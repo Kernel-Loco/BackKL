@@ -21,7 +21,11 @@ Implementación real del modelo lógico de Cirdan (`cirdan_esquema.dbml`), cread
 | `04_prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada y bitácora inmutable |
 | `05_conteo_tablas.sql` | Las 23 tablas con filas y RLS, más el resumen de objetos |
 | `api/` | API inicial en FastAPI y la página `/demo` |
-| `pruebas/` | Pruebas automáticas de la base y de la API |
+| `docs/` | Criterio de criticidad (#29) |
+| `score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
+| `recolectores/` | Recolectores OSINT pasivos. Por ahora crt.sh (#14) |
+| `respuestas_grabadas/` | Respuestas grabadas de cada recolector para las pruebas y el respaldo de las demos |
+| `pruebas/` | Pruebas automáticas de la base, de la API, del criterio de criticidad y de crt.sh |
 | `.env.example` | Variables que necesita todo lo anterior. Se copia como `.env` y se le ponen contraseñas propias. `.env` no se sube al repositorio |
 
 ## Cómo correrlo
@@ -51,7 +55,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < 05_co
 
 1. **Severidad `critical`.** El DBML solo permite high, medium y low, pero el portal usa Critical. Se agregó `critical` a `findings.severity`, `score_contributions.severity`, `alerts.severity` y `scoring_rules.base_severity`.
 2. **Categorías del score.** Se usan las del portal (Infrastructure, Digital Identity, Configuration y Data Leaks: `infrastructure`, `digital_identity`, `configuration`, `data_leaks`) en lugar de exposed_services, vulnerabilities, configuration y breaches. Pesos del juego v1: 30, 20, 20 y 30 %.
-3. **Sentido del score.** Más alto = más exposición. La alerta salta cuando el score sube del umbral (60), así que `alerts.event_type` usa `score.above_threshold` en lugar de `score.below_threshold`. `score_contributions.penalty` conserva el nombre, pero son puntos que suben la exposición.
+3. **Sentido del score.** Más alto = más exposición. La alerta salta cuando el score llega al umbral (60) o lo pasa, así que `alerts.event_type` usa `score.above_threshold` en lugar de `score.below_threshold`. `score_contributions.penalty` conserva el nombre, pero son puntos que suben la exposición.
 4. **Roles.** Solo se creó `cirdan_app`; las tablas pertenecen a `postgres`. No se crearon cirdan_owner, cirdan_maint, cirdan_web, cirdan_worker, cirdan_definer, cirdan_dispatcher ni cirdan_retention, ni las funciones login_lookup, api_key_lookup y audit_platform_append. La excepción de retención del trigger ya compara `current_user = 'cirdan_retention'`.
 5. **Variable de tenant.** Se usa `app.current_org` con `app_current_org()`, como dice el DBML.
 6. **Trigger de `scans`.** Valida vigencia y antigüedad del TXT contra `queued_at` (que por defecto es `now()`), para poder cargar escaneos históricos de la demo. Solo `postgres` puede fijar `queued_at`: `cirdan_app` tiene GRANT INSERT por columna sin `queued_at`, así que para la app siempre es `now()` y no puede fechar un escaneo en el pasado para usar una autorización vencida.
@@ -115,3 +119,11 @@ python -m unittest -v pruebas/test_crtsh.py                      # 33 pruebas si
 Sin `--json` imprime un resumen en español para leer en una demo: los activos con su fecha de vencimiento y cada hallazgo con su severidad (alta, media) y sus características. Los datos conservan los códigos de la base (`high`, `medium`). Con `--reproducir`, la primera línea dice de cuándo es la grabación. Esa fecha va dentro de cada archivo grabado, así que no cambia al copiarlo o clonar el repo. Si falta alguna respuesta grabada, lo dice en una sola línea y no lo cuenta como falla de crt.sh. Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos.
 
 El día anterior a cada sesión y control se graba la respuesta real del dominio de prueba con `--grabar`. Cada dominio graba en su propia carpeta. `--grabar` la vacía y marca el inicio en cuanto crt.sh responde (si no responde, código 1, la grabación anterior queda intacta), así lo que no se grabe hoy, porque falló, se omitió por saturación o se interrumpió, aparece en la línea Faltan de `--reproducir` y nunca se mezcla con respuestas de días anteriores. Si crt.sh deja la grabación a medias (código de salida 2), se repite con `--grabar --completar` hasta que salga 0: solo vuelve a consultar lo que no se grabó desde ese inicio. La demo usa `--reproducir` como respaldo.
+
+## Criterio de criticidad (#29)
+
+Más alto = más riesgo. Bandas 0 a 39 bajo, 40 a 59 medio, 60 a 79 alto y 80 a 100 crítico, ancladas al ejemplo del reto (68 = riesgo alto). Regla de piso: un hallazgo crítico vigente deja el dominio al menos en 60, y dos o más, al menos en 80. La alerta se crea cuando el score llega al umbral o lo pasa. El criterio completo, con ejemplos y quién usa qué, está en `docs/criterio_criticidad.md`, y su código en `score/criterio.py`.
+
+```bash
+python -m unittest -v pruebas/test_criterio.py   # 13 pruebas, sin base de datos
+```

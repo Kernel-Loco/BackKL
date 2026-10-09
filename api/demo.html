@@ -160,7 +160,7 @@ async function loadDetail() {
   let html = `<h2 style="margin-top:16px">${esc(selDomain)}</h2>`;
   if (s.status === 200) html += s.body.categories.map(c => `
     <div class="cat"><span>${esc(c.category)}</span><div class="bar"><i style="width:${c.score}%;background:var(--violet)"></i></div><b>${c.score}</b><span class="sub">× ${c.weight}</span></div>`).join('')
-    + `<div class="sub" style="margin:4px 0 10px">Score global ${s.body.score} (${s.body.level}) = suma de cada categoría por su peso</div>`;
+    + `<div class="sub" style="margin:4px 0 10px">Score global ${s.body.score} (${s.body.level}) = el mayor entre la suma de cada categoría por su peso y el piso por hallazgos críticos (#29)</div>`;
   else html += `<div class="empty">${esc(s.body.detail)}</div>`;
   if (f.status === 200) html += f.body.length ? f.body.map(x => `
     <div class="f"><span>${esc(x.finding)}</span><span class="sub">${esc(x.source)}</span><span class="lvl ${x.severity}">${x.severity}</span></div>`).join('')
