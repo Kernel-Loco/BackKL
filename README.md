@@ -21,7 +21,9 @@ Implementación real del modelo lógico de Cirdan (`cirdan_esquema.dbml`), cread
 | `04_prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada y bitácora inmutable |
 | `05_conteo_tablas.sql` | Las 23 tablas con filas y RLS, más el resumen de objetos |
 | `api/` | API inicial en FastAPI y la página `/demo` |
-| `pruebas/` | Pruebas automáticas de la base y de la API |
+| `docs/` | Criterio de criticidad (#29) |
+| `score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
+| `pruebas/` | Pruebas automáticas de la base, de la API y del criterio de criticidad |
 | `.env.example` | Variables que necesita todo lo anterior. Se copia como `.env` y se le ponen contraseñas propias. `.env` no se sube al repositorio |
 
 ## Cómo correrlo
@@ -51,7 +53,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < 05_co
 
 1. **Severidad `critical`.** El DBML solo permite high, medium y low, pero el portal usa Critical. Se agregó `critical` a `findings.severity`, `score_contributions.severity`, `alerts.severity` y `scoring_rules.base_severity`.
 2. **Categorías del score.** Se usan las del portal (Infrastructure, Digital Identity, Configuration y Data Leaks: `infrastructure`, `digital_identity`, `configuration`, `data_leaks`) en lugar de exposed_services, vulnerabilities, configuration y breaches. Pesos del juego v1: 30, 20, 20 y 30 %.
-3. **Sentido del score.** Más alto = más exposición. La alerta salta cuando el score sube del umbral (60), así que `alerts.event_type` usa `score.above_threshold` en lugar de `score.below_threshold`. `score_contributions.penalty` conserva el nombre, pero son puntos que suben la exposición.
+3. **Sentido del score.** Más alto = más exposición. La alerta salta cuando el score llega al umbral (60) o lo pasa, así que `alerts.event_type` usa `score.above_threshold` en lugar de `score.below_threshold`. `score_contributions.penalty` conserva el nombre, pero son puntos que suben la exposición.
 4. **Roles.** Solo se creó `cirdan_app`; las tablas pertenecen a `postgres`. No se crearon cirdan_owner, cirdan_maint, cirdan_web, cirdan_worker, cirdan_definer, cirdan_dispatcher ni cirdan_retention, ni las funciones login_lookup, api_key_lookup y audit_platform_append. La excepción de retención del trigger ya compara `current_user = 'cirdan_retention'`.
 5. **Variable de tenant.** Se usa `app.current_org` con `app_current_org()`, como dice el DBML.
 6. **Trigger de `scans`.** Valida vigencia y antigüedad del TXT contra `queued_at` (que por defecto es `now()`), para poder cargar escaneos históricos de la demo. Solo `postgres` puede fijar `queued_at`: `cirdan_app` tiene GRANT INSERT por columna sin `queued_at`, así que para la app siempre es `now()` y no puede fechar un escaneo en el pasado para usar una autorización vencida.
@@ -89,3 +91,11 @@ El 2 oct 2026 pasaron las 14 pruebas (8 de la base y 6 de la API).
 ## Vista visual de la base (para la demo)
 
 Con la API arriba, abre **http://127.0.0.1:8000/demo**. Muestra las 23 tablas agrupadas con las filas que ve el cliente elegido (Acme Demo, Beta Corp o sin cliente), las filas reales de la tabla que selecciones (sin columnas secretas), los dominios con su score y, al elegir uno, su desglose por categoría y sus hallazgos. El botón "Intentar como Beta Corp" muestra el 404 al pedir un dominio de Acme. Todo pasa por el rol `cirdan_app`, así que lo que se ve es lo que RLS deja ver. Archivos: `api/explorer.py` y `api/demo.html`.
+
+## Criterio de criticidad (#29)
+
+Más alto = más riesgo. Bandas 0 a 39 bajo, 40 a 59 medio, 60 a 79 alto y 80 a 100 crítico, ancladas al ejemplo del reto (68 = riesgo alto). Regla de piso: un hallazgo crítico vigente deja el dominio al menos en 60, y dos o más, al menos en 80. La alerta se crea cuando el score llega al umbral o lo pasa. El criterio completo, con ejemplos y quién usa qué, está en `docs/criterio_criticidad.md`, y su código en `score/criterio.py`.
+
+```bash
+python -m unittest -v pruebas/test_criterio.py   # 13 pruebas, sin base de datos
+```
