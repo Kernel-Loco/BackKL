@@ -1,2 +1,5 @@
 .env
 __pycache__/
+
+# Marca de inicio de cada grabación de crt.sh (local)
+respuestas_grabadas/crtsh/*/.grabacion

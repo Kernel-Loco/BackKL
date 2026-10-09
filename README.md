@@ -103,10 +103,15 @@ Con la API arriba, abre **http://127.0.0.1:8000/demo**. Muestra las 23 tablas ag
 Cada hallazgo trae título en español, evidencia, las características del reto (tipo, antigüedad, exposición y sensibilidad) y una huella SHA-256 estable para no duplicarlo entre escaneos. Si crt.sh no responde después de 3 intentos, la fuente queda en `failed` sin activos ni hallazgos. Si solo fallan las variantes de dominios parecidos, el escaneo sigue y quedan avisos.
 
 ```bash
-python -m recolectores.crtsh acme-demo.mx               # en vivo
-python -m recolectores.crtsh acme-demo.mx --grabar      # en vivo y guarda las respuestas en respuestas_grabadas/crtsh/
-python -m recolectores.crtsh acme-demo.mx --reproducir  # solo con las respuestas grabadas, sin red
-python -m unittest -v pruebas/test_crtsh.py             # 18 pruebas sin red
+python -m recolectores.crtsh acme-demo.mx                        # en vivo
+python -m recolectores.crtsh acme-demo.mx --sin-parecidos        # en vivo, solo subdominios y certificados (una consulta)
+python -m recolectores.crtsh acme-demo.mx --grabar               # en vivo y graba en respuestas_grabadas/crtsh/acme-demo.mx/
+python -m recolectores.crtsh acme-demo.mx --grabar --completar   # solo consulta lo que aún no está grabado
+python -m recolectores.crtsh acme-demo.mx --reproducir           # solo con las respuestas grabadas, sin red
+python -m recolectores.crtsh acme-demo.mx --json                 # el resultado completo en JSON
+python -m unittest -v pruebas/test_crtsh.py                      # 33 pruebas sin red
 ```
 
-El día anterior a cada sesión y control se graba la respuesta real del dominio de prueba con `--grabar`, como respaldo de la demo.
+Sin `--json` imprime un resumen en español para leer en una demo: los activos con su fecha de vencimiento y cada hallazgo con su severidad (alta, media) y sus características. Los datos conservan los códigos de la base (`high`, `medium`). Con `--reproducir`, la primera línea dice de cuándo es la grabación. Esa fecha va dentro de cada archivo grabado, así que no cambia al copiarlo o clonar el repo. Si falta alguna respuesta grabada, lo dice en una sola línea y no lo cuenta como falla de crt.sh. Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos.
+
+El día anterior a cada sesión y control se graba la respuesta real del dominio de prueba con `--grabar`. Cada dominio graba en su propia carpeta. `--grabar` la vacía y marca el inicio en cuanto crt.sh responde (si no responde, código 1, la grabación anterior queda intacta), así lo que no se grabe hoy, porque falló, se omitió por saturación o se interrumpió, aparece en la línea Faltan de `--reproducir` y nunca se mezcla con respuestas de días anteriores. Si crt.sh deja la grabación a medias (código de salida 2), se repite con `--grabar --completar` hasta que salga 0: solo vuelve a consultar lo que no se grabó desde ese inicio. La demo usa `--reproducir` como respaldo.
