@@ -23,7 +23,9 @@ Implementación real del modelo lógico de Cirdan (`cirdan_esquema.dbml`), cread
 | `api/` | API inicial en FastAPI y la página `/demo` |
 | `docs/` | Criterio de criticidad (#29) |
 | `score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
-| `pruebas/` | Pruebas automáticas de la base, de la API y del criterio de criticidad |
+| `recolectores/` | Recolectores OSINT pasivos. Por ahora crt.sh (#14) |
+| `respuestas_grabadas/` | Respuestas grabadas de cada recolector para las pruebas y el respaldo de las demos |
+| `pruebas/` | Pruebas automáticas de la base, de la API, del criterio de criticidad y de crt.sh |
 | `.env.example` | Variables que necesita todo lo anterior. Se copia como `.env` y se le ponen contraseñas propias. `.env` no se sube al repositorio |
 
 ## Cómo correrlo
@@ -91,6 +93,32 @@ El 2 oct 2026 pasaron las 14 pruebas (8 de la base y 6 de la API).
 ## Vista visual de la base (para la demo)
 
 Con la API arriba, abre **http://127.0.0.1:8000/demo**. Muestra las 23 tablas agrupadas con las filas que ve el cliente elegido (Acme Demo, Beta Corp o sin cliente), las filas reales de la tabla que selecciones (sin columnas secretas), los dominios con su score y, al elegir uno, su desglose por categoría y sus hallazgos. El botón "Intentar como Beta Corp" muestra el 404 al pedir un dominio de Acme. Todo pasa por el rol `cirdan_app`, así que lo que se ve es lo que RLS deja ver. Archivos: `api/explorer.py` y `api/demo.html`.
+
+## Recolector de crt.sh (#14)
+
+`recolectores/crtsh.py` lee los logs públicos de Certificate Transparency en crt.sh, sin tocar los servidores del dominio. Devuelve los subdominios como activos y tres tipos de hallazgo:
+
+| Código de regla | Severidad base | Cuándo |
+|---|---|---|
+| `cert_expired` | high | El certificado más reciente de un nombre venció hace menos de un año (más viejo, el nombre queda solo como activo) |
+| `cert_expiring_soon` | medium | El certificado más reciente vence en menos de 30 días |
+| `lookalike_domain` | medium | Un dominio parecido tiene un certificado vigente o vencido hace menos de 90 días: contiene la marca, usa otro TLD o tiene un error tipográfico |
+
+Cada hallazgo trae título en español, evidencia, las características del reto (tipo, antigüedad, exposición y sensibilidad) y una huella SHA-256 estable para no duplicarlo entre escaneos. Si crt.sh no responde después de 3 intentos, la fuente queda en `failed` sin activos ni hallazgos. Si solo fallan las variantes de dominios parecidos, el escaneo sigue y quedan avisos.
+
+```bash
+python -m recolectores.crtsh acme-demo.mx                        # en vivo
+python -m recolectores.crtsh acme-demo.mx --sin-parecidos        # en vivo, solo subdominios y certificados (una consulta)
+python -m recolectores.crtsh acme-demo.mx --grabar               # en vivo y graba en respuestas_grabadas/crtsh/acme-demo.mx/
+python -m recolectores.crtsh acme-demo.mx --grabar --completar   # solo consulta lo que aún no está grabado
+python -m recolectores.crtsh acme-demo.mx --reproducir           # solo con las respuestas grabadas, sin red
+python -m recolectores.crtsh acme-demo.mx --json                 # el resultado completo en JSON
+python -m unittest -v pruebas/test_crtsh.py                      # 33 pruebas sin red
+```
+
+Sin `--json` imprime un resumen en español para leer en una demo: los activos con su fecha de vencimiento y cada hallazgo con su severidad (alta, media) y sus características. Los datos conservan los códigos de la base (`high`, `medium`). Con `--reproducir`, la primera línea dice de cuándo es la grabación. Esa fecha va dentro de cada archivo grabado, así que no cambia al copiarlo o clonar el repo. Si falta alguna respuesta grabada, lo dice en una sola línea y no lo cuenta como falla de crt.sh. Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos.
+
+El día anterior a cada sesión y control se graba la respuesta real del dominio de prueba con `--grabar`. Cada dominio graba en su propia carpeta. `--grabar` la vacía y marca el inicio en cuanto crt.sh responde (si no responde, código 1, la grabación anterior queda intacta), así lo que no se grabe hoy, porque falló, se omitió por saturación o se interrumpió, aparece en la línea Faltan de `--reproducir` y nunca se mezcla con respuestas de días anteriores. Si crt.sh deja la grabación a medias (código de salida 2), se repite con `--grabar --completar` hasta que salga 0: solo vuelve a consultar lo que no se grabó desde ese inicio. La demo usa `--reproducir` como respaldo.
 
 ## Criterio de criticidad (#29)
 
