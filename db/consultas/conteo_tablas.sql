@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · 05_conteo_tablas.sql
+-- Cirdan · db/consultas/conteo_tablas.sql
 -- Las 23 tablas por grupo del DBML, con filas y estado de RLS, y un
 -- resumen de objetos. Corre como postgres (superusuario, ve todo).
 -- =====================================================================

@@ -1,10 +1,10 @@
 # Contrato de plugin de los recolectores (#13)
 
-Todos los recolectores OSINT (#14 a #20) cumplen este contrato, y el orquestador (#22) solo habla con ellos a través de él. Así se puede agregar una fuente sin tocar el orquestador, que es lo que pide el reto con «módulos integrables como plugins independientes». El código está en `recolectores/contrato.py` y las pruebas en `pruebas/test_contrato.py`.
+Todos los recolectores OSINT (#14 a #20) cumplen este contrato, y el orquestador (#22) solo habla con ellos a través de él. Así se puede agregar una fuente sin tocar el orquestador, que es lo que pide el reto con «módulos integrables como plugins independientes». El código está en `cirdan/recolectores/contrato.py` y las pruebas en `pruebas/test_contrato.py`.
 
 ## Qué expone cada recolector
 
-Cada recolector es un módulo de `recolectores/` con tres cosas:
+Cada recolector es un módulo de `cirdan/recolectores/` con tres cosas:
 
 | Nombre | Qué es |
 |---|---|
@@ -12,7 +12,7 @@ Cada recolector es un módulo de `recolectores/` con tres cosas:
 | `crear_cliente(modo, dominio)` | Su cliente para `vivo`, `grabar` o `reproducir` |
 | `recolectar(dominio, cliente=None, ahora=None, propios=())` | Devuelve un `Resultado`. `propios` son los otros dominios de la misma empresa |
 
-Además se registra en `REGISTRO` de `recolectores/__init__.py`, y `cargar(fuente)` devuelve su módulo. Hoy están `ct_logs` (crt.sh, #14) y `ejemplo`, que no consulta nada y sirve para probar el orquestador sin red.
+Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `cargar(fuente)` devuelve su módulo. Hoy están `ct_logs` (crt.sh, #14) y `ejemplo`, que no consulta nada y sirve para probar el orquestador sin red.
 
 ## Esquema del resultado
 
@@ -86,7 +86,7 @@ Hay dos niveles:
 
 ## Respuestas grabadas
 
-La clase `Grabadora` guarda y reproduce las respuestas de una fuente para un dominio en `respuestas_grabadas/<recolector>/<dominio>/`. Cada respuesta es un archivo `{grabado, consulta, datos}`. La fecha va dentro del archivo porque git y las copias cambian la del sistema.
+La clase `Grabadora` guarda y reproduce las respuestas de una fuente para un dominio en `cirdan/recolectores/respuestas_grabadas/<recolector>/<dominio>/`. Cada respuesta es un archivo `{grabado, consulta, datos}`. La fecha va dentro del archivo porque git y las copias cambian la del sistema.
 
 | Modo | Qué hace |
 |---|---|
@@ -94,12 +94,12 @@ La clase `Grabadora` guarda y reproduce las respuestas de una fuente para un dom
 | `grabar` | Consulta y guarda. Con `nueva`, vacía la carpeta y marca el inicio con la primera respuesta válida, así una grabación fallida deja intacta la anterior. Con `completar`, reutiliza lo grabado desde ese inicio. `crear_cliente('grabar', dominio)` empieza una grabación nueva |
 | `reproducir` | Solo lee del disco. Si falta una respuesta, lanza `SinGrabacion`. El recolector puede tomarla como aviso, como hace crt.sh con las variantes, pero si llega a `ejecutar()` la fuente queda en `failed` igual que con cualquier otra excepción |
 
-Las pruebas de cada recolector usan respuestas grabadas o un transporte simulado, nunca la red. El día anterior a cada sesión se graba el dominio de prueba como respaldo de la demo. En crt.sh se usa `python -m recolectores.crtsh <dominio> --grabar`.
+Las pruebas de cada recolector usan respuestas grabadas o un transporte simulado, nunca la red. El día anterior a cada sesión se graba el dominio de prueba como respaldo de la demo. En crt.sh se usa `python -m cirdan.recolectores.crtsh <dominio> --grabar`.
 
 ## Cómo agregar un recolector
 
 1. Su fila en `data_sources` con su código.
-2. El módulo en `recolectores/` con `FUENTE`, `crear_cliente()` y `recolectar()`, que usa `Grabadora` para sus respuestas.
+2. El módulo en `cirdan/recolectores/` con `FUENTE`, `crear_cliente()` y `recolectar()`, que usa `Grabadora` para sus respuestas.
 3. Su línea en `REGISTRO`.
 4. Una prueba sin red que compruebe `validar(resultado, codigos=<los del catálogo>) == []`.
 5. Los títulos en español, y nada que no sea observación pasiva.

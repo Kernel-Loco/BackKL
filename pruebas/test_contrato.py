@@ -15,8 +15,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_contrato.py
 from pruebas.test_crtsh import AHORA, CrtshSimulado  # noqa: E402
-from recolectores import REGISTRO, cargar, contrato, crtsh, ejemplo  # noqa: E402
-from recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, contrato, crtsh, ejemplo  # noqa: E402
+from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
 
@@ -339,6 +339,12 @@ class Ejecutar(unittest.TestCase):
                 otra = contrato.ejecutar(modulo, 'acme-demo.mx', modo='reproducir', ahora=AHORA)
                 self.assertEqual(otra.estado, 'succeeded', (fuente, otra.error))
                 self.assertEqual((otra.activos, otra.hallazgos), (res.activos, res.hallazgos), fuente)
+
+    def test_15_cada_recolector_graba_dentro_de_la_carpeta_del_contrato(self):
+        self.assertEqual(contrato.CARPETA_GRABADAS.parent, Path(contrato.__file__).resolve().parent)
+        self.assertTrue(contrato.CARPETA_GRABADAS.is_dir())
+        for fuente in REGISTRO:
+            self.assertEqual(cargar(fuente).CARPETA_GRABADAS.parent, contrato.CARPETA_GRABADAS, fuente)
 
 
 class Reintentos(unittest.TestCase):

@@ -1,17 +1,17 @@
 """Recolector de ejemplo (#13): cumple el contrato sin consultar ninguna fuente.
 
 Sirve para probar el orquestador (#22) y la normalización (#23) sin red. Con 'reproducir' lee
-respuestas_grabadas/ejemplo/<dominio>/resultado.json. Con 'vivo' o 'grabar' arma un resultado fijo:
+cirdan/recolectores/respuestas_grabadas/ejemplo/<dominio>/resultado.json. Con 'vivo' o 'grabar' arma un resultado fijo:
 el dominio, su www y un hallazgo spf_missing (regla del catálogo demo). No está en data_sources:
 es solo para pruebas.
 """
 import hashlib
 
-from recolectores.contrato import CARPETA_GRABADAS as RAIZ
-from recolectores.contrato import Activo, Grabadora, Hallazgo, Resultado
+from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
+from cirdan.recolectores.contrato import Activo, Grabadora, Hallazgo, Resultado
 
 FUENTE = 'ejemplo'
-CARPETA_GRABADAS = RAIZ / 'ejemplo'
+CARPETA_GRABADAS = RAIZ_GRABADAS / 'ejemplo'
 
 
 def crear_cliente(modo, dominio):
