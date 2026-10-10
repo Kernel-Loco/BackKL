@@ -7,14 +7,14 @@ dominio, y devuelve:
 - dominios parecidos que ya tienen un certificado emitido (hallazgos).
 
 Modos: 'vivo' consulta crt.sh; 'grabar' además guarda cada respuesta en
-respuestas_grabadas/crtsh/<dominio>/; 'reproducir' solo lee esas respuestas, sin red
+cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/; 'reproducir' solo lee esas respuestas, sin red
 (pruebas y respaldo de las demos). Si crt.sh no responde después de los
 reintentos, el resultado queda en 'failed' y no trae activos ni hallazgos.
 
-    python -m recolectores.crtsh acme-demo.mx
-    python -m recolectores.crtsh acme-demo.mx --grabar
-    python -m recolectores.crtsh acme-demo.mx --grabar --completar
-    python -m recolectores.crtsh acme-demo.mx --reproducir
+    python -m cirdan.recolectores.crtsh acme-demo.mx
+    python -m cirdan.recolectores.crtsh acme-demo.mx --grabar
+    python -m cirdan.recolectores.crtsh acme-demo.mx --grabar --completar
+    python -m cirdan.recolectores.crtsh acme-demo.mx --reproducir
 
 --grabar empieza con la carpeta del dominio vacía. --completar solo consulta
 lo que aún no se grabó desde ese inicio, para terminar una grabación que
@@ -34,13 +34,14 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from recolectores.contrato import (MARCA, NOMBRE_VALIDO, SIN_GRABACION, Activo, FuenteNoResponde, Grabadora,  # noqa: F401
-                                   Hallazgo, Resultado, SinGrabacion, nombre_archivo)
+from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
+from cirdan.recolectores.contrato import (MARCA, NOMBRE_VALIDO, SIN_GRABACION, Activo, FuenteNoResponde,  # noqa: F401
+                                          Grabadora, Hallazgo, Resultado, SinGrabacion, nombre_archivo)
 
 FUENTE = 'ct_logs'
 URL = 'https://crt.sh/'
 AGENTE = 'cirdan-osint/0.1 (+https://github.com/Kernel-Loco)'
-CARPETA_GRABADAS = Path(__file__).resolve().parent.parent / 'respuestas_grabadas' / 'crtsh'
+CARPETA_GRABADAS = RAIZ_GRABADAS / 'crtsh'
 
 DIAS_POR_VENCER = 30         # vence en menos de esto = hallazgo
 VENTANA_VENCIDOS_DIAS = 365  # vencido hace más de esto ya no es hallazgo; el subdominio queda como activo
@@ -443,7 +444,7 @@ def _main(argv=None):
     p = argparse.ArgumentParser(description='Subdominios, certificados y dominios parecidos desde crt.sh')
     p.add_argument('dominio')
     p.add_argument('--grabar', action='store_true',
-                   help='empieza una grabación nueva en respuestas_grabadas/crtsh/<dominio>/')
+                   help='empieza una grabación nueva en cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/')
     p.add_argument('--completar', action='store_true', help='con --grabar, solo consulta lo que aún no está grabado')
     p.add_argument('--reproducir', action='store_true', help='usa solo las respuestas grabadas, sin red')
     p.add_argument('--sin-parecidos', action='store_true')

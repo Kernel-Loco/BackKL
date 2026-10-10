@@ -1,7 +1,7 @@
 """Pruebas de la API de Cirdan contra el servidor local (biblioteca estándar).
 
-Primero levanta la API desde implementacion/:
-    python -m uvicorn api.main:app --port 8000
+Primero levanta la API desde la raíz del repo:
+    python -m uvicorn cirdan.api.main:app --port 8000
 y luego:
     python -m unittest -v pruebas/test_api.py
 """

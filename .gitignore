@@ -1,5 +1,15 @@
 .env
 __pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
 
-# Marca de inicio de cada grabación de crt.sh (local)
-respuestas_grabadas/*/*/.grabacion
+# En la raíz solo se versiona README.md (igual que FrontKL)
+/*.md
+!/README.md
+
+# Marca de inicio de cada grabación (local)
+cirdan/recolectores/respuestas_grabadas/*/*/.grabacion
+
+# Carpeta de grabaciones de antes del 11 oct: su contenido se mueve a cirdan/recolectores/respuestas_grabadas/
+/respuestas_grabadas/

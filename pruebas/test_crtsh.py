@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -13,7 +14,8 @@ from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
-from recolectores import contrato, crtsh
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_crtsh.py
+from cirdan.recolectores import contrato, crtsh  # noqa: E402
 
 AHORA = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 

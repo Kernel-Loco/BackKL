@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_criterio.py
-from score import criterio as c  # noqa: E402
+from cirdan.score import criterio as c  # noqa: E402
 
-PESOS_V1 = {'infrastructure': 0.30, 'digital_identity': 0.20, 'configuration': 0.20, 'data_leaks': 0.30}  # 02_datos_demo.sql
+PESOS_V1 = {'infrastructure': 0.30, 'digital_identity': 0.20, 'configuration': 0.20, 'data_leaks': 0.30}  # db/semillas/001_datos_demo.sql
 
 
 def notas(infra, identidad, config, fugas):

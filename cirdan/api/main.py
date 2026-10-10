@@ -8,18 +8,19 @@ ninguna consulta filtra por organización.
 Modo demo: el cliente se identifica con el id de su organización. En producción
 será la llave de API de la tabla `api_keys` (hash, alcance y vigencia).
 
-    uvicorn api.main:app --port 8000      (desde implementacion/)
+    python -m uvicorn cirdan.api.main:app --port 8000      (desde la raíz del repo)
     Documentación: http://127.0.0.1:8000/docs
 """
 import os
 import uuid
-from pathlib import Path
 
 import psycopg
 from fastapi import FastAPI, Header, HTTPException
 from psycopg.rows import dict_row
 
-ENV = dict(line.split('=', 1) for line in (Path(__file__).resolve().parent.parent / '.env').read_text().split()
+from cirdan import RAIZ
+
+ENV = dict(line.split('=', 1) for line in (RAIZ / '.env').read_text().split()
            if '=' in line)
 DSN = 'host=127.0.0.1 port=%s dbname=cirdan user=cirdan_app password=%s' % (
     os.environ.get('PGPORT', ENV.get('PGPORT', '5433')), ENV['CIRDAN_APP_PASSWORD'])
@@ -32,7 +33,7 @@ app = FastAPI(
                 'Vista visual de la base en /demo.',
 )
 
-from api.explorer import register  # noqa: E402  (needs DSN, defined above)
+from cirdan.api.explorer import register  # noqa: E402  (needs DSN, defined above)
 register(app, DSN)
 
 

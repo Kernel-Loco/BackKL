@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · 02_datos_demo.sql
+-- Cirdan · db/semillas/001_datos_demo.sql
 -- Datos canónicos de la organización "Acme Demo" (Cirdan_cambios_Figma.md)
 -- más "Beta Corp", que solo sirve para la prueba de aislamiento RLS.
 -- UUID fijos para que cada recarga sea idéntica. Fechas en hora del

@@ -1,6 +1,6 @@
 """Contrato de plugin de los recolectores OSINT (#13).
 
-Cada recolector es un módulo de recolectores/ con:
+Cada recolector es un módulo de cirdan/recolectores/ con:
 - FUENTE: el código de su fila en data_sources (por ejemplo 'ct_logs').
 - crear_cliente(modo, dominio): su cliente para 'vivo', 'grabar' o 'reproducir'.
 - recolectar(dominio, cliente=None, ahora=None, propios=()): devuelve un Resultado.
@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-CARPETA_GRABADAS = Path(__file__).resolve().parent.parent / 'respuestas_grabadas'
+CARPETA_GRABADAS = Path(__file__).resolve().parent / 'respuestas_grabadas'   # dentro del paquete, viaja con el código
 MODOS = ('vivo', 'grabar', 'reproducir')
 ESTADOS = ('succeeded', 'failed')                                                    # scan_source_runs.status final de una corrida
 TIPOS_ACTIVO = ('domain', 'subdomain', 'ip', 'service', 'certificate', 'email')      # assets.asset_type

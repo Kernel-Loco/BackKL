@@ -83,7 +83,7 @@ La alerta `score.above_threshold` se crea en cada cálculo en que el score queda
 
 ## Código
 
-`score/criterio.py` implementa las bandas, el piso, el ponderado y la alerta. Las pruebas están en `pruebas/test_criterio.py`:
+`cirdan/score/criterio.py` implementa las bandas, el piso, el ponderado y la alerta. Las pruebas están en `pruebas/test_criterio.py`:
 
 ```bash
 python -m unittest -v pruebas/test_criterio.py
