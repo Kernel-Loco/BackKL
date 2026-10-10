@@ -13,7 +13,7 @@ from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
-from recolectores import crtsh
+from recolectores import contrato, crtsh
 
 AHORA = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 
@@ -373,6 +373,45 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(len(res.avisos), 1)
         self.assertIn('pueden faltar subdominios', res.avisos[0])
         self.assertEqual(crtsh.codigo_salida(res), 2)
+
+
+class ErroresQueNoSonDeCrtsh(unittest.TestCase):
+
+    def test_1_un_4xx_no_se_reintenta(self):
+        def transporte(url, timeout):
+            raise urllib.error.HTTPError(url, 400, 'Bad Request', None, None)
+        cliente = crtsh.ClienteCrtsh(transporte=transporte, dormir=lambda s: None)
+        with self.assertRaises(crtsh.CrtshNoResponde) as e:
+            cliente.consultar('%.acme-demo.mx')
+        self.assertEqual(cliente.consultas, 1)
+        self.assertIn('después de 1 intento (', str(e.exception))
+
+    def test_1b_408_y_429_si_se_reintentan(self):
+        for codigo in (408, 429):
+            def transporte(url, timeout, codigo=codigo):
+                raise urllib.error.HTTPError(url, codigo, 'espera', None, None)
+            cliente = crtsh.ClienteCrtsh(transporte=transporte, dormir=lambda s: None)
+            with self.assertRaises(crtsh.CrtshNoResponde):
+                cliente.consultar('%.acme-demo.mx')
+            self.assertEqual(cliente.consultas, crtsh.INTENTOS, codigo)
+
+    def test_2_un_error_del_disco_al_grabar_no_cuenta_como_falla_de_crtsh(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = CrtshSimulado()
+            cliente = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=t, dormir=lambda s: None)
+            with mock.patch.object(cliente.grabadora, 'guardar', side_effect=PermissionError('abierto')):
+                with self.assertRaises(PermissionError):
+                    cliente.consultar('%.acme-demo.mx')
+            self.assertEqual((cliente.consultas, len(t.urls)), (1, 1))
+
+    def test_3_un_certificado_que_empieza_despues_de_ahora_tiene_antiguedad_0(self):
+        t = CrtshSimulado(respuestas={
+            '%.acme-demo.mx': [cert(40, ['nuevo.acme-demo.mx'], '2026-10-15T12:05:00', '2026-10-21T00:00:00')],
+            'acme-dem0.mx': [cert(41, ['acme-dem0.mx'], '2026-10-15T12:00:01', '2026-12-30T00:00:00')]})
+        res = recolectar(t)
+        edades = {h.codigo: h.caracteristicas['antiguedad_dias'] for h in res.hallazgos}
+        self.assertEqual(edades, {'cert_expiring_soon': 0, 'lookalike_domain': 0})
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
 
 class Resumen(unittest.TestCase):

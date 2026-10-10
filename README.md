@@ -21,11 +21,11 @@ Implementación real del modelo lógico de Cirdan (`cirdan_esquema.dbml`), cread
 | `04_prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada y bitácora inmutable |
 | `05_conteo_tablas.sql` | Las 23 tablas con filas y RLS, más el resumen de objetos |
 | `api/` | API inicial en FastAPI y la página `/demo` |
-| `docs/` | Criterio de criticidad (#29) |
+| `docs/` | Criterio de criticidad (#29) y contrato de plugin (#13) |
 | `score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
-| `recolectores/` | Recolectores OSINT pasivos. Por ahora crt.sh (#14) |
+| `recolectores/` | Contrato de plugin (#13) y recolectores OSINT pasivos: crt.sh (#14) y uno de ejemplo para pruebas |
 | `respuestas_grabadas/` | Respuestas grabadas de cada recolector para las pruebas y el respaldo de las demos |
-| `pruebas/` | Pruebas automáticas de la base, de la API, del criterio de criticidad y de crt.sh |
+| `pruebas/` | Pruebas automáticas de la base, de la API, del criterio de criticidad, del contrato de plugin y de crt.sh |
 | `.env.example` | Variables que necesita todo lo anterior. Se copia como `.env` y se le ponen contraseñas propias. `.env` no se sube al repositorio |
 
 ## Cómo correrlo
@@ -113,7 +113,7 @@ python -m recolectores.crtsh acme-demo.mx --grabar               # en vivo y gra
 python -m recolectores.crtsh acme-demo.mx --grabar --completar   # solo consulta lo que aún no está grabado
 python -m recolectores.crtsh acme-demo.mx --reproducir           # solo con las respuestas grabadas, sin red
 python -m recolectores.crtsh acme-demo.mx --json                 # el resultado completo en JSON
-python -m unittest -v pruebas/test_crtsh.py                      # 33 pruebas sin red
+python -m unittest -v pruebas/test_crtsh.py                      # 37 pruebas sin red
 ```
 
 Sin `--json` imprime un resumen en español para leer en una demo: los activos con su fecha de vencimiento y cada hallazgo con su severidad (alta, media) y sus características. Los datos conservan los códigos de la base (`high`, `medium`). Con `--reproducir`, la primera línea dice de cuándo es la grabación. Esa fecha va dentro de cada archivo grabado, así que no cambia al copiarlo o clonar el repo. Si falta alguna respuesta grabada, lo dice en una sola línea y no lo cuenta como falla de crt.sh. Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos.
@@ -126,4 +126,19 @@ Más alto = más riesgo. Bandas 0 a 39 bajo, 40 a 59 medio, 60 a 79 alto y 80 a 
 
 ```bash
 python -m unittest -v pruebas/test_criterio.py   # 13 pruebas, sin base de datos
+```
+
+## Contrato de plugin (#13)
+
+Todos los recolectores cumplen `recolectores/contrato.py`:
+- el esquema de activos y hallazgos, con las 4 características del reto
+- la interfaz `FUENTE`, `crear_cliente()` y `recolectar()`
+- el filtro de alcance
+- los reintentos de `scan_source_runs` a 1, 5 y 25 minutos
+- las respuestas grabadas
+
+El orquestador usa `ejecutar()`, que nunca deja que un recolector tumbe el escaneo y deja en `failed` un resultado que no cumple el contrato o que es de otro dominio. `cargar(fuente)` devuelve el recolector de cada `data_sources.code`, y `ejemplo` sirve para probar sin red. El detalle está en `docs/contrato_plugin.md`.
+
+```bash
+python -m unittest -v pruebas/test_contrato.py   # 35 pruebas, sin red
 ```
