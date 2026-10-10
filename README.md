@@ -28,7 +28,7 @@ Todos los comandos se corren desde la raíz del repo.
 2. Crea el contenedor y carga la base con la sección «Cómo cargarla» de [`db/README.md`](db/README.md), que empieza por copiar `.env.example` como `.env`.
 3. Crea un entorno virtual y actívalo. En Git Bash: `python -m venv .venv` y `source .venv/Scripts/activate`. En Linux o macOS: `python3 -m venv .venv` y `source .venv/bin/activate` (en Ubuntu y Debian, antes `sudo apt install python3-venv`).
 4. Instala lo que usa la API (el `requirements.txt` llega con #7): `python -m pip install fastapi uvicorn "psycopg[binary]"`.
-5. Corre las pruebas que no usan la base ni la red: `python -m unittest -v pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py` (86 pruebas).
+5. Corre las pruebas que no usan la base ni la red: `python -m unittest -v pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py` (96 pruebas).
 6. Sigue con las secciones de abajo: las pruebas de la base, la API y su vista en http://127.0.0.1:8000/demo.
 
 ## Base de datos
@@ -73,11 +73,11 @@ Con la API arriba, abre **http://127.0.0.1:8000/demo**. Muestra las 23 tablas ag
 
 | Código de regla | Severidad base | Cuándo |
 |---|---|---|
-| `cert_expired` | high | El certificado más reciente de un nombre venció hace menos de un año (más viejo, el nombre queda solo como activo) |
-| `cert_expiring_soon` | medium | El certificado más reciente vence en menos de 30 días |
+| `cert_expired` | high | El certificado más reciente de un nombre venció hace menos de un año, el nombre todavía resuelve en DNS y no lo cubre un certificado comodín vigente de su dominio padre. Si no, el nombre queda solo como activo. Un comodín vencido (`*.nombre`) siempre cuenta |
+| `cert_expiring_soon` | medium | El certificado más reciente vence en menos de 30 días y le queda menos de un tercio de su vida, así los de vida corta que se renuevan solos no cuentan |
 | `lookalike_domain` | medium | Un dominio parecido tiene un certificado vigente o vencido hace menos de 90 días: contiene la marca, usa otro TLD o tiene un error tipográfico |
 
-Cada hallazgo trae título en español, evidencia, las características del reto (tipo, antigüedad, exposición y sensibilidad) y una huella SHA-256 estable para no duplicarlo entre escaneos. Para los subdominios consulta primero `%.dominio`. Si crt.sh no responde después de 3 intentos, busca por nombre con otros 3, sigue con lo que encuentre y deja un aviso de que pueden faltar subdominios. Si tampoco responde a esa búsqueda, la fuente queda en `failed` sin activos ni hallazgos. Si solo fallan las variantes de dominios parecidos, el escaneo sigue y quedan avisos.
+Cada hallazgo trae título en español, evidencia, las características del reto (tipo, antigüedad, exposición y sensibilidad) y una huella SHA-256 estable para no duplicarlo entre escaneos. Para los subdominios consulta primero `%.dominio`. Si crt.sh no responde después de 3 intentos, busca por nombre con otros 3, sigue con lo que encuentre y deja un aviso de que pueden faltar subdominios. Si tampoco responde a esa búsqueda, la fuente queda en `failed` sin activos ni hallazgos. Si solo fallan las variantes de dominios parecidos, el escaneo sigue y quedan avisos. Consulta el DNS de los nombres con certificado vencido. Al grabar consulta el de todos los nombres con certificado vigente o vencido hace menos de un año, así una reproducción de días después tiene las respuestas que necesita. Esas respuestas se graban y se reproducen como las de crt.sh.
 
 ```bash
 python -m cirdan.recolectores.crtsh acme-demo.mx                        # en vivo
@@ -86,7 +86,7 @@ python -m cirdan.recolectores.crtsh acme-demo.mx --grabar               # en viv
 python -m cirdan.recolectores.crtsh acme-demo.mx --grabar --completar   # solo consulta lo que aún no está grabado
 python -m cirdan.recolectores.crtsh acme-demo.mx --reproducir           # solo con las respuestas grabadas, sin red (antes hay que grabar)
 python -m cirdan.recolectores.crtsh acme-demo.mx --json                 # el resultado completo en JSON
-python -m unittest -v pruebas/test_crtsh.py                             # 37 pruebas sin red
+python -m unittest -v pruebas/test_crtsh.py                             # 47 pruebas sin red
 ```
 
 Sin `--json` imprime un resumen en español para leer en una demo: los activos con su fecha de vencimiento y cada hallazgo con su severidad (alta, media) y sus características. Los datos conservan los códigos de la base (`high`, `medium`). Con `--reproducir`, la primera línea dice de cuándo es la grabación. Esa fecha va dentro de cada archivo grabado, así que no cambia al copiarlo o clonar el repo. Si faltan respuestas grabadas, las lista en una sola línea Faltan y no lo cuenta como falla de crt.sh (código 2). Si falta la de `%.dominio` pero está la búsqueda por nombre, usa esa y también sale con código 2. Solo si faltan las dos queda en `failed` (código 1). Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos.

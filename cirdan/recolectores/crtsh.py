@@ -3,7 +3,8 @@
 Lee los logs públicos de Certificate Transparency, sin tocar los servidores del
 dominio, y devuelve:
 - los subdominios del dominio autorizado (activos),
-- certificados vencidos o que vencen en menos de 30 días (hallazgos),
+- certificados vencidos de nombres que todavía resuelven en DNS, o que vencen en menos de 30 días
+  cuando les queda menos de un tercio de su vida (hallazgos),
 - dominios parecidos que ya tienen un certificado emitido (hallazgos).
 
 Modos: 'vivo' consulta crt.sh; 'grabar' además guarda cada respuesta en
@@ -26,6 +27,7 @@ import argparse
 import hashlib
 import http.client
 import json
+import socket
 import sys
 import time
 import urllib.error
@@ -43,7 +45,8 @@ URL = 'https://crt.sh/'
 AGENTE = 'cirdan-osint/0.1 (+https://github.com/Kernel-Loco)'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'crtsh'
 
-DIAS_POR_VENCER = 30         # vence en menos de esto = hallazgo
+DIAS_POR_VENCER = 30         # vence en menos de esto = hallazgo...
+FRACCION_POR_VENCER = 3      # ...y le queda menos de 1/3 de su vida (los de vida corta se renuevan solos)
 VENTANA_VENCIDOS_DIAS = 365  # vencido hace más de esto ya no es hallazgo; el subdominio queda como activo
 VENTANA_PARECIDOS_DIAS = 90  # un dominio parecido cuenta si tiene un certificado vigente o vencido hace menos de esto
 MAX_CANDIDATOS = 10          # variantes que se consultan por escaneo
@@ -98,22 +101,47 @@ class ClienteCrtsh:
     contrato (#13)."""
 
     def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, transporte=None, dormir=None, timeout=45,
-                 completar=False, desde=None, reloj=None, nueva=False):
+                 completar=False, desde=None, reloj=None, nueva=False, resolver=None):
         """`completar` (solo al grabar) reutiliza lo grabado desde `desde`, el inicio de la grabación en curso,
         y vuelve a consultar lo demás, incluidas las respuestas de grabaciones anteriores.
         `nueva` (solo al grabar) vacía la carpeta y escribe la marca de inicio con la primera respuesta válida de
-        crt.sh: si crt.sh no responde, la grabación anterior queda intacta."""
+        crt.sh: si crt.sh no responde, la grabación anterior queda intacta.
+        `resolver(nombre)` dice si un nombre resuelve en DNS (True, False o None si no se pudo saber). Si no se pasa,
+        se usa el del transporte cuando lo trae (el simulado de las pruebas) o la consulta DNS del sistema."""
         self.modo, self.carpeta, self.timeout = modo, Path(carpeta), timeout
         self.grabadora = Grabadora(carpeta, modo, completar=completar, desde=desde, nueva=nueva, reloj=reloj,
                                    nombre=_nombre_grabado)
         self.transporte = transporte or _descargar
+        self.resolver = resolver or getattr(self.transporte, 'resolver', None) or _resolver_dns
         self.dormir = dormir or time.sleep
         self.consultas = 0
+        self._dns_funciona = {}    # nombre de control -> si el DNS responde, una vez por corrida
 
     @property
     def leidas(self):
         """(archivo, fecha de grabación) de cada respuesta tomada del disco."""
         return self.grabadora.leidas
+
+    def resuelve(self, nombre, control=None):
+        """True si el nombre resuelve en DNS, False si no existe y None si no se pudo saber. La respuesta se graba y se
+        reproduce como las de crt.sh (dns_<nombre>.json), así --reproducir no consulta el DNS.
+
+        Un «no existe» solo se cree si el nombre de `control` (el dominio autorizado) sí resuelve: sin servidor DNS
+        alcanzable, Windows y macOS dan el mismo código que un nombre que no existe. Si el control falla, es None y no
+        se graba."""
+        consulta = 'dns:' + nombre
+        del_disco, datos = self.grabadora.de_disco(consulta)
+        if del_disco:
+            return datos
+        valor = self.resolver(nombre)
+        if valor is False and control:
+            if control not in self._dns_funciona:
+                self._dns_funciona[control] = self.resolver(control) is True
+            if not self._dns_funciona[control]:
+                valor = None
+        if valor is not None:
+            self.grabadora.guardar(consulta, valor)
+        return valor
 
     def consultar(self, consulta, intentos=INTENTOS, timeout=None, pausa=0, **extra):
         """`pausa`: segundos de espera antes de consultar crt.sh; no aplica si la respuesta sale del disco."""
@@ -147,6 +175,21 @@ class ClienteCrtsh:
 
 
 # ---------------------------------------------------------------- utilidades
+
+NO_EXISTE = {socket.EAI_NONAME, getattr(socket, 'EAI_NODATA', socket.EAI_NONAME), 11001, 11004}  # NXDOMAIN o sin datos
+
+
+def _resolver_dns(nombre):
+    """True si el nombre resuelve (A, AAAA o un CNAME que llega a una), False si no existe y None si no se pudo saber.
+    Es la misma consulta de DNS que hace cualquier navegador, sin tocar los servidores del dominio."""
+    try:
+        socket.getaddrinfo(nombre, None, proto=socket.IPPROTO_TCP)
+        return True
+    except socket.gaierror as e:
+        return False if e.errno in NO_EXISTE else None
+    except (OSError, UnicodeError):
+        return None
+
 
 def _con_fechas(certs):
     return [c for c in certs if isinstance(c, dict) and c.get('not_before') and c.get('not_after')]
@@ -215,20 +258,31 @@ def candidatos_parecidos(dominio, maximo=MAX_CANDIDATOS):
 
 # ---------------------------------------------------------------- análisis
 
-def _subdominios(dominio, certs, ahora):
-    """Agrupa los certificados por nombre dentro del dominio y genera activos y hallazgos de vigencia."""
-    por_nombre = {}
+def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
+    """Agrupa los certificados por nombre dentro del dominio y genera activos y hallazgos de vigencia.
+
+    Un certificado vencido solo es hallazgo si el nombre todavía resuelve en DNS (`resuelve(nombre)` no es False) y no
+    lo cubre un certificado comodín vigente de su dominio padre. Si no, el sitio ya no existe o usa el comodín, y el
+    nombre queda solo como activo. Sin `resuelve` se da por hecho que resuelve. Un comodín vencido (*.nombre) siempre
+    cuenta: no lo cubre el comodín del padre y su DNS no es el del nombre base.
+    Con `anticipar` (al grabar) también consulta el DNS de los nombres que todavía no vencen o que un comodín cubre, así
+    una reproducción de días después tiene las respuestas que necesite.
+    """
+    por_nombre, comodines = {}, set()
     vistos = set()
     for c in certs:
         if c.get('id') in vistos:
             continue
         vistos.add(c.get('id'))
+        vigente = _fecha(c['not_before']) <= ahora < _fecha(c['not_after'])
         for nombre, comodin in _nombres(c):
             if nombre != dominio and not nombre.endswith('.' + dominio):
                 continue
             g = por_nombre.setdefault(nombre, {'certs': [], 'comodin': False})
             g['certs'].append(c)
             g['comodin'] |= comodin
+            if comodin and vigente:
+                comodines.add(nombre)  # *.nombre está cubierto hoy
 
     activos, hallazgos = [], []
     for nombre in sorted(por_nombre):
@@ -243,7 +297,20 @@ def _subdominios(dominio, certs, ahora):
         evidencia = {'host': nombre, 'vence': vence.isoformat(), 'emisor': reciente.get('issuer_name', ''),
                      'serie': reciente.get('serial_number', ''), 'crtsh_id': reciente.get('id'),
                      'comodin': g['comodin']}
+        exacto = nombre in {n.strip().lower().rstrip('.') for n in
+                            (reciente.get('name_value') or '').split('\n') + [reciente.get('common_name') or '']}
+        padre = nombre.split('.', 1)[1] if nombre != dominio else ''
+        cubierto = exacto and padre in comodines  # un *.padre vigente no cubre a un comodín *.nombre
+        dns = None
+        if resuelve and exacto and -dias <= VENTANA_VENCIDOS_DIAS and (anticipar or (dias < 0 and not cubierto)):
+            dns = resuelve(nombre)
         if dias < 0 and -dias <= VENTANA_VENCIDOS_DIAS:
+            if cubierto:
+                activos[-1].atributos['cubierto_por_comodin'] = padre
+                continue
+            if dns is False:
+                activos[-1].atributos['resuelve'] = False
+                continue
             titulo = 'Certificado vencido en %s' % nombre
             hallazgos.append(Hallazgo(
                 'cert_expired', CODIGOS['cert_expired'], nombre, titulo,
@@ -251,7 +318,7 @@ def _subdominios(dominio, certs, ahora):
                 {'tipo': 'certificado_vencido', 'antiguedad_dias': int(-dias), 'exposicion': 'publica',
                  'sensibilidad': 'media'},
                 _huella('cert_expired', nombre, str(reciente.get('serial_number', '')))))
-        elif 0 <= dias < DIAS_POR_VENCER:
+        elif 0 <= dias < DIAS_POR_VENCER and dias * 86400 < (vence - _fecha(reciente['not_before'])).total_seconds() / FRACCION_POR_VENCER:
             titulo = 'El certificado de %s vence en %d días' % (nombre, int(dias))
             hallazgos.append(Hallazgo(
                 'cert_expiring_soon', CODIGOS['cert_expiring_soon'], nombre, titulo,
@@ -332,7 +399,21 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, ma
         res.avisos.append(str(falla_comodin) if isinstance(falla_comodin, SinGrabacion) else
                           'crt.sh no respondió a %%.%s. Se usó la búsqueda por nombre y pueden faltar subdominios'
                           % dominio)
-    res.activos, res.hallazgos = _subdominios(dominio, certs, ahora)
+    desconocidos = []
+
+    def resuelve(nombre):
+        try:
+            valor = cliente.resuelve(nombre, control=dominio)
+        except SinGrabacion:  # la grabación no trae ese DNS (por ejemplo, es de antes de que crt.sh lo consultara)
+            valor = None
+        if valor is None:
+            desconocidos.append(nombre)
+        return valor
+    res.activos, res.hallazgos = _subdominios(dominio, certs, ahora, resuelve,
+                                              anticipar=getattr(cliente, 'modo', 'vivo') == 'grabar')
+    vencidos = {h.activo for h in res.hallazgos if h.codigo == 'cert_expired'}
+    res.avisos += ['No se pudo comprobar en DNS si %s resuelve. Se reporta su certificado vencido.' % n
+                   for n in desconocidos if n in vencidos]
 
     if parecidos:
         propios_set = {registrable(dominio)} | {registrable(p.lower()) for p in propios} | {p.lower() for p in propios}
