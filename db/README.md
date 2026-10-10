@@ -1,6 +1,6 @@
 # Base de datos de Cirdan (PostgreSQL 16)
 
-Implementación real del modelo lógico de Cirdan (`cirdan_esquema.dbml`), creada el 2 oct 2026 en un contenedor Docker local y mostrada en vivo en la revisión del 2 oct.
+Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirdan_esquema.dbml), en esta carpeta, que se ve como diagrama pegando su contenido en el editor de la izquierda de https://dbdiagram.io/d), creada el 2 oct 2026 en un contenedor Docker local y mostrada en vivo en la revisión del 2 oct.
 
 ## Carpetas
 
@@ -12,6 +12,7 @@ Implementación real del modelo lógico de Cirdan (`cirdan_esquema.dbml`), cread
 
 | Archivo | Qué hace |
 |---|---|
+| `cirdan_esquema.dbml` | Modelo lógico del que sale la migración inicial (23 tablas en 7 grupos). Lo que la base hace distinto está en «Decisiones y desviaciones respecto al DBML» |
 | `migraciones/001_esquema_inicial.sql` | Extensiones, rol, función de tenant, 23 tablas, índices, triggers, RLS, GRANT y COMMENT ON TABLE |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
@@ -29,6 +30,8 @@ Implementación real del modelo lógico de Cirdan (`cirdan_esquema.dbml`), cread
 
 ## Cómo cargarla
 
+En Windows corre estos comandos en Git Bash, no en PowerShell, porque PowerShell no acepta el operador `<`.
+
 1. Copia `.env.example` como `.env` y cambia las dos contraseñas.
 2. Crea el contenedor con la contraseña de `postgres` que pusiste en `POSTGRES_PASSWORD`:
 
@@ -36,7 +39,15 @@ Implementación real del modelo lógico de Cirdan (`cirdan_esquema.dbml`), cread
 docker run -d --name cirdan-pg16 -e POSTGRES_PASSWORD=<POSTGRES_PASSWORD> -e TZ=America/Mexico_City -e PGTZ=America/Mexico_City -p 127.0.0.1:5433:5432 -v cirdan-pg16-data:/var/lib/postgresql/data postgres:16.14
 ```
 
-3. Desde la raíz del repo, crea la base, carga los scripts y dale al rol `cirdan_app` la contraseña de `CIRDAN_APP_PASSWORD` (la API entra con ella):
+Si el contenedor ya existe (por ejemplo, queda detenido después de reiniciar la PC), no repitas `docker run`, porque choca con el nombre. Arráncalo con `docker start cirdan-pg16`.
+
+3. Espera a que Postgres termine de arrancar. La primera vez tarda unos segundos, y si no esperas, `psql` falla con `No such file or directory`:
+
+```bash
+until docker exec cirdan-pg16 pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done
+```
+
+4. Desde la raíz del repo, crea la base, carga los scripts y dale al rol `cirdan_app` la contraseña de `CIRDAN_APP_PASSWORD` (la API entra con ella):
 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d postgres -c "DROP DATABASE IF EXISTS cirdan;" -c "CREATE DATABASE cirdan;"
@@ -51,6 +62,8 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/co
 `prueba_rls.sql` se corre con `sh -c '... 2>&1'` para que los ERROR esperados salgan en orden junto a su etiqueta. En ese script, las secciones [5] a [8] desactivan `ON_ERROR_STOP` porque deben fallar.
 
 ## Decisiones y desviaciones respecto al DBML
+
+Las desviaciones 1, 2 y 3 se pasaron al DBML el 9 oct, así que hoy la base y el DBML ya coinciden en esos tres puntos. Se dejan en la lista para explicar por qué cambió el modelo.
 
 1. **Severidad `critical`.** El DBML solo permite high, medium y low, pero el portal usa Critical. Se agregó `critical` a `findings.severity`, `score_contributions.severity`, `alerts.severity` y `scoring_rules.base_severity`.
 2. **Categorías del score.** Se usan las del portal (Infrastructure, Digital Identity, Configuration y Data Leaks: `infrastructure`, `digital_identity`, `configuration`, `data_leaks`) en lugar de exposed_services, vulnerabilities, configuration y breaches. Pesos del juego v1: 30, 20, 20 y 30 %.
