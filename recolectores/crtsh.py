@@ -26,15 +26,16 @@ import argparse
 import hashlib
 import http.client
 import json
-import re
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from recolectores.contrato import (MARCA, NOMBRE_VALIDO, SIN_GRABACION, Activo, FuenteNoResponde, Grabadora,  # noqa: F401
+                                   Hallazgo, Resultado, SinGrabacion, nombre_archivo)
 
 FUENTE = 'ct_logs'
 URL = 'https://crt.sh/'
@@ -46,7 +47,7 @@ VENTANA_VENCIDOS_DIAS = 365  # vencido hace más de esto ya no es hallazgo; el s
 VENTANA_PARECIDOS_DIAS = 90  # un dominio parecido cuenta si tiene un certificado vigente o vencido hace menos de esto
 MAX_CANDIDATOS = 10          # variantes que se consultan por escaneo
 FALLAS_SEGUIDAS = 3          # si tantas variantes seguidas fallan, crt.sh está saturado y se dejan las demás
-INTENTOS = 3                 # scan_source_runs.attempt va de 0 a 3
+INTENTOS = 3                 # intentos HTTP por consulta dentro de una corrida (no es scan_source_runs.attempt)
 ESPERAS = (5, 15)            # segundos entre intentos; crt.sh suele recuperarse en segundos
 PAUSA_PARECIDOS = 2          # segundos entre consultas de variantes, para no saturar crt.sh
 
@@ -59,9 +60,6 @@ SUFIJOS_DOBLES = {'com.mx', 'org.mx', 'net.mx', 'edu.mx', 'gob.mx', 'com.br', 'c
 TLD_PRINCIPALES = ('com', 'mx', 'com.mx', 'net')
 TLD_SECUNDARIOS = ('org', 'co', 'io', 'info', 'online', 'site')
 HOMOGLIFOS = {'o': '0', 'l': '1', 'i': 'l', 'm': 'rn', 'w': 'vv', 'e': '3', 'a': '4', 's': '5'}
-NOMBRE_VALIDO = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
-SIN_GRABACION = 'no hay respuesta grabada para '
-MARCA = '.grabacion'  # inicio de la grabación en curso, dentro de la carpeta del dominio
 
 # Solo para lo que se imprime: los datos conservan los códigos de la base (high, medium...).
 SEVERIDAD_ES = {'critical': 'crítica', 'high': 'alta', 'medium': 'media', 'low': 'baja'}
@@ -69,45 +67,7 @@ EXPOSICION_ES = {'publica': 'pública', 'privada': 'privada'}
 MESES = ('ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic')
 
 
-class CrtshNoResponde(Exception):
-    """crt.sh no respondió con un JSON válido después de todos los intentos."""
-
-
-class SinGrabacion(CrtshNoResponde):
-    """En modo reproducir no hay respuesta grabada para la consulta. No es una falla de crt.sh."""
-
-
-@dataclass
-class Activo:
-    tipo: str                      # 'domain' o 'subdomain'
-    valor: str
-    atributos: dict = field(default_factory=dict)
-
-
-@dataclass
-class Hallazgo:
-    codigo: str                    # código de la regla (scoring_rules.code)
-    severidad: str
-    activo: str                    # valor del activo al que pertenece
-    titulo: str
-    evidencia: dict
-    caracteristicas: dict          # tipo, antiguedad_dias, exposicion y sensibilidad (características del reto)
-    huella: str                    # sha256 estable para no duplicar el hallazgo entre escaneos
-
-
-@dataclass
-class Resultado:
-    dominio: str
-    fuente: str = FUENTE
-    estado: str = 'succeeded'      # 'succeeded' o 'failed', como scan_source_runs.status
-    consultas: int = 0             # peticiones HTTP hechas a crt.sh, contando reintentos
-    error: str = ''
-    avisos: list = field(default_factory=list)
-    activos: list = field(default_factory=list)
-    hallazgos: list = field(default_factory=list)
-
-    def a_dict(self):
-        return asdict(self)
+CrtshNoResponde = FuenteNoResponde  # el contrato (#13) define las excepciones de todas las fuentes
 
 
 # ---------------------------------------------------------------- consulta a crt.sh
@@ -118,18 +78,23 @@ def _descargar(url, timeout):
         return r.read()
 
 
-def _archivo_grabado(consulta, carpeta):
+def _nombre_grabado(consulta):
     """subdominios_acme.mx.json para %.acme.mx, contiene_acme.json para %acme% y acme.com.json para acme.com."""
     c = consulta.lower()
     if c.startswith('%.'):
         c = 'subdominios_' + c[2:]
     elif c.startswith('%') and c.endswith('%'):
         c = 'contiene_' + c.strip('%')
-    return Path(carpeta) / ('%s.json' % (re.sub(r'[^a-z0-9.-]+', '_', c).strip('_.') or 'vacio'))
+    return nombre_archivo(c)
+
+
+def _archivo_grabado(consulta, carpeta):
+    return Path(carpeta) / _nombre_grabado(consulta)
 
 
 class ClienteCrtsh:
-    """Hace las consultas con reintentos y, según el modo, graba o reproduce las respuestas."""
+    """Hace las consultas con reintentos y, según el modo, graba o reproduce las respuestas con la Grabadora del
+    contrato (#13)."""
 
     def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, transporte=None, dormir=None, timeout=45,
                  completar=False, desde=None, reloj=None, nueva=False):
@@ -137,70 +102,47 @@ class ClienteCrtsh:
         y vuelve a consultar lo demás, incluidas las respuestas de grabaciones anteriores.
         `nueva` (solo al grabar) vacía la carpeta y escribe la marca de inicio con la primera respuesta válida de
         crt.sh: si crt.sh no responde, la grabación anterior queda intacta."""
-        assert modo in ('vivo', 'grabar', 'reproducir'), modo
-        assert not completar or modo == 'grabar', 'completar solo aplica al grabar'
-        self.modo, self.carpeta, self.timeout, self.completar, self.desde = modo, Path(carpeta), timeout, completar, desde
+        self.modo, self.carpeta, self.timeout = modo, Path(carpeta), timeout
+        self.grabadora = Grabadora(carpeta, modo, completar=completar, desde=desde, nueva=nueva, reloj=reloj,
+                                   nombre=_nombre_grabado)
         self.transporte = transporte or _descargar
         self.dormir = dormir or time.sleep
-        self.reloj = reloj or (lambda: datetime.now(timezone.utc))
-        self.nueva = nueva and modo == 'grabar'
         self.consultas = 0
-        self.leidas = []           # (archivo, fecha de grabación) de cada respuesta tomada del disco
 
-    @staticmethod
-    def _abrir(archivo):
-        """(datos, fecha de grabación). La fecha va dentro del archivo porque git y las copias cambian la del sistema;
-        los archivos del formato anterior (solo la lista) usan la fecha del sistema."""
-        contenido = json.loads(archivo.read_text(encoding='utf-8') or '[]')
-        if isinstance(contenido, dict) and 'datos' in contenido:
-            return contenido['datos'], _fecha(contenido['grabado'])
-        return contenido, datetime.fromtimestamp(archivo.stat().st_mtime, timezone.utc)
-
-    def _leer(self, archivo):
-        datos, fecha = self._abrir(archivo)
-        self.leidas.append((archivo.name, fecha))
-        return datos
+    @property
+    def leidas(self):
+        """(archivo, fecha de grabación) de cada respuesta tomada del disco."""
+        return self.grabadora.leidas
 
     def consultar(self, consulta, intentos=INTENTOS, timeout=None, pausa=0, **extra):
         """`pausa`: segundos de espera antes de consultar crt.sh; no aplica si la respuesta sale del disco."""
-        archivo = _archivo_grabado(consulta, self.carpeta)
-        if self.modo == 'reproducir':
-            if not archivo.exists():
-                raise SinGrabacion(SIN_GRABACION + consulta)
-            return self._leer(archivo)
-        if self.completar and archivo.exists():
-            datos, fecha = self._abrir(archivo)
-            if self.desde is None or fecha >= self.desde:
-                self.leidas.append((archivo.name, fecha))
-                return datos
+        del_disco, datos = self.grabadora.de_disco(consulta)
+        if del_disco:
+            return datos
         if pausa:
             self.dormir(pausa)
         url = URL + '?' + urllib.parse.urlencode(dict(q=consulta, output='json', **extra))
-        ultimo = ''
+        ultimo, hechos = '', 0
         for n in range(intentos):
             self.consultas += 1
+            hechos += 1
             try:
                 cuerpo = self.transporte(url, timeout or self.timeout)
                 datos = json.loads(cuerpo or b'[]')
                 if not isinstance(datos, list):
                     raise ValueError('respuesta inesperada')
-                if self.modo == 'grabar':
-                    self.carpeta.mkdir(parents=True, exist_ok=True)
-                    if self.nueva:  # crt.sh ya respondió: hasta aquí no se toca la grabación anterior
-                        self.nueva = False
-                        for viejo in self.carpeta.glob('*.json'):
-                            viejo.unlink()
-                        (self.carpeta / MARCA).write_text(self.reloj().isoformat(), encoding='utf-8')
-                    archivo.write_text(json.dumps({'grabado': self.reloj().isoformat(), 'consulta': consulta,
-                                                   'datos': datos}, ensure_ascii=False), encoding='utf-8')
-                return datos
             except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
                 ultimo = '%s: %s' % (type(e).__name__, e)
+                if isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code not in (408, 429):
+                    break  # crt.sh sí respondió y otro intento daría lo mismo
                 if n < intentos - 1:
                     self.dormir(ESPERAS[min(n, len(ESPERAS) - 1)])
-        if self.modo == 'grabar' and not self.nueva and archivo.exists():
-            archivo.unlink()  # una respuesta de una grabación anterior no debe pasar por la de hoy
-        raise CrtshNoResponde('crt.sh no respondió a %s después de %d intentos (%s)' % (consulta, intentos, ultimo))
+                continue
+            self.grabadora.guardar(consulta, datos)  # fuera del try: un error del disco no es una falla de crt.sh
+            return datos
+        self.grabadora.descartar(consulta)  # una respuesta de una grabación anterior no debe pasar por la de hoy
+        raise CrtshNoResponde('crt.sh no respondió a %s después de %d %s (%s)' % (
+            consulta, hechos, 'intento' if hechos == 1 else 'intentos', ultimo))
 
 
 # ---------------------------------------------------------------- utilidades
@@ -313,7 +255,7 @@ def _subdominios(dominio, certs, ahora):
             hallazgos.append(Hallazgo(
                 'cert_expiring_soon', CODIGOS['cert_expiring_soon'], nombre, titulo,
                 dict(evidencia, title=titulo, dias_para_vencer=int(dias)),
-                {'tipo': 'certificado_por_vencer', 'antiguedad_dias': int((ahora - _fecha(reciente['not_before'])).days),
+                {'tipo': 'certificado_por_vencer', 'antiguedad_dias': max(0, (ahora - _fecha(reciente['not_before'])).days),
                  'exposicion': 'publica', 'sensibilidad': 'baja'},
                 _huella('cert_expiring_soon', nombre, str(reciente.get('serial_number', '')))))
     return activos, hallazgos
@@ -350,9 +292,9 @@ def _parecidos(dominio, certs_por_tipo, propios, ahora):
              'nombres': sorted(g['nombres'])[:10], 'certificados': len(certs),
              'primer_certificado': primero.isoformat(), 'vence': _fecha(reciente['not_after']).isoformat(),
              'emisor': reciente.get('issuer_name', ''), 'crtsh_id': reciente.get('id')},
-            {'tipo': 'dominio_parecido', 'antiguedad_dias': int((ahora - primero).days), 'exposicion': 'publica',
+            {'tipo': 'dominio_parecido', 'antiguedad_dias': max(0, (ahora - primero).days), 'exposicion': 'publica',
              'sensibilidad': 'alta'},
-            _huella('lookalike_domain', dominio, reg)))
+            _huella('lookalike_domain', dominio, reg), clave=reg))
     return hallazgos
 
 
@@ -366,7 +308,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, ma
     dominio = dominio.strip().lower().rstrip('.')
     cliente = cliente or ClienteCrtsh()
     ahora = ahora or datetime.now(timezone.utc)
-    res = Resultado(dominio)
+    res = Resultado(dominio, FUENTE)
     if not NOMBRE_VALIDO.match(dominio):
         res.estado, res.error = 'failed', 'dominio inválido: %s' % dominio
         return res
@@ -488,6 +430,12 @@ def carpeta_de(dominio):
     return CARPETA_GRABADAS / dominio.strip().lower().rstrip('.')
 
 
+def crear_cliente(modo, dominio):
+    """Cliente para el orquestador (#13): 'vivo' consulta crt.sh, 'reproducir' usa la grabación del dominio y
+    'grabar' empieza una grabación nueva, igual que --grabar."""
+    return ClienteCrtsh(modo=modo, carpeta=carpeta_de(dominio), nueva=(modo == 'grabar'))
+
+
 def _main(argv=None):
     # En Windows, cuando la salida no es la consola (Git Bash, una tubería), Python usa cp1252 y los acentos se rompen.
     if (getattr(sys.stdout, 'encoding', '') or '').lower().replace('-', '') != 'utf8' and hasattr(sys.stdout, 'reconfigure'):
@@ -518,7 +466,7 @@ def _main(argv=None):
     if a.completar:
         if not marca.exists():
             p.error('--completar continúa una grabación de este dominio, primero corre --grabar')
-        desde = _fecha(marca.read_text(encoding='utf-8').strip())
+        desde = Grabadora.inicio(carpeta)
     cliente = ClienteCrtsh(modo=modo, carpeta=carpeta, completar=a.completar, desde=desde,
                            nueva=a.grabar and not a.completar)
     res = recolectar(dominio, cliente, parecidos=not a.sin_parecidos)
