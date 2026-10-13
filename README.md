@@ -79,13 +79,15 @@ Con la API arriba, abre **http://127.0.0.1:8000/demo**. Muestra las 23 tablas ag
 
 Cada hallazgo trae título en español, evidencia, las características del reto (tipo, antigüedad, exposición y sensibilidad) y una huella SHA-256 estable para no duplicarlo entre escaneos. Para los subdominios consulta primero `%.dominio`. Si crt.sh no responde después de 3 intentos, busca por nombre con otros 3, sigue con lo que encuentre y deja un aviso de que pueden faltar subdominios. Si tampoco responde a esa búsqueda, la fuente queda en `failed` sin activos ni hallazgos. Si solo fallan las variantes de dominios parecidos, el escaneo sigue y quedan avisos. Consulta el DNS de los nombres con certificado vencido. Al grabar consulta el de todos los nombres con certificado vigente o vencido hace menos de un año, así una reproducción de días después tiene las respuestas que necesita. Esas respuestas se graban y se reproducen como las de crt.sh.
 
+Los ejemplos usan olmardo.com, el dominio de prueba del equipo (Grupo Olmardo, empresa ficticia). Una consulta en vivo solo se corre sobre un dominio con carta de autorización vigente, nunca sobre uno de terceros, y `--grabar` solo se usa con el dominio de prueba. acme-demo.mx es un dato de la semilla y no es del equipo: no lo consultes en vivo.
+
 ```bash
-python -m cirdan.recolectores.crtsh acme-demo.mx                        # en vivo
-python -m cirdan.recolectores.crtsh acme-demo.mx --sin-parecidos        # en vivo, solo subdominios y certificados (una consulta, dos si falla la primera)
-python -m cirdan.recolectores.crtsh acme-demo.mx --grabar               # en vivo y graba en cirdan/recolectores/respuestas_grabadas/crtsh/acme-demo.mx/
-python -m cirdan.recolectores.crtsh acme-demo.mx --grabar --completar   # solo consulta lo que aún no está grabado
-python -m cirdan.recolectores.crtsh acme-demo.mx --reproducir           # solo con las respuestas grabadas, sin red (antes hay que grabar)
-python -m cirdan.recolectores.crtsh acme-demo.mx --json                 # el resultado completo en JSON
+python -m cirdan.recolectores.crtsh olmardo.com                         # en vivo
+python -m cirdan.recolectores.crtsh olmardo.com --sin-parecidos         # en vivo, solo subdominios y certificados (una consulta, dos si falla la primera)
+python -m cirdan.recolectores.crtsh olmardo.com --grabar                # en vivo y graba en cirdan/recolectores/respuestas_grabadas/crtsh/olmardo.com/
+python -m cirdan.recolectores.crtsh olmardo.com --grabar --completar    # solo consulta lo que aún no está grabado
+python -m cirdan.recolectores.crtsh olmardo.com --reproducir            # solo con las respuestas grabadas, sin red (antes hay que grabar)
+python -m cirdan.recolectores.crtsh olmardo.com --json                  # el resultado completo en JSON
 python -m unittest -v pruebas/test_crtsh.py                             # 47 pruebas sin red
 ```
 

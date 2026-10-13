@@ -12,10 +12,14 @@ cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/; 'reproducir' solo lee 
 (pruebas y respaldo de las demos). Si crt.sh no responde después de los
 reintentos, el resultado queda en 'failed' y no trae activos ni hallazgos.
 
-    python -m cirdan.recolectores.crtsh acme-demo.mx
-    python -m cirdan.recolectores.crtsh acme-demo.mx --grabar
-    python -m cirdan.recolectores.crtsh acme-demo.mx --grabar --completar
-    python -m cirdan.recolectores.crtsh acme-demo.mx --reproducir
+    python -m cirdan.recolectores.crtsh olmardo.com
+    python -m cirdan.recolectores.crtsh olmardo.com --grabar
+    python -m cirdan.recolectores.crtsh olmardo.com --grabar --completar
+    python -m cirdan.recolectores.crtsh olmardo.com --reproducir
+
+olmardo.com es el dominio de prueba del equipo. Solo se consulta en vivo un dominio
+con carta de autorización vigente, nunca uno de terceros, y --grabar solo con el
+dominio de prueba.
 
 --grabar empieza con la carpeta del dominio vacía. --completar solo consulta
 lo que aún no se grabó desde ese inicio, para terminar una grabación que
