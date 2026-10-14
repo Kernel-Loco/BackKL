@@ -1,0 +1,88 @@
+# Cirdan en cualquier PC: `docker compose up -d` levanta PostgreSQL 16, Valkey y la API.
+# Antes copia .env.example como .env y cambia las contraseñas.
+# Todo escucha solo en 127.0.0.1: nada queda expuesto a la red.
+
+services:
+  db:
+    image: postgres:16.14
+    container_name: cirdan-pg16  # las pruebas entran con `docker exec cirdan-pg16`
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD en .env}
+      CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD:?Falta CIRDAN_APP_PASSWORD en .env}
+      TZ: America/Mexico_City
+      PGTZ: America/Mexico_City
+    ports:
+      - "127.0.0.1:${PGPORT:-5433}:5432"
+    volumes:
+      - cirdan-pg16-data:/var/lib/postgresql/data
+      - ./db:/cirdan-db:ro
+      - ./db/init/cargar_cirdan.sh:/docker-entrypoint-initdb.d/cargar_cirdan.sh:ro
+    healthcheck:
+      # Pasa solo cuando terminó la carga inicial y la base `cirdan` acepta conexiones.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d cirdan"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:8.0.2
+    container_name: cirdan-valkey
+    command: ["valkey-server", "--requirepass", "${VALKEY_PASSWORD:?Falta VALKEY_PASSWORD en .env}", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${VALKEY_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD}
+    restart: unless-stopped
+
+  api:
+    build: .
+    container_name: cirdan-api
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: cirdan
+      CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
+      VALKEY_URL: redis://:${VALKEY_PASSWORD}@valkey:6379/0
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:?Falta TOTP_ENCRYPTION_KEY en .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # De quién se acepta X-Forwarded-For (la IP real para el bloqueo por intentos).
+      # En desarrollo la API solo escucha en 127.0.0.1, así que basta "*"; en el
+      # despliegue (#49) va solo la IP del proxy.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      demo-accounts:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Corre una vez en cada `up`: con DEMO_ACCOUNTS=true pone contraseña y MFA a las cuentas
+  # de la semilla (cirdan/auth/demo.py). Con false no toca nada. Nunca true en producción.
+  demo-accounts:
+    build: .
+    command: ["python", "-m", "cirdan.auth.demo"]
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: cirdan
+      CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY}
+      DEMO_ACCOUNTS: ${DEMO_ACCOUNTS:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  cirdan-pg16-data:

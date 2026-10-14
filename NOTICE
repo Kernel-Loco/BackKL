@@ -1,0 +1,21 @@
+Cirdan
+Copyright 2026 Kernel Loco (Ernesto De Luna Quintero, Emilio Salcedo,
+Germán Mounier Zalenski e Israel Booz Rodriguez Zavala)
+
+Este producto se distribuye bajo la Licencia Apache 2.0 (ver LICENSE).
+
+Atribuciones de datos de terceros
+---------------------------------
+
+Have I Been Pwned
+  Los datos de exposición en brechas provienen de Have I Been Pwned
+  (https://haveibeenpwned.com), de Troy Hunt, bajo la licencia
+  Creative Commons Attribution 4.0 International (CC BY 4.0):
+  https://creativecommons.org/licenses/by/4.0/
+  Cirdan solo guarda el hecho de la exposición (nombre y fecha de la brecha y
+  tipos de datos), nunca contraseñas ni otros datos filtrados.
+
+DB-IP
+  IP Geolocation by DB-IP (https://db-ip.com), bajo la licencia
+  Creative Commons Attribution 4.0 International (CC BY 4.0):
+  https://creativecommons.org/licenses/by/4.0/
