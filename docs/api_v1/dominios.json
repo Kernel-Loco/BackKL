@@ -1,0 +1,70 @@
+{
+  "items": [
+    {
+      "id": "40000000-0000-4000-8000-000000000001",
+      "fqdn": "acme-demo.mx",
+      "status": "verified",
+      "authorization": {"status": "valid", "valid_from": "2026-09-01", "valid_until": "2026-12-31"},
+      "txt": {"status": "verified", "checked_at": "2026-09-30T14:19:20-06:00"},
+      "scan_eligibility": {"can_scan": true, "reasons": []},
+      "score": 68,
+      "band": "high",
+      "open_findings": {"critical": 1, "high": 2, "medium": 1, "low": 0},
+      "last_scan_at": "2026-09-30T14:20:00-06:00",
+      "next_scan_at": "2026-10-07T14:20:00-06:00"
+    },
+    {
+      "id": "40000000-0000-4000-8000-000000000002",
+      "fqdn": "acme-tienda.mx",
+      "status": "verified",
+      "authorization": {"status": "valid", "valid_from": "2026-09-01", "valid_until": "2026-12-31"},
+      "txt": {"status": "verified", "checked_at": "2026-09-29T09:11:30-06:00"},
+      "scan_eligibility": {"can_scan": true, "reasons": []},
+      "score": 54,
+      "band": "medium",
+      "open_findings": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+      "last_scan_at": "2026-09-29T09:12:00-06:00",
+      "next_scan_at": "2026-10-06T09:12:00-06:00"
+    },
+    {
+      "id": "40000000-0000-4000-8000-000000000003",
+      "fqdn": "acme-portal.mx",
+      "status": "verified",
+      "authorization": {"status": "valid", "valid_from": "2026-09-01", "valid_until": "2026-12-31"},
+      "txt": {"status": "verified", "checked_at": "2026-09-27T18:44:10-06:00"},
+      "scan_eligibility": {"can_scan": true, "reasons": []},
+      "score": 31,
+      "band": "low",
+      "open_findings": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+      "last_scan_at": "2026-09-27T18:45:00-06:00",
+      "next_scan_at": "2026-10-04T18:45:00-06:00"
+    },
+    {
+      "id": "40000000-0000-4000-8000-000000000004",
+      "fqdn": "partner-example.com",
+      "status": "pending_verification",
+      "authorization": {"status": "missing", "valid_from": null, "valid_until": null},
+      "txt": {"status": "missing", "checked_at": "2026-10-01T16:10:00-06:00"},
+      "scan_eligibility": {"can_scan": false, "reasons": ["authorization_missing", "txt_not_verified"]},
+      "score": null,
+      "band": null,
+      "open_findings": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+      "last_scan_at": null,
+      "next_scan_at": null
+    },
+    {
+      "id": "40000000-0000-4000-8000-000000000005",
+      "fqdn": "old-example.net",
+      "status": "paused",
+      "authorization": {"status": "expired", "valid_from": "2025-08-15", "valid_until": "2026-08-15"},
+      "txt": {"status": "verified", "checked_at": "2026-10-01T06:00:00-06:00"},
+      "scan_eligibility": {"can_scan": false, "reasons": ["authorization_expired", "domain_paused"]},
+      "score": null,
+      "band": null,
+      "open_findings": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+      "last_scan_at": null,
+      "next_scan_at": null
+    }
+  ],
+  "total": 5
+}

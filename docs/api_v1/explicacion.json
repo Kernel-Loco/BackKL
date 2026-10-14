@@ -1,0 +1,23 @@
+{
+  "finding_id": "80000000-0000-4000-8000-000000000001",
+  "domain": "acme-demo.mx",
+  "title": "12 correos de la empresa aparecen en brechas de datos públicas",
+  "severity": "critical",
+  "base_severity": "critical",
+  "category": "data_leaks",
+  "rule_code": "breach_exposure",
+  "score_id": "a0000000-0000-4000-8000-000000000001",
+  "computed_at": "2026-09-30T14:24:30-06:00",
+  "method": "rules",
+  "penalty": 24.0,
+  "max_penalty": 40.0,
+  "factors": [
+    {"label": "La brecha es de hace menos de 6 meses", "points": 12},
+    {"label": "Incluye cuentas de administrador", "points": 8},
+    {"label": "La brecha incluye contraseñas", "points": 6},
+    {"label": "El hallazgo ya se había visto antes", "points": -2}
+  ],
+  "caracteristicas": {"tipo": "correos_en_brecha", "antiguedad_dias": 104, "exposicion": "publica", "sensibilidad": "alta"},
+  "summary": "Es crítico porque alguien de fuera puede usar ya esas contraseñas para entrar a cuentas de la empresa, sin pasos extra.",
+  "shap": null
+}

@@ -48,7 +48,7 @@ Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `carga
 | `exposicion` | `directa` si el activo responde en internet (un servicio o un panel), `publica` si es un dato público (un certificado, un registro DNS, una brecha o un repositorio) |
 | `sensibilidad` | `baja`, `media` o `alta`, según lo que expone |
 
-El hallazgo de ejemplo del contrato de API (#21) debe traer `caracteristicas` con estos mismos campos y valores. Cuando #21 esté en el repo, hay que enlazar aquí su archivo.
+El hallazgo de ejemplo del contrato de API (#21) trae `caracteristicas` con estos mismos campos y valores: [`api_v1/hallazgos.json`](api_v1/hallazgos.json), descrito en [`contrato_api_v1.md`](contrato_api_v1.md).
 
 ## Filtro de alcance
 

@@ -1,0 +1,24 @@
+{
+  "rule_set_version": 1,
+  "is_active": true,
+  "activated_at": "2026-09-01T08:00:00-06:00",
+  "validated_by": "Emilio",
+  "category_weights": {"infrastructure": 0.30, "digital_identity": 0.20, "configuration": 0.20, "data_leaks": 0.30},
+  "bands": [
+    {"band": "low", "from": 0, "to": 39},
+    {"band": "medium", "from": 40, "to": 59},
+    {"band": "high", "from": 60, "to": 79},
+    {"band": "critical", "from": 80, "to": 100}
+  ],
+  "floor": {"one_critical": 60, "two_or_more_critical": 80, "counts_statuses": ["open", "accepted_risk"]},
+  "alert_threshold_default": 60,
+  "rules": [
+    {"code": "breach_exposure", "category": "data_leaks", "base_severity": "critical", "weight": 1.0, "max_penalty": 40.0},
+    {"code": "cert_expired", "category": "infrastructure", "base_severity": "high", "weight": 0.4, "max_penalty": 20.0},
+    {"code": "outdated_software", "category": "infrastructure", "base_severity": "high", "weight": 0.4, "max_penalty": 25.0},
+    {"code": "exposed_rdp", "category": "infrastructure", "base_severity": "high", "weight": 0.2, "max_penalty": 25.0},
+    {"code": "dmarc_missing", "category": "configuration", "base_severity": "medium", "weight": 0.5, "max_penalty": 10.0},
+    {"code": "spf_missing", "category": "configuration", "base_severity": "low", "weight": 0.5, "max_penalty": 8.0},
+    {"code": "lookalike_domain", "category": "digital_identity", "base_severity": "medium", "weight": 1.0, "max_penalty": 15.0}
+  ]
+}
