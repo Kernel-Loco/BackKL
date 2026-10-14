@@ -11,7 +11,7 @@ Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa 
 | `cirdan/score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
 | `db/` | Base PostgreSQL 16: migraciones, semillas y consultas |
 | `docs/` | Documentos del proyecto, con su índice |
-| `pruebas/` | Pruebas automáticas de la base, de la API, del criterio de criticidad, del contrato de plugin y de crt.sh |
+| `pruebas/` | Pruebas automáticas de la base, de la API, del contrato de API v1, del criterio de criticidad, del contrato de plugin y de crt.sh |
 | `.env.example` | Plantilla del `.env`, que se copia en la raíz con contraseñas propias y nunca se sube al repositorio. Solo lo lee la API, que sin él no arranca: toma `CIRDAN_APP_PASSWORD` y `PGPORT`. `POSTGRES_PASSWORD` se usa al crear el contenedor. Los recolectores, el criterio y sus pruebas no lo necesitan |
 
 ## Requisitos
@@ -28,7 +28,7 @@ Todos los comandos se corren desde la raíz del repo.
 2. Crea el contenedor y carga la base con la sección «Cómo cargarla» de [`db/README.md`](db/README.md), que empieza por copiar `.env.example` como `.env`.
 3. Crea un entorno virtual y actívalo. En Git Bash: `python -m venv .venv` y `source .venv/Scripts/activate`. En Linux o macOS: `python3 -m venv .venv` y `source .venv/bin/activate` (en Ubuntu y Debian, antes `sudo apt install python3-venv`).
 4. Instala lo que usa la API (el `requirements.txt` llega con #7): `python -m pip install fastapi uvicorn "psycopg[binary]"`.
-5. Corre las pruebas que no usan la base ni la red: `python -m unittest -v pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py` (96 pruebas).
+5. Corre las pruebas que no usan la base ni la red: `python -m unittest -v pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_contrato_api.py` (117 pruebas).
 6. Sigue con las secciones de abajo: las pruebas de la base, la API y su vista en http://127.0.0.1:8000/demo.
 
 ## Base de datos
@@ -99,6 +99,14 @@ Más alto = más riesgo. Bandas 0 a 39 bajo, 40 a 59 medio, 60 a 79 alto y 80 a 
 
 ```bash
 python -m unittest -v pruebas/test_criterio.py   # 13 pruebas, sin base de datos
+```
+
+## Contrato de API v1 (#21)
+
+Lo que devolverá la API v1 (`/api/v1`): dominios, hallazgos, score, histórico, explicación y pesos, con un JSON de ejemplo por respuesta en `docs/api_v1/`. El portal y el dataset de ML los usan mientras la API v1 no esté lista, y sirven de plan B en las demos. El detalle está en `docs/contrato_api_v1.md`.
+
+```bash
+python -m unittest -v pruebas/test_contrato_api.py   # 21 pruebas, sin base ni red
 ```
 
 ## Contrato de plugin (#13)

@@ -1,0 +1,22 @@
+{
+  "domain": "acme-demo.mx",
+  "score_id": "a0000000-0000-4000-8000-000000000001",
+  "score": 68,
+  "band": "high",
+  "weighted": 68,
+  "floor": 60,
+  "floor_applied": false,
+  "critical_open": 1,
+  "method": "rules",
+  "rule_set_version": 1,
+  "reason": "scan",
+  "partial_coverage": false,
+  "computed_at": "2026-09-30T14:24:30-06:00",
+  "categories": [
+    {"category": "infrastructure", "score": 80, "band": "critical", "weight": 0.30},
+    {"category": "digital_identity", "score": 55, "band": "medium", "weight": 0.20},
+    {"category": "configuration", "score": 30, "band": "low", "weight": 0.20},
+    {"category": "data_leaks", "score": 90, "band": "critical", "weight": 0.30}
+  ],
+  "alert": {"threshold": 60, "triggered": true}
+}
