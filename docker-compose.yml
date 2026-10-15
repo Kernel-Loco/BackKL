@@ -56,6 +56,9 @@ services:
       # En desarrollo la API solo escucha en 127.0.0.1, así que basta "*"; en el
       # despliegue (#49) va solo la IP del proxy.
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
+      # Dominios que el orquestador puede consultar en vivo (DNS y fuentes). Los de la demo
+      # (acme-demo.mx...) no son del equipo: nunca en vivo. En producción, "*".
+      DOMINIOS_EN_VIVO: ${DOMINIOS_EN_VIVO:-olmardo.com}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

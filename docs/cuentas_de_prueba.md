@@ -9,7 +9,7 @@ Cuentas para entrar al portal LowTide en tu PC mientras desarrollamos. Son **sol
 
 ## Las cuentas
 
-La contraseña es la misma para las cuatro: **`Lowtide-Demo-2026`**
+La contraseña es la misma para las cinco: **`Lowtide-Demo-2026`**
 
 | Correo | Rol en el portal | Empresa | Qué ve |
 |---|---|---|---|
@@ -17,6 +17,7 @@ La contraseña es la misma para las cuatro: **`Lowtide-Demo-2026`**
 | `maya.reed@acme-demo.mx` | Gerente | Acme Demo | Dashboard, Dominios, Detalle de dominio y Reportes e histórico, solo lectura |
 | `alex.morgan@acme-demo.mx` | Administrador | Acme Demo | Todo lo anterior, más registrar dominios, verificar el TXT, Políticas de alerta y la sección Administración |
 | `dana.cruz@beta-corp.mx` | Administrador | Beta Corp | Solo los datos de Beta Corp. Sirve para comprobar que una empresa no ve los datos de otra |
+| `admin@olmardo.com` | Administrador | Grupo Olmardo | El dominio de prueba del equipo, olmardo.com: el único que el orquestador escanea en vivo (#22) |
 
 ## Cómo pasar el MFA (verificación en dos pasos)
 
@@ -36,6 +37,7 @@ Sirve Google Authenticator, Microsoft Authenticator, Authy, 1Password u otra par
 | `maya.reed@acme-demo.mx` (Gerente) | `3BU6UYVDTBEQMASX2IGWUOJGGJBXMLZW` |
 | `alex.morgan@acme-demo.mx` (Administrador) | `UGXK2GMMQ65BHJLIVR6NNDOAKMMRVLW5` |
 | `dana.cruz@beta-corp.mx` (Administrador, Beta Corp) | `CMPPTNCOFPU3YUPJB4KJGFDMN5QZPXOV` |
+| `admin@olmardo.com` (Administrador, Grupo Olmardo) | `SNSA4TTR4FCTTDMKEYMPWGD6ZAKG3G5B` |
 
 Desde ahí, la app muestra el código de cada cuenta. Las claves son fijas: aunque reconstruyas Docker, no hace falta volver a agregarlas. Están en `CUENTAS` de `cirdan/auth/demo.py`.
 

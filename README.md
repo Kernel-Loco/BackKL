@@ -8,6 +8,7 @@ Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa 
 |---|---|
 | `cirdan/api/` | API en FastAPI y la página `/demo` |
 | `cirdan/auth/` | Inicio de sesión (#25): contraseña con argon2id, MFA con TOTP, sesiones en Valkey y cuentas de demo |
+| `cirdan/orquestador/` | Orquestador de escaneos (#22): solo escanea con autorización vigente y TXT verificado |
 | `cirdan/recolectores/` | Contrato de plugin (#13), recolectores OSINT pasivos (crt.sh, #14, y uno de ejemplo para pruebas) y sus respuestas grabadas para el respaldo de las demos (hoy solo está la del recolector de ejemplo) |
 | `cirdan/score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
 | `db/` | Base PostgreSQL 16: migraciones, semillas y consultas |
@@ -32,7 +33,7 @@ Todos los comandos se corren desde la raíz del repo.
 2. Copia `.env.example` como `.env`, cambia las tres contraseñas (`POSTGRES_PASSWORD`, `CIRDAN_APP_PASSWORD` y `VALKEY_PASSWORD`) y genera `TOTP_ENCRYPTION_KEY` con el comando que trae el archivo.
 3. Levanta todo: `docker compose up -d --build`. La primera vez crea la base `cirdan` y carga migraciones y semillas (tarda unos segundos). La API queda en http://127.0.0.1:8000.
 4. Comprueba: `curl http://127.0.0.1:8000/health` responde 200 con `"role": "cirdan_app"`, y `docker compose ps` muestra los tres contenedores `healthy`.
-5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_api.py pruebas/test_auth.py` (22, contra la base y la API) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_contrato_api.py` (117, sin base ni red).
+5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (35, contra la base y la API), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py` (10, el orquestador dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_contrato_api.py` (117, sin base ni red).
 6. Instala el candado de secretos una vez: `pip install pre-commit && pre-commit install`. Desde ahí gitleaks revisa cada commit.
 
 Otros comandos: `docker compose logs -f api` (ver la API), `docker compose down` (apagar, la base se conserva) y `docker compose down -v` (borrar la base para volver a cargarla desde cero en el siguiente `up`). Para revisar todo el historial con gitleaks: `docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 git /repo`.
@@ -94,6 +95,20 @@ docker compose exec api python -m cirdan.auth.demo codigo jordan.tate@acme-demo.
 
 `cirdan/api/main.py` expone `GET /health` (público) y, con sesión, `GET /domains`, `GET /domains/{fqdn}/findings` y `GET /domains/{fqdn}/score`, además de las rutas de `/api/v1/auth`. Entra como `cirdan_app` y en cada petición fija `app.current_org` **con la empresa de la sesión**, así que el aislamiento lo aplica RLS. Ya no se acepta el encabezado `X-Organization` (#25): sin sesión, la respuesta es 401, y un dominio de otra empresa responde 404.
 
+**API v1 del portal (RC-17)**, en `cirdan/api/v1.py`, con la forma del contrato #21 y siempre con sesión:
+
+| Endpoint | Qué devuelve |
+|---|---|
+| `GET /api/v1/domains` | Dominios con autorización, TXT, si se pueden escanear, score y hallazgos abiertos |
+| `GET /api/v1/domains/{fqdn}/findings` | Hallazgos abiertos con las 4 características del reto |
+| `GET /api/v1/domains/{fqdn}/score` y `/score/history` | Score con desglose, piso y alerta; y su histórico |
+| `GET /api/v1/findings/{id}/explanation` | Por qué es crítico: factores, penalización y recomendación |
+| `GET /api/v1/scoring/weights` | Juego de reglas activo |
+| `GET /api/v1/domains/{fqdn}/assets` y `GET /api/v1/scans` | Activos y escaneos (provisionales: aún no están en el contrato) |
+| `GET /api/v1/domains/txt` | Registro TXT de cada dominio (solo Admin) |
+
+Con los datos demo de Acme responden igual que los JSON de `docs/api_v1/` (lo revisa `pruebas/test_api_v1.py`). Mientras #23 no guarde las características del reto en la evidencia, la API las calcula con las mismas reglas del contrato. La semilla `003_titulos_espanol.sql` pone en español los títulos de los hallazgos demo.
+
 `cirdan/api/explorer.py` agrega los 2 endpoints que usa `/demo`, `GET /db/tables` y `GET /db/tables/{table}/rows`. Es el único lugar donde sigue el modo demo con `X-Organization`.
 
 Con `docker compose up -d` la API ya está corriendo; su documentación está en http://127.0.0.1:8000/docs.
@@ -103,6 +118,36 @@ python -m unittest -v pruebas/test_aislamiento.py pruebas/test_api.py pruebas/te
 ```
 
 El 14 oct 2026 pasaron las 22 pruebas (8 de la base, 6 de la API y 8 del inicio de sesión) con todo levantado por `docker compose`. Las de la API y del login entran con las cuentas de demo (`pruebas/sesion.py`).
+
+## Orquestador de escaneos (#22)
+
+`cirdan/orquestador/` arranca los escaneos. **Solo escanea un dominio con autorización firmada vigente y con el registro TXT `cirdan-verification=<txt_token>` verificado justo antes.** Si falta algo, no escanea y dice por qué.
+
+1. **Revisa el dominio y la autorización:** que el dominio esté verificado y no en pausa, y que haya una carta sin revocar con la fecha de hoy dentro de su vigencia.
+2. **Consulta el TXT en DNS** (1.1.1.1, con `dnspython`) y guarda la evidencia en `dns_txt_verifications` con `check_reason = 'pre_scan'` y su resultado (`match`, `mismatch`, `missing` o `dns_error`).
+3. **Solo con todo en orden crea la fila en `scans`.** El trigger de la base vuelve a exigir carta vigente y TXT `match` de la última hora: es el segundo candado.
+4. **Corre cada recolector** con `contrato.ejecutar()` (#13) y llena `scan_source_runs` con `siguiente_estado()`. Una fuente que falla queda en `retrying`, los reintentos los programa #27, y el escaneo termina `partial`. Guardar activos y hallazgos en la base es de #23.
+
+Los motivos de rechazo usan los códigos de `scan_eligibility.reasons` del contrato #21: `authorization_missing`, `authorization_expired`, `txt_not_verified`, `domain_paused`, etc., más `scan_in_progress` y `live_scan_not_allowed`. Cada aceptación y cada rechazo quedan en la bitácora (`scan.requested`, `scan.rejected` y `scan.finished`).
+
+**Solo se consultan en vivo los dominios de `DOMINIOS_EN_VIVO`** (`.env`, por defecto `olmardo.com`). Los de la demo, como acme-demo.mx, no son del equipo: pedir su escaneo responde `live_scan_not_allowed`.
+
+| Endpoint | Qué hace |
+|---|---|
+| `POST /api/v1/domains/{fqdn}/scans` | Pide un escaneo. Solo Analista y Administrador (el Gerente recibe 403). 202 si se acepta, y el escaneo corre en segundo plano; 409 con `detail` y `reasons` si no; 404 si el dominio no es de tu organización |
+| `GET /api/v1/scans/{id}` | Estado del escaneo y de cada fuente |
+
+Desde la terminal (plan B de la demo):
+
+```bash
+docker compose exec api python -m cirdan.orquestador olmardo.com                     # aceptado: dominio de prueba en vivo
+docker compose exec api python -m cirdan.orquestador partner-example.com --org ACME  # rechazado: falta la autorización
+docker compose exec api python -m cirdan.orquestador old-example.net --org ACME      # rechazado: en pausa y carta vencida
+```
+
+**Dominio de prueba:** olmardo.com (Grupo Olmardo, empresa ficticia) está en `db/semillas/002_dominio_prueba.sql` (#9b), con su token TXT publicado y su autorización. Su administrador es `admin@olmardo.com` (ver `docs/cuentas_de_prueba.md`). **Pendiente (#6):** el sha256 de la carta es provisional hasta tener la carta firmada.
+
+El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de escaneos pasaron, y el escaneo en vivo de olmardo.com se aceptó y terminó `completed` (crt.sh no reporta certificados porque el dominio aún no tiene sitio).
 
 ## Vista visual de la base (para la demo)
 

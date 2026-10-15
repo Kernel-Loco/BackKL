@@ -14,6 +14,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from cirdan.auth.deps import Session, current_session
+from cirdan.api.escaneos import router as scans_router
+from cirdan.api.v1 import router as v1_router
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import config
 from cirdan.db import DSN, transaction
@@ -43,6 +45,8 @@ async def same_origin_writes(request: Request, call_next):
 
 
 app.include_router(auth_router)
+app.include_router(scans_router)
+app.include_router(v1_router)
 
 from cirdan.api.explorer import register  # noqa: E402
 register(app, DSN)

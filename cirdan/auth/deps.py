@@ -30,3 +30,13 @@ def current_session(request: Request) -> Session:
 
 def client_ip(request: Request):
     return request.client.host if request.client else None
+
+
+def require_roles(*roles):
+    """Dependencia que solo deja pasar a ciertos roles de la base (`analyst`, `manager`, `admin`)."""
+    def dependency(request: Request) -> Session:
+        session = current_session(request)
+        if session.role not in roles:
+            raise HTTPException(403, 'Tu rol no tiene permiso para esta acción.')
+        return session
+    return dependency
