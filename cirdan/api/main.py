@@ -1,54 +1,62 @@
-"""Cirdan · API REST inicial (FastAPI) sobre la base `cirdan`.
+"""Cirdan · API REST (FastAPI) sobre la base `cirdan`.
 
-Entra como el rol de la aplicación `cirdan_app` (sin superusuario ni BYPASSRLS).
-Cada petición abre una transacción y fija `app.current_org` con el cliente que
-envía el encabezado `X-Organization`; Row-Level Security hace el resto, así que
-ninguna consulta filtra por organización.
+Entra como el rol de la aplicación `cirdan_app` (sin superusuario ni BYPASSRLS). La empresa
+de quien llama sale de su sesión (cookie httpOnly `lt_session`, #25): cada petición fija
+`app.current_org` con ella y Row-Level Security hace el resto, así que ninguna consulta
+filtra por organización. El encabezado `X-Organization` solo existe en el modo demo de /demo.
 
-Modo demo: el cliente se identifica con el id de su organización. En producción
-será la llave de API de la tabla `api_keys` (hash, alcance y vigencia).
-
-    python -m uvicorn cirdan.api.main:app --port 8000      (desde la raíz del repo)
+    docker compose up -d            (o, fuera de Docker: python -m uvicorn cirdan.api.main:app --port 8000)
     Documentación: http://127.0.0.1:8000/docs
 """
-import os
-import uuid
+from urllib.parse import urlsplit
 
-import psycopg
-from fastapi import FastAPI, Header, HTTPException
-from psycopg.rows import dict_row
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
-from cirdan import RAIZ
-
-ENV = dict(line.split('=', 1) for line in (RAIZ / '.env').read_text().split()
-           if '=' in line)
-DSN = 'host=127.0.0.1 port=%s dbname=cirdan user=cirdan_app password=%s' % (
-    os.environ.get('PGPORT', ENV.get('PGPORT', '5433')), ENV['CIRDAN_APP_PASSWORD'])
+from cirdan.auth.deps import Session, current_session
+from cirdan.api.escaneos import router as scans_router
+from cirdan.api.v1 import router as v1_router
+from cirdan.auth.routes import router as auth_router
+from cirdan.config import config
+from cirdan.db import DSN, transaction
 
 app = FastAPI(
     title='Cirdan API',
-    version='0.1.0',
-    description='Primeros endpoints de solo lectura sobre la base cirdan (PostgreSQL 16). '
-                'El aislamiento entre clientes lo aplica Row-Level Security en la base. '
-                'Vista visual de la base en /demo.',
+    version='0.2.0',
+    description='Inicio de sesión con MFA y endpoints de solo lectura sobre la base cirdan (PostgreSQL 16). '
+                'La empresa sale de la sesión y el aislamiento lo aplica Row-Level Security en la base. '
+                'Vista visual de la base (modo demo) en /demo.',
 )
 
-from cirdan.api.explorer import register  # noqa: E402  (needs DSN, defined above)
+# Orígenes que pueden mandar POST con la cookie: el portal y la propia API.
+ALLOWED_ORIGINS = {o.strip() for o in config(
+    'ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000').split(',')}
+
+
+@app.middleware('http')
+async def same_origin_writes(request: Request, call_next):
+    """Contra CSRF: además de SameSite=Lax, una escritura con Origin ajeno se rechaza."""
+    origin = request.headers.get('origin')
+    if request.method not in ('GET', 'HEAD', 'OPTIONS') and origin:
+        parts = urlsplit(origin)
+        if '%s://%s' % (parts.scheme, parts.netloc) not in ALLOWED_ORIGINS:
+            return JSONResponse({'detail': 'Origen no permitido'}, status_code=403)
+    return await call_next(request)
+
+
+app.include_router(auth_router)
+app.include_router(scans_router)
+app.include_router(v1_router)
+
+from cirdan.api.explorer import register  # noqa: E402
 register(app, DSN)
 
 
-def query(org, sql, params=()):
-    try:
-        org = str(uuid.UUID(org))
-    except (TypeError, ValueError):
-        raise HTTPException(400, 'X-Organization debe ser el id (uuid) de la organización')
+def query(session, sql, params=()):
     if any(chr(0) in str(p) for p in params):
         raise HTTPException(400, 'Parámetro inválido')
-    with psycopg.connect(DSN, row_factory=dict_row) as conn:
-        with conn.transaction():
-            conn.execute("SET LOCAL TIME ZONE 'America/Mexico_City'")
-            conn.execute("SELECT set_config('app.current_org', %s, true)", (org,))
-            return conn.execute(sql, params).fetchall()
+    with transaction(session.org_id) as conn:
+        return conn.execute(sql, params).fetchall()
 
 
 LEVEL = """CASE WHEN {s} IS NULL THEN NULL WHEN {s} >= 80 THEN 'Critical' WHEN {s} >= 60 THEN 'High'
@@ -113,35 +121,34 @@ CATEGORIES = [('infrastructure', 'Infrastructure'), ('digital_identity', 'Digita
               ('configuration', 'Configuration'), ('data_leaks', 'Data Leaks')]
 
 
-def known_domain(org, fqdn):
-    if not query(org, 'SELECT 1 FROM domains WHERE fqdn = %s', (fqdn,)):
+def known_domain(session, fqdn):
+    if not query(session, 'SELECT 1 FROM domains WHERE fqdn = %s', (fqdn,)):
         # RLS hides other clients' domains, so they look exactly like domains that do not exist
         raise HTTPException(404, 'Dominio no encontrado para esta organización')
 
 
 @app.get('/health', tags=['sistema'], summary='Estado de la API y de la base')
 def health():
-    with psycopg.connect(DSN) as conn:
-        version = conn.execute('SHOW server_version').fetchone()[0]
-        role = conn.execute('SELECT current_user').fetchone()[0]
-    return {'status': 'ok', 'postgres': version, 'role': role}
+    with transaction() as conn:
+        row = conn.execute("SELECT current_setting('server_version') AS version, current_user AS role").fetchone()
+    return {'status': 'ok', 'postgres': row['version'], 'role': row['role']}
 
 
 @app.get('/domains', tags=['dominios'], summary='Dominios del cliente con autorización, TXT y score')
-def list_domains(x_organization: str = Header(..., description='Id (uuid) de la organización')):
-    return query(x_organization, DOMAINS)
+def list_domains(session: Session = Depends(current_session)):
+    return query(session, DOMAINS)
 
 
 @app.get('/domains/{fqdn}/findings', tags=['dominios'], summary='Hallazgos abiertos de un dominio, por severidad')
-def list_findings(fqdn: str, x_organization: str = Header(..., description='Id (uuid) de la organización')):
-    known_domain(x_organization, fqdn)
-    return query(x_organization, FINDINGS, (fqdn,))
+def list_findings(fqdn: str, session: Session = Depends(current_session)):
+    known_domain(session, fqdn)
+    return query(session, FINDINGS, (fqdn,))
 
 
 @app.get('/domains/{fqdn}/score', tags=['dominios'], summary='Score de exposición por categoría con sus pesos')
-def domain_score(fqdn: str, x_organization: str = Header(..., description='Id (uuid) de la organización')):
-    known_domain(x_organization, fqdn)
-    rows = query(x_organization, SCORE, (fqdn,))
+def domain_score(fqdn: str, session: Session = Depends(current_session)):
+    known_domain(session, fqdn)
+    rows = query(session, SCORE, (fqdn,))
     if not rows:
         raise HTTPException(404, 'El dominio aún no tiene score')
     r = rows[0]

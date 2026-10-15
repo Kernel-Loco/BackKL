@@ -14,7 +14,10 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 |---|---|
 | `cirdan_esquema.dbml` | Modelo lógico del que sale la migración inicial (23 tablas en 7 grupos). Lo que la base hace distinto está en «Decisiones y desviaciones respecto al DBML» |
 | `migraciones/001_esquema_inicial.sql` | Extensiones, rol, función de tenant, 23 tablas, índices, triggers, RLS, GRANT y COMMENT ON TABLE |
+| `migraciones/002_login.sql` | Función `login_lookup()` para iniciar sesión sin abrir RLS (#25) |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
+| `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo) con su TXT y autorización (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador |
+| `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada y bitácora inmutable |
 | `consultas/conteo_tablas.sql` | Las 23 tablas con filas y RLS, más el resumen de objetos |
@@ -29,6 +32,8 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 - Datos de Acme Demo (plan Starter), los mismos de las pantallas de Figma, más Beta Corp solo para la prueba de aislamiento.
 
 ## Cómo cargarla
+
+**Lo normal es no hacerlo a mano:** `docker compose up -d` (ver el README de la raíz) crea el contenedor `cirdan-pg16` y `db/init/cargar_cirdan.sh` carga la base la primera vez. Los pasos de abajo sirven para cargarla sin compose o para entender qué hace ese script.
 
 En Windows corre estos comandos en Git Bash, no en PowerShell, porque PowerShell no acepta el operador `<`.
 
@@ -54,6 +59,8 @@ docker exec -i cirdan-pg16 psql -U postgres -d postgres -c "DROP DATABASE IF EXI
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/001_esquema_inicial.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/003_titulos_espanol.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -68,7 +75,7 @@ Las desviaciones 1, 2 y 3 se pasaron al DBML el 9 oct, así que hoy la base y el
 1. **Severidad `critical`.** El DBML solo permite high, medium y low, pero el portal usa Critical. Se agregó `critical` a `findings.severity`, `score_contributions.severity`, `alerts.severity` y `scoring_rules.base_severity`.
 2. **Categorías del score.** Se usan las del portal (Infrastructure, Digital Identity, Configuration y Data Leaks: `infrastructure`, `digital_identity`, `configuration`, `data_leaks`) en lugar de exposed_services, vulnerabilities, configuration y breaches. Pesos del juego v1: 30, 20, 20 y 30 %.
 3. **Sentido del score.** Más alto = más exposición. La alerta salta cuando el score llega al umbral (60) o lo pasa, así que `alerts.event_type` usa `score.above_threshold` en lugar de `score.below_threshold`. `score_contributions.penalty` conserva el nombre, pero son puntos que suben la exposición.
-4. **Roles.** Solo se creó `cirdan_app`; las tablas pertenecen a `postgres`. No se crearon cirdan_owner, cirdan_maint, cirdan_web, cirdan_worker, cirdan_definer, cirdan_dispatcher ni cirdan_retention, ni las funciones login_lookup, api_key_lookup y audit_platform_append. La excepción de retención del trigger ya compara `current_user = 'cirdan_retention'`.
+4. **Roles.** Solo se creó `cirdan_app`; las tablas pertenecen a `postgres`. No se crearon cirdan_owner, cirdan_maint, cirdan_web, cirdan_worker, cirdan_definer, cirdan_dispatcher ni cirdan_retention, ni las funciones api_key_lookup y audit_platform_append. `login_lookup` llegó con la migración 002 (#25): es SECURITY DEFINER de `postgres` y solo `cirdan_app` puede ejecutarla. La excepción de retención del trigger ya compara `current_user = 'cirdan_retention'`.
 5. **Variable de tenant.** Se usa `app.current_org` con `app_current_org()`, como dice el DBML.
 6. **Trigger de `scans`.** Valida vigencia y antigüedad del TXT contra `queued_at` (que por defecto es `now()`), para poder cargar escaneos históricos de la demo. Solo `postgres` puede fijar `queued_at`: `cirdan_app` tiene GRANT INSERT por columna sin `queued_at`, así que para la app siempre es `now()` y no puede fechar un escaneo en el pasado para usar una autorización vencida.
 7. **Título del hallazgo.** El DBML no tiene columna de título. Va en `findings.evidence->>'title'`. Los nombres de fuente (HIBP API, Shodan, DNS) se traducen en la consulta desde `data_sources.code`.

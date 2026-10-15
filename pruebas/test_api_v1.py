@@ -1,0 +1,99 @@
+"""Pruebas de la API v1 del portal (RC-17) contra el contrato #21 (biblioteca estándar).
+
+    python -m unittest -v pruebas/test_api_v1.py      (con `docker compose up -d`)
+
+Con los datos demo de Acme, las respuestas deben coincidir con los JSON de docs/api_v1/. Las únicas
+diferencias aceptadas son los campos «propuestos» del portal (signer_email, recommendation,
+confidence) y los textos que todavía no calcula el motor de score (#31).
+"""
+import json
+import unittest
+from pathlib import Path
+
+from pruebas import sesion
+
+EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
+PROPUESTOS = {'signer_email', 'recommendation', 'confidence'}
+
+
+def ejemplo(nombre):
+    return json.loads((EJEMPLOS / nombre).read_text(encoding='utf-8'))
+
+
+def sin_propuestos(x):
+    if isinstance(x, dict):
+        return {k: sin_propuestos(v) for k, v in x.items() if k not in PROPUESTOS}
+    if isinstance(x, list):
+        return [sin_propuestos(v) for v in x]
+    return x
+
+
+class ApiV1(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        sesion.reset()
+        cls.acme = sesion.login('alex.morgan@acme-demo.mx')
+        cls.beta = sesion.login('dana.cruz@beta-corp.mx')
+        cls.olmardo = sesion.login('admin@olmardo.com')
+
+    def get(self, client, url):
+        code, body = client.get(url)
+        self.assertEqual(code, 200, (url, body))
+        return body
+
+    def test_1_dominios_como_el_contrato(self):
+        body = sin_propuestos(self.get(self.acme, '/api/v1/domains'))
+        esperado = ejemplo('dominios.json')
+        self.assertEqual([d['fqdn'] for d in body['items']], [d['fqdn'] for d in esperado['items']])
+        for real, ej in zip(body['items'], esperado['items']):
+            for campo in ('id', 'status', 'authorization', 'scan_eligibility', 'score', 'band', 'open_findings'):
+                self.assertEqual(real[campo], ej[campo], (real['fqdn'], campo))
+
+    def test_2_hallazgos_como_el_contrato(self):
+        body = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
+        esperado = ejemplo('hallazgos.json')
+        self.assertEqual(body['total'], esperado['total'])
+        for real, ej in zip(body['items'], esperado['items']):
+            for campo in ('id', 'title', 'asset', 'category', 'rule_code', 'source', 'severity', 'recurrence', 'caracteristicas'):
+                self.assertEqual(real[campo], ej[campo], (real['id'], campo))
+
+    def test_3_score_igual_al_contrato(self):
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), ejemplo('score.json'))
+
+    def test_4_explicacion_y_pesos(self):
+        exp = sin_propuestos(self.get(self.acme, '/api/v1/findings/80000000-0000-4000-8000-000000000001/explanation'))
+        esperado = ejemplo('explicacion.json')
+        for campo in ('title', 'severity', 'penalty', 'max_penalty', 'factors', 'caracteristicas', 'score_id', 'shap'):
+            self.assertEqual(exp[campo], esperado[campo], campo)
+        pesos = self.get(self.acme, '/api/v1/scoring/weights')
+        esperado = ejemplo('pesos.json')
+        for campo in ('rule_set_version', 'category_weights', 'bands', 'floor', 'alert_threshold_default', 'rules'):
+            self.assertEqual(pesos[campo], esperado[campo], campo)
+
+    def test_5_historico_activos_y_escaneos(self):
+        hist = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')
+        self.assertEqual([p['score'] for p in hist['items']][-1], 68)
+        activos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/assets')
+        self.assertEqual(activos['total'], 6)
+        escaneos = self.get(self.acme, '/api/v1/scans')
+        self.assertIn('acme-demo.mx', [s['domain'] for s in escaneos['items']])
+
+    def test_6_cada_empresa_ve_solo_lo_suyo(self):
+        self.assertEqual([d['fqdn'] for d in self.get(self.beta, '/api/v1/domains')['items']], ['beta-corp.mx'])
+        olmardo = self.get(self.olmardo, '/api/v1/domains')['items']
+        self.assertEqual([(d['fqdn'], d['score'], d['scan_eligibility']['can_scan']) for d in olmardo], [('olmardo.com', None, True)])
+        for url in ('/api/v1/domains/acme-demo.mx/findings', '/api/v1/domains/acme-demo.mx/score',
+                    '/api/v1/findings/80000000-0000-4000-8000-000000000001/explanation'):
+            self.assertEqual(self.beta.get(url)[0], 404, url)
+        self.assertEqual(sesion.Client().get('/api/v1/domains')[0], 401)
+
+    def test_7_txt_solo_para_admin_y_de_su_empresa(self):
+        txt = self.get(self.olmardo, '/api/v1/domains/txt')['items']
+        self.assertEqual([(t['fqdn'], t['expected_value']) for t in txt], [('olmardo.com', 'cirdan-verification=ab439d2b39a7')])
+        analista = sesion.login('jordan.tate@acme-demo.mx')
+        self.assertEqual(analista.get('/api/v1/domains/txt')[0], 403)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

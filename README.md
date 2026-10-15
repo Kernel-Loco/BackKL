@@ -6,30 +6,39 @@ Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa 
 
 | Carpeta | Qué tiene |
 |---|---|
-| `cirdan/api/` | API inicial en FastAPI y la página `/demo` |
+| `cirdan/api/` | API en FastAPI y la página `/demo` |
+| `cirdan/auth/` | Inicio de sesión (#25): contraseña con argon2id, MFA con TOTP, sesiones en Valkey y cuentas de demo |
+| `cirdan/orquestador/` | Orquestador de escaneos (#22): solo escanea con autorización vigente y TXT verificado |
 | `cirdan/recolectores/` | Contrato de plugin (#13), recolectores OSINT pasivos (crt.sh, #14, y uno de ejemplo para pruebas) y sus respuestas grabadas para el respaldo de las demos (hoy solo está la del recolector de ejemplo) |
 | `cirdan/score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
 | `db/` | Base PostgreSQL 16: migraciones, semillas y consultas |
 | `docs/` | Documentos del proyecto, con su índice |
 | `pruebas/` | Pruebas automáticas de la base, de la API, del contrato de API v1, del criterio de criticidad, del contrato de plugin y de crt.sh |
-| `.env.example` | Plantilla del `.env`, que se copia en la raíz con contraseñas propias y nunca se sube al repositorio. Solo lo lee la API, que sin él no arranca: toma `CIRDAN_APP_PASSWORD` y `PGPORT`. `POSTGRES_PASSWORD` se usa al crear el contenedor. Los recolectores, el criterio y sus pruebas no lo necesitan |
+| `.env.example` | Plantilla del `.env`, que se copia en la raíz con contraseñas propias y nunca se sube al repositorio. La leen `docker compose` y la API. Los recolectores, el criterio y sus pruebas no la necesitan |
+| `docker-compose.yml`, `Dockerfile` | Levantan PostgreSQL 16 (`cirdan-pg16`), Valkey (`cirdan-valkey`) y la API (`cirdan-api`), todo en `127.0.0.1`. `db/init/cargar_cirdan.sh` carga la base la primera vez |
+| `requirements.txt` | Librerías de la API con versión fija |
+| `LICENSE`, `NOTICE` | Licencia Apache-2.0 y atribuciones de HIBP y DB-IP (CC BY 4.0) |
+| `.pre-commit-config.yaml` | gitleaks antes de cada commit, para que ningún secreto llegue al repo |
 
 ## Requisitos
 
-- Git y Python 3.13 (también funciona con 3.11).
-- Docker encendido (en Windows, Docker Desktop). La base corre en el contenedor `cirdan-pg16`.
-- Una terminal bash. En Windows, Git Bash: PowerShell no acepta la redirección `<` que usan los comandos de [`db/README.md`](db/README.md).
+- Git y Docker encendido (en Windows y macOS, Docker Desktop).
+- Python 3.11 o más reciente, solo para correr las pruebas desde tu PC (usan la biblioteca estándar).
 
 ## Cómo empezar
 
 Todos los comandos se corren desde la raíz del repo.
 
 1. Clona el repo: `git clone https://github.com/Kernel-Loco/BackKL.git` y `cd BackKL`.
-2. Crea el contenedor y carga la base con la sección «Cómo cargarla» de [`db/README.md`](db/README.md), que empieza por copiar `.env.example` como `.env`.
-3. Crea un entorno virtual y actívalo. En Git Bash: `python -m venv .venv` y `source .venv/Scripts/activate`. En Linux o macOS: `python3 -m venv .venv` y `source .venv/bin/activate` (en Ubuntu y Debian, antes `sudo apt install python3-venv`).
-4. Instala lo que usa la API (el `requirements.txt` llega con #7): `python -m pip install fastapi uvicorn "psycopg[binary]"`.
-5. Corre las pruebas que no usan la base ni la red: `python -m unittest -v pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_contrato_api.py` (117 pruebas).
-6. Sigue con las secciones de abajo: las pruebas de la base, la API y su vista en http://127.0.0.1:8000/demo.
+2. Copia `.env.example` como `.env`, cambia las tres contraseñas (`POSTGRES_PASSWORD`, `CIRDAN_APP_PASSWORD` y `VALKEY_PASSWORD`) y genera `TOTP_ENCRYPTION_KEY` con el comando que trae el archivo.
+3. Levanta todo: `docker compose up -d --build`. La primera vez crea la base `cirdan` y carga migraciones y semillas (tarda unos segundos). La API queda en http://127.0.0.1:8000.
+4. Comprueba: `curl http://127.0.0.1:8000/health` responde 200 con `"role": "cirdan_app"`, y `docker compose ps` muestra los tres contenedores `healthy`.
+5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (35, contra la base y la API), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py` (10, el orquestador dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_contrato_api.py` (117, sin base ni red).
+6. Instala el candado de secretos una vez: `pip install pre-commit && pre-commit install`. Desde ahí gitleaks revisa cada commit.
+
+Otros comandos: `docker compose logs -f api` (ver la API), `docker compose down` (apagar, la base se conserva) y `docker compose down -v` (borrar la base para volver a cargarla desde cero en el siguiente `up`). Para revisar todo el historial con gitleaks: `docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 git /repo`.
+
+Para trabajar en la API sin reconstruir la imagen: `docker compose stop api`, crea un entorno virtual (`python3 -m venv .venv` y `source .venv/bin/activate`, o `source .venv/Scripts/activate` en Git Bash), `pip install -r requirements.txt` y `python -m uvicorn cirdan.api.main:app --port 8000 --reload`. Fuera de Docker la API lee el `.env` de la raíz.
 
 ## Base de datos
 
@@ -37,31 +46,108 @@ Todos los comandos se corren desde la raíz del repo.
 
 ## Pruebas de la base
 
-`pruebas/test_aislamiento.py` corre 8 pruebas con la biblioteca estándar de Python (sin instalar paquetes) contra la base `cirdan` del contenedor `cirdan-pg16`, que debe estar cargado y encendido (`docker start cirdan-pg16` si se apagó, por ejemplo al reiniciar la PC). No usa el `.env`: entra con `docker exec` y el `psql` del contenedor, como `cirdan_app` y, en 2 pruebas, como `postgres`. Revisa el rol sin privilegios, RLS forzado en 18 tablas, Acme ve solo lo suyo (5 dominios, 4 hallazgos, 3 usuarios), Beta Corp ve 1, 1 y 1, sin cliente se ve 0, no se puede escribir a nombre de otro cliente, no se puede escanear con la autorización vencida y la bitácora no se modifica. Cada escritura va en una transacción que se deshace.
+`pruebas/test_aislamiento.py` corre 8 pruebas con la biblioteca estándar de Python (sin instalar paquetes) contra la base `cirdan` del contenedor `cirdan-pg16`, que debe estar encendido (`docker compose up -d` si se apagó, por ejemplo al reiniciar la PC). No usa el `.env`: entra con `docker exec` y el `psql` del contenedor, como `cirdan_app` y, en 2 pruebas, como `postgres`. Revisa el rol sin privilegios, RLS forzado en 18 tablas, Acme ve solo lo suyo (5 dominios, 4 hallazgos, 3 usuarios), Beta Corp ve 1, 1 y 1, sin cliente se ve 0, no se puede escribir a nombre de otro cliente, no se puede escanear con la autorización vencida y la bitácora no se modifica. Cada escritura va en una transacción que se deshace.
 
 ```bash
 python -m unittest -v pruebas/test_aislamiento.py
 ```
 
-El 2 oct 2026 pasaron 8 de 8.
+El 14 oct 2026 pasaron 8 de 8 con la base levantada por `docker compose`.
 
-## API inicial (FastAPI)
+## Inicio de sesión (#25)
 
-`cirdan/api/main.py` expone 4 endpoints de solo lectura: `GET /health`, `GET /domains`, `GET /domains/{fqdn}/findings` y `GET /domains/{fqdn}/score`. `cirdan/api/explorer.py` agrega los 2 que usa `/demo`, `GET /db/tables` y `GET /db/tables/{table}/rows`, así que `/docs` muestra 6. Entra como `cirdan_app` (contraseña en `.env`, `CIRDAN_APP_PASSWORD`) y en cada petición fija `app.current_org` con el encabezado `X-Organization`, así que el aislamiento lo aplica RLS. Un dominio de otro cliente responde 404. En producción el cliente se identificará con su llave de API (tabla `api_keys`).
+Correo y contraseña, y después el código de 6 dígitos de una app autenticadora (TOTP). Al verificar el código, la API entrega una cookie `lt_session` (httpOnly, SameSite=Lax, Secure en producción con `COOKIE_SECURE=true`) que solo lleva un token aleatorio. La sesión vive en Valkey, guardada bajo el SHA-256 del token: expira a los 15 min sin actividad y a las 8 h aunque haya actividad, y al cerrar sesión se borra del servidor.
 
-Para probarlos en `/docs` con «Try it out», pon en `X-Organization` el id de Acme Demo (`20000000-0000-4000-8000-000000000001`) o el de Beta Corp (`20000000-0000-4000-8000-000000000002`). Sin el encabezado, los de `/domains` responden 422.
+| Endpoint | Qué hace |
+|---|---|
+| `POST /api/v1/auth/login` | Correo y contraseña. Con MFA activo responde `{mfa_required: true, mfa_token}` (válido 5 min y 5 intentos) |
+| `POST /api/v1/auth/mfa/verify` | `mfa_token` y código. Crea la sesión y pone la cookie |
+| `POST /api/v1/auth/logout` | Borra la sesión en Valkey y la cookie |
+| `GET /api/v1/auth/me` | Usuario de la sesión (nunca el hash ni el secreto TOTP) |
+| `POST /api/v1/auth/password` | Cambia la contraseña (mínimo 12 caracteres) |
+
+Seguridad:
+- **Contraseñas con argon2id.** Si el correo no existe, el mensaje y el tiempo son los mismos que con una contraseña equivocada, así que no se puede saber qué correos existen.
+- **Bloqueo:** 5 fallos por correo o 20 por IP en 15 min responden 429.
+- **El secreto TOTP** se guarda cifrado con AES-256-GCM (llave `TOTP_ENCRYPTION_KEY`, fuera de la base). `last_totp_step` impide usar dos veces el mismo código.
+- **Contra CSRF:** las escrituras con un `Origin` que no esté en `ALLOWED_ORIGINS` responden 403.
+- Cada inicio, fallo, código equivocado, cierre de sesión y cambio de contraseña queda en la bitácora (`auth.*`).
+- **La búsqueda del correo al iniciar sesión** usa `login_lookup()` (migración 002), porque antes del login no hay empresa para RLS. El secreto TOTP se lee después, ya con RLS.
+
+### Cuentas de demo
+
+Con `DEMO_ACCOUNTS=true` en el `.env` (solo desarrollo, nunca en producción), cada `docker compose up` les pone contraseña y MFA a los usuarios de la semilla (`cirdan/auth/demo.py`).
+
+| Correo | Rol | Empresa |
+|---|---|---|
+| `alex.morgan@acme-demo.mx` | Administrador | Acme Demo |
+| `maya.reed@acme-demo.mx` | Gerente | Acme Demo |
+| `jordan.tate@acme-demo.mx` | Analista | Acme Demo |
+| `dana.cruz@beta-corp.mx` | Administrador | Beta Corp (para probar el aislamiento) |
+
+Contraseña de las cuatro: `Lowtide-Demo-2026`. **La guía completa para el equipo, con las claves para la app autenticadora y qué hacer si algo falla, está en [`docs/cuentas_de_prueba.md`](docs/cuentas_de_prueba.md).** Para el código MFA rápido:
 
 ```bash
-python -m uvicorn cirdan.api.main:app --port 8000      # se queda corriendo. Documentación en http://127.0.0.1:8000/docs
+docker compose exec api python -m cirdan.auth.demo codigo jordan.tate@acme-demo.mx
 ```
 
-Con la API corriendo, en otra terminal y también desde la raíz del repo (activa ahí el entorno con `source .venv/Scripts/activate`, o `source .venv/bin/activate` en Linux o macOS):
+## API (FastAPI)
+
+`cirdan/api/main.py` expone `GET /health` (público) y, con sesión, `GET /domains`, `GET /domains/{fqdn}/findings` y `GET /domains/{fqdn}/score`, además de las rutas de `/api/v1/auth`. Entra como `cirdan_app` y en cada petición fija `app.current_org` **con la empresa de la sesión**, así que el aislamiento lo aplica RLS. Ya no se acepta el encabezado `X-Organization` (#25): sin sesión, la respuesta es 401, y un dominio de otra empresa responde 404.
+
+**API v1 del portal (RC-17)**, en `cirdan/api/v1.py`, con la forma del contrato #21 y siempre con sesión:
+
+| Endpoint | Qué devuelve |
+|---|---|
+| `GET /api/v1/domains` | Dominios con autorización, TXT, si se pueden escanear, score y hallazgos abiertos |
+| `GET /api/v1/domains/{fqdn}/findings` | Hallazgos abiertos con las 4 características del reto |
+| `GET /api/v1/domains/{fqdn}/score` y `/score/history` | Score con desglose, piso y alerta; y su histórico |
+| `GET /api/v1/findings/{id}/explanation` | Por qué es crítico: factores, penalización y recomendación |
+| `GET /api/v1/scoring/weights` | Juego de reglas activo |
+| `GET /api/v1/domains/{fqdn}/assets` y `GET /api/v1/scans` | Activos y escaneos (provisionales: aún no están en el contrato) |
+| `GET /api/v1/domains/txt` | Registro TXT de cada dominio (solo Admin) |
+
+Con los datos demo de Acme responden igual que los JSON de `docs/api_v1/` (lo revisa `pruebas/test_api_v1.py`). Mientras #23 no guarde las características del reto en la evidencia, la API las calcula con las mismas reglas del contrato. La semilla `003_titulos_espanol.sql` pone en español los títulos de los hallazgos demo.
+
+`cirdan/api/explorer.py` agrega los 2 endpoints que usa `/demo`, `GET /db/tables` y `GET /db/tables/{table}/rows`. Es el único lugar donde sigue el modo demo con `X-Organization`.
+
+Con `docker compose up -d` la API ya está corriendo; su documentación está en http://127.0.0.1:8000/docs.
 
 ```bash
-python -m unittest -v pruebas/test_aislamiento.py pruebas/test_api.py
+python -m unittest -v pruebas/test_aislamiento.py pruebas/test_api.py pruebas/test_auth.py
 ```
 
-El 2 oct 2026 pasaron las 14 pruebas (8 de la base y 6 de la API).
+El 14 oct 2026 pasaron las 22 pruebas (8 de la base, 6 de la API y 8 del inicio de sesión) con todo levantado por `docker compose`. Las de la API y del login entran con las cuentas de demo (`pruebas/sesion.py`).
+
+## Orquestador de escaneos (#22)
+
+`cirdan/orquestador/` arranca los escaneos. **Solo escanea un dominio con autorización firmada vigente y con el registro TXT `cirdan-verification=<txt_token>` verificado justo antes.** Si falta algo, no escanea y dice por qué.
+
+1. **Revisa el dominio y la autorización:** que el dominio esté verificado y no en pausa, y que haya una carta sin revocar con la fecha de hoy dentro de su vigencia.
+2. **Consulta el TXT en DNS** (1.1.1.1, con `dnspython`) y guarda la evidencia en `dns_txt_verifications` con `check_reason = 'pre_scan'` y su resultado (`match`, `mismatch`, `missing` o `dns_error`).
+3. **Solo con todo en orden crea la fila en `scans`.** El trigger de la base vuelve a exigir carta vigente y TXT `match` de la última hora: es el segundo candado.
+4. **Corre cada recolector** con `contrato.ejecutar()` (#13) y llena `scan_source_runs` con `siguiente_estado()`. Una fuente que falla queda en `retrying`, los reintentos los programa #27, y el escaneo termina `partial`. Guardar activos y hallazgos en la base es de #23.
+
+Los motivos de rechazo usan los códigos de `scan_eligibility.reasons` del contrato #21: `authorization_missing`, `authorization_expired`, `txt_not_verified`, `domain_paused`, etc., más `scan_in_progress` y `live_scan_not_allowed`. Cada aceptación y cada rechazo quedan en la bitácora (`scan.requested`, `scan.rejected` y `scan.finished`).
+
+**Solo se consultan en vivo los dominios de `DOMINIOS_EN_VIVO`** (`.env`, por defecto `olmardo.com`). Los de la demo, como acme-demo.mx, no son del equipo: pedir su escaneo responde `live_scan_not_allowed`.
+
+| Endpoint | Qué hace |
+|---|---|
+| `POST /api/v1/domains/{fqdn}/scans` | Pide un escaneo. Solo Analista y Administrador (el Gerente recibe 403). 202 si se acepta, y el escaneo corre en segundo plano; 409 con `detail` y `reasons` si no; 404 si el dominio no es de tu organización |
+| `GET /api/v1/scans/{id}` | Estado del escaneo y de cada fuente |
+
+Desde la terminal (plan B de la demo):
+
+```bash
+docker compose exec api python -m cirdan.orquestador olmardo.com                     # aceptado: dominio de prueba en vivo
+docker compose exec api python -m cirdan.orquestador partner-example.com --org ACME  # rechazado: falta la autorización
+docker compose exec api python -m cirdan.orquestador old-example.net --org ACME      # rechazado: en pausa y carta vencida
+```
+
+**Dominio de prueba:** olmardo.com (Grupo Olmardo, empresa ficticia) está en `db/semillas/002_dominio_prueba.sql` (#9b), con su token TXT publicado y su autorización. Su administrador es `admin@olmardo.com` (ver `docs/cuentas_de_prueba.md`). **Pendiente (#6):** el sha256 de la carta es provisional hasta tener la carta firmada.
+
+El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de escaneos pasaron, y el escaneo en vivo de olmardo.com se aceptó y terminó `completed` (crt.sh no reporta certificados porque el dominio aún no tiene sitio).
 
 ## Vista visual de la base (para la demo)
 
