@@ -33,7 +33,7 @@ Todos los comandos se corren desde la raíz del repo.
 2. Copia `.env.example` como `.env`, cambia las tres contraseñas (`POSTGRES_PASSWORD`, `CIRDAN_APP_PASSWORD` y `VALKEY_PASSWORD`) y genera `TOTP_ENCRYPTION_KEY` con el comando que trae el archivo.
 3. Levanta todo: `docker compose up -d --build`. La primera vez crea la base `cirdan` y carga migraciones y semillas (tarda unos segundos). La API queda en http://127.0.0.1:8000.
 4. Comprueba: `curl http://127.0.0.1:8000/health` responde 200 con `"role": "cirdan_app"`, y `docker compose ps` muestra los tres contenedores `healthy`.
-5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (35, contra la base y la API), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py` (10, el orquestador dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_contrato_api.py` (117, sin base ni red).
+5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (43, contra la base y la API), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py` (10, el orquestador dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_contrato_api.py` (117, sin base ni red).
 6. Instala el candado de secretos una vez: `pip install pre-commit && pre-commit install`. Desde ahí gitleaks revisa cada commit.
 
 Otros comandos: `docker compose logs -f api` (ver la API), `docker compose down` (apagar, la base se conserva) y `docker compose down -v` (borrar la base para volver a cargarla desde cero en el siguiente `up`). Para revisar todo el historial con gitleaks: `docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 git /repo`.
@@ -42,7 +42,7 @@ Para trabajar en la API sin reconstruir la imagen: `docker compose stop api`, cr
 
 ## Base de datos
 
-23 tablas (18 con Row-Level Security por cliente y 5 catálogos compartidos), datos de Acme Demo y Beta Corp, y el rol `cirdan_app` sin privilegios de más. Qué se creó, cómo cargarla y las decisiones respecto al DBML están en [`db/README.md`](db/README.md).
+23 tablas (18 con Row-Level Security por cliente y 5 catálogos compartidos), datos de Acme Demo y Beta Corp, el dominio de prueba olmardo.com de Grupo Olmardo, y el rol `cirdan_app` sin privilegios de más. Qué se creó, cómo cargarla y las decisiones respecto al DBML están en [`db/README.md`](db/README.md).
 
 ## Pruebas de la base
 
@@ -53,6 +53,14 @@ python -m unittest -v pruebas/test_aislamiento.py
 ```
 
 El 14 oct 2026 pasaron 8 de 8 con la base levantada por `docker compose`.
+
+`pruebas/test_dominio_prueba.py` corre 8 pruebas sobre la carga de `db/semillas/002_dominio_prueba.sql`, también con `docker exec` y como `cirdan_app`. Revisa que olmardo.com quedó verificado después de su registro, que es de Grupo Olmardo con plan Business y su admin, y que la carta va del 13 oct 2026 al 13 oct 2027 con los datos de rol del titular. También revisa la verificación TXT del alta, que Acme no ve olmardo.com y que la fuente `ejemplo` está deshabilitada. Las pruebas 7 y 8 escriben en una transacción que se deshace. La 7 comprueba que un escaneo de olmardo.com queda en cola con un TXT `match` reciente. La 8 comprueba que no se puede escanear con la verificación vieja del alta.
+
+```bash
+python -m unittest -v pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py
+```
+
+El 18 oct 2026 pasaron las 16 (8 de aislamiento y 8 del dominio de prueba) con la base levantada por `docker compose`.
 
 ## Inicio de sesión (#25)
 
@@ -145,7 +153,7 @@ docker compose exec api python -m cirdan.orquestador partner-example.com --org A
 docker compose exec api python -m cirdan.orquestador old-example.net --org ACME      # rechazado: en pausa y carta vencida
 ```
 
-**Dominio de prueba:** olmardo.com (Grupo Olmardo, empresa ficticia) está en `db/semillas/002_dominio_prueba.sql` (#9b), con su token TXT publicado y su autorización. Su administrador es `admin@olmardo.com` (ver `docs/cuentas_de_prueba.md`). **Pendiente (#6):** el sha256 de la carta es provisional hasta tener la carta firmada.
+**Dominio de prueba:** olmardo.com (Grupo Olmardo, empresa ficticia, plan Business) está en `db/semillas/002_dominio_prueba.sql` (#9b). Trae su token TXT, verificado a mano el 13 oct 2026 a las 19:02 hora de Monterrey (RC-38), y su carta del 13 oct 2026 al 13 oct 2027, que firma el titular del dominio. Su administrador es `admin@olmardo.com` (ver `docs/cuentas_de_prueba.md`). **Pendiente (#6):** el sha256 de la carta es provisional hasta tener el PDF de la carta firmada.
 
 El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de escaneos pasaron, y el escaneo en vivo de olmardo.com se aceptó y terminó `completed` (crt.sh no reporta certificados porque el dominio aún no tiene sitio).
 
