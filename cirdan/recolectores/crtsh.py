@@ -29,7 +29,9 @@ crt.sh dejó a medias. Si se grabó el respaldo de Cert Spotter, también se gra
 respondió, así --reproducir lo repite igual, y --completar vuelve a probar crt.sh sin repetir la
 consulta a Cert Spotter. Código de salida: 0 bien, 1 si el
 resultado queda en 'failed', 2 si quedan avisos (grabación incompleta, variantes sin respuesta o
-respaldo de Cert Spotter).
+respaldo de Cert Spotter). Con el respaldo de Cert Spotter el código 2 es lo esperado. No corras
+--completar salvo que quieras cambiarlo por crt.sh: si crt.sh responde, aunque traiga menos
+certificados, reemplaza el respaldo.
 """
 import argparse
 import hashlib
@@ -121,7 +123,7 @@ class ClienteCrtsh:
         """`completar` (solo al grabar) reutiliza lo grabado desde `desde`, el inicio de la grabación en curso,
         y vuelve a consultar lo demás, incluidas las respuestas de grabaciones anteriores.
         `nueva` (solo al grabar) vacía la carpeta y escribe la marca de inicio con la primera respuesta válida de
-        crt.sh: si crt.sh no responde, la grabación anterior queda intacta.
+        crt.sh o Cert Spotter: si ninguno responde, la grabación anterior queda intacta.
         `resolver(nombre)` dice si un nombre resuelve en DNS (True, False o None si no se pudo saber). Si no se pasa,
         se usa el del transporte cuando lo trae (el simulado de las pruebas) o la consulta DNS del sistema."""
         self.modo, self.carpeta, self.timeout = modo, Path(carpeta), timeout
@@ -184,9 +186,11 @@ class ClienteCrtsh:
         elif not isinstance(error, SinGrabacion):
             self.grabadora.guardar(FALLA + consulta, str(error))
 
-    def pedir(self, consulta, url, fuente='crt.sh', intentos=INTENTOS, timeout=None, pausa=0):
+    def pedir(self, consulta, url, fuente='crt.sh', intentos=INTENTOS, timeout=None, pausa=0, sin_reintento=(),
+              texto=None):
         """La lista JSON de `url` con reintentos. Sale del disco si la grabación la trae y, al grabar, se guarda.
-        Lo usan crt.sh y su respaldo Cert Spotter (certspotter.py)."""
+        Lo usan crt.sh y su respaldo Cert Spotter (certspotter.py). Un código HTTP de `sin_reintento` corta los
+        intentos, por ejemplo el 429 de Cert Spotter. `texto` se muestra en el error en lugar de `consulta`."""
         del_disco, datos = self.grabadora.de_disco(consulta)
         if del_disco:
             return datos
@@ -203,6 +207,11 @@ class ClienteCrtsh:
                     raise ValueError('respuesta inesperada')
             except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
                 ultimo = '%s: %s' % (type(e).__name__, e)
+                if isinstance(e, urllib.error.HTTPError) and e.code in sin_reintento:
+                    if e.code == 429:
+                        ultimo = 'llegó a su límite de consultas, Retry-After %s s' % (
+                            (e.headers or {}).get('Retry-After') or '?')
+                    break  # otro intento solo gastaría cupo
                 if isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code not in (408, 429):
                     break  # la fuente sí respondió y otro intento daría lo mismo
                 if n < intentos - 1:
@@ -212,7 +221,7 @@ class ClienteCrtsh:
             return datos
         self.grabadora.descartar(consulta)  # una respuesta de una grabación anterior no debe pasar por la de hoy
         raise CrtshNoResponde('%s no respondió a %s después de %d %s (%s)' % (
-            fuente, consulta, hechos, 'intento' if hechos == 1 else 'intentos', ultimo))
+            fuente, texto or consulta, hechos, 'intento' if hechos == 1 else 'intentos', ultimo))
 
 
 # ---------------------------------------------------------------- utilidades
@@ -275,8 +284,9 @@ def _origen(cert):
 
 
 def _serie(cert):
-    """Lo que distingue al certificado en la huella: su número de serie, o su sha256 si viene de Cert Spotter."""
-    return str(cert.get('serial_number') or cert.get('cert_sha256', ''))
+    """Lo que distingue al certificado en la huella: su vigencia. crt.sh y Cert Spotter la dan igual (Cert Spotter no da
+    el número de serie), así el mismo certificado no se duplica en findings cuando cambia la fuente."""
+    return '%s/%s' % (_fecha(cert['not_before']).isoformat(), _fecha(cert['not_after']).isoformat())
 
 
 def candidatos_parecidos(dominio, maximo=MAX_CANDIDATOS):
@@ -456,11 +466,12 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, ma
             cliente.grabar_falla(consulta, e)
         res.avisos += [str(e) for _, e in fallas] + [certspotter.AVISO]
         if not completos:
-            res.avisos.append('Cert Spotter trae más de %d páginas: pueden faltar subdominios' % certspotter.MAX_PAGINAS)
+            res.avisos.append(certspotter.INCOMPLETO)
         res.sin_cobertura = list(certspotter.SIN_COBERTURA)
     else:
-        for consulta, _ in consultas:  # crt.sh respondió: una falla grabada antes ya no aplica
-            cliente.grabar_falla(consulta)
+        fallidas = dict(fallas)
+        for consulta, _ in consultas:  # la falla de hoy se graba (--reproducir repite el aviso) y una vieja se borra
+            cliente.grabar_falla(consulta, fallidas.get(consulta))
         if fallas:  # se usó la búsqueda por nombre, que puede no traer todos los subdominios
             falla_comodin = fallas[0][1]
             res.avisos.append(str(falla_comodin) if isinstance(falla_comodin, SinGrabacion) else
@@ -479,10 +490,13 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, ma
         return valor
     res.activos, res.hallazgos = _subdominios(dominio, certs, ahora, resuelve,
                                               anticipar=getattr(cliente, 'modo', 'vivo') == 'grabar')
+    # Un código sin cobertura no trae hallazgos: al reproducir el respaldo meses después, ya vencieron.
+    res.hallazgos = [h for h in res.hallazgos if h.codigo not in res.sin_cobertura]
     vencidos = {h.activo for h in res.hallazgos if h.codigo == 'cert_expired'}
     res.avisos += ['No se pudo comprobar en DNS si %s resuelve. Se reporta su certificado vencido.' % n
                    for n in desconocidos if n in vencidos]
 
+    respondidas = 0  # búsquedas de parecidos que sí respondieron
     if parecidos and not respaldo:  # con crt.sh caído no se buscan: lookalike_domain queda en sin_cobertura
         propios_set = {registrable(dominio)} | {registrable(p.lower()) for p in propios} | {p.lower() for p in propios}
         etiqueta = registrable(dominio).split('.', 1)[0]
@@ -491,6 +505,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, ma
             try:
                 por_tipo.append(('contiene_marca', _con_fechas(cliente.consultar('%' + etiqueta + '%', intentos=2)),
                                  lambda n, e=etiqueta: e in n))
+                respondidas += 1
             except CrtshNoResponde as e:
                 res.avisos.append(str(e))
         candidatos = [c for c in candidatos_parecidos(dominio, max_candidatos) if c not in propios_set]
@@ -503,6 +518,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, ma
             try:
                 encontrados = cliente.consultar(candidato, intentos=2, timeout=20, pausa=PAUSA_PARECIDOS)
                 seguidas = 0
+                respondidas += 1
             except SinGrabacion as e:  # falta en la grabación: no cuenta como saturación de crt.sh
                 res.avisos.append(str(e))
                 continue
@@ -513,6 +529,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, ma
             tipo = 'otro_tld' if candidato.split('.', 1)[0] == etiqueta else 'error_tipografico'
             por_tipo.append((tipo, _con_fechas(encontrados), lambda n, k=candidato: registrable(n) == k))
         res.hallazgos += _parecidos(dominio, por_tipo, propios_set, ahora)
+    if not respondidas and 'lookalike_domain' not in res.sin_cobertura:  # sin búsquedas no es lo mismo que 0 parecidos
+        res.sin_cobertura.append('lookalike_domain')
     res.consultas = cliente.consultas
     return res
 
@@ -612,9 +630,9 @@ def _main(argv=None):
     dominio = a.dominio.strip().lower().rstrip('.')
     if not NOMBRE_VALIDO.match(dominio):  # también evita que '..' o '/' saquen la carpeta de respuestas_grabadas
         p.error('dominio inválido: %s' % a.dominio)
-    # Cada dominio graba en su carpeta. --grabar la vacía y marca el inicio en cuanto crt.sh responde, así lo que no
-    # se grabe hoy aparece como faltante y nunca se mezcla con días anteriores; si crt.sh no responde, la grabación
-    # anterior queda intacta. --completar solo reutiliza lo grabado desde esa marca.
+    # Cada dominio graba en su carpeta. --grabar la vacía y marca el inicio en cuanto crt.sh o Cert Spotter
+    # responde, así lo que no se grabe hoy aparece como faltante y nunca se mezcla con días anteriores. Si ninguno
+    # responde, la grabación anterior queda intacta. --completar solo reutiliza lo grabado desde esa marca.
     carpeta = carpeta_de(dominio)
     marca = carpeta / MARCA
     desde = None
@@ -622,6 +640,9 @@ def _main(argv=None):
         if not marca.exists():
             p.error('--completar continúa una grabación de este dominio, primero corre --grabar')
         desde = Grabadora.inicio(carpeta)
+        if _archivo_grabado(FALLA + dominio, carpeta).exists():  # solo se graba si se usó Cert Spotter
+            print('aviso: esta grabación es el respaldo de Cert Spotter. Si crt.sh responde, aunque traiga menos '
+                  'certificados, lo reemplaza.', file=sys.stderr)
     cliente = ClienteCrtsh(modo=modo, carpeta=carpeta, completar=a.completar, desde=desde,
                            nueva=a.grabar and not a.completar)
     res = recolectar(dominio, cliente, parecidos=not a.sin_parecidos)

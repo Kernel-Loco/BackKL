@@ -12,18 +12,24 @@ Lo que no da:
 Por eso el resultado deja cert_expired y lookalike_domain en sin_cobertura (cobertura parcial, no 0).
 
 Sin llave de API el límite es pequeño (unas 10 consultas por hora de un dominio con sus
-subdominios), así que solo se usa como respaldo.
+subdominios), así que solo se usa como respaldo. Cada escaneo pide a lo más MAX_PAGINAS páginas y un
+429 (límite alcanzado) no se reintenta: otro intento solo gastaría cupo. Si falla una página después
+de la primera, el resultado sigue con lo que llegó y un aviso de que pueden faltar subdominios.
 """
 import urllib.parse
+
+from cirdan.recolectores.contrato import FuenteNoResponde
 
 URL = 'https://api.certspotter.com/v1/issuances'
 NOMBRE = 'Cert Spotter'
 ORIGEN = 'certspotter'       # va en los atributos y la evidencia: de dónde salió el certificado
 PREFIJO = 'certspotter:'     # consulta de la grabadora: certspotter_<dominio>.json
-MAX_PAGINAS = 10             # cada página es una consulta del límite por hora
+MAX_PAGINAS = 4              # cada página es una consulta del límite por hora (unas 10), la vacía que cierra también
+SIN_REINTENTO = (429,)       # límite por hora alcanzado: reintentar a los 5 o 15 s solo gasta cupo
 SIN_COBERTURA = ['cert_expired', 'lookalike_domain']
 AVISO = ('crt.sh no respondió. Los subdominios y certificados vigentes salen de Cert Spotter (SSLMate), que no da '
          'certificados vencidos ni dominios parecidos')
+INCOMPLETO = 'Cert Spotter no dio todas las páginas: pueden faltar subdominios'
 
 
 def consulta(dominio, despues=None):
@@ -41,7 +47,7 @@ def url(dominio, despues=None):
 def certificado(emision):
     """Una emisión de Cert Spotter con la forma de un certificado de crt.sh, la que usa crtsh._subdominios.
 
-    No trae número de serie: la huella del hallazgo usa cert_sha256 en su lugar.
+    No trae número de serie: la huella del hallazgo usa la vigencia, que crt.sh y Cert Spotter dan igual.
     """
     emisor = emision.get('issuer')
     if isinstance(emisor, dict):
@@ -55,14 +61,21 @@ def certificado(emision):
 def certificados(cliente, dominio, max_paginas=MAX_PAGINAS):
     """(certificados, completos) del dominio y sus subdominios, página por página hasta una vacía.
 
-    `cliente.pedir(consulta, url, fuente)` hace cada petición con reintentos y la graba o la reproduce
-    (ClienteCrtsh). Lanza FuenteNoResponde si una página no llega. `completos` es False si se cortó en
-    `max_paginas`.
+    `cliente.pedir(consulta, url, fuente, ...)` hace cada petición con reintentos y la graba o la reproduce
+    (ClienteCrtsh). Lanza FuenteNoResponde si la primera página no llega. Si falla una de las siguientes, devuelve
+    lo que ya llegó con `completos` en False, igual que si se cortó en `max_paginas`. Al reproducir, una página
+    que no se grabó es SinGrabacion, que hereda de FuenteNoResponde, así sale lo mismo que en vivo.
     """
     emisiones, despues = [], None
     for _ in range(max_paginas):
-        pagina = [e for e in cliente.pedir(consulta(dominio, despues), url(dominio, despues), NOMBRE)
-                  if isinstance(e, dict)]
+        try:
+            respuesta = cliente.pedir(consulta(dominio, despues), url(dominio, despues), NOMBRE,
+                                      sin_reintento=SIN_REINTENTO, texto=dominio)
+        except FuenteNoResponde:
+            if not emisiones:
+                raise
+            break
+        pagina = [e for e in respuesta if isinstance(e, dict)]
         if not pagina:
             return [certificado(e) for e in emisiones], True
         emisiones += pagina

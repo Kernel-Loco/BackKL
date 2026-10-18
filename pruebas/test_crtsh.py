@@ -373,6 +373,20 @@ class FallasYGrabacion(unittest.TestCase):
                 crtsh._main(['..', '--grabar'])
             self.assertTrue(fuera.exists())
 
+    def test_16_sin_ninguna_busqueda_de_parecidos_queda_sin_cobertura(self):
+        class SoloSubdominios(CrtshSimulado):
+            def __call__(self, url, timeout):
+                if 'q=%25.acme-demo.mx' not in url:
+                    self.urls.append(url)
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        res = recolectar(SoloSubdominios())
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']))
+        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        self.assertEqual(recolectar(CrtshSimulado(), parecidos=False).sin_cobertura, ['lookalike_domain'])
+        self.assertEqual(recolectar(CrtshSimulado()).sin_cobertura, [])  # con una que responda basta
+
     def test_12_respaldo_por_nombre_deja_aviso(self):
         class SinComodin(CrtshSimulado):
             def __call__(self, url, timeout):
@@ -592,10 +606,14 @@ class Resumen(unittest.TestCase):
 
     def test_4_sin_hallazgos_lo_dice(self):
         solo = cert(40, ['acme-demo.mx'], '2026-09-20T00:00:00', '2026-12-19T00:00:00')
-        res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=False)
+        res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}))
         lineas = crtsh.resumen(res)
         self.assertEqual(lineas[-1], 'Sin hallazgos.')
         self.assertIn('1 activo:', lineas)
+        # sin buscar parecidos (--sin-parecidos) no es lo mismo que 0 parecidos
+        res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=False)
+        self.assertEqual(crtsh.resumen(res)[-2:], [
+            'Sin hallazgos.', 'Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).'])
 
 
 if __name__ == '__main__':

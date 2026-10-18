@@ -188,6 +188,8 @@ def validar(res, codigos=None):
             errores.append('%s: código inválido' % donde)
         elif codigos is not None and h.codigo not in codigos:
             errores.append('%s: el código no está en el catálogo de reglas' % donde)
+        elif isinstance(sin, list) and h.codigo in sin:
+            errores.append('%s: el código está en sin_cobertura, no puede traer hallazgos' % donde)
         if h.severidad not in SEVERIDADES:
             errores.append('%s: severidad inválida %r' % (donde, h.severidad))
         if not isinstance(h.activo, str) or h.activo not in valores:

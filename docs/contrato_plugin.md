@@ -18,7 +18,7 @@ Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `carga
 
 **Resultado:** `dominio`, `fuente`, `estado` (`succeeded` o `failed`), `consultas` (entero, peticiones hechas con reintentos), `error` (texto), `avisos` (lista de textos), `activos`, `hallazgos` y `sin_cobertura`. Un resultado `failed` no trae activos ni hallazgos. Todo tiene que poder guardarse como JSON y sin el carácter nulo, que Postgres no acepta.
 
-**sin_cobertura:** los códigos de regla que la fuente no pudo revisar en esta corrida, sin repetir y del catálogo si se pasa. Por ejemplo, con crt.sh caído el respaldo de Cert Spotter no da certificados vencidos ni dominios parecidos, así que `ct_logs` pone `cert_expired` y `lookalike_domain`. Es cobertura parcial: un código ahí nunca se muestra como 0 hallazgos. Si la fuente revisó todo, va vacía.
+**sin_cobertura:** los códigos de regla que la fuente no pudo revisar en esta corrida, sin repetir y del catálogo si se pasa. Por ejemplo, con crt.sh caído el respaldo de Cert Spotter no da certificados vencidos ni dominios parecidos, así que `ct_logs` pone `cert_expired` y `lookalike_domain`. También pone `lookalike_domain` si crt.sh responde pero ninguna búsqueda de parecidos responde, o si no se buscaron. Es cobertura parcial: un código ahí nunca se muestra como 0 hallazgos y no puede traer hallazgos (`validar()` lo revisa). Si la fuente revisó todo, va vacía.
 
 **Activo**, que va a la tabla `assets`:
 

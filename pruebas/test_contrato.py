@@ -163,6 +163,8 @@ class Esquema(unittest.TestCase):
             res.sin_cobertura = valor
             errores = contrato.validar(res, codigos={'spf_missing', 'cert_expired'})
             self.assertTrue(any(esperado in e for e in errores), (nombre, errores))
+        res.sin_cobertura = ['spf_missing']  # un código que no se revisó no puede traer hallazgos
+        self.assertTrue(any('no puede traer hallazgos' in e for e in contrato.validar(res)))
 
 
 class Alcance(unittest.TestCase):
