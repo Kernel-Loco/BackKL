@@ -7,7 +7,9 @@ igual que `test_aislamiento.py`. Solo usan la biblioteca estándar:
     python -m unittest -v pruebas/test_dominio_prueba.py
 
 Las pruebas 1 a 6 solo leen. La 7 y la 8 escriben dentro de una transacción
-que se deshace, así que la base queda igual.
+que se deshace, así que la base queda igual. La 7 choca si en ese momento
+hay un escaneo de olmardo.com en cola o corriendo, porque solo se permite uno
+activo por dominio.
 """
 import unittest
 
@@ -69,7 +71,7 @@ class DominioDePrueba(unittest.TestCase):
         self.assertEqual(scalar("SELECT v.check_reason || ',' || v.result || ',' || host(v.resolver_ip) || ','"
                                 " || ('%s' = ANY(v.observed_values)) || ',' || (v.checked_at = d.verified_at)"
                                 " FROM dns_txt_verifications v JOIN domains d ON d.id = v.domain_id"
-                                " WHERE v.domain_id = '%s';" % (TXT, DOMINIO), org=OLMARDO),
+                                " WHERE v.id = '%s';" % (TXT, VERIFICACION_ALTA), org=OLMARDO),
                          'onboarding,match,8.8.8.8,true,true')
 
     def test_5_acme_sigue_con_sus_5_dominios_y_no_ve_olmardo(self):
@@ -84,7 +86,11 @@ class DominioDePrueba(unittest.TestCase):
         ok, out, err = psql(escaneo(verificacion_nueva=True), org=OLMARDO)
         self.assertTrue(ok, err)
         self.assertEqual(out.splitlines()[-1], 'queued')
-        self.assertEqual(scalar("SELECT count(*) FROM scans;", org=OLMARDO), '0')
+        # Solo cuenta el escaneo de esta prueba, porque los escaneos reales de olmardo.com se quedan en la base.
+        self.assertEqual(scalar("SELECT count(*) FROM scans WHERE id = '60000000-0000-4000-8000-0000000003ff';",
+                                org=OLMARDO), '0')
+        self.assertEqual(scalar("SELECT count(*) FROM dns_txt_verifications"
+                                " WHERE id = '42000000-0000-4000-8000-0000000003ff';", org=OLMARDO), '0')
 
     def test_8_no_escanea_con_la_verificacion_vieja_del_alta(self):
         ok, _, err = psql(escaneo(verificacion_nueva=False), org=OLMARDO)
