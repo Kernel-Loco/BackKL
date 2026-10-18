@@ -64,7 +64,7 @@ class DominioDePrueba(unittest.TestCase):
                                 " || a.signer_title || ',' || a.signer_email || ',' || u.email"
                                 " FROM domain_authorizations a JOIN users u ON u.id = a.accepted_by"
                                 " WHERE a.id = '%s';" % AUTORIZACION, org=OLMARDO),
-                         '2026-10-13,2027-10-13,Titular de olmardo.com,titular del dominio olmardo.com,'
+                         '2026-10-18,2027-10-18,Titular de olmardo.com,titular del dominio olmardo.com,'
                          'admin@olmardo.com,admin@olmardo.com')
 
     def test_4_verificacion_del_alta_con_el_txt_real(self):

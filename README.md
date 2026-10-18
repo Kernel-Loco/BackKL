@@ -54,7 +54,7 @@ python -m unittest -v pruebas/test_aislamiento.py
 
 El 14 oct 2026 pasaron 8 de 8 con la base levantada por `docker compose`.
 
-`pruebas/test_dominio_prueba.py` corre 8 pruebas sobre la carga de `db/semillas/002_dominio_prueba.sql`, también con `docker exec` y como `cirdan_app`. Revisa que olmardo.com quedó verificado después de su registro, que es de Grupo Olmardo con plan Business y su admin, y que la carta va del 13 oct 2026 al 13 oct 2027 con los datos de rol del titular. También revisa la verificación TXT del alta, que Acme no ve olmardo.com y que la fuente `ejemplo` está deshabilitada. Las pruebas 7 y 8 escriben en una transacción que se deshace. La 7 comprueba que un escaneo de olmardo.com queda en cola con un TXT `match` reciente. La 8 comprueba que no se puede escanear con la verificación vieja del alta.
+`pruebas/test_dominio_prueba.py` corre 8 pruebas sobre la carga de `db/semillas/002_dominio_prueba.sql`, también con `docker exec` y como `cirdan_app`. Revisa que olmardo.com quedó verificado después de su registro, que es de Grupo Olmardo con plan Business y su admin, y que la carta va del 18 oct 2026 al 18 oct 2027 con los datos de rol del titular. También revisa la verificación TXT del alta, que Acme no ve olmardo.com y que la fuente `ejemplo` está deshabilitada. Las pruebas 7 y 8 escriben en una transacción que se deshace. La 7 comprueba que un escaneo de olmardo.com queda en cola con un TXT `match` reciente. La 8 comprueba que no se puede escanear con la verificación vieja del alta.
 
 ```bash
 python -m unittest -v pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py
@@ -153,7 +153,7 @@ docker compose exec api python -m cirdan.orquestador partner-example.com --org A
 docker compose exec api python -m cirdan.orquestador old-example.net --org ACME      # rechazado: en pausa y carta vencida
 ```
 
-**Dominio de prueba:** olmardo.com (Grupo Olmardo, empresa ficticia, plan Business) está en `db/semillas/002_dominio_prueba.sql` (#9b). Trae su token TXT, verificado a mano el 13 oct 2026 a las 19:02 hora de Monterrey (RC-38), y su carta del 13 oct 2026 al 13 oct 2027, que firma el titular del dominio. Su administrador es `admin@olmardo.com` (ver `docs/cuentas_de_prueba.md`). **Pendiente (#6):** el sha256 de la carta es provisional hasta tener el PDF de la carta firmada.
+**Dominio de prueba:** olmardo.com (Grupo Olmardo, empresa ficticia, plan Business) está en `db/semillas/002_dominio_prueba.sql` (#9b). Trae su token TXT, verificado a mano el 13 oct 2026 a las 19:02 hora de Monterrey (RC-38), y su carta, que el titular del dominio firmó el 18 oct 2026, con vigencia del 18 oct 2026 al 18 oct 2027. Su administrador es `admin@olmardo.com` (ver `docs/cuentas_de_prueba.md`). **Pendiente (#6):** el sha256 de la carta es provisional hasta tener el PDF de la carta firmada.
 
 El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de escaneos pasaron, y el escaneo en vivo de olmardo.com se aceptó y terminó `completed` (crt.sh no reporta certificados porque el dominio aún no tiene sitio).
 
