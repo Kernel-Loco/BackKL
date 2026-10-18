@@ -12,11 +12,13 @@ Cada recolector es un módulo de `cirdan/recolectores/` con tres cosas:
 | `crear_cliente(modo, dominio)` | Su cliente para `vivo`, `grabar` o `reproducir` |
 | `recolectar(dominio, cliente=None, ahora=None, propios=())` | Devuelve un `Resultado`. `propios` son los otros dominios de la misma empresa |
 
-Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `cargar(fuente)` devuelve su módulo. Hoy están `ct_logs` (crt.sh, #14) y `ejemplo`, que no consulta nada y sirve para probar el orquestador sin red.
+Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `cargar(fuente)` devuelve su módulo. Hoy están `ct_logs` (crt.sh con el respaldo de Cert Spotter, #14 y #14b) y `ejemplo`, que no consulta nada y sirve para probar el orquestador sin red.
 
 ## Esquema del resultado
 
-**Resultado:** `dominio`, `fuente`, `estado` (`succeeded` o `failed`), `consultas` (entero, peticiones hechas con reintentos), `error` (texto), `avisos` (lista de textos), `activos` y `hallazgos`. Un resultado `failed` no trae activos ni hallazgos. Todo tiene que poder guardarse como JSON y sin el carácter nulo, que Postgres no acepta.
+**Resultado:** `dominio`, `fuente`, `estado` (`succeeded` o `failed`), `consultas` (entero, peticiones hechas con reintentos), `error` (texto), `avisos` (lista de textos), `activos`, `hallazgos` y `sin_cobertura`. Un resultado `failed` no trae activos ni hallazgos. Todo tiene que poder guardarse como JSON y sin el carácter nulo, que Postgres no acepta.
+
+**sin_cobertura:** los códigos de regla que la fuente no pudo revisar en esta corrida, sin repetir y del catálogo si se pasa. Por ejemplo, con crt.sh caído el respaldo de Cert Spotter no da certificados vencidos ni dominios parecidos, así que `ct_logs` pone `cert_expired` y `lookalike_domain`. Es cobertura parcial: un código ahí nunca se muestra como 0 hallazgos. Si la fuente revisó todo, va vacía.
 
 **Activo**, que va a la tabla `assets`:
 
@@ -69,6 +71,8 @@ El orquestador llama a `ejecutar(recolector, dominio, modo, ahora, propios, codi
 3. Revisa el resultado con `validar()` contra este esquema y, si se le pasan, contra los códigos del catálogo. También revisa que sea del dominio autorizado y de la fuente del recolector, y que se pueda guardar como JSON. Si no cumple, la fuente queda en `failed` con los primeros incumplimientos en el error.
 4. Aplica el filtro de alcance.
 
+Una fuente que respondió con códigos en `sin_cobertura` queda `succeeded` en `scan_source_runs`, pero el escaneo termina `partial` y esos códigos van en `scans.stats.rules_without_coverage`. Así el portal marca la cobertura parcial y un escaneo así no cierra hallazgos (#23).
+
 ## Reintentos
 
 Hay dos niveles:
@@ -94,7 +98,7 @@ La clase `Grabadora` guarda y reproduce las respuestas de una fuente para un dom
 | `grabar` | Consulta y guarda. Con `nueva`, vacía la carpeta y marca el inicio con la primera respuesta válida, así una grabación fallida deja intacta la anterior. Con `completar`, reutiliza lo grabado desde ese inicio. `crear_cliente('grabar', dominio)` empieza una grabación nueva |
 | `reproducir` | Solo lee del disco. Si falta una respuesta, lanza `SinGrabacion`. El recolector puede tomarla como aviso, como hace crt.sh con las variantes, pero si llega a `ejecutar()` la fuente queda en `failed` igual que con cualquier otra excepción |
 
-Las pruebas de cada recolector usan respuestas grabadas o un transporte simulado, nunca la red. El día anterior a cada sesión se graba el dominio de prueba como respaldo de la demo. En crt.sh se usa `python -m cirdan.recolectores.crtsh <dominio> --grabar`.
+Las pruebas de cada recolector usan respuestas grabadas o un transporte simulado, nunca la red. El día anterior a cada sesión se graba el dominio de prueba como respaldo de la demo. En crt.sh se usa `python -m cirdan.recolectores.crtsh <dominio> --grabar`. Si crt.sh no responde y Cert Spotter sí, la misma carpeta guarda las páginas de Cert Spotter y la falla de crt.sh, así `--reproducir` repite el respaldo con los mismos avisos.
 
 ## Cómo agregar un recolector
 
@@ -103,6 +107,7 @@ Las pruebas de cada recolector usan respuestas grabadas o un transporte simulado
 3. Su línea en `REGISTRO`.
 4. Una prueba sin red que compruebe `validar(resultado, codigos=<los del catálogo>) == []`.
 5. Los títulos en español, y nada que no sea observación pasiva.
+6. Si en una corrida no puede revisar alguno de sus códigos, lo pone en `sin_cobertura` en lugar de dejarlo en 0 hallazgos.
 
 ## Lo que no es de este contrato
 

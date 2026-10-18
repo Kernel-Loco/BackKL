@@ -172,7 +172,8 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(res.estado, 'failed')
         self.assertEqual((res.activos, res.hallazgos), ([], []))
         self.assertIn('502', res.error)
-        self.assertEqual(len(t.urls), 2 * crtsh.INTENTOS)  # la consulta por comodín y la de respaldo
+        self.assertEqual(len(t.urls), 3 * crtsh.INTENTOS)  # comodín, búsqueda por nombre y Cert Spotter (#14b)
+        self.assertIn('Cert Spotter no respondió', res.error)
 
     def test_3_falla_en_parecidos_no_tumba_el_escaneo(self):
         class SoloSubdominios(CrtshSimulado):

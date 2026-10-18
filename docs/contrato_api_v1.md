@@ -59,7 +59,7 @@ Lo que devolverá la API v1 de Cirdan, con un JSON de ejemplo por respuesta en [
 | `method` | `rules` o `ml` (#36) |
 | `rule_set_version` | Versión del juego de reglas con que se calculó |
 | `reason` | `scan`, `intel_update` o `rules_change` |
-| `partial_coverage` | `true` si alguna fuente falló en ese escaneo |
+| `partial_coverage` | `true` si alguna fuente falló en ese escaneo o no pudo revisar alguno de sus códigos (`sin_cobertura`) |
 | `categories` | En `score.json`, una fila por categoría con nota, banda y peso, en el orden del reto. En `historico.json`, un objeto `{categoría: nota}` para graficar |
 | `alert` | El umbral de la empresa y si este score dispara `score.above_threshold` |
 

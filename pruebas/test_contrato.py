@@ -152,6 +152,18 @@ class Esquema(unittest.TestCase):
         self.assertEqual(len({h.clave for h in parecidos}), len(parecidos))
         self.assertEqual([h.clave for h in parecidos], [h.evidencia['dominio_parecido'] for h in parecidos])
 
+    def test_9_sin_cobertura_son_codigos_del_catalogo(self):
+        res = resultado(hallazgo())
+        res.sin_cobertura = ['cert_expired', 'lookalike_domain']
+        self.assertEqual(contrato.validar(res, codigos={'spf_missing', 'cert_expired', 'lookalike_domain'}), [])
+        malos = {'texto': ('cert_expired', 'lista de códigos'), 'código inválido': (['Cert-Expired'], 'lista de códigos'),
+                 'no es texto': ([None], 'lista de códigos'), 'repetido': (['cert_expired'] * 2, 'repetidos'),
+                 'fuera del catálogo': (['dmarc_missing'], 'dmarc_missing no está en el catálogo')}
+        for nombre, (valor, esperado) in malos.items():
+            res.sin_cobertura = valor
+            errores = contrato.validar(res, codigos={'spf_missing', 'cert_expired'})
+            self.assertTrue(any(esperado in e for e in errores), (nombre, errores))
+
 
 class Alcance(unittest.TestCase):
 

@@ -10,7 +10,9 @@ dominio, y devuelve:
 Modos: 'vivo' consulta crt.sh; 'grabar' además guarda cada respuesta en
 cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/; 'reproducir' solo lee esas respuestas, sin red
 (pruebas y respaldo de las demos). Si crt.sh no responde después de los
-reintentos, el resultado queda en 'failed' y no trae activos ni hallazgos.
+reintentos, los subdominios y certificados vigentes salen de Cert Spotter (#14b, certspotter.py), sin
+vencidos ni dominios parecidos: esos dos códigos quedan en sin_cobertura. Si Cert Spotter tampoco
+responde, el resultado queda en 'failed' y no trae activos ni hallazgos.
 
     python -m cirdan.recolectores.crtsh olmardo.com
     python -m cirdan.recolectores.crtsh olmardo.com --grabar
@@ -23,9 +25,11 @@ dominio de prueba.
 
 --grabar empieza con la carpeta del dominio vacía. --completar solo consulta
 lo que aún no se grabó desde ese inicio, para terminar una grabación que
-crt.sh dejó a medias. Código de salida: 0 bien, 1 si el
-resultado queda en 'failed', 2 si quedan avisos (grabación incompleta o
-variantes sin respuesta).
+crt.sh dejó a medias. Si se grabó el respaldo de Cert Spotter, también se graba que crt.sh no
+respondió, así --reproducir lo repite igual, y --completar vuelve a probar crt.sh sin repetir la
+consulta a Cert Spotter. Código de salida: 0 bien, 1 si el
+resultado queda en 'failed', 2 si quedan avisos (grabación incompleta, variantes sin respuesta o
+respaldo de Cert Spotter).
 """
 import argparse
 import hashlib
@@ -40,6 +44,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from cirdan.recolectores import certspotter
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (MARCA, NOMBRE_VALIDO, SIN_GRABACION, Activo, FuenteNoResponde,  # noqa: F401
                                           Grabadora, Hallazgo, Resultado, SinGrabacion, nombre_archivo)
@@ -58,6 +63,8 @@ FALLAS_SEGUIDAS = 3          # si tantas variantes seguidas fallan, crt.sh está
 INTENTOS = 3                 # intentos HTTP por consulta dentro de una corrida (no es scan_source_runs.attempt)
 ESPERAS = (5, 15)            # segundos entre intentos; crt.sh suele recuperarse en segundos
 PAUSA_PARECIDOS = 2          # segundos entre consultas de variantes, para no saturar crt.sh
+FALLA = 'falla:'             # consulta que graba que crt.sh no respondió y se usó Cert Spotter
+ORIGEN = 'crtsh'             # de dónde salió el certificado, en atributos y evidencia (el otro es Cert Spotter)
 
 # Código de regla -> severidad base. Los tres deben existir en el catálogo de reglas (#30).
 CODIGOS = {'cert_expired': 'high', 'cert_expiring_soon': 'medium', 'lookalike_domain': 'medium'}
@@ -71,6 +78,8 @@ HOMOGLIFOS = {'o': '0', 'l': '1', 'i': 'l', 'm': 'rn', 'w': 'vv', 'e': '3', 'a':
 
 # Solo para lo que se imprime: los datos conservan los códigos de la base (high, medium...).
 SEVERIDAD_ES = {'critical': 'crítica', 'high': 'alta', 'medium': 'media', 'low': 'baja'}
+CODIGO_ES = {'cert_expired': 'certificados vencidos', 'cert_expiring_soon': 'certificados por vencer',
+             'lookalike_domain': 'dominios parecidos'}
 EXPOSICION_ES = {'publica': 'pública', 'privada': 'privada'}
 MESES = ('ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic')
 
@@ -87,8 +96,11 @@ def _descargar(url, timeout):
 
 
 def _nombre_grabado(consulta):
-    """subdominios_acme.mx.json para %.acme.mx, contiene_acme.json para %acme% y acme.com.json para acme.com."""
+    """subdominios_acme.mx.json para %.acme.mx, contiene_acme.json para %acme% y acme.com.json para acme.com.
+    La falla grabada de una consulta lleva falla_ antes del mismo nombre."""
     c = consulta.lower()
+    if c.startswith(FALLA):
+        return 'falla_' + _nombre_grabado(c[len(FALLA):])
     if c.startswith('%.'):
         c = 'subdominios_' + c[2:]
     elif c.startswith('%') and c.endswith('%'):
@@ -148,13 +160,38 @@ class ClienteCrtsh:
         return valor
 
     def consultar(self, consulta, intentos=INTENTOS, timeout=None, pausa=0, **extra):
-        """`pausa`: segundos de espera antes de consultar crt.sh; no aplica si la respuesta sale del disco."""
+        """Una consulta a crt.sh. `pausa`: segundos de espera antes de consultar, no aplica si la respuesta sale del disco.
+
+        Al reproducir, si la grabación dice que crt.sh no respondió a esta consulta, lanza CrtshNoResponde con el mismo
+        error, así el respaldo de Cert Spotter se repite igual que en vivo."""
+        url = URL + '?' + urllib.parse.urlencode(dict(q=consulta, output='json', **extra))
+        try:
+            datos = self.pedir(consulta, url, 'crt.sh', intentos, timeout, pausa)
+        except SinGrabacion as falta:
+            try:
+                _, error = self.grabadora.de_disco(FALLA + consulta)
+            except SinGrabacion:
+                raise falta from None
+            raise CrtshNoResponde(error) from None
+        return datos
+
+    def grabar_falla(self, consulta, error=None):
+        """Graba que crt.sh no respondió a `consulta`. Se llama cuando Cert Spotter ya respondió: si tampoco responde,
+        no se graba nada y la grabación anterior queda intacta. Sin `error` borra la falla grabada, porque crt.sh ya
+        respondió (por ejemplo con --completar)."""
+        if error is None:
+            self.grabadora.descartar(FALLA + consulta)
+        elif not isinstance(error, SinGrabacion):
+            self.grabadora.guardar(FALLA + consulta, str(error))
+
+    def pedir(self, consulta, url, fuente='crt.sh', intentos=INTENTOS, timeout=None, pausa=0):
+        """La lista JSON de `url` con reintentos. Sale del disco si la grabación la trae y, al grabar, se guarda.
+        Lo usan crt.sh y su respaldo Cert Spotter (certspotter.py)."""
         del_disco, datos = self.grabadora.de_disco(consulta)
         if del_disco:
             return datos
         if pausa:
             self.dormir(pausa)
-        url = URL + '?' + urllib.parse.urlencode(dict(q=consulta, output='json', **extra))
         ultimo, hechos = '', 0
         for n in range(intentos):
             self.consultas += 1
@@ -167,15 +204,15 @@ class ClienteCrtsh:
             except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
                 ultimo = '%s: %s' % (type(e).__name__, e)
                 if isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code not in (408, 429):
-                    break  # crt.sh sí respondió y otro intento daría lo mismo
+                    break  # la fuente sí respondió y otro intento daría lo mismo
                 if n < intentos - 1:
                     self.dormir(ESPERAS[min(n, len(ESPERAS) - 1)])
                 continue
-            self.grabadora.guardar(consulta, datos)  # fuera del try: un error del disco no es una falla de crt.sh
+            self.grabadora.guardar(consulta, datos)  # fuera del try: un error del disco no es una falla de la fuente
             return datos
         self.grabadora.descartar(consulta)  # una respuesta de una grabación anterior no debe pasar por la de hoy
-        raise CrtshNoResponde('crt.sh no respondió a %s después de %d %s (%s)' % (
-            consulta, hechos, 'intento' if hechos == 1 else 'intentos', ultimo))
+        raise CrtshNoResponde('%s no respondió a %s después de %d %s (%s)' % (
+            fuente, consulta, hechos, 'intento' if hechos == 1 else 'intentos', ultimo))
 
 
 # ---------------------------------------------------------------- utilidades
@@ -227,6 +264,19 @@ def _nombres(cert):
 
 def _huella(*partes):
     return hashlib.sha256('|'.join((FUENTE,) + partes).encode('utf-8')).hexdigest()
+
+
+def _origen(cert):
+    """De dónde salió el certificado, para los atributos y la evidencia: crt.sh con su id y su número de serie, o Cert
+    Spotter con su id y su sha256."""
+    if cert.get('origen') == certspotter.ORIGEN:
+        return {'origen': certspotter.ORIGEN, 'certspotter_id': cert.get('id'), 'sha256': cert.get('cert_sha256', '')}
+    return {'origen': ORIGEN, 'crtsh_id': cert.get('id'), 'serie': cert.get('serial_number', '')}
+
+
+def _serie(cert):
+    """Lo que distingue al certificado en la huella: su número de serie, o su sha256 si viene de Cert Spotter."""
+    return str(cert.get('serial_number') or cert.get('cert_sha256', ''))
 
 
 def candidatos_parecidos(dominio, maximo=MAX_CANDIDATOS):
@@ -295,11 +345,11 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
         vence = _fecha(reciente['not_after'])
         primero = min(_fecha(c['not_before']) for c in g['certs'])
         dias = (vence - ahora).total_seconds() / 86400
+        origen = _origen(reciente)
         activos.append(Activo('domain' if nombre == dominio else 'subdomain', nombre, {
             'comodin': g['comodin'], 'certificados': len(g['certs']), 'primer_certificado': primero.isoformat(),
-            'vence': vence.isoformat(), 'emisor': reciente.get('issuer_name', ''), 'fuente': FUENTE}))
-        evidencia = {'host': nombre, 'vence': vence.isoformat(), 'emisor': reciente.get('issuer_name', ''),
-                     'serie': reciente.get('serial_number', ''), 'crtsh_id': reciente.get('id'),
+            'vence': vence.isoformat(), 'emisor': reciente.get('issuer_name', ''), 'fuente': FUENTE, **origen}))
+        evidencia = {'host': nombre, 'vence': vence.isoformat(), 'emisor': reciente.get('issuer_name', ''), **origen,
                      'comodin': g['comodin']}
         exacto = nombre in {n.strip().lower().rstrip('.') for n in
                             (reciente.get('name_value') or '').split('\n') + [reciente.get('common_name') or '']}
@@ -321,7 +371,7 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
                 dict(evidencia, title=titulo, dias_vencido=int(-dias)),
                 {'tipo': 'certificado_vencido', 'antiguedad_dias': int(-dias), 'exposicion': 'publica',
                  'sensibilidad': 'media'},
-                _huella('cert_expired', nombre, str(reciente.get('serial_number', '')))))
+                _huella('cert_expired', nombre, _serie(reciente))))
         elif 0 <= dias < DIAS_POR_VENCER and dias * 86400 < (vence - _fecha(reciente['not_before'])).total_seconds() / FRACCION_POR_VENCER:
             titulo = 'El certificado de %s vence en %d días' % (nombre, int(dias))
             hallazgos.append(Hallazgo(
@@ -329,7 +379,7 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
                 dict(evidencia, title=titulo, dias_para_vencer=int(dias)),
                 {'tipo': 'certificado_por_vencer', 'antiguedad_dias': max(0, (ahora - _fecha(reciente['not_before'])).days),
                  'exposicion': 'publica', 'sensibilidad': 'baja'},
-                _huella('cert_expiring_soon', nombre, str(reciente.get('serial_number', '')))))
+                _huella('cert_expiring_soon', nombre, _serie(reciente))))
     return activos, hallazgos
 
 
@@ -363,7 +413,7 @@ def _parecidos(dominio, certs_por_tipo, propios, ahora):
             {'title': titulo, 'dominio_parecido': reg, 'tipo_parecido': g['tipo'],
              'nombres': sorted(g['nombres'])[:10], 'certificados': len(certs),
              'primer_certificado': primero.isoformat(), 'vence': _fecha(reciente['not_after']).isoformat(),
-             'emisor': reciente.get('issuer_name', ''), 'crtsh_id': reciente.get('id')},
+             'emisor': reciente.get('issuer_name', ''), 'origen': ORIGEN, 'crtsh_id': reciente.get('id')},
             {'tipo': 'dominio_parecido', 'antiguedad_dias': max(0, (ahora - primero).days), 'exposicion': 'publica',
              'sensibilidad': 'alta'},
             _huella('lookalike_domain', dominio, reg), clave=reg))
@@ -386,23 +436,37 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, ma
         return res
 
     # Subdominios: primero la consulta por comodín; si crt.sh no la resuelve, la búsqueda por nombre.
-    certs, falla_comodin = None, None
-    for consulta, extra in (('%.' + dominio, {'deduplicate': 'Y'}), (dominio, {})):
+    certs, fallas, consultas = None, [], (('%.' + dominio, {'deduplicate': 'Y'}), (dominio, {}))
+    for consulta, extra in consultas:
         try:
             certs = _con_fechas(cliente.consultar(consulta, **extra))
             break
         except CrtshNoResponde as e:
-            res.error = str(e)
-            falla_comodin = falla_comodin or e
+            fallas.append((consulta, e))
+    respaldo = certs is None
+    if respaldo:  # crt.sh no respondió a ninguna: los certificados vigentes salen de Cert Spotter (#14b)
+        try:
+            certs, completos = certspotter.certificados(cliente, dominio)
+        except FuenteNoResponde as e:
+            res.consultas = cliente.consultas
+            res.estado, res.error = 'failed', '%s. %s' % (fallas[-1][1], e)
+            return res
+        certs = _con_fechas(certs)
+        for consulta, e in fallas:  # Cert Spotter ya respondió: grabar la falla no borra la grabación anterior
+            cliente.grabar_falla(consulta, e)
+        res.avisos += [str(e) for _, e in fallas] + [certspotter.AVISO]
+        if not completos:
+            res.avisos.append('Cert Spotter trae más de %d páginas: pueden faltar subdominios' % certspotter.MAX_PAGINAS)
+        res.sin_cobertura = list(certspotter.SIN_COBERTURA)
+    else:
+        for consulta, _ in consultas:  # crt.sh respondió: una falla grabada antes ya no aplica
+            cliente.grabar_falla(consulta)
+        if fallas:  # se usó la búsqueda por nombre, que puede no traer todos los subdominios
+            falla_comodin = fallas[0][1]
+            res.avisos.append(str(falla_comodin) if isinstance(falla_comodin, SinGrabacion) else
+                              'crt.sh no respondió a %%.%s. Se usó la búsqueda por nombre y pueden faltar subdominios'
+                              % dominio)
     res.consultas = cliente.consultas
-    if certs is None:
-        res.estado = 'failed'
-        return res
-    res.error = ''
-    if falla_comodin:  # se usó la búsqueda por nombre, que puede no traer todos los subdominios
-        res.avisos.append(str(falla_comodin) if isinstance(falla_comodin, SinGrabacion) else
-                          'crt.sh no respondió a %%.%s. Se usó la búsqueda por nombre y pueden faltar subdominios'
-                          % dominio)
     desconocidos = []
 
     def resuelve(nombre):
@@ -419,7 +483,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, ma
     res.avisos += ['No se pudo comprobar en DNS si %s resuelve. Se reporta su certificado vencido.' % n
                    for n in desconocidos if n in vencidos]
 
-    if parecidos:
+    if parecidos and not respaldo:  # con crt.sh caído no se buscan: lookalike_domain queda en sin_cobertura
         propios_set = {registrable(dominio)} | {registrable(p.lower()) for p in propios} | {p.lower() for p in propios}
         etiqueta = registrable(dominio).split('.', 1)[0]
         por_tipo = []
@@ -466,7 +530,8 @@ def _cuantos(n, singular, plural):
 
 def resumen(res, cliente=None, maximo_activos=20):
     """Líneas en español para leer el resultado en una terminal o en una demo."""
-    cabecera = '%s · crt.sh · %s' % (res.dominio, res.estado)
+    origen = 'Cert Spotter (crt.sh no respondió)' if certspotter.AVISO in res.avisos else 'crt.sh'
+    cabecera = '%s · %s · %s' % (res.dominio, origen, res.estado)
     leidas = cliente.leidas if cliente else []
     if cliente and cliente.modo == 'reproducir':
         if leidas:
@@ -500,6 +565,10 @@ def resumen(res, cliente=None, maximo_activos=20):
                 EXPOSICION_ES.get(c['exposicion'], c['exposicion']), c['sensibilidad']))
     elif res.estado == 'succeeded':
         lineas.append('Sin hallazgos.')
+    if res.sin_cobertura:  # no es lo mismo que 0 hallazgos
+        nombres = ['%s (%s)' % (CODIGO_ES.get(c, c), c) for c in res.sin_cobertura]
+        lineas.append('Cobertura parcial: no se revisaron %s.' % (
+            nombres[0] if len(nombres) == 1 else ', '.join(nombres[:-1]) + ' ni ' + nombres[-1]))
 
     faltan = [a[len(SIN_GRABACION):] for a in res.avisos if a.startswith(SIN_GRABACION)]
     if faltan:
