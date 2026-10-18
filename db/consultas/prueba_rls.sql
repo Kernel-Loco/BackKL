@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · 04_prueba_rls.sql
+-- Cirdan · db/consultas/prueba_rls.sql
 -- Prueba de aislamiento entre clientes (RLS) y de inmutabilidad.
 -- Las secciones [5] a [8] DEBEN fallar: ahí se desactiva ON_ERROR_STOP
 -- para que psql muestre cada ERROR y siga con la siguiente prueba.

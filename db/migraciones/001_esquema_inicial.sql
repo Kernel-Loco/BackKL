@@ -1,12 +1,12 @@
 -- =====================================================================
--- Cirdan (Kernel Loco · reto IKUSI VELATIA) · 01_esquema.sql
+-- Cirdan (Kernel Loco · reto IKUSI VELATIA) · db/migraciones/001_esquema_inicial.sql
 -- Traducción a PostgreSQL 16 del modelo lógico cirdan_esquema.dbml:
 -- 23 tablas en 7 grupos, 57 FK (las de tenant son compuestas), RLS con
 -- ENABLE + FORCE en las 18 tablas por cliente, triggers de inmutabilidad,
 -- cadena de hashes en audit_log, autorización forzada en scans y
 -- keep_raw_payload en scan_source_runs.
 -- Enumerados como text + CHECK (no CREATE TYPE), PK uuid.
--- Desviaciones respecto al DBML: ver README.md.
+-- Desviaciones respecto al DBML: ver db/README.md.
 -- =====================================================================
 
 CREATE EXTENSION IF NOT EXISTS citext;

@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · 03_consultas.sql
+-- Cirdan · db/consultas/portal.sql
 -- Cuatro consultas que reproducen el portal de Figma. Corren como el rol
 -- de la aplicación (cirdan_app) con el tenant de Acme Demo: ninguna filtra
 -- por organización, el aislamiento lo pone Row-Level Security.
