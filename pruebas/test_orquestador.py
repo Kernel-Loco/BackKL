@@ -7,7 +7,10 @@ Necesitan psycopg y dnspython, así que corren dentro del contenedor de la API, 
 Cada prueba corre en una transacción que se deshace al final: la base queda igual. Nunca consultan
 en vivo los dominios de la demo (acme-demo.mx no es del equipo).
 """
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import psycopg
 from psycopg.rows import dict_row
@@ -15,6 +18,8 @@ from psycopg.rows import dict_row
 from cirdan import orquestador
 from cirdan.db import DSN
 from cirdan.orquestador.txt import ConsultaTxt
+from cirdan.recolectores import crtsh
+from pruebas.test_certspotter import AHORA, RespaldoSimulado
 
 ACME = '20000000-0000-4000-8000-000000000001'
 TXT_ACME = 'cirdan-verification=c41d7e2a9b06'   # token de acme-demo.mx en la semilla
@@ -87,6 +92,22 @@ class Orquestador(unittest.TestCase):
                            "JOIN data_sources d ON d.id = r.source_id WHERE r.scan_id = %s AND d.code = 'ct_logs'", s.scan_id)
         self.assertEqual((fallida['status'], fallida['attempt'], fallida['reintento']), ('retrying', 1, True))
         self.assertTrue(fallida['error'])
+
+    def test_3b_una_fuente_con_codigos_sin_cobertura_deja_el_escaneo_parcial(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)):
+            # respaldo de Cert Spotter grabado sin red: crt.sh caído y Cert Spotter simulado (#14b)
+            cliente = crtsh.ClienteCrtsh(modo='grabar', carpeta=crtsh.carpeta_de('acme-demo.mx'), transporte=RespaldoSimulado(),
+                                         dormir=lambda s: None, nueva=True)
+            crtsh.recolectar('acme-demo.mx', cliente, AHORA)
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], modo='reproducir', ahora=AHORA,
+                                         conn=self.conn)
+        self.assertEqual(resumen['status'], 'partial')
+        self.assertEqual(resumen['stats']['rules_without_coverage'], ['cert_expired', 'lookalike_domain'])
+        self.assertEqual((resumen['stats']['sources_ok'], resumen['stats']['assets']), (1, 4))
+        run = self.uno('SELECT status, attempt FROM scan_source_runs WHERE scan_id = %s', s.scan_id)
+        self.assertEqual((run['status'], run['attempt']), ('succeeded', 0))
+        self.assertEqual(self.uno('SELECT status FROM scans WHERE id = %s', s.scan_id)['status'], 'partial')
 
     # --------------------------------------------------------------------- rechaza
 
