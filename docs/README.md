@@ -8,5 +8,6 @@
 | [`cuentas_de_prueba.md`](cuentas_de_prueba.md) | **Cuentas de prueba del portal y cómo pasar el MFA** (para todo el equipo) | #25 |
 | [`politica_uso_etico.md`](politica_uso_etico.md) | Reglas de uso ético de Cirdan: solo dominios autorizados y observación pasiva | #6 |
 | [`plantilla_carta_autorizacion.md`](plantilla_carta_autorizacion.md) | Plantilla de carta de autorización con vigencia, firmante y firma | #6 |
+| [`hallazgos_esperados.md`](hallazgos_esperados.md) | Hallazgos esperados del dominio de prueba olmardo.com, por fuente, con código, severidad, fecha y estado | #10b |
 
 La base de datos se documenta en [`db/README.md`](../db/README.md).
