@@ -2,7 +2,7 @@
 
 Esta es la lista de lo que LowTide debe encontrar en olmardo.com, el dominio de prueba del equipo (Grupo Olmardo, empresa ficticia). La usan #14 a #20 para probar su hallazgo, #47 para enseñar las 4 categorías en S12 y #84 para medir cobertura y falsos positivos.
 
-**Revisado el 18 oct 2026 a las 19:35 y otra vez a las 20:02, hora de Monterrey,** solo con DNS sobre HTTPS (dns.google) y Cert Spotter. No se hizo ninguna petición a un sitio o servicio de olmardo.com. Las consultas están en 'Cómo se revisó'.
+**Revisado el 18 oct 2026 a las 19:35, a las 20:02 y a las 20:13, hora de Monterrey,** solo con DNS sobre HTTPS (dns.google) y Cert Spotter. No se hizo ninguna petición a un sitio o servicio de olmardo.com. Las consultas están en 'Cómo se revisó'.
 
 ## Cómo leer las tablas
 
@@ -10,7 +10,8 @@ Esta es la lista de lo que LowTide debe encontrar en olmardo.com, el dominio de 
 - **Código:** la regla del catálogo de #30. 'Semilla 001' quiere decir que ya está en `db/semillas/001_datos_demo.sql`. 'Propuesto' quiere decir que sale de la lista de códigos para #30 y todavía no está en dev. `cert_expiring_soon` ya lo emite `cirdan/recolectores/crtsh.py`, pero falta en la semilla 001.
 - **Severidad:** la base de la regla. El motor de score (#31) la puede subir.
 - **Se ve desde:** la primera fecha en que la fuente lo puede ver si la siembra se hace a tiempo.
-- **Hoy:** 'Existe' o 'Pendiente', según la revisión del 18 oct.
+- **Hoy:** 'Existe' (o 'Existen'), 'A medias' o 'Pendiente', según la revisión del 18 oct.
+- **Fechas:** hora de Monterrey (UTC-6). Los vencimientos de certificados y del registro van en UTC, como los dan Cert Spotter y el registrador. La tabla de CT va toda en UTC.
 - **Depende de:** lo que falta de @GermanMZtec. 'VM' es la máquina virtual de Azure, 'GitHub' es la organización olmardo y 'Correo' es el correo @olmardo.com. 'Zona' es el acceso a la zona de olmardo.com en Cloudflare.
 
 ## Lista por fuente
@@ -24,12 +25,12 @@ Esta es la lista de lo que LowTide debe encontrar en olmardo.com, el dominio de 
 | 5 | Certificado de vida corta de eventos.olmardo.com. Perfil shortlived de Let's Encrypt (160 h), sin renovación automática | #14, y #14b si crt.sh falla | `cert_expiring_soon` (en crtsh.py, falta en la semilla 001) | Infraestructura | Media | Jueves 29 oct en la mañana, hasta que vence el sábado 31 oct | Pendiente. Se emite el sábado 24 oct de 20:00 a 23:59. Hoy eventos no existe en DNS ni en CT | Zona |
 | 6 | Un solo SPF en la raíz y ningún `_dmarc` | #15 DNS | `dmarc_missing` (semilla 001) | Configuración | Media | 21 oct, cuando llegue #15 | A medias. `_dmarc` no existe, como se quiere. El SPF todavía falta | Zona |
 | 7 | Registro de olmardo.com, que vence el 14 oct 2027, y las IP a las que resuelven reservas y camaras | #15b RDAP e IP | Ninguno, solo activos. Registrador y vencimiento van en el activo `domain`, y hosting, ASN, país y CDN en los activos `ip`. `domain_expiring_soon` (propuesto) no sale | No aplica | No aplica | 23 oct, cuando llegue #15b | A medias. El registro existe. Las IP faltan, porque reservas y camaras no resuelven | VM |
-| 8 | Organización de GitHub olmardo con un repo público que trae un token falso `CIRDAN_FAKE_` | #16 GitHub | `secret_in_public_repo` (propuesto), sobre olmardo.com | Fugas | Crítica | Al subir el token. #16 llega el 27 oct | Pendiente. No se revisó GitHub. En DNS no hay TXT de verificación de dominio de GitHub | GitHub |
+| 8 | Organización de GitHub olmardo con un repo público que trae un token falso `CIRDAN_FAKE_` | #16 GitHub | `secret_in_public_repo` (propuesto), sobre olmardo.com | Fugas | Crítica | Al subir el token. #16 llega el 27 oct | Pendiente. No se revisó GitHub. En DNS no existe `_gh-olmardo-o.olmardo.com`, el TXT con que GitHub verifica el dominio | GitHub |
 | 9 | Commits en ese repo con un correo @olmardo.com como autor | #16 | `email_in_public_commits` (propuesto), sobre el activo `email` | Identidad digital | Baja | Igual que la fila 8 | Pendiente | GitHub y Correo |
 | 10 | Página de cámara IP en el puerto 8080 de una VM, en camaras.olmardo.com | #17 InternetDB | `exposed_service` (propuesto), sobre `<IP>:8080/tcp` | Infraestructura | Baja | Cuando Shodan escanee la IP. #17 llega el 27 oct | Pendiente. camaras no resuelve, así que no apunta a ninguna VM | VM |
 | 11 | La misma cámara, vista con la API de host de Shodan o con su respuesta grabada | #17 con la llave de #8 | `exposed_iot_device` (propuesto), sobre la IP | Infraestructura | Alta | Igual que la fila 10, si hay llave | Pendiente | VM y llave de Shodan (#8) |
 | 12 | Sitio de pruebas en reservas.olmardo.com en 'Solo DNS', con cabecera Server con versión y una página que dice que es de pruebas | #18 tecnologías web | `server_version_disclosed` (propuesto), sobre reservas.olmardo.com | Configuración | Baja | Al publicar el sitio. #18 llega el 6 nov | Pendiente. reservas no resuelve | VM |
-| 13 | Correos @olmardo.com, como el de los commits (fila 9). El dominio es del 14 oct, así que no deben estar en brechas | #19 Have I Been Pwned | Ninguno. Sin llave, la fuente queda en `failed` con `sin_llave`. Con llave y sin brechas, queda en `succeeded` con 0 hallazgos | No aplica | No aplica | 6 nov, cuando llegue #19. La llave se compra la semana del 2 nov | Pendiente. #19 no está en dev | Correo y GitHub, y la llave de #19 |
+| 13 | Correos @olmardo.com, como el de los commits (fila 9). El dominio se registró el 13 oct (14 oct en UTC), así que sus correos no deben estar en brechas | #19 Have I Been Pwned | Ninguno. Sin llave, la fuente queda en `failed` con `sin_llave`. Con llave y sin brechas, queda en `succeeded` con 0 hallazgos | No aplica | No aplica | 6 nov, cuando llegue #19. La llave se compra la semana del 2 nov | Pendiente. #19 no está en dev | Correo y GitHub, y la llave de #19 |
 | 14 | Correo de contacto en el sitio | #20 identidad pasiva | Ninguno si es un buzón @olmardo.com, que queda como activo `email`. `personal_email_exposed` (propuesto) solo si es un correo gratuito, como uno de gmail.com, ligado a la empresa | Identidad digital | Media, solo en ese caso | Al publicar el sitio. #20 llega el 13 nov | Pendiente. No hay sitio ni MX | Correo y VM |
 | 15 | Enlace del sitio a un perfil público | #20 | Ninguno. El perfil es un activo de identidad. Da `personal_email_exposed` solo si muestra un correo personal | Identidad digital | Media, solo en ese caso | Al publicar el sitio. #20 llega el 13 nov | Pendiente | VM, y GitHub si el perfil es la página de la organización |
 
@@ -65,7 +66,7 @@ Si alguno de estos sale en olmardo.com, #84 lo cuenta como posible falso positiv
 | `spf_allow_all` | El SPF sembrado debe terminar en `~all` o en `-all`. Solo sale con `+all` o con `all` sin calificador. Con `?all` saldría `spf_missing` |
 | `dmarc_policy_none` | No hay `_dmarc` |
 | `cert_expired` | Todos los certificados están vigentes. El de eventos, ya vencido, queda cubierto por el comodín (fila 4) |
-| `cert_expiring_soon` en reservas, camaras o olmardo.com | Les quedan más de 30 días hasta el 13 dic 2026, después de S16. Cloudflare renueva solo sus comodines |
+| `cert_expiring_soon` en reservas, camaras o olmardo.com | Les quedan más de 30 días hasta el 13 dic 2026 en UTC, después de S16. Cloudflare renueva solo sus comodines |
 | `lookalike_domain` | El equipo no registró ninguna variante de olmardo.com. Si sale una, es de un tercero y no viene de la siembra. Por la [política de uso ético](politica_uso_etico.md) ese dominio no se revisa, porque no tiene carta. Queda solo como evidencia. Solo crt.sh cubre este código, porque Cert Spotter no busca por contenido |
 | `domain_expiring_soon` | El registro de olmardo.com vence el 14 oct 2027 (fila 7) |
 | `breach_exposure` y sus variantes | El dominio es nuevo y sus correos no están en brechas. Sin llave de Have I Been Pwned la fuente queda en `failed` con `sin_llave`, no en 0 (fila 13) |
@@ -121,7 +122,8 @@ curl -s "https://dns.google/resolve?name=camaras.olmardo.com&type=A"
 curl -s "https://dns.google/resolve?name=eventos.olmardo.com&type=A"
 curl -s "https://dns.google/resolve?name=_acme-challenge.reservas.olmardo.com&type=TXT"
 curl -s "https://dns.google/resolve?name=_acme-challenge.camaras.olmardo.com&type=TXT"
+curl -s "https://dns.google/resolve?name=_gh-olmardo-o.olmardo.com&type=TXT"
 curl -s "https://api.certspotter.com/v1/issuances?domain=olmardo.com&include_subdomains=true&expand=dns_names&expand=issuer"
 ```
 
-En dns.google, `Status` 3 quiere decir que el nombre no existe. `Status` 0 sin `Answer` quiere decir que el nombre existe pero no tiene registros de ese tipo. El SPF se busca en la respuesta TXT de la raíz.
+En dns.google, `Status` 3 quiere decir que el nombre no existe. `Status` 0 sin `Answer` quiere decir que el nombre existe pero no tiene registros de ese tipo. El SPF se busca en la respuesta TXT de la raíz. GitHub no pone su TXT de verificación en la raíz. Lo pone en `_gh-<org>-o.olmardo.com`, por eso esa consulta va aparte. Se agregó en la revisión de las 20:13.
