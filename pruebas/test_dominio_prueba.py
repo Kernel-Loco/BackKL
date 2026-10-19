@@ -23,6 +23,8 @@ VERIFICACION_ALTA = '42000000-0000-4000-8000-000000000007'
 TXT = 'cirdan-verification=ab439d2b39a7'
 REGISTRO_UTC = '2026-10-14 00:38:02+00'      # RDAP: alta de olmardo.com en Spaceship
 VERIFICADO_UTC = '2026-10-14 01:02:00+00'    # consulta manual por DoH (comentario 10093 de RC-38)
+# sha256 del PDF firmado de la carta. El PDF no va en el repo: está en la carpeta compartida del equipo.
+SHA256_CARTA = '359f2f33929ac3fa63856d5d99c2037751356d785e860b0138064b811d2acffe'
 
 
 def escaneo(verificacion_nueva):
@@ -64,8 +66,11 @@ class DominioDePrueba(unittest.TestCase):
                                 " || a.signer_title || ',' || a.signer_email || ',' || u.email"
                                 " FROM domain_authorizations a JOIN users u ON u.id = a.accepted_by"
                                 " WHERE a.id = '%s';" % AUTORIZACION, org=OLMARDO),
-                         '2026-10-18,2027-10-18,Titular de olmardo.com,titular del dominio olmardo.com,'
+                         '2026-10-19,2027-10-19,Titular de olmardo.com,titular del dominio olmardo.com,'
                          'admin@olmardo.com,admin@olmardo.com')
+        self.assertEqual(scalar("SELECT encode(signed_document_sha256, 'hex') || ',' || signed_document_key"
+                                " FROM domain_authorizations WHERE id = '%s';" % AUTORIZACION, org=OLMARDO),
+                         SHA256_CARTA + ',authorizations/olmardo/olmardo.com_2026.pdf')
 
     def test_4_verificacion_del_alta_con_el_txt_real(self):
         self.assertEqual(scalar("SELECT v.check_reason || ',' || v.result || ',' || host(v.resolver_ip) || ','"

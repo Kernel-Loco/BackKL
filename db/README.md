@@ -16,7 +16,7 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `migraciones/001_esquema_inicial.sql` | Extensiones, rol, función de tenant, 23 tablas, índices, triggers, RLS, GRANT y COMMENT ON TABLE |
 | `migraciones/002_login.sql` | Función `login_lookup()` para iniciar sesión sin abrir RLS (#25) |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
-| `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 18 oct 2026, con vigencia del 18 oct 2026 al 18 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. El sha256 de la carta es provisional hasta tener el PDF firmado. Lo revisa `pruebas/test_dominio_prueba.py` |
+| `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada y bitácora inmutable |

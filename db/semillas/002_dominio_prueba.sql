@@ -8,11 +8,6 @@
 --
 -- olmardo.com se registró el 13 oct 2026 a las 18:38 hora de Monterrey
 -- (RDAP: 2026-10-14T00:38:02Z). Ninguna fecha de este archivo es anterior.
---
--- PENDIENTE (#6, #9b): signed_document_sha256 es provisional porque todavía no
--- está el PDF de la carta firmada. Cuando exista el PDF firmado de la carta, se
--- reemplaza por el sha256 de ese PDF:
---   decode('<sha256 del PDF firmado>', 'hex')
 -- =====================================================================
 
 BEGIN;
@@ -40,18 +35,19 @@ INSERT INTO domains (id, organization_id, fqdn, status, txt_token, verified_at, 
   '2026-10-13 19:02-06', '30000000-0000-4000-8000-000000000005');
 
 -- Carta de la plantilla de #6. La firma el titular de olmardo.com como persona
--- física el 18 de octubre de 2026, con vigencia del 18 de octubre de 2026 al
--- 18 de octubre de 2027. La carta nombra el producto LowTide.
--- Aquí solo van valores de rol. El nombre real de quien firma solo estará en el
+-- física el 19 de octubre de 2026, con vigencia del 19 de octubre de 2026 al
+-- 19 de octubre de 2027. La carta nombra el producto LowTide.
+-- Aquí solo van valores de rol. El nombre real de quien firma solo está en el
 -- PDF firmado, ligado por su sha256.
--- El sha256 es provisional hasta tener el PDF de la carta firmada (ver PENDIENTE arriba).
+-- signed_document_sha256 es el sha256 de ese PDF. El PDF no va en el repo: está
+-- en la carpeta compartida del equipo.
 INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, signer_email,
   signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) VALUES
  ('41000000-0000-4000-8000-000000000007', '20000000-0000-4000-8000-000000000003', '40000000-0000-4000-8000-000000000007',
   'Titular de olmardo.com', 'titular del dominio olmardo.com', 'admin@olmardo.com',
   'authorizations/olmardo/olmardo.com_2026.pdf',
-  sha256(convert_to('PROVISIONAL: reemplazar por el sha256 del PDF firmado de la carta (#6, #9b)', 'UTF8')),
-  '2026-10-18', '2027-10-18', '30000000-0000-4000-8000-000000000005');
+  decode('359f2f33929ac3fa63856d5d99c2037751356d785e860b0138064b811d2acffe', 'hex'),
+  '2026-10-19', '2027-10-19', '30000000-0000-4000-8000-000000000005');
 
 -- Verificación del alta, igual que en el resto de la semilla. Es la consulta
 -- manual de verified_at: DNS sobre HTTPS con dns.google (8.8.8.8) a las 01:02 UTC
