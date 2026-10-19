@@ -67,7 +67,7 @@ class DominioDePrueba(unittest.TestCase):
                                 " FROM domain_authorizations a JOIN users u ON u.id = a.accepted_by"
                                 " WHERE a.id = '%s';" % AUTORIZACION, org=OLMARDO),
                          '2026-10-19,2027-10-19,Titular de olmardo.com,titular del dominio olmardo.com,'
-                         'admin@olmardo.com,admin@olmardo.com')
+                         'contacto@olmardo.com,admin@olmardo.com')
         self.assertEqual(scalar("SELECT encode(signed_document_sha256, 'hex') || ',' || signed_document_key"
                                 " FROM domain_authorizations WHERE id = '%s';" % AUTORIZACION, org=OLMARDO),
                          SHA256_CARTA + ',authorizations/olmardo/olmardo.com_2026.pdf')
