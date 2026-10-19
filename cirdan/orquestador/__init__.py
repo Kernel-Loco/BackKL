@@ -181,7 +181,9 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None)
     """Ejecuta los recolectores de un escaneo aceptado y deja el estado de cada fuente.
 
     Un recolector que falla no tumba el escaneo: su fuente queda en 'retrying' (los reintentos
-    los programa #27) y el escaneo termina 'partial'. Devuelve un resumen.
+    los programa #27) y el escaneo termina 'partial'. También termina 'partial' si una fuente respondió
+    pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
+    se muestran como 0 hallazgos. Devuelve un resumen.
     """
     fqdn = fqdn.strip().lower().rstrip('.')
     with _tx(org, conn) as c:
@@ -198,7 +200,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None)
         res = ejecutar(cargar(codigo), fqdn, modo, ahora=ahora, propios=propios)
         status, attempt, next_retry_at = siguiente_estado(res.estado, 0, datetime.now(timezone.utc))
         resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': res.consultas,
-                   'avisos': res.avisos[:10]}
+                   'avisos': res.avisos[:10], 'sin_cobertura': res.sin_cobertura}
         with _tx(org, conn) as c:
             c.execute(
                 'INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status, attempt, next_retry_at, '
@@ -211,8 +213,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None)
             hallazgos += len(res.hallazgos)
 
     ok = sum(1 for r in corridas if r['status'] == 'succeeded')
-    estado = 'completed' if ok == len(corridas) else 'failed' if ok == 0 else 'partial'
+    sin_cobertura = sorted({c for r in corridas if r['status'] == 'succeeded' for c in r['sin_cobertura']})
+    estado = 'completed' if ok == len(corridas) and not sin_cobertura else 'failed' if ok == 0 else 'partial'
     stats = {'assets': activos, 'findings': hallazgos, 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
+    if sin_cobertura:
+        stats['rules_without_coverage'] = sin_cobertura
     with _tx(org, conn) as c:
         c.execute('UPDATE scans SET status = %s, finished_at = now(), stats = %s, updated_at = now() WHERE id = %s',
                   (estado, Jsonb(stats), scan_id))

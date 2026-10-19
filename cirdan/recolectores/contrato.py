@@ -8,6 +8,8 @@ Cada recolector es un módulo de cirdan/recolectores/ con:
 El orquestador (#22) no llama a recolectar() directo: llama a ejecutar(), que atrapa cualquier
 excepción, revisa que el resultado cumpla este esquema y aplica el filtro de alcance. Si el
 recolector falla o rompe el contrato, la fuente queda en 'failed' y el escaneo sigue con las demás.
+Si la fuente respondió pero no pudo revisar algunos códigos, los pone en sin_cobertura y el escaneo
+termina 'partial', así el portal no los muestra como 0 hallazgos.
 La limpieza de datos y el límite diario por fuente son de #13b. El documento completo está en
 docs/contrato_plugin.md.
 """
@@ -78,6 +80,7 @@ class Resultado:
     avisos: list = field(default_factory=list)
     activos: list = field(default_factory=list)
     hallazgos: list = field(default_factory=list)
+    sin_cobertura: list = field(default_factory=list)  # códigos que la fuente no pudo revisar: cobertura parcial, no 0
 
     def a_dict(self):
         return asdict(self)
@@ -149,6 +152,13 @@ def validar(res, codigos=None):
         errores.append('error debe ser texto')
     if not isinstance(res.avisos, list) or not all(isinstance(a, str) for a in res.avisos):
         errores.append('avisos debe ser una lista de textos')
+    sin = res.sin_cobertura
+    if not isinstance(sin, list) or not all(isinstance(c, str) and CODIGO_VALIDO.fullmatch(c) for c in sin):
+        errores.append('sin_cobertura debe ser una lista de códigos de regla')
+    elif len(set(sin)) != len(sin):
+        errores.append('sin_cobertura tiene códigos repetidos')
+    elif codigos is not None and set(sin) - set(codigos):
+        errores.append('sin_cobertura: %s no está en el catálogo de reglas' % ', '.join(sorted(set(sin) - set(codigos))))
     if not isinstance(res.activos, list) or not isinstance(res.hallazgos, list):
         return errores + ['activos y hallazgos deben ser listas']
     if res.estado == 'failed' and (res.activos or res.hallazgos):
@@ -178,6 +188,8 @@ def validar(res, codigos=None):
             errores.append('%s: código inválido' % donde)
         elif codigos is not None and h.codigo not in codigos:
             errores.append('%s: el código no está en el catálogo de reglas' % donde)
+        elif isinstance(sin, list) and h.codigo in sin:
+            errores.append('%s: el código está en sin_cobertura, no puede traer hallazgos' % donde)
         if h.severidad not in SEVERIDADES:
             errores.append('%s: severidad inválida %r' % (donde, h.severidad))
         if not isinstance(h.activo, str) or h.activo not in valores:
