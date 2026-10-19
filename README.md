@@ -155,7 +155,7 @@ docker compose exec api python -m cirdan.orquestador old-example.net --org ACME 
 
 **Dominio de prueba:** olmardo.com (Grupo Olmardo, empresa ficticia, plan Business) está en `db/semillas/002_dominio_prueba.sql` (#9b). Trae su token TXT, verificado a mano el 13 oct 2026 a las 19:02 hora de Monterrey (RC-38), y su carta, que el titular del dominio firmó el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027. La semilla guarda el sha256 del PDF firmado. El PDF no va en el repo. Su administrador es `admin@olmardo.com` (ver `docs/cuentas_de_prueba.md`).
 
-El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de escaneos pasaron, y el escaneo en vivo de olmardo.com se aceptó y terminó `completed`. El dominio todavía no tiene sitio, pero desde el 13 oct 2026 sí tiene certificados en los logs de Certificate Transparency.
+El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de escaneos pasaron, y el escaneo en vivo de olmardo.com se aceptó y terminó `completed`. El dominio todavía no tiene sitio, pero desde el 13 oct 2026 sí tiene certificados en los logs de Certificate Transparency. El escaneo del 14 oct y la grabación del 18 oct fueron antes de la carta firmada, cuando el dominio ya era del equipo. El escaneo usó la vigencia provisional de la semilla anterior.
 
 ## Vista visual de la base (para la demo)
 
