@@ -191,7 +191,7 @@ python -m unittest -v pruebas/test_criterio.py   # 13 pruebas, sin base de datos
 
 ## Contrato de API v1 (#21)
 
-Lo que devuelve la API v1 (`/api/v1`): dominios, hallazgos, score, histórico, explicación y pesos, con un JSON de ejemplo por respuesta en `docs/api_v1/`. La API v1 ya existe (ver API arriba) y el portal la lee desde el 15 oct 2026. Los JSON los usan el dataset de ML y los datos simulados del portal, y sirven de plan B en las demos. El detalle está en `docs/contrato_api_v1.md`.
+Lo que devuelve la API v1 (`/api/v1`): dominios, hallazgos, score, histórico, explicación y pesos, con un JSON de ejemplo por respuesta en `docs/api_v1/`. La API v1 ya existe (ver API arriba) y el portal la lee desde el 15 oct 2026. Hoy los JSON de ejemplo los usan las pruebas de este repo y los datos simulados del portal. Los usará el dataset de ML (#33, RC-65). También sirven de plan B en las demos. El detalle está en `docs/contrato_api_v1.md`.
 
 ```bash
 python -m unittest -v pruebas/test_contrato_api.py   # 21 pruebas, sin base ni red
