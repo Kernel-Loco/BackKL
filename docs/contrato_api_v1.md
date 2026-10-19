@@ -4,7 +4,7 @@ Lo que devolverá la API v1 de Cirdan, con un JSON de ejemplo por respuesta en [
 
 ## Reglas generales
 
-- **Prefijo:** todo cuelga de `/api/v1`, que es lo que el portal ya tiene en `NEXT_PUBLIC_API_URL`. `/health` se queda fuera del prefijo para Docker y el monitoreo.
+- **Prefijo:** todo cuelga de `/api/v1`. En el portal (FrontKL), el navegador llama a `/api/v1` en el propio portal y `next.config.ts` reenvía esas rutas a FastAPI en `API_INTERNAL_URL`, así que la cookie de sesión es del mismo sitio. Las lecturas que hace el servidor de Next van directo a `API_INTERNAL_URL` (`src/lib/apiServer.ts`). `/health` se queda fuera del prefijo para Docker y el monitoreo.
 - **Cliente:** cada respuesta trae solo los datos de la empresa de quien llama, porque RLS filtra en la base. En el portal la empresa sale de la sesión (cookie httpOnly) y en integraciones de la llave de API (`api_keys`). Mientras no exista el login (Germán), el modo demo sigue aceptando el encabezado `X-Organization` como la API actual.
 - **Nombres de campos en inglés y valores con los códigos de la base:** `critical`, `infrastructure`, `ct_logs`, `open`. El portal muestra los nombres en español con `src/config/labels.ts`. La única excepción es `caracteristicas`, que conserva las claves en español del contrato de plugin (#13) para que el dataset de ML use los mismos nombres de punta a punta.
 - **Fechas:** ISO 8601 con zona, en hora de la Ciudad de México (`2026-09-30T14:24:30-06:00`). Las que son solo día, como la vigencia de una autorización, van como `2026-12-31`.
