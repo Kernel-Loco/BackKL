@@ -44,7 +44,7 @@ INSERT INTO domains (id, organization_id, fqdn, status, txt_token, verified_at, 
 INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, signer_email,
   signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) VALUES
  ('41000000-0000-4000-8000-000000000007', '20000000-0000-4000-8000-000000000003', '40000000-0000-4000-8000-000000000007',
-  'Titular de olmardo.com', 'titular del dominio olmardo.com', 'admin@olmardo.com',
+  'Titular de olmardo.com', 'titular del dominio olmardo.com', 'contacto@olmardo.com',
   'authorizations/olmardo/olmardo.com_2026.pdf',
   decode('359f2f33929ac3fa63856d5d99c2037751356d785e860b0138064b811d2acffe', 'hex'),
   '2026-10-19', '2027-10-19', '30000000-0000-4000-8000-000000000005');
