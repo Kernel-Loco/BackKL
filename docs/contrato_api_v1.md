@@ -1,11 +1,11 @@
 # Contrato de API v1 (#21)
 
-Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo por respuesta en [`api_v1/`](api_v1/). El portal (RC-17a, #40a) ya lee la API v1 real con la sesión (`src/services/queries.ts` en FrontKL). Si la API no está arriba, el portal no lee estos archivos en su lugar. FrontKL tiene una copia en `src/mocks/api/contrato.ts`, que hoy solo usa el alta simulada de dominios (#26). El dataset de ML (#33, RC-65) todavía no los usa. Los ejemplos salen de los datos demo de `db/semillas/001_datos_demo.sql` (Acme Demo), así que la API real debe devolver lo mismo con esa base. `pruebas/test_contrato_api.py` revisa que los ejemplos cumplan el criterio de criticidad (#29) y el contrato de plugin (#13).
+Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo por respuesta en [`api_v1/`](api_v1/). El portal (RC-17a, #40a) ya lee la API v1 real con la sesión (`src/services/queries.ts` en FrontKL). Si la API no está arriba, el portal no lee estos archivos en su lugar. Siguen sirviendo de plan B en las demos. FrontKL tiene una copia en `src/mocks/api/contrato.ts`, que hoy solo usa el alta simulada de dominios (#26). El dataset de ML (#33, RC-65) todavía no los usa. Los ejemplos salen de los datos demo de `db/semillas/001_datos_demo.sql` (Acme Demo), así que la API real debe devolver lo mismo con esa base. `pruebas/test_contrato_api.py` revisa que los ejemplos cumplan el criterio de criticidad (#29) y el contrato de plugin (#13).
 
 ## Reglas generales
 
 - **Prefijo:** todo cuelga de `/api/v1`. En el portal (FrontKL), el navegador llama a `/api/v1` en el propio portal y `next.config.ts` reenvía esas rutas a FastAPI en `API_INTERNAL_URL`, así que la cookie de sesión es del mismo sitio. Las lecturas que hace el servidor de Next van directo a `API_INTERNAL_URL` (`src/lib/apiServer.ts`). `/health` se queda fuera del prefijo para Docker y el monitoreo.
-- **Cliente:** cada respuesta trae solo los datos de la empresa de quien llama, porque RLS filtra en la base. La empresa sale de la sesión (cookie httpOnly `lt_session`), que se crea al iniciar sesión en `/api/v1/auth` con contraseña y, si la cuenta lo tiene activo, código MFA (#25). La API nunca toma la empresa de un encabezado. `X-Organization` solo queda en `/db/tables` y `/db/tables/{table}/rows`, que usa la página `/demo`. La tabla `api_keys` existe en la base, pero la API todavía no acepta llaves de API.
+- **Cliente:** cada respuesta trae solo los datos de la empresa de quien llama, porque RLS filtra en la base. La empresa sale de la sesión (cookie httpOnly `lt_session`), que se crea al iniciar sesión en `/api/v1/auth` con contraseña y, si la cuenta lo tiene activo, código MFA (#25). Fuera de `/db`, la API nunca toma la empresa de un encabezado. `X-Organization` solo queda en `/db/tables` y `/db/tables/{table}/rows`, que usa la página `/demo`. La tabla `api_keys` existe en la base, pero la API todavía no acepta llaves de API.
 - **Nombres de campos en inglés y valores con los códigos de la base:** `critical`, `infrastructure`, `ct_logs`, `open`. El portal muestra los nombres en español con `src/config/labels.ts`. La única excepción es `caracteristicas`, que conserva las claves en español del contrato de plugin (#13) para que el dataset de ML use los mismos nombres de punta a punta.
 - **Fechas:** ISO 8601 con zona, en hora de la Ciudad de México (`2026-09-30T14:24:30-06:00`). Las que son solo día, como la vigencia de una autorización, van como `2026-12-31`.
 - **Listas:** `{"items": [...], "total": n}`. Cuando haya paginación se agregan `limit` y `offset` sin romper lo demás.
@@ -43,7 +43,7 @@ Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo
 | `category`, `rule_code` | La categoría del reto y el código de su regla (`scoring_rules`) |
 | `source` | `data_sources.code`: `ct_logs`, `dns`, `whois`, `shodan`, `hibp` o `censys` |
 | `severity`, `base_severity` | La vigente y la de su regla. Son distintas cuando el motor la subió (#29) |
-| `status` | `open`, `resolved`, `accepted_risk` o `false_positive` |
+| `status` | Hoy siempre es `open`, porque el endpoint solo trae abiertos. En la base también existen `resolved`, `accepted_risk` y `false_positive` |
 | `recurrence` | `new` si apareció en el último escaneo, `recurring` si ya venía de antes |
 | `cve_id`, `cvss`, `epss`, `in_kev` | Datos de la CVE cuando el hallazgo tiene una. Si no, `null`, `null`, `null` y `false` |
 | `evidence` | Lo que prueba el hallazgo, sin `title`. Nunca contraseñas, tokens ni datos de brechas más allá del hecho |
@@ -70,6 +70,7 @@ Viene de `score_contributions`. `penalty` es lo que el hallazgo suma a la nota d
 ## Pesos (`pesos.json`)
 
 Los del juego de reglas v1 de la base: infraestructura 30 %, identidad digital 20 %, configuración 20 % y fugas de datos 30 %, con las bandas, el piso y el umbral de `cirdan/score/criterio.py`. Emilio los confirmó para este contrato, por eso `validated_by` dice `Emilio`. Si cambian, se crea el juego v2 (#32) y se actualizan este archivo y la semilla.
+La API real devuelve `validated_by` en `null`, porque la semilla no lo llena.
 
 ## Qué cambia respecto a la API inicial
 
