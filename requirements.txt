@@ -2,7 +2,7 @@
 # contenedor y cualquier PC instalen exactamente lo mismo. Las actualiza Dependabot.
 fastapi==0.143.0
 uvicorn==0.34.0
-psycopg[binary]==3.2.6
+psycopg[binary]==3.2.13
 argon2-cffi==25.1.0
 pyotp==2.9.0
 cryptography==50.0.2
