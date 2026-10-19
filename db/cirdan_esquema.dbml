@@ -3,7 +3,7 @@ Project cirdan {
   database_type: 'PostgreSQL'
   Note: '''
   - Estado en dev al 19 oct 2026. Este archivo es el diseño objetivo de la base. Lo que existe hoy está en db/migraciones/ (001_esquema_inicial.sql y 002_login.sql), y lo que la base hace distinto de este diseño está en db/README.md, en «Decisiones y desviaciones respecto al DBML». Hoy en dev existen las 23 tablas con sus 57 FK, sus índices y CHECK, los triggers (inmutabilidad, cadena de hashes de audit_log, autorización forzada en scans y keep_raw_payload), RLS con ENABLE y FORCE en 18 tablas, app_current_org(), un solo rol de aplicación, cirdan_app, sin superusuario ni BYPASSRLS, y login_lookup(), que llegó con la migración 002 y es de postgres. En las notas, «Hoy en dev» dice lo que ya existe y «Plan» dice lo que falta y qué tarjeta lo trae.
-  - Plan. Fuera de la base hoy existen la API con el login (#25) y la API v1, el orquestador de escaneos (#22), los recolectores (#13 y #14) y el criterio de criticidad (#29). Los demás procesos que describen las notas todavía no existen, aunque las notas los describan en presente. Tienen tarjeta: guardar activos y hallazgos de cada escaneo (#23, RC-55), el alta de dominios y autorizaciones desde el portal o la API (#26, RC-59), el scheduler y los reintentos programados (#27, RC-52), el motor de score que llena domain_scores y score_contributions (#31, RC-60), el outbox con su worker y las entregas (#65, RC-114, y #88, RC-124, para CEF), el cargador diario de cves con KEV y EPSS (#69, RC-127), las llaves de API con api_key_lookup() (#87, RC-129), los reportes PDF (#45, RC-70, y #89, RC-138, para el resumen semanal), la verificación de la cadena desde la API (#86, RC-130) y el CI que aplica las migraciones numeradas (#11, RC-43). No tienen tarjeta todavía: los roles distintos de cirdan_app, audit_platform_append() y la cadena de plataforma, la revisión diaria de TXT y vigencias con su alerta authorization.expiring, el job de retención, check_plan_limits() y la llave maestra en SOPS + age. Hoy el orquestador (#22) registra scan.rejected cuando no escanea, también si el trigger de scans rechaza el INSERT, y no scan.blocked.
+  - Procesos fuera de la base. Hoy en dev existen la API con el login (#25) y la API v1, el orquestador de escaneos (#22), los recolectores (#13 y #14) y el criterio de criticidad (#29). Los demás procesos todavía no existen. Si una nota los describe en presente, es el diseño objetivo. Tienen tarjeta: guardar activos y hallazgos de cada escaneo (#23, RC-55), el alta de dominios y autorizaciones desde el portal o la API (#26, RC-59), el scheduler y los reintentos programados (#27, RC-52), el motor de score que llena domain_scores y score_contributions (#31, RC-60), el outbox con su worker y las entregas (#65, RC-114, y #88, RC-124, para CEF), el cargador diario de cves con KEV y EPSS (#69, RC-127), las llaves de API con api_key_lookup() (#87, RC-129), los reportes PDF (#45, RC-70, y #89, RC-138, para el resumen semanal), la verificación de la cadena desde la API (#86, RC-130) y el CI que aplica las migraciones numeradas (#11, RC-43). No tienen tarjeta todavía: los roles distintos de cirdan_app, audit_platform_append() y la cadena de plataforma, la revisión diaria de TXT y vigencias con su alerta authorization.expiring, el job de retención, check_plan_limits() y la llave maestra en SOPS + age. Hoy el orquestador (#22) registra scan.rejected cuando no escanea, también si el trigger de scans rechaza el INSERT, y no scan.blocked.
   - Esquema final de 23 tablas: las 22 de la versión anterior más scoring_rule_sets. La base sigue siendo el diseño A (MVP): lo variable de cada fuente vive en jsonb (scan_source_runs.raw_payload, assets.attributes, findings.evidence), así que agregar una fuente no pide migración. Requiere PostgreSQL 15 o superior por UNIQUE NULLS NOT DISTINCT y ON DELETE SET NULL con lista de columnas (RDS ya ofrece 16 y 17).
   - Del diseño B se conservan dos tablas. dns_txt_verifications respalda 'sin eso, no se escanea nada': cada escaneo apunta a la consulta TXT exacta que lo permitió. breach_exposures respalda 'no guardamos credenciales filtradas, solo el hecho de la exposición': no tiene columna para una contraseña, y data_sources.keep_raw_payload = false con su trigger impide guardar en crudo la respuesta de HIBP. En los banners de Shodan y Censys la promesa sigue dependiendo de que el normalizador limpie el jsonb antes de insertar, con pruebas de que no pasan cadenas tipo 'password=' ni tokens.
   - Del diseño B también se tomó: token TXT en domains (renovar la autorización no obliga a cambiar el DNS), domain_authorizations inmutable salvo revoked_at con valid_from y valid_until, trigger BEFORE INSERT en scans, índice único parcial en domains(fqdn) WHERE status = 'verified', cadena de bitácora por organización con actor_type, CHECK de 90 días en api_keys, deliveries.latency_ms generada y una versión mínima de scoring_rule_sets. Quedó fuera: plans como columnas sueltas, platform_credentials, raw_observations particionada, feed_syncs, delivery_attempts con una fila por intento, columnas sueltas de nonce y versión de llave, HMAC con pepper para llaves de API, pinned_ip, failed_logins (el bloqueo vive en Valkey. Hoy en dev lo hace cirdan/auth/sessions.py, sin slowapi) y audit_chain_checkpoints (plan: la verificación diaria se escribirá en la bitácora como chain.verified. No tiene tarjeta todavía).
@@ -14,12 +14,12 @@ Project cirdan {
   - Catálogos globales sin RLS: plans, data_sources, cves, scoring_rule_sets y scoring_rules. Hoy en dev cirdan_app solo tiene SELECT en ellos, sin la columna data_sources.api_key_enc, y en cves además GRANT INSERT (cve_id). Plan: el rol web solo tendrá SELECT y no podrá leer data_sources.api_key_enc, que solo leerá cirdan_worker. En cves el worker solo podrá insertar stubs y el cargador diario (#69, RC-127) será el único que actualice. Nunca se borran CVE, así ningún hallazgo queda huérfano.
   - Cifrado en la app con AES-256-GCM para users.totp_secret_enc, data_sources.api_key_enc e integrations.secret_enc. Hoy en dev solo se cifra users.totp_secret_enc (cirdan/auth/totp.py): el bytea guarda nonce de 12 bytes, texto cifrado y tag, sin versión de llave, el AAD es el id del usuario y la llave sale de TOTP_ENCRYPTION_KEY, en el .env y fuera de la base. Hoy en dev las contraseñas usan argon2id. Plan: el bytea guardará versión de llave, nonce de 12 bytes, texto cifrado y tag. El AAD será tabla + columna + id de fila, más organization_id en las tablas por cliente (data_sources es global y no lo lleva), así un valor copiado a otra fila u otro cliente no descifra. integrations.secret_enc se cifrará con #65 (RC-114). La llave maestra vivirá en SOPS + age y nunca entrará a la BD. El CI fallará a los 85 días y la rotación a los 90 volverá a cifrar. SOPS, la rotación y ese aviso del CI no tienen tarjeta todavía. Las llaves de API usarán SHA-256 porque son aleatorias de 256 bits (#87, RC-129).
   - Inmutabilidad: un trigger BEFORE UPDATE OR DELETE y otro BEFORE TRUNCATE lanzan excepción en audit_log, dns_txt_verifications, domain_authorizations (salvo UPDATE de revoked_at), domain_scores y score_contributions. Única excepción: en domain_scores y score_contributions el trigger deja pasar DELETE si current_user = 'cirdan_retention' y la fila (o su score padre) tiene computed_at < now() - interval '12 months'. UPDATE y TRUNCATE siguen prohibidos para todos, la app no tiene GRANT DELETE en esas tablas y nadie usa session_replication_role. audit_log, domain_authorizations y dns_txt_verifications bloquean DELETE para todos.
-  - Bitácora: la cadena es por cliente, así cada cliente verifica y exporta la suya sin romper RLS. Plan: los eventos sin tenant (auth.login_failed con un correo que no existe, rotación de llaves de data_sources, resumen de retención, chain.verified global) irán a la cadena de plataforma con organization_id NULL. Hoy en dev la tabla y su trigger ya aceptan organization_id NULL, pero nadie escribe en esa cadena: RLS no deja a cirdan_app y audit_platform_append() no existe. UNIQUE NULLS NOT DISTINCT (organization_id, chain_seq) impide consecutivos duplicados en esa cadena, el trigger usa IS NOT DISTINCT FROM para encontrar el evento anterior y una llave fija de pg_advisory_xact_lock para serializarla (pg_advisory_xact_lock es STRICT y con NULL no bloquearía). El contenido canónico que se hashea no depende de la sesión (UTC, epoch en microsegundos, jsonb::text) y está documentado para que el verificador diario lo reproduzca igual. audit_log no se particiona por fecha, porque perdería UNIQUE (organization_id, chain_seq) y UNIQUE (row_hash). Si crece, los años cerrados se archivan en una tabla histórica inmutable sellada con el último row_hash.
+  - Bitácora: la cadena es por cliente, así cada cliente verifica y exporta la suya sin romper RLS. Plan: los eventos sin tenant (auth.login_failed con un correo que no existe, rotación de llaves de data_sources, resumen de retención, chain.verified global) irán a la cadena de plataforma con organization_id NULL. Hoy en dev la tabla y su trigger ya aceptan organization_id NULL, pero la app no escribe en esa cadena: RLS no deja a cirdan_app y audit_platform_append() no existe. Solo la semilla de demo trae un evento chain.verified de ejemplo, que carga postgres. UNIQUE NULLS NOT DISTINCT (organization_id, chain_seq) impide consecutivos duplicados en esa cadena, el trigger usa IS NOT DISTINCT FROM para encontrar el evento anterior y una llave fija de pg_advisory_xact_lock para serializarla (pg_advisory_xact_lock es STRICT y con NULL no bloquearía). El contenido canónico que se hashea no depende de la sesión (UTC, epoch en microsegundos, jsonb::text) y está documentado para que el verificador diario lo reproduzca igual. audit_log no se particiona por fecha, porque perdería UNIQUE (organization_id, chain_seq) y UNIQUE (row_hash). Si crece, los años cerrados se archivan en una tabla histórica inmutable sellada con el último row_hash.
   - Autorización forzada en la base: el INSERT en scans exige por FK compuesta que la autorización y la verificación TXT sean del mismo dominio, y por trigger que la autorización esté vigente y sin revocar y que la verificación tenga result = 'match' de la última hora. Si falla, el INSERT se rechaza y la app registra scan.blocked en audit_log. El job diario crea alertas authorization.expiring.
   - Resiliencia: cada fuente es una fila de scan_source_runs con attempt y next_retry_at (1, 5 y 25 min). Si una fuente agota sus intentos, las demás siguen, el escaneo termina 'partial' y domain_scores.partial_coverage lo marca en el portal. Un escaneo parcial nunca cierra hallazgos.
   - Alertas en menos de 60 s (outbox): el worker inserta finding, alert y deliveries en la misma transacción, así el hallazgo se guarda antes de salir al SIEM. Si el CVE aún no está en cves, la misma transacción crea antes la fila stub con ON CONFLICT DO NOTHING, así la FK nunca tumba un hallazgo crítico. findings.fingerprint (único por cliente) evita duplicados y solo un hallazgo nuevo genera alerta. Las alertas salen de inmediato por los tres canales: webhook firmado con Standard Webhooks (webhook-id = message_id), CEF sobre TLS al SIEM y correo SMTP. El lote CEF cada 15 min del deck del 25 sep queda solo para el log periódico de inventario y score (integrations.config.log_batch_seconds). El indicador es el p95 de deliveries.latency_ms por integrations.kind, solo con alert_id IS NOT NULL, menor a 60,000 en webhook, siem_cef y email. UNIQUE (integration_id, alert_id) y (integration_id, report_id) hacen idempotente el reencolado si Valkey pierde la cola.
-  - Score explicable y reproducible: scoring_rule_sets guarda una versión completa del juego (los pesos de las 4 categorías y, por copia, todas sus reglas en scoring_rules). Cambiar un peso crea un juego nuevo, y solo uno está activo. El score global es el mayor entre la suma de la nota de cada categoría por su peso y el piso por hallazgos críticos vigentes del criterio #29. Las 4 categorías (infraestructura, identidad digital, configuración y fugas de datos) son las del reto y coinciden con la gráfica del portal. Más alto = más exposición: cada hallazgo suma puntos a su categoría. domain_scores guarda score, category_scores y rule_set_id. score_contributions guarda por hallazgo los puntos, la regla exacta (rule_id) y los factores, con CVSS, EPSS y KEV congelados. El fingerprint de findings usa scoring_rules.code y no rule_id, así ajustar pesos en las semanas 9 a 14 no duplica hallazgos ni dispara finding.created. findings.severity es la severidad vigente: el proceso de scoring la actualiza al insertar score_contributions y registra finding.severity_changed. Si la carga diaria mete un CVE a KEV, se recalcula con reason 'intel_update' sin volver a escanear. La alerta score.above_threshold salta cuando score >= organizations.alert_score_threshold (60 por defecto).
-  - ML versión A sin migraciones grandes: domain_scores.method pasa a 'ml', los valores SHAP van en score_contributions.factors y findings.status = 'false_positive' sirve de etiqueta para entrenar.
+  - Score explicable y reproducible: scoring_rule_sets guarda una versión completa del juego (los pesos de las 4 categorías y, por copia, todas sus reglas en scoring_rules). Cambiar un peso crea un juego nuevo, y solo uno está activo. El score global es el mayor entre la suma de la nota de cada categoría por su peso y el piso por hallazgos críticos vigentes del criterio #29. Las 4 categorías (infraestructura, identidad digital, configuración y fugas de datos) son las del reto y coinciden con la gráfica del portal. Más alto = más exposición: cada hallazgo suma puntos a su categoría. domain_scores guarda score, category_scores y rule_set_id. score_contributions guarda por hallazgo los puntos, la regla exacta (rule_id) y los factores, con CVSS, EPSS y KEV congelados. El fingerprint de findings usa scoring_rules.code y no rule_id, así ajustar pesos en las semanas 9 a 14 no duplica hallazgos ni dispara finding.created. findings.severity es la severidad vigente: el proceso de scoring la actualiza al insertar score_contributions y registra finding.severity_changed. Si la carga diaria mete un CVE a KEV, se recalcula con reason 'intel_update' sin volver a escanear. La alerta score.above_threshold salta cuando score >= organizations.alert_score_threshold (60 por defecto). Hoy en dev existen las tablas, el juego v1 de la semilla y el criterio de #29 en cirdan/score/criterio.py. El proceso que calcula y guarda el score llega con #31 (RC-60), la alerta con #65 (RC-114) y el recálculo intel_update con #69 (RC-127).
+  - ML versión A sin migraciones grandes: domain_scores.method pasa a 'ml', los valores SHAP van en score_contributions.factors y findings.status = 'false_positive' sirve de etiqueta para entrenar. Plan, llega con #36 (RC-61).
   - Planes en la capa de servicio (plan, sin tarjeta todavía): los límites comerciales (max_domains o domain_limit_override, on_demand_scans y api_and_siem) los aplicará una sola función check_plan_limits(org, action) en FastAPI con pruebas unitarias, no triggers. Hoy en dev esa función no existe. Para que dos altas simultáneas no superen el tope, la función hace SELECT ... FOR UPDATE sobre la fila de organizations antes de contar, al insertar un dominio y al pasarlo de nuevo a 'verified'. Los cambios de plan no los puede hacer el cliente: la app solo tiene GRANT UPDATE (name, alert_score_threshold) en organizations (hoy en dev cirdan_app, en el plan cirdan_web), y plan_id, domain_limit_override y status los cambia operación con evento en audit_log. En la base quedan solo los triggers que respaldan promesas del deck: cadena e inmutabilidad, autorización en scans y keep_raw_payload.
   - Retención de 12 meses (plan, sin tarjeta todavía: hoy no existen ni el job ni el rol): un job diario con el rol cirdan_retention (políticas 'FOR SELECT, DELETE TO cirdan_retention USING (true)' solo en las tablas que purga) borra por lotes en este orden: deliveries y alerts con detected_at de más de 12 meses, score_contributions y domain_scores con computed_at de más de 12 meses, findings con resolved_at de más de 12 meses junto con sus breach_exposures, assets sin verse en 12 meses que ya no tengan hallazgos ni hijos, reports de más de 12 meses con su PDF, scan_source_runs y por último scans de más de 12 meses que ya no referencie ningún domain_scores. findings.last_scan_id usa ON DELETE SET NULL (last_scan_id), así un hallazgo abierto de hace 13 meses no bloquea la purga. Se quitaron findings.first_scan_id y assets.last_seen_scan_id porque detected_at y last_seen_at ya conservan esas fechas. Cada lote queda en audit_log como retention.purged con conteos. audit_log, domain_authorizations y dns_txt_verifications no se purgan. Si crece, scan_source_runs se puede particionar por mes.
   - Índices clave: todo índice de consulta por cliente empieza por organization_id o por una FK que ya lo fija (domain_id, scan_id, asset_id, score_id). Únicos: (organization_id, fqdn) en domains, (domain_id, asset_type, value) en assets, (organization_id, fingerprint) en findings, (scan_id, source_id) en scan_source_runs, (score_id, finding_id) en score_contributions, (rule_set_id, code) en scoring_rules, (integration_id, alert_id) y (integration_id, report_id) en deliveries y NULLS NOT DISTINCT (organization_id, chain_seq) en audit_log. Normales: (organization_id, domain_id, status, severity) en findings, (organization_id, domain_id, computed_at DESC) en domain_scores y (domain_id, checked_at DESC) en dns_txt_verifications. Únicos parciales: un escaneo activo por dominio, un juego de reglas activo y un fqdn verificado global. Hoy en dev existen todos estos índices. Excepción documentada a la regla del organization_id: los índices parciales de trabajo pendiente que cirdan_dispatcher leerá entre clientes, domains(next_scan_at) WHERE status = 'verified', scan_source_runs(next_retry_at) WHERE status = 'retrying', deliveries(next_attempt_at) WHERE status IN ('pending','retrying'), domain_authorizations(valid_until) WHERE revoked_at IS NULL y findings(cve_id) WHERE status = 'open', además de cves WHERE in_kev.
@@ -46,7 +46,7 @@ Table organizations [note: 'Cliente (tenant). Raíz del aislamiento por Row-Leve
   plan_id uuid [not null, ref: > plans.id, note: 'Sin GRANT UPDATE para la app (hoy cirdan_app, en el plan cirdan_web). Solo lo cambia operación, con evento en audit_log']
   status text [not null, note: 'CHECK IN (\'trial\',\'active\',\'suspended\',\'cancelled\'). Suspendida = no se escanea ni se entrega. Sin GRANT UPDATE para la app (hoy cirdan_app, en el plan cirdan_web)']
   domain_limit_override smallint [note: 'Tope pactado en contratos Enterprise de 100 o más dominios. Sin GRANT UPDATE para la app (hoy cirdan_app, en el plan cirdan_web)']
-  alert_score_threshold smallint [not null, note: 'DEFAULT 60, CHECK 0 a 100. Si el score de un dominio llega a este valor o lo pasa (score >= umbral), se crea una alerta score.above_threshold. Más alto = más riesgo']
+  alert_score_threshold smallint [not null, note: 'DEFAULT 60, CHECK 0 a 100. Si el score de un dominio llega a este valor o lo pasa (score >= umbral), se creará una alerta score.above_threshold (plan, #31, RC-60, y #65, RC-114). Hoy en dev la regla está en cirdan/score/criterio.py, pero nada crea la alerta. Más alto = más riesgo']
 }
 
 Table users [note: 'Usuarios del portal con rol y MFA (argon2 + TOTP). Las sesiones web de 15 min viven en Valkey, no aquí. Nunca se borran porque la bitácora los referencia.'] {
@@ -63,7 +63,7 @@ Table users [note: 'Usuarios del portal con rol y MFA (argon2 + TOTP). Las sesio
   last_login_at timestamptz
 }
 
-Table api_keys [note: 'Llaves de la API REST, con alcance a un dominio o a toda la organización. Solo se guarda el hash: la llave completa se muestra una vez.'] {
+Table api_keys [note: 'Llaves de la API REST, con alcance a un dominio o a toda la organización. Solo se guarda el hash: la llave completa se muestra una vez. Hoy en dev no hay llaves ni endpoint para crearlas (#87, RC-129).'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [ref: > domains.id, note: 'Llave por dominio. NULL = todos los dominios (solo la crea un Admin). FK compuesta (organization_id, domain_id)']
@@ -78,7 +78,7 @@ Table api_keys [note: 'Llaves de la API REST, con alcance a un dominio o a toda 
   revoked_at timestamptz
 }
 
-Table domains [note: 'Dominios raíz que el cliente quiere monitorear, con su token TXT de propiedad. Pueden darse de alta desde el portal o por API. No se escanean sin TXT verificado y autorización firmada vigente.'] {
+Table domains [note: 'Dominios raíz que el cliente quiere monitorear, con su token TXT de propiedad. Se podrán dar de alta desde el portal o por API (plan, #26, RC-59). Hoy en dev solo llegan por las semillas. No se escanean sin TXT verificado y autorización firmada vigente.'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
   fqdn citext [not null, note: 'Ej. acme.mx. UNIQUE (organization_id, fqdn) e índice único parcial (fqdn) WHERE status = \'verified\': un dominio verificado pertenece a un solo cliente']
@@ -90,7 +90,7 @@ Table domains [note: 'Dominios raíz que el cliente quiere monitorear, con su to
   added_by uuid [ref: > users.id, note: 'NULL si el alta llegó por API con llave. El actor exacto (actor_api_key_id) queda en audit_log, igual que en scans.requested_by']
 }
 
-Table domain_authorizations [note: 'Autorización firmada por quien tiene facultad sobre el dominio, con vigencia. Solo se carga desde el portal. Inmutable salvo revoked_at: renovar crea otra fila.'] {
+Table domain_authorizations [note: 'Autorización firmada por quien tiene facultad sobre el dominio, con vigencia. Solo se cargará desde el portal (plan, #26, RC-59). Hoy en dev solo llegan por las semillas. Inmutable salvo revoked_at: renovar crea otra fila.'] {
   id uuid [pk, note: 'UNIQUE (organization_id, domain_id, id) para la FK compuesta desde scans']
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [not null, ref: > domains.id, note: 'FK compuesta (organization_id, domain_id)']
@@ -105,7 +105,7 @@ Table domain_authorizations [note: 'Autorización firmada por quien tiene facult
   accepted_by uuid [not null, ref: > users.id, note: 'Admin del cliente que cargó la autorización. NOT NULL porque la API no puede cargar autorizaciones']
 }
 
-Table dns_txt_verifications [note: 'Evidencia de cada consulta del registro TXT: al dar de alta, en la revisión diaria y justo antes de cada escaneo. Solo inserción y no se purga.'] {
+Table dns_txt_verifications [note: 'Evidencia de cada consulta del registro TXT: al dar de alta, en la revisión diaria y justo antes de cada escaneo. Solo inserción y no se purga. Hoy en dev el orquestador (#22) guarda la de antes de cada escaneo (pre_scan) y las de alta solo vienen de las semillas. El alta (#26, RC-59) y la revisión diaria (sin tarjeta todavía) son plan.'] {
   id uuid [pk, note: 'UNIQUE (organization_id, domain_id, id) para la FK compuesta desde scans']
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [not null, ref: > domains.id, note: 'FK compuesta (organization_id, domain_id)']
@@ -117,7 +117,7 @@ Table dns_txt_verifications [note: 'Evidencia de cada consulta del registro TXT:
   checked_at timestamptz [not null, note: 'Índice (domain_id, checked_at DESC)']
 }
 
-Table data_sources [note: 'Catálogo de fuentes externas: plugins OSINT que corren en cada escaneo y feeds de inteligencia diarios. Guarda cifradas las llaves de API de la plataforma y decide si se conserva la respuesta cruda.'] {
+Table data_sources [note: 'Catálogo de fuentes externas: plugins OSINT que corren en cada escaneo y feeds de inteligencia diarios. Guardará cifradas las llaves de API de la plataforma (plan, #8, RC-40. Hoy en dev api_key_enc está vacío) y decide si se conserva la respuesta cruda.'] {
   id uuid [pk]
   code text [not null, unique, note: 'ct_logs, dns, whois, shodan, censys, hibp, nvd, first_epss, cisa_kev']
   kind text [not null, note: 'CHECK IN (\'osint\',\'intel\'). osint corre por escaneo, intel se carga una vez al día']
@@ -149,14 +149,14 @@ Table scan_source_runs [note: 'Resultado de cada fuente dentro de un escaneo. Co
   scan_id uuid [not null, ref: > scans.id]
   source_id uuid [not null, ref: > data_sources.id, note: 'UNIQUE (scan_id, source_id)']
   status text [not null, note: 'CHECK IN (\'pending\',\'running\',\'succeeded\',\'retrying\',\'failed\'). Si una fuente cae, las demás siguen']
-  attempt smallint [not null, note: '0 a 3. Reintentos a 1, 5 y 25 min']
+  attempt smallint [not null, note: '0 a 3. Reintentos a 1, 5 y 25 min. Hoy en dev el orquestador fija next_retry_at y los reintentos los correrá #27 (RC-52)']
   next_retry_at timestamptz [note: 'Índice parcial (next_retry_at) WHERE status = \'retrying\', que leerá cirdan_dispatcher entre clientes']
   raw_payload jsonb [note: 'Respuesta cruda sin contraseñas, hashes ni tokens. Trigger BEFORE INSERT: debe ser NULL si data_sources.keep_raw_payload = false (HIBP nunca se guarda en crudo)']
   error text [note: 'Código corto, sin cuerpos de respuesta ni llaves']
   finished_at timestamptz
 }
 
-Table assets [note: 'Inventario normalizado de la superficie expuesta: dominio, subdominios, IP, servicios, certificados y correos.'] {
+Table assets [note: 'Inventario normalizado de la superficie expuesta: dominio, subdominios, IP, servicios, certificados y correos. Hoy en dev solo hay activos de las semillas: guardarlos en cada escaneo llega con #23 (RC-55).'] {
   id uuid [pk, note: 'UNIQUE (organization_id, domain_id, id) para las FK compuestas de findings y parent_asset_id']
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [not null, ref: > domains.id]
@@ -166,10 +166,10 @@ Table assets [note: 'Inventario normalizado de la superficie expuesta: dominio, 
   ip_address inet [note: 'Solo para ip y service. Permite filtrar por rango']
   attributes jsonb [not null, note: 'Datos variables por fuente: banner, producto y versión, emisor y vencimiento del certificado, registros DNS, WHOIS']
   first_seen_at timestamptz [not null]
-  last_seen_at timestamptz [not null, note: 'Ancla de la retención: se purga a los 12 meses sin verse si no tiene hallazgos ni hijos']
+  last_seen_at timestamptz [not null, note: 'Ancla de la retención: se purgará a los 12 meses sin verse si no tiene hallazgos ni hijos (plan, sin tarjeta todavía)']
 }
 
-Table findings [note: 'Problema de seguridad sobre un activo. Se deduplica entre escaneos y es la unidad que se puntúa, se alerta y se exporta. Se guarda antes de enviarse a cualquier destino.'] {
+Table findings [note: 'Problema de seguridad sobre un activo. Se deduplica entre escaneos y es la unidad que se puntúa, se alerta y se exporta. Se guarda antes de enviarse a cualquier destino. Hoy en dev solo hay hallazgos de las semillas: guardarlos y deduplicarlos en cada escaneo llega con #23 (RC-55).'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [not null, ref: > domains.id, note: 'Va en el índice. Coincide con el del activo por la FK compuesta de asset_id']
@@ -178,8 +178,8 @@ Table findings [note: 'Problema de seguridad sobre un activo. Se deduplica entre
   cve_id text [ref: > cves.cve_id, note: 'Un hallazgo por CVE por activo. Si el CVE no está cargado, el worker creará antes una fila stub en cves (plan, #65 y #69). Índice parcial (cve_id) WHERE status = \'open\' para recalcular con intel_update']
   source_id uuid [not null, ref: > data_sources.id, note: 'Fuente que lo reveló']
   fingerprint bytea [not null, note: 'SHA-256(scoring_rules.code || asset_id || coalesce(cve_id, breach_name, clave del recolector (#13), \'\')). Usa el code estable, nunca rule_id, así un cambio de pesos no duplica hallazgos. UNIQUE (organization_id, fingerprint)']
-  severity text [not null, note: 'CHECK IN (\'critical\',\'high\',\'medium\',\'low\'). Severidad vigente: el proceso que inserta score_contributions la actualiza en la misma transacción y registra finding.severity_changed']
-  status text [not null, note: 'CHECK IN (\'open\',\'resolved\',\'accepted_risk\',\'false_positive\'). Cada cambio queda en audit_log']
+  severity text [not null, note: 'CHECK IN (\'critical\',\'high\',\'medium\',\'low\'). Severidad vigente: el proceso que inserte score_contributions la actualizará en la misma transacción y registrará finding.severity_changed (plan, #31, RC-60)']
+  status text [not null, note: 'CHECK IN (\'open\',\'resolved\',\'accepted_risk\',\'false_positive\'). Cada cambio quedará en audit_log (plan, #23, RC-55, y #80, RC-133). Hoy en dev nada cambia el estado']
   evidence jsonb [not null, note: 'Extracto mínimo normalizado (banner, puerto, vencimiento). Nunca credenciales']
   detected_at timestamptz [not null, note: 'Primera vez que se guardó. Arranca el reloj de 60 s y reemplaza al antiguo first_scan_id']
   last_scan_id uuid [ref: > scans.id, note: 'Último escaneo que lo volvió a ver. FK compuesta con ON DELETE SET NULL (last_scan_id), así la purga no toca organization_id']
@@ -204,13 +204,13 @@ Table cves [note: 'Inteligencia de vulnerabilidades local: CVSS de NVD, EPSS de 
   in_kev boolean [not null, note: 'DEFAULT false. true si CISA KEV la lista como explotada. Índice parcial WHERE in_kev']
   kev_date_added date
   published_at timestamptz
-  intel_updated_at timestamptz [note: 'Última carga diaria que tocó la fila. NULL = stub sin inteligencia todavía. Al completarlo se recalcula con reason \'intel_update\'. Nunca se borra un CVE, aunque NVD lo marque REJECTED']
+  intel_updated_at timestamptz [note: 'Última carga diaria que tocó la fila. NULL = stub sin inteligencia todavía. Al completarlo se recalculará con reason \'intel_update\' (plan, #69, RC-127). Nunca se borra un CVE, aunque NVD lo marque REJECTED']
 }
 
 Table scoring_rule_sets [note: 'Versión completa del juego de reglas y pesos de las 4 categorías del score, validada con el socio formador. Un cambio de cualquier peso crea un juego nuevo. Inmutable una vez activado.'] {
   id uuid [pk]
   version smallint [not null, unique, note: '1, 2, 3... Es lo que muestra el portal junto al score']
-  category_weights jsonb [not null, note: 'Ej. {\'infrastructure\': 0.30, \'digital_identity\': 0.20, \'configuration\': 0.20, \'data_leaks\': 0.30} (juego v1). Suma 1, validado por prueba en CI. Score global = el mayor entre la suma de nota de categoría x peso y el piso de #29']
+  category_weights jsonb [not null, note: 'Ej. {\'infrastructure\': 0.30, \'digital_identity\': 0.20, \'configuration\': 0.20, \'data_leaks\': 0.30} (juego v1). Suma 1. Hoy en dev lo revisa pruebas/test_contrato_api.py sobre docs/api_v1/pesos.json, sin CI todavía (#11, RC-43). Score global = el mayor entre la suma de nota de categoría x peso y el piso de #29']
   is_active boolean [not null, note: 'Índice único parcial ((true)) WHERE is_active: un solo juego activo']
   validated_by text [note: 'Quién validó los pesos (decisión 2 del deck del 25 sep)']
   activated_at timestamptz
@@ -226,7 +226,7 @@ Table scoring_rules [note: 'Reglas con pesos que clasifican hallazgos y calculan
   max_penalty numeric(5,2) [not null, note: 'Tope de puntos de exposición que la regla puede sumar']
 }
 
-Table domain_scores [note: 'Histórico del score de 0 a 100 por dominio y por categoría. Alimenta la tendencia de 12 meses y la alerta por umbral. Solo inserción, y solo el rol de retención (plan, sin tarjeta todavía) podrá borrar filas de más de 12 meses.'] {
+Table domain_scores [note: 'Histórico del score de 0 a 100 por dominio y por categoría. Alimenta la tendencia de 12 meses y la alerta por umbral. Solo inserción, y solo el rol de retención (plan, sin tarjeta todavía) podrá borrar filas de más de 12 meses. Hoy en dev solo hay scores de las semillas: el motor de score llega con #31 (RC-60).'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [not null, ref: > domains.id]
@@ -247,7 +247,7 @@ Table score_contributions [note: 'Desglose explicable del score: cuánto suma ca
   finding_id uuid [not null, ref: > findings.id, note: 'UNIQUE (score_id, finding_id)']
   rule_id uuid [not null, ref: > scoring_rules.id, note: 'Regla del juego domain_scores.rule_set_id con que se calcularon los puntos. Puede diferir de findings.rule_id tras un rules_change']
   penalty numeric(5,2) [not null, note: 'Puntos de exposición que este hallazgo suma al score (la columna conserva el nombre penalty)']
-  severity text [not null, note: 'CHECK IN (\'critical\',\'high\',\'medium\',\'low\'). Criticidad calculada en ese momento. Se copia a findings.severity en la misma transacción']
+  severity text [not null, note: 'CHECK IN (\'critical\',\'high\',\'medium\',\'low\'). Criticidad calculada en ese momento. Se copiará a findings.severity en la misma transacción (plan, #31, RC-60)']
   factors jsonb [not null, note: 'Ej. {\'public_exposure\': 0.42, \'finding_age\': 0.27, \'asset_type\': 0.19, \'cvss\': 9.8, \'epss\': 0.94, \'kev\': true}. Valores congelados. Con la versión A del ML guarda los valores SHAP']
 }
 
@@ -256,14 +256,14 @@ Table integrations [note: 'Destinos de entrega configurados por el cliente: webh
   organization_id uuid [not null, ref: > organizations.id]
   kind text [not null, note: 'CHECK IN (\'webhook\',\'siem_cef\',\'email\'). webhook y siem_cef solo si plans.api_and_siem, revisado en check_plan_limits() (plan)']
   name text [not null]
-  endpoint text [not null, note: 'URL https del webhook, host:puerto TLS del SIEM o destinatarios de correo. La IP destino se valida contra SSRF en cada envío']
+  endpoint text [not null, note: 'URL https del webhook, host:puerto TLS del SIEM o destinatarios de correo. La IP destino se validará contra SSRF en cada envío (plan, #65, RC-114)']
   secret_enc bytea [note: 'Secreto whsec de Standard Webhooks o certificado cliente TLS, cifrado AES-256-GCM']
-  secret_rotated_at timestamptz [note: 'Rotación cada 90 días']
+  secret_rotated_at timestamptz [note: 'Rotación cada 90 días (plan, sin tarjeta todavía)']
   config jsonb [not null, note: 'Eventos (incluye \'report.weekly_summary\' en correo), severidad mínima y dominios. En siem_cef las alertas salen de inmediato y \'log_batch_seconds\' (DEFAULT 900) solo aplica al log periódico de inventario y score']
   enabled boolean [not null]
 }
 
-Table alerts [note: 'Evento a notificar (outbox). Se inserta en la misma transacción que el hallazgo o el score que lo causa.'] {
+Table alerts [note: 'Evento a notificar (outbox). Se insertará en la misma transacción que el hallazgo o el score que lo causa (plan, #65, RC-114). Hoy en dev solo hay alertas de las semillas.'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [not null, ref: > domains.id]
@@ -277,7 +277,7 @@ Table alerts [note: 'Evento a notificar (outbox). Se inserta en la misma transac
   acknowledged_at timestamptz [note: 'CHECK ((acknowledged_by IS NULL) = (acknowledged_at IS NULL))']
 }
 
-Table deliveries [note: 'Cada envío de una alerta o un informe a un destino, con reintentos en la misma fila y las marcas de tiempo que miden las alertas en menos de 60 s.'] {
+Table deliveries [note: 'Cada envío de una alerta o un informe a un destino, con reintentos en la misma fila y las marcas de tiempo que miden las alertas en menos de 60 s. Hoy en dev nada envía: el worker llega con #65 (RC-114) y #88 (RC-124).'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
   integration_id uuid [not null, ref: > integrations.id]
@@ -294,7 +294,7 @@ Table deliveries [note: 'Cada envío de una alerta o un informe a un destino, co
   latency_ms integer [note: 'GENERATED ALWAYS AS (delivered_at - detected_at en ms) STORED. Indicador: p95 por integrations.kind con alert_id IS NOT NULL menor a 60,000 en webhook, siem_cef y email']
 }
 
-Table reports [note: 'Informes PDF generados con WeasyPrint, a petición o como resumen semanal por correo.'] {
+Table reports [note: 'Informes PDF que se generarán con WeasyPrint, a petición (#45, RC-70) o como resumen semanal por correo (#89, RC-138). Hoy en dev no se generan y solo hay filas de las semillas.'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [ref: > domains.id, note: 'NULL = todos los dominios del cliente']
@@ -310,7 +310,7 @@ Table reports [note: 'Informes PDF generados con WeasyPrint, a petición o como 
 
 Table audit_log [note: 'Bitácora de solo inserción con cadena de hashes SHA-256 por organización, más una cadena de plataforma. Triggers bloquean UPDATE, DELETE y TRUNCATE para todos. No se purga.'] {
   id uuid [pk]
-  organization_id uuid [ref: > organizations.id, note: 'NULL = cadena de la plataforma, que solo escribirá audit_platform_append() (SECURITY DEFINER, plan sin tarjeta todavía). Hoy en dev nadie escribe en ella. CHECK (organization_id IS NOT NULL OR (actor_user_id IS NULL AND actor_api_key_id IS NULL))']
+  organization_id uuid [ref: > organizations.id, note: 'NULL = cadena de la plataforma, que solo escribirá audit_platform_append() (SECURITY DEFINER, plan sin tarjeta todavía). Hoy en dev la app no escribe en ella y solo la semilla de demo trae un evento de ejemplo. CHECK (organization_id IS NOT NULL OR (actor_user_id IS NULL AND actor_api_key_id IS NULL))']
   chain_seq bigint [not null, note: 'Consecutivo por cadena. El trigger toma pg_advisory_xact_lock con llave fija por cadena (constante para la de plataforma) y busca el anterior con IS NOT DISTINCT FROM. UNIQUE NULLS NOT DISTINCT (organization_id, chain_seq)']
   actor_type text [not null, note: 'CHECK IN (\'user\',\'api_key\',\'system\')']
   actor_user_id uuid [ref: > users.id]
