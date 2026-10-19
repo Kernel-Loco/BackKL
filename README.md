@@ -1,6 +1,6 @@
 # Cirdan · Backend (BackKL)
 
-Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa con OSINT pasivo del reto IKUSI VELATIA: la base de datos, la API, los recolectores OSINT y el criterio de criticidad. El portal web (Next.js) está en [FrontKL](https://github.com/Kernel-Loco/FrontKL). Por ahora usa datos simulados y todavía no llama a esta API.
+Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa con OSINT pasivo del reto IKUSI VELATIA: la base de datos, la API, los recolectores OSINT y el criterio de criticidad. El portal web (Next.js) está en [FrontKL](https://github.com/Kernel-Loco/FrontKL). Desde el 14 y 15 oct 2026 inicia sesión con esta API (#25) y lee sus datos de la API v1 con esa sesión. Siguen simulados en el portal el alta de dominios y la verificación TXT (#26), los reportes, usuarios, llaves de API, webhooks, alertas y bitácora.
 
 ## Carpetas
 
@@ -147,7 +147,7 @@ docker compose exec api python -m cirdan.orquestador old-example.net --org ACME 
 
 **Dominio de prueba:** olmardo.com (Grupo Olmardo, empresa ficticia) está en `db/semillas/002_dominio_prueba.sql` (#9b), con su token TXT publicado y su autorización. Su administrador es `admin@olmardo.com` (ver `docs/cuentas_de_prueba.md`). **Pendiente (#6):** el sha256 de la carta es provisional hasta tener la carta firmada.
 
-El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de escaneos pasaron, y el escaneo en vivo de olmardo.com se aceptó y terminó `completed` (crt.sh no reporta certificados porque el dominio aún no tiene sitio).
+El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de escaneos pasaron, y el escaneo en vivo de olmardo.com se aceptó y terminó `completed`. El dominio todavía no tiene sitio, pero desde el 13 oct 2026 sí tiene certificados en los logs de Certificate Transparency.
 
 ## Vista visual de la base (para la demo)
 
@@ -196,7 +196,7 @@ python -m unittest -v pruebas/test_criterio.py   # 13 pruebas, sin base de datos
 
 ## Contrato de API v1 (#21)
 
-Lo que devolverá la API v1 (`/api/v1`): dominios, hallazgos, score, histórico, explicación y pesos, con un JSON de ejemplo por respuesta en `docs/api_v1/`. El portal y el dataset de ML los usan mientras la API v1 no esté lista, y sirven de plan B en las demos. El detalle está en `docs/contrato_api_v1.md`.
+Lo que devuelve la API v1 (`/api/v1`): dominios, hallazgos, score, histórico, explicación y pesos, con un JSON de ejemplo por respuesta en `docs/api_v1/`. La API v1 ya existe (ver API arriba) y el portal la lee desde el 15 oct 2026. Hoy los JSON de ejemplo los usan las pruebas de este repo y los datos simulados del portal. Los usará el dataset de ML (#33, RC-65). También sirven de plan B en las demos. El detalle está en `docs/contrato_api_v1.md`.
 
 ```bash
 python -m unittest -v pruebas/test_contrato_api.py   # 21 pruebas, sin base ni red
