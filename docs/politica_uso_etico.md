@@ -2,7 +2,7 @@
 
 Tarjeta #6 (RC-36). La política de seguridad y privacidad de la tarjeta #78 integrará estas reglas.
 
-LowTide es el nombre comercial del servicio. Cirdan es su nombre clave y se queda en los identificadores técnicos: el prefijo del TXT `cirdan-verification=`, el User-Agent `cirdan-osint`, el prefijo `CIRDAN_FAKE_` de los tokens falsos y los nombres del paquete, la base y los archivos.
+LowTide es el nombre comercial del servicio. Cirdan es su nombre clave y se queda en los identificadores técnicos, como el prefijo del TXT `cirdan-verification=`, el User-Agent `cirdan-osint`, el prefijo `CIRDAN_FAKE_` de los tokens falsos y los nombres del paquete, la base, los contenedores, las variables de entorno y los archivos.
 
 Aplica al equipo Kernel Loco, a quien contribuya a los repositorios de LowTide y a las empresas que usen el servicio, que la aceptan en la sección 10 de su carta. Va junto con la [plantilla de carta de autorización](plantilla_carta_autorizacion.md). Es un documento académico, no una opinión jurídica.
 
@@ -17,6 +17,7 @@ Aplica al equipo Kernel Loco, a quien contribuya a los repositorios de LowTide y
 7. `--grabar` solo se usa con el dominio de prueba del equipo, el día anterior a una sesión o a un control, como respaldo de la demo. Nunca se usa para probar, porque vacía la grabación anterior del dominio en cuanto la fuente responde. El orquestador analiza a las empresas en modo `vivo`, nunca en `grabar`.
 8. El filtro de alcance de `ejecutar()` descarta todo activo que no sea del dominio autorizado ([`docs/contrato_plugin.md`](contrato_plugin.md), sección 'Filtro de alcance'). En un análisis, todo recolector se llama a través de `ejecutar()`, nunca con `recolectar()` directo. El CLI de un recolector no pasa por ese filtro y solo se usa con el dominio de prueba del equipo.
 9. Los ejemplos de la documentación solo usan el dominio de prueba del equipo o nombres reservados para ejemplos (`example.com`, `.example` o `.test`). Ningún README ni comentario enseña una consulta en vivo a un dominio que el equipo no controla.
+10. Todo análisis deja rastro de quién lo autorizó, cuándo se hizo, qué datos se pidieron y a qué fuentes. Cada fila de `scans` apunta a la carta que lo autoriza y a la verificación del TXT que lo dejó pasar, y guarda quién lo pidió (o si fue programado), cuándo empezó y cuándo terminó. `scan_source_runs` guarda cada fuente que corrió, su resultado y su error. `audit_log` anota cuando se pide, se rechaza y termina cada análisis, en una cadena de hashes que no se puede editar ni borrar. Un recolector que se corre a mano no deja este rastro en la base. Por eso solo se usa como dicen los puntos 6 y 8.
 
 ## 2. Solo se observa, nunca se ataca
 
@@ -58,6 +59,7 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 1. Lo que LowTide ve de terceros, como un dominio parecido o un bucket enlazado de otra empresa, solo se registra como evidencia. Nunca se consulta más ni se contacta a su dueño.
 2. Si LowTide hace una petición fuera del alcance o recibe datos que no debía, como el contenido de un bucket o de una página privada, se detiene el análisis y no se explora más. Ese mismo día se borra lo recibido de la base, de las grabaciones y de los registros, y solo queda una nota de qué pasó, cuándo y con qué fuente, sin el contenido. La nota va en un lugar privado del equipo, como Jira, nunca en un issue o PR de los repositorios, que son públicos. Se avisa ese mismo día a quien coordine, o a otro integrante si fue quien coordina, y si el afectado es un tercero se informa al profesor.
 3. Lo que el filtro de alcance descarta por su cuenta y deja como aviso no es un incidente.
+4. Lo que devuelve una fuente externa no se da por cierto hasta revisarlo. Antes de guardarlo o de usarlo en el score, se revisa que tenga el formato del contrato de plugin y que sea del dominio autorizado, y se descarta lo que no cumple. `ejecutar()` deja en `failed` la fuente cuyo resultado no cumple el contrato, por ejemplo con un nombre, un correo o una IP inválidos, y el filtro de alcance descarta lo que no es del dominio ([`docs/contrato_plugin.md`](contrato_plugin.md), sección 'Qué hace el orquestador con cada recolector'). La limpieza de los datos de cada fuente llega con la tarjeta #13b.
 
 ## 6. Confidencialidad, demostraciones y cartas
 
@@ -95,13 +97,15 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 | Solo activos del dominio autorizado | Filtro de alcance de `ejecutar()` | Existe. El CLI de un recolector no pasa por él |
 | Cada empresa solo ve sus datos | RLS con ENABLE y FORCE en las 18 tablas por cliente | Existe en la base. Desde la tarjeta #25 la API toma la empresa de la sesión. Solo el modo demo de `/demo` y `/db/tables` usa todavía el encabezado `X-Organization` |
 | La carta no se edita | `domain_authorizations` inmutable salvo `revoked_at` | Existe |
-| Una revocación no se deshace | Bloquear que `revoked_at` vuelva a NULL | Falta. Hoy el trigger deja regresarlo |
-| Revocar una carta desde el portal | Pantalla o API para fijar `revoked_at` | No está en ninguna tarjeta todavía |
+| Una revocación no se deshace | Bloquear que `revoked_at` vuelva a NULL | Falta. Hoy el trigger deja regresarlo. Una migración que lo impide está propuesta en un comentario de la tarjeta #26 (13 oct), sin decidir |
+| Revocar una carta desde el portal | Pantalla o API para fijar `revoked_at` | Falta. Propuesto en el mismo comentario de la tarjeta #26 (13 oct), sin decidir |
 | Sin respuesta cruda de HIBP | `scan_source_runs` rechaza `raw_payload` de esa fuente | Existe |
 | Fuentes con secretos sin respuesta cruda | `keep_raw_payload = false` en `data_sources` | Falta para GitHub, que llega con la tarjeta #16 |
-| Pruebas sin fuentes externas | Las pruebas de `pruebas/` nunca consultan fuentes externas ni DNS real. Las de la base, la API, el inicio de sesión, los escaneos y el orquestador usan la base y la API locales. La única consulta en vivo es la prueba opcional de `test_escaneos_api.py` con `EN_VIVO=1`, que escanea el dominio de prueba del equipo | Existe como convención, sin bloqueo de red |
+| Pruebas sin fuentes externas | Fuera de la prueba opcional de `test_escaneos_api.py` con `EN_VIVO=1`, que escanea el dominio de prueba del equipo, las pruebas de `pruebas/` nunca consultan fuentes externas ni DNS real. Las de la base, la API, el inicio de sesión, los escaneos y el orquestador usan la base y la API locales | Existe como convención, sin bloqueo de red |
 | Ningún secreto entra al repositorio | gitleaks como pre-commit y en el CI, más una revisión de todo el historial | El pre-commit existe (`.pre-commit-config.yaml`) y el README dice cómo revisar todo el historial. El CI llega con la tarjeta #12 |
-| Ejemplos sin dominios ajenos | README y comentarios con el dominio de prueba o nombres reservados | Existe. El README y `crtsh.py` enseñan las consultas en vivo con olmardo.com, el dominio de prueba del equipo |
+| Ejemplos sin dominios ajenos | README y comentarios con el dominio de prueba o nombres reservados | En parte. Las consultas en vivo del README y de `crtsh.py` usan olmardo.com, el dominio de prueba del equipo, y ningún ejemplo enseña una consulta en vivo a otro dominio. Pero los comandos rechazados del README y del orquestador usan partner-example.com y old-example.net, `contrato_plugin.md` usa evil.com y las cuentas de la demo usan acme-demo.mx, y ninguno es un nombre reservado |
+| Cada análisis deja rastro | `scans` con su carta, su verificación del TXT y quién lo pidió, `scan_source_runs` por fuente y `audit_log` con su cadena de hashes | Existe para los análisis del orquestador. El CLI de un recolector no deja rastro. Un análisis que se cae por un error inesperado queda `failed` en `scans`, pero sin su registro de fin en `audit_log`. Falta guardar los activos y hallazgos de cada análisis (#23) y revisar la cadena de `audit_log` (#86) |
+| Datos de fuentes externas no confiables | `ejecutar()` revisa el contrato y aplica el filtro de alcance | Existen la revisión del contrato y el filtro. La limpieza de los datos de cada fuente llega con la tarjeta #13b |
 
 ## 11. Cambios a esta política
 

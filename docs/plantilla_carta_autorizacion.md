@@ -2,9 +2,10 @@
 
 Plantilla de LowTide (tarjeta #6, RC-36). Va junto con la [política de uso ético](politica_uso_etico.md), que la carta pide aceptar en su sección 10.
 
-- Los campos entre corchetes los llena la empresa. Lo que guarda la base está marcado con (base). La tabla `domain_authorizations` también guarda la ruta del PDF firmado, su huella sha256 y quién lo cargó. El alcance (plan, GitHub, Docker Hub y exclusiones) solo queda en el PDF.
+- Los campos entre corchetes los llena la empresa. Lo que guarda la base está marcado con (base). La tabla `domain_authorizations` también guarda la ruta del PDF firmado (`signed_document_key`), su huella sha256 (`signed_document_sha256`) y el administrador que lo cargó (`accepted_by`). El alcance (plan, GitHub, Docker Hub y exclusiones) solo queda en el PDF.
 - Se firma una carta por cada dominio raíz, porque la base guarda una autorización por dominio.
-- Un administrador de la empresa sube el PDF firmado al portal (máximo 5 MB). LowTide guarda su huella sha256.
+- Un administrador de la empresa sube el PDF firmado al portal (máximo 5 MB, tarjeta #26). LowTide guarda su huella sha256.
+- Sin una carta vigente y sin revocar, el dominio no entra a ningún análisis (punto 1 de la sección 1 de la política).
 - Plantilla académica del equipo Kernel Loco. Antes de usarla con un cliente real, incluido el dominio del socio formador de la tarjeta #76, debe revisarla un abogado o el área legal de esa empresa.
 
 ---
