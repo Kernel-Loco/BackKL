@@ -50,7 +50,7 @@ class Esquema(unittest.TestCase):
 
     def test_2_crtsh_cumple_el_contrato(self):
         cliente = crtsh.ClienteCrtsh(transporte=CrtshSimulado(), dormir=lambda s: None)
-        res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'])
+        res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
         self.assertTrue(res.hallazgos)
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
@@ -146,7 +146,7 @@ class Esquema(unittest.TestCase):
 
     def test_8_crtsh_da_una_clave_distinta_a_cada_dominio_parecido(self):
         cliente = crtsh.ClienteCrtsh(transporte=CrtshSimulado(), dormir=lambda s: None)
-        res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'])
+        res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
         parecidos = [h for h in res.hallazgos if h.codigo == 'lookalike_domain']
         self.assertTrue(parecidos)
         self.assertEqual(len({h.clave for h in parecidos}), len(parecidos))
@@ -359,6 +359,19 @@ class Ejecutar(unittest.TestCase):
         self.assertTrue(contrato.CARPETA_GRABADAS.is_dir())
         for fuente in REGISTRO:
             self.assertEqual(cargar(fuente).CARPETA_GRABADAS.parent, contrato.CARPETA_GRABADAS, fuente)
+
+    def test_16_un_escaneo_nunca_busca_dominios_parecidos(self):
+        """ejecutar() es el camino del portal y del orquestador: crt.sh solo consulta el dominio autorizado."""
+        for modo in ('vivo', 'grabar'):
+            t = CrtshSimulado()
+            with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                    mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
+                res = contrato.ejecutar(cargar('ct_logs'), 'acme-demo.mx', modo=modo, ahora=AHORA,
+                                        propios=['acme-demo.com.mx'], codigos=set(crtsh.CODIGOS))
+            consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
+            self.assertEqual(consultas, ['%.acme-demo.mx'], modo)  # ni %acme-demo% ni variantes como acme-dem0.mx
+            self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']), modo)
+            self.assertEqual({h.codigo for h in res.hallazgos}, {'cert_expired', 'cert_expiring_soon'}, modo)
 
 
 class Reintentos(unittest.TestCase):

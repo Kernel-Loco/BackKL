@@ -283,6 +283,8 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
     Si el dominio no es un nombre válido, no llama al recolector. El resultado tiene que ser del dominio
     autorizado y de la fuente del recolector. Primero se valida y luego se filtra por alcance, así un activo
     mal formado deja la fuente en 'failed' en lugar de perderse.
+    A recolectar() solo le pasa dominio, cliente, ahora y propios. Lo que un recolector apaga por defecto, como
+    la búsqueda de dominios parecidos de crt.sh, nunca se prende desde un escaneo.
     """
     fuente = getattr(recolector, 'FUENTE', '') or getattr(recolector, '__name__', '?')
     fuente = fuente if isinstance(fuente, str) else '?'

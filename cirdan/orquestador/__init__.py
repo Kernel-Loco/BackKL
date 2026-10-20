@@ -183,7 +183,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None)
     Un recolector que falla no tumba el escaneo: su fuente queda en 'retrying' (los reintentos
     los programa #27) y el escaneo termina 'partial'. También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
-    se muestran como 0 hallazgos. Devuelve un resumen.
+    se muestran como 0 hallazgos. crt.sh nunca busca dominios parecidos desde aquí, porque consulta
+    variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
     """
     fqdn = fqdn.strip().lower().rstrip('.')
     with _tx(org, conn) as c:
