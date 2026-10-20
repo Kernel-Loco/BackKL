@@ -104,10 +104,10 @@ class RespaldoSimulado:
         return [u for u in self.urls if urllib.parse.urlparse(u).netloc == host]
 
 
-def recolectar(transporte, carpeta=None, modo='vivo', **kw):
+def recolectar(transporte, carpeta=None, modo='vivo', parecidos=False, **kw):
     cliente = crtsh.ClienteCrtsh(modo=modo, carpeta=carpeta or crtsh.CARPETA_GRABADAS, transporte=transporte,
                                  dormir=lambda s: None, **kw)
-    return crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx']), cliente
+    return crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'], parecidos=parecidos), cliente
 
 
 def sin_red(url, timeout):
@@ -118,7 +118,7 @@ class Respaldo(unittest.TestCase):
 
     def setUp(self):
         self.t = RespaldoSimulado()
-        self.res, _ = recolectar(self.t)
+        self.res, _ = recolectar(self.t, parecidos=True)  # aunque se pidan, con crt.sh caído no se buscan
         self.activos = {a.valor: a for a in self.res.activos}
         self.hallazgos = {(h.codigo, h.activo): h for h in self.res.hallazgos}
 
@@ -215,7 +215,7 @@ class Respaldo(unittest.TestCase):
 
     def test_9_si_crtsh_responde_no_consulta_cert_spotter(self):
         t = RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS})
-        res, _ = recolectar(t)
+        res, _ = recolectar(t, parecidos=True)
         self.assertEqual((t.de('api.certspotter.com'), res.sin_cobertura), ([], []))
         h = {(h.codigo, h.activo): h for h in res.hallazgos}[('cert_expired', 'dev.acme-demo.mx')]
         self.assertEqual((h.evidencia['origen'], h.evidencia['crtsh_id']), ('crtsh', 4))
@@ -260,11 +260,11 @@ class GrabarYReproducir(unittest.TestCase):
             self.assertEqual(res.sin_cobertura, ['cert_expired', 'lookalike_domain'])
 
             sano = RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS})
-            res, _ = recolectar(sano, d, 'grabar', completar=True, desde=desde)
+            res, _ = recolectar(sano, d, 'grabar', parecidos=True, completar=True, desde=desde)
             self.assertEqual((sano.de('api.certspotter.com'), res.sin_cobertura, crtsh.codigo_salida(res)), ([], [], 0))
             self.assertFalse(list(Path(d).glob('falla_*.json')))  # crt.sh ya respondió: la falla no se repite
 
-            grabado, _ = recolectar(sin_red, d, 'reproducir')
+            grabado, _ = recolectar(sin_red, d, 'reproducir', parecidos=True)
         self.assertEqual((grabado.activos, grabado.hallazgos, grabado.sin_cobertura), (res.activos, res.hallazgos, []))
 
     def test_4_reproducir_sin_grabacion_de_cert_spotter_queda_failed(self):
@@ -323,9 +323,10 @@ class GrabarYReproducir(unittest.TestCase):
                     raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
                 return super().__call__(url, timeout)
         with tempfile.TemporaryDirectory() as d:
-            vivo, _ = recolectar(SinComodin(crtsh={'acme-demo.mx': SUBDOMINIOS}), d, 'grabar', nueva=True)
+            vivo, _ = recolectar(SinComodin(crtsh={'acme-demo.mx': SUBDOMINIOS}), d, 'grabar', parecidos=True,
+                                 nueva=True)
             self.assertTrue((Path(d) / 'falla_subdominios_acme-demo.mx.json').exists())
-            grabado, _ = recolectar(sin_red, d, 'reproducir')
+            grabado, _ = recolectar(sin_red, d, 'reproducir', parecidos=True)
         self.assertIn('crt.sh no respondió a %.acme-demo.mx. Se usó la búsqueda por nombre', vivo.avisos[0])
         self.assertEqual((grabado.avisos, grabado.activos, grabado.sin_cobertura), (vivo.avisos, vivo.activos, []))
 

@@ -5,7 +5,13 @@ dominio, y devuelve:
 - los subdominios del dominio autorizado (activos),
 - certificados vencidos de nombres que todavía resuelven en DNS, o que vencen en menos de 30 días
   cuando les queda menos de un tercio de su vida (hallazgos),
-- dominios parecidos que ya tienen un certificado emitido (hallazgos).
+- dominios parecidos que ya tienen un certificado emitido (hallazgos), solo si se piden.
+
+La búsqueda de dominios parecidos consulta en crt.sh variantes del dominio que pueden ser de terceros, así que
+va apagada por defecto. El orquestador (#22) nunca la prende: contrato.ejecutar() no pasa `parecidos`. En la
+terminal solo se prende con --con-parecidos. Úsalo solo cuando el equipo apruebe las variantes que consulta:
+%marca% y las de candidatos_parecidos(). Sin esa búsqueda, lookalike_domain queda en sin_cobertura: cobertura
+parcial, nunca 0 parecidos. --sin-parecidos se sigue aceptando y hace lo mismo que no ponerlo.
 
 Modos: 'vivo' consulta crt.sh; 'grabar' además guarda cada respuesta en
 cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/; 'reproducir' solo lee esas respuestas, sin red
@@ -15,6 +21,7 @@ vencidos ni dominios parecidos: esos dos códigos quedan en sin_cobertura. Si Ce
 responde, el resultado queda en 'failed' y no trae activos ni hallazgos.
 
     python -m cirdan.recolectores.crtsh olmardo.com
+    python -m cirdan.recolectores.crtsh olmardo.com --con-parecidos     (solo cuando el equipo apruebe las variantes)
     python -m cirdan.recolectores.crtsh olmardo.com --grabar
     python -m cirdan.recolectores.crtsh olmardo.com --grabar --completar
     python -m cirdan.recolectores.crtsh olmardo.com --reproducir
@@ -60,7 +67,7 @@ DIAS_POR_VENCER = 30         # vence en menos de esto = hallazgo...
 FRACCION_POR_VENCER = 3      # ...y le queda menos de 1/3 de su vida (los de vida corta se renuevan solos)
 VENTANA_VENCIDOS_DIAS = 365  # vencido hace más de esto ya no es hallazgo; el subdominio queda como activo
 VENTANA_PARECIDOS_DIAS = 90  # un dominio parecido cuenta si tiene un certificado vigente o vencido hace menos de esto
-MAX_CANDIDATOS = 10          # variantes que se consultan por escaneo
+MAX_CANDIDATOS = 10          # variantes que se consultan con --con-parecidos
 FALLAS_SEGUIDAS = 3          # si tantas variantes seguidas fallan, crt.sh está saturado y se dejan las demás
 INTENTOS = 3                 # intentos HTTP por consulta dentro de una corrida (no es scan_source_runs.attempt)
 ESPERAS = (5, 15)            # segundos entre intentos; crt.sh suele recuperarse en segundos
@@ -432,9 +439,11 @@ def _parecidos(dominio, certs_por_tipo, propios, ahora):
 
 # ---------------------------------------------------------------- punto de entrada
 
-def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=True, max_candidatos=MAX_CANDIDATOS):
-    """Recolecta subdominios, vigencia de certificados y dominios parecidos de `dominio`.
+def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, max_candidatos=MAX_CANDIDATOS):
+    """Recolecta subdominios y vigencia de certificados de `dominio`, y sus dominios parecidos si `parecidos`.
 
+    `parecidos` va apagado por defecto porque consulta variantes del dominio que pueden ser de terceros. Solo lo
+    prende el CLI con --con-parecidos. Sin esa búsqueda, lookalike_domain queda en sin_cobertura.
     `propios` son los otros dominios de la misma empresa, que nunca cuentan como parecidos.
     """
     dominio = dominio.strip().lower().rstrip('.')
@@ -613,13 +622,19 @@ def _main(argv=None):
     # En Windows, cuando la salida no es la consola (Git Bash, una tubería), Python usa cp1252 y los acentos se rompen.
     if (getattr(sys.stdout, 'encoding', '') or '').lower().replace('-', '') != 'utf8' and hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
-    p = argparse.ArgumentParser(description='Subdominios, certificados y dominios parecidos desde crt.sh')
+    p = argparse.ArgumentParser(description='Subdominios y certificados desde crt.sh. Dominios parecidos solo con '
+                                            '--con-parecidos')
     p.add_argument('dominio')
     p.add_argument('--grabar', action='store_true',
                    help='empieza una grabación nueva en cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/')
     p.add_argument('--completar', action='store_true', help='con --grabar, solo consulta lo que aún no está grabado')
     p.add_argument('--reproducir', action='store_true', help='usa solo las respuestas grabadas, sin red')
-    p.add_argument('--sin-parecidos', action='store_true')
+    buscar = p.add_mutually_exclusive_group()
+    buscar.add_argument('--con-parecidos', action='store_true',
+                        help='también busca dominios parecidos: consulta en crt.sh %%marca%% y las variantes de '
+                             'candidatos_parecidos(), que pueden ser de terceros. Úsalo solo cuando el equipo las apruebe')
+    buscar.add_argument('--sin-parecidos', action='store_true',
+                        help='no busca dominios parecidos. Ya es lo predeterminado y se acepta igual que antes')
     p.add_argument('--json', action='store_true', help='imprime el resultado completo en JSON')
     a = p.parse_args(argv)
     if a.completar and not a.grabar:
@@ -645,7 +660,7 @@ def _main(argv=None):
                   'certificados, lo reemplaza.', file=sys.stderr)
     cliente = ClienteCrtsh(modo=modo, carpeta=carpeta, completar=a.completar, desde=desde,
                            nueva=a.grabar and not a.completar)
-    res = recolectar(dominio, cliente, parecidos=not a.sin_parecidos)
+    res = recolectar(dominio, cliente, parecidos=a.con_parecidos)
     if a.json:
         print(json.dumps(res.a_dict(), ensure_ascii=False, indent=1))
     else:

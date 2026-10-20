@@ -20,6 +20,7 @@ from cirdan.db import DSN
 from cirdan.orquestador.txt import ConsultaTxt
 from cirdan.recolectores import crtsh
 from pruebas.test_certspotter import AHORA, RespaldoSimulado
+from pruebas.test_crtsh import CrtshSimulado
 
 ACME = '20000000-0000-4000-8000-000000000001'
 TXT_ACME = 'cirdan-verification=c41d7e2a9b06'   # token de acme-demo.mx en la semilla
@@ -108,6 +109,22 @@ class Orquestador(unittest.TestCase):
         run = self.uno('SELECT status, attempt FROM scan_source_runs WHERE scan_id = %s', s.scan_id)
         self.assertEqual((run['status'], run['attempt']), ('succeeded', 0))
         self.assertEqual(self.uno('SELECT status FROM scans WHERE id = %s', s.scan_id)['status'], 'partial')
+
+    def test_3c_un_escaneo_en_vivo_nunca_busca_dominios_parecidos(self):
+        """Lo que corre POST /api/v1/domains/{fqdn}/scans: crt.sh solo consulta el dominio autorizado. El crt.sh es
+        simulado, así que nada sale a la red aunque se deje pasar acme-demo.mx como dominio en vivo."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        t = CrtshSimulado()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                mock.patch.object(crtsh, '_descargar', t), \
+                mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
+                                         conn=self.conn)
+        consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
+        self.assertEqual(consultas, ['%.acme-demo.mx'])  # ni %acme-demo% ni variantes como acme-dem0.mx
+        self.assertEqual(resumen['status'], 'partial')
+        self.assertEqual(resumen['stats']['rules_without_coverage'], ['lookalike_domain'])
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 2)  # el vencido y el que vence pronto, ningún parecido
 
     # --------------------------------------------------------------------- rechaza
 
