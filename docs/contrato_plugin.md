@@ -10,7 +10,7 @@ Cada recolector es un módulo de `cirdan/recolectores/` con tres cosas:
 |---|---|
 | `FUENTE` | El código de su fila en `data_sources`, por ejemplo `ct_logs` |
 | `crear_cliente(modo, dominio)` | Su cliente para `vivo`, `grabar` o `reproducir` |
-| `recolectar(dominio, cliente=None, ahora=None, propios=())` | Devuelve un `Resultado`. `propios` son los otros dominios de la misma empresa. Puede aceptar más opciones, pero cada una va apagada por defecto, porque `ejecutar()` solo pasa estas cuatro |
+| `recolectar(dominio, cliente=None, ahora=None, propios=())` | Devuelve un `Resultado`. `propios` son los otros dominios de la misma empresa. Puede aceptar más opciones, pero lo que consulte fuera del dominio autorizado va apagado por defecto, porque `ejecutar()` solo pasa estas cuatro |
 
 Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `cargar(fuente)` devuelve su módulo. Hoy están `ct_logs` (crt.sh con el respaldo de Cert Spotter, #14 y #14b) y `ejemplo`, que no consulta nada y sirve para probar el orquestador sin red.
 
