@@ -4,7 +4,7 @@ fastapi==0.143.0
 uvicorn==0.54.0
 psycopg[binary]==3.2.13
 argon2-cffi==25.1.0
-pyotp==2.9.0
+pyotp==2.10.0
 cryptography==50.0.2
 redis==5.2.1
 dnspython==2.9.0
