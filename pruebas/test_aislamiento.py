@@ -103,10 +103,10 @@ END $$;
 CREATE TEMP VIEW users AS
   SELECT '00000000-0000-4000-8000-0000000000aa'::uuid AS id, '%s'::uuid AS organization_id,
          'trampa'::text AS password_hash, 'admin'::text AS role, 'Trampa'::text AS full_name,
-         'trampa@ejemplo.invalid'::citext AS email, now() AS mfa_enabled_at,
+         'trampa@acme-demo.mx'::citext AS email, now() AS mfa_enabled_at,
          '\\x00'::bytea AS totp_secret_enc, pg_temp.escalar() AS is_active;
-SELECT relpersistence FROM pg_class WHERE oid = 'users'::regclass;
-SELECT count(*) FROM login_lookup('trampa@ejemplo.invalid');
+SELECT relpersistence = 't' FROM pg_class WHERE oid = 'users'::regclass;
+SELECT count(*) FROM login_lookup('trampa@acme-demo.mx');
 RESET ROLE;
 SELECT rolsuper FROM pg_roles WHERE rolname = 'cirdan_app';
 ROLLBACK;
@@ -121,7 +121,7 @@ class LoginLookup(unittest.TestCase):
         self.assertEqual(config, 'true,search_path=pg_catalog, public, pg_temp')
 
     def test_10_una_vista_temporal_no_engana_a_login_lookup(self):
-        ok, _, err = psql("CREATE TEMP VIEW users AS SELECT 1;")
+        ok, _, err = psql("BEGIN; CREATE TEMP VIEW users AS SELECT 1; ROLLBACK;")
         self.assertFalse(ok, 'cirdan_app no debe poder crear objetos temporales')
         self.assertIn('permission denied to create temporary tables', err)
         ok, out, err = psql(VISTA_TEMPORAL, user='postgres')

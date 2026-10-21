@@ -88,11 +88,11 @@ CREATE TEMP VIEW users AS
   SELECT '00000000-0000-4000-8000-0000000000aa'::uuid AS id,
          '20000000-0000-4000-8000-000000000001'::uuid AS organization_id,
          'trampa'::text AS password_hash, 'admin'::text AS role, 'Trampa'::text AS full_name,
-         'trampa@ejemplo.invalid'::citext AS email, now() AS mfa_enabled_at,
+         'trampa@acme-demo.mx'::citext AS email, now() AS mfa_enabled_at,
          '\x00'::bytea AS totp_secret_enc, pg_temp.escalar() AS is_active;
 SELECT current_user AS rol,
-       (SELECT relpersistence FROM pg_class WHERE oid = 'users'::regclass) AS users_para_la_app,
-       (SELECT count(*) FROM login_lookup('trampa@ejemplo.invalid')) AS filas_falsas;
+       (SELECT relpersistence = 't' FROM pg_class WHERE oid = 'users'::regclass) AS users_es_temporal,
+       (SELECT count(*) FROM login_lookup('trampa@acme-demo.mx')) AS filas_falsas;
 RESET ROLE;
 SELECT rolname, rolsuper FROM pg_roles WHERE rolname = 'cirdan_app';
 ROLLBACK;

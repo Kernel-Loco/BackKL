@@ -12,6 +12,7 @@ from pruebas.test_aislamiento import scalar
 
 JORDAN = 'jordan.tate@acme-demo.mx'   # analista de Acme
 MAYA = 'maya.reed@acme-demo.mx'       # gerente de Acme
+ALEX = 'alex.morgan@acme-demo.mx'     # admin de Acme
 INVALID = 'Correo o contraseña incorrectos.'
 
 
@@ -87,21 +88,32 @@ class Login(unittest.TestCase):
         code, _ = Client().post(AUTH + '/login', {'email': JORDAN, 'password': PASSWORD}, headers={'Origin': 'https://evil.example'})
         self.assertEqual(code, 403)
 
+    def _sin_mfa(self, email):
+        """Quita el MFA a una cuenta de demo solo durante la prueba y al final le devuelve la misma fecha.
+        Si una corrida anterior se cortó y la dejó sin fecha, le pone now(), como cirdan/auth/demo.py."""
+        antes = scalar("SELECT coalesce(quote_literal(mfa_enabled_at), 'now()') FROM users WHERE email = '%s';" % email,
+                       user='postgres')
+        self.addCleanup(scalar, "UPDATE users SET mfa_enabled_at = %s WHERE email = '%s' RETURNING 1;" % (antes, email),
+                        user='postgres')
+        scalar("UPDATE users SET mfa_enabled_at = NULL WHERE email = '%s' RETURNING 1;" % email, user='postgres')
+
     def test_9_sin_mfa_la_sesion_lleva_el_rol_de_la_base(self):
         # login_lookup() ya no devuelve el rol (migración 004): sin MFA, la API lo lee con RLS.
-        # A Jordan se le quita el MFA solo durante la prueba y se le devuelve la misma fecha.
-        antes = scalar("SELECT mfa_enabled_at FROM users WHERE email = '%s';" % JORDAN, user='postgres')
-        self.addCleanup(scalar, "UPDATE users SET mfa_enabled_at = '%s' WHERE email = '%s' RETURNING 1;" % (antes, JORDAN),
-                        user='postgres')
-        scalar("UPDATE users SET mfa_enabled_at = NULL WHERE email = '%s' RETURNING 1;" % JORDAN, user='postgres')
-        client = Client()
-        code, body = client.post(AUTH + '/login', {'email': JORDAN, 'password': PASSWORD})
-        self.assertEqual(code, 200)
-        self.assertFalse(body['mfa_required'])
-        self.assertEqual((body['user']['email'], body['user']['role']), (JORDAN, 'analyst'))
-        self.assertIsNotNone(client.cookie())
-        self.assertEqual(client.get(AUTH + '/me')[0], 200)
-        self.assertEqual(client.get('/api/v1/domains/txt')[0], 403, 'la sesión debe llevar el rol de analista')
+        # El rol de la sesión se ve en lo que deja hacer: solo admin lee los TXT y el gerente no pide
+        # escaneos. Un dominio que no existe responde 404 sin escribir nada.
+        for email, role, txt, scan in ((JORDAN, 'analyst', 403, 404), (ALEX, 'admin', 200, 404)):
+            with self.subTest(email=email):
+                self._sin_mfa(email)
+                client = Client()
+                code, body = client.post(AUTH + '/login', {'email': email, 'password': PASSWORD})
+                self.assertEqual(code, 200)
+                self.assertFalse(body['mfa_required'])
+                self.assertEqual((body['user']['email'], body['user']['role']), (email, role))
+                self.assertIsNotNone(client.cookie())
+                self.assertEqual(client.get(AUTH + '/me')[0], 200)
+                self.assertEqual(client.get('/api/v1/domains/txt')[0], txt, 'solo admin lee los TXT')
+                self.assertEqual(client.post('/api/v1/domains/no-existe.acme-demo.mx/scans')[0], scan,
+                                 'el gerente no puede pedir escaneos')
 
 
 if __name__ == '__main__':

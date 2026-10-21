@@ -73,13 +73,15 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/co
 
 ### Aplicar una migración nueva a una base que ya existe
 
-`cargar_cirdan.sh` solo corre con el volumen vacío, así que una base creada antes de una migración no la tiene. Para no borrar la base, aplica a mano cada migración que falte, en orden y desde la raíz del repo. Por ejemplo, la 004:
+`cargar_cirdan.sh` solo corre con el volumen vacío, así que una base creada antes de una migración no la tiene. Para no borrar la base, aplica a mano cada migración que falte, en orden y desde la raíz del repo.
+
+Para la 004, primero actualiza el código y reconstruye la API con `docker compose up -d --build`. Con la 004, `login_lookup()` ya no devuelve el rol. La API anterior lo leía de ahí y su login sin MFA daría 500. La API de esta versión lo lee con RLS en `/login` y funciona antes y después de aplicar la 004. Ya con esa API arriba, aplica la 004:
 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/004_login_lookup_seguro.sql
 ```
 
-La 004 corre en una sola transacción: si algo falla, la base queda como estaba. Se puede correr otra vez sin error. Con ella `login_lookup()` ya no devuelve el rol, así que la API debe ser una que lee el rol con RLS (la de RC-58 en adelante). Reconstrúyela con `docker compose up -d --build`. Comprueba el resultado con `prueba_rls.sql` (secciones [10] y [11]) o con `python -m unittest -v pruebas/test_aislamiento.py`.
+La 004 corre en una sola transacción: si algo falla, la base queda como estaba. Se puede correr otra vez sin error. Comprueba el resultado con `prueba_rls.sql` (secciones [10] y [11]) o con `python -m unittest -v pruebas/test_aislamiento.py`.
 
 ## Decisiones y desviaciones respecto al DBML
 
