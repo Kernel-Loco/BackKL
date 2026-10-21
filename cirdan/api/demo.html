@@ -12,15 +12,13 @@
     --crit: #ef4444; --high: #d97706; --med: #eab308; --low: #3b82f6; --ok: #22c55e;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 Inter, "Segoe UI", system-ui, sans-serif; }
   header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 18px 28px; border-bottom: 1px solid var(--line); }
   .logo { width: 34px; height: 34px; border-radius: 50%; background: var(--purple); display: grid; place-items: center; font-weight: 700; }
   h1 { font-size: 20px; margin: 0; }
   .sub { color: var(--muted); font-size: 13px; }
   .spacer { flex: 1; }
-  .pills { display: flex; gap: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 4px; }
-  .pill { border: 0; background: transparent; color: var(--muted); padding: 7px 14px; border-radius: 7px; cursor: pointer; font: inherit; }
-  .pill.on { background: var(--purple); color: #fff; }
   .badge { font: 12px/1 "Cascadia Mono", Consolas, monospace; color: var(--violet); border: 1px solid #4c3a8a; border-radius: 6px; padding: 6px 8px; }
   main { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 20px; padding: 20px 28px 28px; }
   @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
@@ -60,6 +58,10 @@
   .f span:first-child { flex: 1; }
   button.test { background: var(--chip); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 7px 12px; cursor: pointer; font: inherit; font-size: 13px; }
   button.test:hover { border-color: var(--violet); }
+  .login { max-width: 420px; margin: 40px auto; }
+  .login form { display: flex; flex-direction: column; gap: 10px; }
+  .login input { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; color: var(--text); padding: 9px 11px; font: inherit; }
+  .login input:focus { outline: none; border-color: var(--violet); }
 </style>
 </head>
 <body>
@@ -70,23 +72,31 @@
     <div class="sub" id="sub">PostgreSQL 16 · 23 tablas · consultas reales a través de la API</div>
   </div>
   <div class="spacer"></div>
-  <div class="pills" id="pills">
-    <button class="pill on" data-org="20000000-0000-4000-8000-000000000001">Acme Demo</button>
-    <button class="pill" data-org="20000000-0000-4000-8000-000000000002">Beta Corp</button>
-    <button class="pill" data-org="">Sin cliente</button>
-  </div>
-  <span class="badge" id="role">rol: …</span>
+  <span class="sub" id="who" hidden></span>
+  <button class="test" id="logout" hidden>Cerrar sesión</button>
+  <span class="badge" id="role" hidden>rol: …</span>
 </header>
-<main>
+<section class="card login" id="login" hidden>
+  <h2>Inicia sesión</h2>
+  <div class="hint">El explorador pide sesión como el resto de la API y muestra solo los datos de la empresa de esa sesión. Las cuentas de demo están en docs/cuentas_de_prueba.md.</div>
+  <form id="loginForm">
+    <input id="email" type="email" placeholder="Correo" autocomplete="username" required>
+    <input id="password" type="password" placeholder="Contraseña" autocomplete="current-password" required>
+    <input id="code" placeholder="Código de 6 dígitos" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" hidden>
+    <button class="test" type="submit">Entrar</button>
+  </form>
+  <div class="err" id="loginErr" style="margin-top:10px"></div>
+</section>
+<main id="main" hidden>
   <section class="card">
-    <h2>Las 23 tablas y las filas que ve este cliente</h2>
+    <h2>Las 23 tablas y las filas que ve esta empresa</h2>
     <div class="hint">Morado = protegida con Row-Level Security. Gris = catálogo compartido. Clic en una tabla para ver sus filas.</div>
     <div id="groups"></div>
   </section>
   <div class="stack">
     <section class="card">
       <h2 id="rowsTitle">Filas de domains</h2>
-      <div class="hint">Lo que devuelve la base para el cliente elegido (máximo 8 filas, sin columnas secretas)</div>
+      <div class="hint">Lo que devuelve la base para la empresa de la sesión (máximo 8 filas, sin columnas secretas)</div>
       <div class="scroll" id="rows"></div>
     </section>
     <section class="card">
@@ -97,25 +107,31 @@
     </section>
     <section class="card">
       <h2>Prueba en vivo de aislamiento</h2>
-      <div class="hint">Beta Corp pide los hallazgos de acme-demo.mx, que es de Acme</div>
-      <button class="test" id="probe">Intentar como Beta Corp</button>
+      <div class="hint">Pide los hallazgos de acme-demo.mx, que es de Acme, con la sesión abierta. Con la sesión de Beta Corp responde 404</div>
+      <button class="test" id="probe">Intentar</button>
       <div id="probeOut" style="margin-top:10px"></div>
     </section>
   </div>
 </main>
 <script>
-const ACME = '20000000-0000-4000-8000-000000000001', BETA = '20000000-0000-4000-8000-000000000002';
-let org = ACME, selTable = 'domains', selDomain = null, last = {};
+// La empresa sale de la sesión (cookie httpOnly lt_session), igual que en el portal. La página no la elige.
+let me = null, mfaToken = null, selTable = 'domains', selDomain = null, last = {};
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
-async function api(path, who = org) {
-  const r = await fetch(path, {headers: who ? {'X-Organization': who} : {}});
-  return {status: r.status, body: await r.json()};
+const detail = b => typeof b?.detail === 'string' ? b.detail : 'Revisa los datos e inténtalo de nuevo.';
+async function api(path, data) {
+  const r = await fetch(path, data === undefined ? {credentials: 'same-origin'}
+    : {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)});
+  const text = await r.text();
+  const body = text ? JSON.parse(text) : null;
+  if (r.status === 401 && me && !path.startsWith('/api/v1/auth/')) showLogin(detail(body));
+  return {status: r.status, body};
 }
 const color = l => ({Critical: 'var(--crit)', High: 'var(--high)', Medium: 'var(--med)', Low: 'var(--low)'}[l] || 'var(--dim)');
 
 async function loadTables() {
-  const {body} = await api('/db/tables');
+  const {status, body} = await api('/db/tables');
+  if (status !== 200) return;
   $('role').textContent = 'rol: ' + body.role;
   $('sub').textContent = 'PostgreSQL 16 · 23 tablas · cliente activo: ' + (body.organization || 'ninguno');
   const groups = {};
@@ -134,7 +150,8 @@ async function loadTables() {
 
 async function loadRows() {
   $('rowsTitle').textContent = 'Filas de ' + selTable;
-  const {body} = await api(`/db/tables/${selTable}/rows`);
+  const {status, body} = await api(`/db/tables/${selTable}/rows`);
+  if (status !== 200) return;
   $('rows').innerHTML = body.rows.length ? `<table><tr>${body.columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr>${
     body.rows.map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join('')}</tr>`).join('')}</table>`
     : '<div class="empty">0 filas visibles para este cliente.</div>';
@@ -142,15 +159,15 @@ async function loadRows() {
 
 async function loadDomains() {
   $('detail').innerHTML = '';
-  if (!org) { $('domains').innerHTML = '<div class="empty">Sin cliente la base no devuelve ningún dominio: falla cerrada.</div>'; return; }
-  const {body} = await api('/domains');
-  $('domains').innerHTML = body.map(d => `
+  const {status, body} = await api('/domains');
+  if (status !== 200) return;
+  $('domains').innerHTML = body.length ? body.map(d => `
     <div class="dom ${d.domain === selDomain ? 'sel' : ''}" data-d="${esc(d.domain)}">
       <span class="fq">${esc(d.domain)}</span>
       <div class="bar"><i style="width:${d.score || 0}%;background:${color(d.level)}"></i></div>
       <b>${d.score ?? '—'}</b>
       <span class="lvl ${d.level || 'none'}">${d.level || d.authorization}</span>
-    </div>`).join('');
+    </div>`).join('') : '<div class="empty">Esta empresa no tiene dominios.</div>';
   document.querySelectorAll('.dom').forEach(e => e.onclick = () => { selDomain = e.dataset.d; loadDomains().then(loadDetail); });
 }
 
@@ -169,16 +186,50 @@ async function loadDetail() {
 }
 
 $('probe').onclick = async () => {
-  const r = await api('/domains/acme-demo.mx/findings', BETA);
-  $('probeOut').innerHTML = `<div class="err">GET /domains/acme-demo.mx/findings · X-Organization: Beta Corp → HTTP ${r.status}</div>
-    <div class="sub" style="margin-top:4px">${esc(r.body.detail || JSON.stringify(r.body))}</div>`;
+  const r = await api('/domains/acme-demo.mx/findings');
+  if (!me) return;
+  $('probeOut').innerHTML = `<div class="err">GET /domains/acme-demo.mx/findings · sesión de ${esc(me.organization_name)} → HTTP ${r.status}</div>
+    <div class="sub" style="margin-top:4px">${esc(r.status === 200 ? r.body.length + ' hallazgos abiertos: el dominio es de esta empresa' : detail(r.body))}</div>`;
 };
-document.querySelectorAll('.pill').forEach(p => p.onclick = () => {
-  document.querySelectorAll('.pill').forEach(x => x.classList.toggle('on', x === p));
-  org = p.dataset.org; selDomain = null; refresh();
-});
 async function refresh() { await Promise.all([loadTables(), loadRows(), loadDomains()]); }
-refresh();
+
+// Sin sesión no se ve nada: la página pide correo, contraseña y el código MFA a /api/v1/auth.
+function showLogin(message = '') {
+  me = null; mfaToken = null;
+  ['main', 'who', 'logout', 'role'].forEach(id => $(id).hidden = true);
+  $('login').hidden = false; $('code').hidden = true; $('code').required = false; $('code').value = '';
+  $('loginErr').textContent = message;
+}
+async function start() {
+  const r = await api('/api/v1/auth/me');
+  if (r.status !== 200) return showLogin();
+  me = r.body;
+  $('who').textContent = me.email + ' · ' + me.organization_name;
+  $('probe').textContent = 'Intentar como ' + me.organization_name;
+  $('probeOut').innerHTML = '';
+  $('login').hidden = true;
+  ['main', 'who', 'logout', 'role'].forEach(id => $(id).hidden = false);
+  selDomain = null; last = {};
+  refresh();
+}
+$('loginForm').onsubmit = async e => {
+  e.preventDefault();
+  $('loginErr').textContent = '';
+  const r = mfaToken
+    ? await api('/api/v1/auth/mfa/verify', {mfa_token: mfaToken, code: $('code').value})
+    : await api('/api/v1/auth/login', {email: $('email').value, password: $('password').value});
+  if (r.status === 200 && r.body.mfa_required) {
+    mfaToken = r.body.mfa_token;
+    $('code').hidden = false; $('code').required = true; $('code').focus();
+    return;
+  }
+  if (r.status === 200) { $('password').value = ''; mfaToken = null; return start(); }
+  // 'Tu verificación expiró. Inicia sesión de nuevo.': vuelve a pedir correo y contraseña
+  if (mfaToken && detail(r.body).includes('Inicia sesión de nuevo')) return showLogin(detail(r.body));
+  $('loginErr').textContent = detail(r.body);
+};
+$('logout').onclick = async () => { await api('/api/v1/auth/logout', {}); showLogin(); };
+start();
 </script>
 </body>
 </html>

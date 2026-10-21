@@ -3,7 +3,8 @@
 Entra como el rol de la aplicación `cirdan_app` (sin superusuario ni BYPASSRLS). La empresa
 de quien llama sale de su sesión (cookie httpOnly `lt_session`, #25): cada petición fija
 `app.current_org` con ella y Row-Level Security hace el resto, así que ninguna consulta
-filtra por organización. El encabezado `X-Organization` solo existe en el modo demo de /demo.
+filtra por organización. Ninguna ruta toma la empresa de un encabezado. El explorador de /demo
+y /db solo existe con DEMO_EXPLORER=true y también pide sesión (RC-58).
 
     docker compose up -d            (o, fuera de Docker: python -m uvicorn cirdan.api.main:app --port 8000)
     Documentación: http://127.0.0.1:8000/docs
@@ -15,17 +16,18 @@ from fastapi.responses import JSONResponse
 
 from cirdan.auth.deps import Session, current_session
 from cirdan.api.escaneos import router as scans_router
+from cirdan.api.explorer import router as explorer_router
 from cirdan.api.v1 import router as v1_router
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import config
-from cirdan.db import DSN, transaction
+from cirdan.db import transaction
 
 app = FastAPI(
     title='Cirdan API',
     version='0.2.0',
     description='Inicio de sesión con MFA y endpoints de solo lectura sobre la base cirdan (PostgreSQL 16). '
                 'La empresa sale de la sesión y el aislamiento lo aplica Row-Level Security en la base. '
-                'Vista visual de la base (modo demo) en /demo.',
+                'Con DEMO_EXPLORER=true, vista visual de la base en /demo, también con sesión.',
 )
 
 # Orígenes que pueden mandar POST con la cookie: el portal y la propia API.
@@ -48,8 +50,10 @@ app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(v1_router)
 
-from cirdan.api.explorer import register  # noqa: E402
-register(app, DSN)
+# Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas
+# rutas no existen (404). Nunca true en producción.
+if config('DEMO_EXPLORER', 'false').lower() == 'true':
+    app.include_router(explorer_router)
 
 
 def query(session, sql, params=()):
