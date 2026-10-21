@@ -8,6 +8,7 @@ import unittest
 
 from pruebas import sesion
 from pruebas.sesion import AUTH, PASSWORD, Client
+from pruebas.test_aislamiento import scalar
 
 JORDAN = 'jordan.tate@acme-demo.mx'   # analista de Acme
 MAYA = 'maya.reed@acme-demo.mx'       # gerente de Acme
@@ -85,6 +86,22 @@ class Login(unittest.TestCase):
     def test_8_un_sitio_ajeno_no_puede_mandar_el_login(self):
         code, _ = Client().post(AUTH + '/login', {'email': JORDAN, 'password': PASSWORD}, headers={'Origin': 'https://evil.example'})
         self.assertEqual(code, 403)
+
+    def test_9_sin_mfa_la_sesion_lleva_el_rol_de_la_base(self):
+        # login_lookup() ya no devuelve el rol (migración 004): sin MFA, la API lo lee con RLS.
+        # A Jordan se le quita el MFA solo durante la prueba y se le devuelve la misma fecha.
+        antes = scalar("SELECT mfa_enabled_at FROM users WHERE email = '%s';" % JORDAN, user='postgres')
+        self.addCleanup(scalar, "UPDATE users SET mfa_enabled_at = '%s' WHERE email = '%s' RETURNING 1;" % (antes, JORDAN),
+                        user='postgres')
+        scalar("UPDATE users SET mfa_enabled_at = NULL WHERE email = '%s' RETURNING 1;" % JORDAN, user='postgres')
+        client = Client()
+        code, body = client.post(AUTH + '/login', {'email': JORDAN, 'password': PASSWORD})
+        self.assertEqual(code, 200)
+        self.assertFalse(body['mfa_required'])
+        self.assertEqual((body['user']['email'], body['user']['role']), (JORDAN, 'analyst'))
+        self.assertIsNotNone(client.cookie())
+        self.assertEqual(client.get(AUTH + '/me')[0], 200)
+        self.assertEqual(client.get('/api/v1/domains/txt')[0], 403, 'la sesión debe llevar el rol de analista')
 
 
 if __name__ == '__main__':

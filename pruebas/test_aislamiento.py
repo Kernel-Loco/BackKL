@@ -86,5 +86,57 @@ class ReglasDeNegocio(unittest.TestCase):
         self.assertIn('solo inserción', err)
 
 
+LOGIN_LOOKUP = "'login_lookup(citext)'::regprocedure"
+
+# Ataque de la revisión de seguridad (migración 004): una vista temporal `users` que llama una
+# función temporal que vuelve superusuario a cirdan_app. Si login_lookup() leyera esa vista, la
+# función correría como postgres. TEMPORARY se le presta a cirdan_app dentro de la transacción,
+# y el ROLLBACK lo deshace todo.
+VISTA_TEMPORAL = """BEGIN;
+GRANT TEMPORARY ON DATABASE cirdan TO cirdan_app;
+SET LOCAL ROLE cirdan_app;
+CREATE FUNCTION pg_temp.escalar() RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+  ALTER ROLE cirdan_app SUPERUSER;
+  RETURN true;
+END $$;
+CREATE TEMP VIEW users AS
+  SELECT '00000000-0000-4000-8000-0000000000aa'::uuid AS id, '%s'::uuid AS organization_id,
+         'trampa'::text AS password_hash, 'admin'::text AS role, 'Trampa'::text AS full_name,
+         'trampa@ejemplo.invalid'::citext AS email, now() AS mfa_enabled_at,
+         '\\x00'::bytea AS totp_secret_enc, pg_temp.escalar() AS is_active;
+SELECT relpersistence FROM pg_class WHERE oid = 'users'::regclass;
+SELECT count(*) FROM login_lookup('trampa@ejemplo.invalid');
+RESET ROLE;
+SELECT rolsuper FROM pg_roles WHERE rolname = 'cirdan_app';
+ROLLBACK;
+""" % ACME
+
+
+class LoginLookup(unittest.TestCase):
+
+    def test_9_search_path_fijo_que_termina_en_pg_temp(self):
+        config = scalar("SELECT prosecdef || ',' || array_to_string(proconfig, ';') FROM pg_proc WHERE oid = %s;"
+                        % LOGIN_LOOKUP)
+        self.assertEqual(config, 'true,search_path=pg_catalog, public, pg_temp')
+
+    def test_10_una_vista_temporal_no_engana_a_login_lookup(self):
+        ok, _, err = psql("CREATE TEMP VIEW users AS SELECT 1;")
+        self.assertFalse(ok, 'cirdan_app no debe poder crear objetos temporales')
+        self.assertIn('permission denied to create temporary tables', err)
+        ok, out, err = psql(VISTA_TEMPORAL, user='postgres')
+        self.assertTrue(ok, err)
+        # t: para cirdan_app, `users` ya es la vista temporal. 0: login_lookup() no la leyó. f: no escaló.
+        self.assertEqual(out.splitlines(), ['t', '0', 'f'])
+        self.assertEqual(scalar("SELECT rolsuper FROM pg_roles WHERE rolname = 'cirdan_app';"), 'f')
+
+    def test_11_login_lookup_devuelve_solo_4_columnas(self):
+        self.assertEqual(scalar("SELECT pg_get_function_result(%s);" % LOGIN_LOOKUP),
+                         'TABLE(user_id uuid, organization_id uuid, password_hash text, mfa_enabled boolean)')
+        fila = scalar("SELECT * FROM login_lookup('jordan.tate@acme-demo.mx');").split('|')
+        self.assertEqual(len(fila), 4)
+        self.assertEqual(fila[:2], ['30000000-0000-4000-8000-000000000003', ACME])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

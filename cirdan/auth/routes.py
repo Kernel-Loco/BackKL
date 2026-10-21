@@ -81,7 +81,11 @@ def login(body: LoginIn, request: Request, response: Response):
             conn.execute('UPDATE users SET password_hash = %s WHERE id = %s', (passwords.hash_password(body.password), user_id))
         if found['mfa_enabled']:
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org})}
-        user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': found['role'], 'email': email}, ip, 'password')
+        # login_lookup() no devuelve el rol (migración 004): se lee aquí con RLS, como en /mfa/verify
+        row = conn.execute('SELECT role FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
+        if not row:  # se desactivó la cuenta entre la búsqueda y aquí
+            raise HTTPException(401, INVALID)
+        user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': email}, ip, 'password')
     return {'mfa_required': False, 'user': user}
 
 
