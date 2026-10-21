@@ -29,7 +29,9 @@ MAX_FAILS_IP = 20
 def _valkey():
     url = config('VALKEY_URL') or 'redis://:%s@%s:%s/0' % (
         config('VALKEY_PASSWORD', ''), config('VALKEY_HOST', '127.0.0.1'), config('VALKEY_PORT', '6379'))
-    return redis.Redis.from_url(url, decode_responses=True, socket_timeout=3)
+    # Si Valkey no contesta, falla a los 3 s. Con redis 8.1 el tiempo para conectar ya no
+    # sale de socket_timeout (serían 5 s), por eso va aparte.
+    return redis.Redis.from_url(url, decode_responses=True, socket_timeout=3, socket_connect_timeout=3)
 
 
 def _digest(token):
