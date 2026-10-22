@@ -5,8 +5,8 @@
 
 Lee maestro.jsonl y las etiquetas devueltas en etiquetas/etiquetador_N.csv, con las columnas id y etiqueta (nota es
 opcional). Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media
-o baja. Si hay un error, o si no hay ningún archivo de etiquetas, no escribe nada. Si falta el archivo de un
-etiquetador, sus filas del reparto salen del dataset y lo demás sigue (plan B del reparto).
+o baja. Si hay un error, o si no hay etiquetas de personas, no escribe nada. Si falta el archivo de un etiquetador,
+sus filas del reparto salen del dataset y lo demás sigue (plan B del reparto), salvo que las cubra el LLM.
 
 En el bloque común la etiqueta final es la mayoría de etiquetador_2 a etiquetador_4, y media si no hay mayoría.
 Si falta uno de los tres, deciden los otros dos: si no coinciden queda media, y n_etiquetas es 2.
@@ -14,6 +14,14 @@ etiquetador_1 conoce la clase esperada de cada plantilla, así que su etiqueta s
 Escribe dataset.csv y acuerdo.json: kappa de Fleiss con los 4 y sin etiquetador_1, acuerdo simple, kappa de Cohen
 por pares, qué parte de las etiquetas coincide con clase_reglas y con la sensibilidad, y el F1 macro que sacan en el
 set de prueba las dos líneas base que #34 tiene que superar: las reglas y copiar la sensibilidad.
+
+Etiquetador LLM, opcional y declarado: etiquetas/llm.csv trae todas las filas del maestro y etiquetas/llm_repeticion.csv
+una segunda pasada del bloque común. Se revisan igual que los de las personas. El LLM nunca vota: no entra en la
+etiqueta final, en el kappa de Fleiss ni en el kappa de Cohen entre personas. La sección llm de acuerdo.json trae su
+kappa contra la etiqueta final de las personas en el bloque común y contra cada persona, si repite sus etiquetas y
+cuánto coincide con clase_reglas y con la sensibilidad. Si falta el archivo de etiquetador_2, etiquetador_3 o
+etiquetador_4 y ese kappa es de UMBRAL_LLM o más, el LLM llena sus filas del reparto con n_etiquetas 0. Si no, esas
+filas salen del dataset. Nunca llena el bloque común. por_clase_solo_personas cuenta las clases sin las filas del LLM.
 """
 import argparse
 import csv
@@ -33,6 +41,9 @@ MINIMO_POR_CLASE = 60          # lo que pide #33
 UMBRAL_TRIVIAL = 0.9           # si tantas etiquetas finales coinciden con clase_reglas o con la sensibilidad, el
                                # modelo casi solo puede copiarlas
 PARTICIONES = ('entrenamiento', 'prueba')
+LLM = 'llm'                        # etiquetas/llm.csv: las etiquetas del LLM de todas las filas del maestro
+LLM_REPETICION = 'llm_repeticion'  # etiquetas/llm_repeticion.csv: el bloque común otra vez, en otro orden
+UMBRAL_LLM = 0.6                   # kappa mínimo del LLM contra la etiqueta final de las personas para cubrir faltantes
 
 
 # ---------------------------------------------------------------- medidas
@@ -105,6 +116,33 @@ def leer_maestro(carpeta):
         return [json.loads(linea) for linea in f if linea.strip()]
 
 
+def _leer_archivo(ruta, esperados, en, de):
+    """({id: etiqueta}, errores) de un archivo de etiquetas que debe traer justo los ids de `esperados`. `en` y `de`
+    dicen de dónde son esos ids en los errores, por ejemplo 'en su copia' y 'de su copia'."""
+    suyas, vistos, errores = {}, set(), []
+    with open(ruta, encoding='utf-8-sig', newline='') as f:
+        lector = csv.DictReader(f)
+        if not {'id', 'etiqueta'} <= set(lector.fieldnames or ()):
+            return {}, ['%s: le faltan las columnas id y etiqueta' % ruta.name]
+        for linea, fila in enumerate(lector, 2):
+            id_ = (fila['id'] or '').strip()
+            valor = (fila['etiqueta'] or '').strip().lower()
+            if id_ not in esperados:
+                errores.append('%s, línea %d: el id %r no está %s' % (ruta.name, linea, id_, en))
+            elif id_ in vistos:
+                errores.append('%s, línea %d: el id %s está repetido' % (ruta.name, linea, id_))
+            elif valor not in CLASES:
+                errores.append('%s, línea %d: la etiqueta de %s es %r y debe ser alta, media o baja' % (
+                    ruta.name, linea, id_, valor))
+            else:
+                suyas[id_] = valor
+            vistos.add(id_)
+    sin_fila = sorted(esperados - vistos)
+    if sin_fila:
+        errores.append('%s: faltan %d ids %s, por ejemplo %s' % (ruta.name, len(sin_fila), de, ', '.join(sin_fila[:3])))
+    return suyas, errores
+
+
 def leer_etiquetas(carpeta, maestro):
     """({etiquetador: {id: etiqueta}}, etiquetadores sin archivo, errores)."""
     esperados = {e: {h['id'] for h in maestro if e in h['asignado_a']} for e in ETIQUETADORES}
@@ -114,49 +152,113 @@ def leer_etiquetas(carpeta, maestro):
         if not ruta.exists():
             faltan.append(e)
             continue
-        with open(ruta, encoding='utf-8-sig', newline='') as f:
-            lector = csv.DictReader(f)
-            if not {'id', 'etiqueta'} <= set(lector.fieldnames or ()):
-                errores.append('%s: le faltan las columnas id y etiqueta' % ruta.name)
-                continue
-            suyas, vistos = {}, set()
-            for linea, fila in enumerate(lector, 2):
-                id_ = (fila['id'] or '').strip()
-                valor = (fila['etiqueta'] or '').strip().lower()
-                if id_ not in esperados[e]:
-                    errores.append('%s, línea %d: el id %r no está en su copia' % (ruta.name, linea, id_))
-                elif id_ in vistos:
-                    errores.append('%s, línea %d: el id %s está repetido' % (ruta.name, linea, id_))
-                elif valor not in CLASES:
-                    errores.append('%s, línea %d: la etiqueta de %s es %r y debe ser alta, media o baja' % (
-                        ruta.name, linea, id_, valor))
-                else:
-                    suyas[id_] = valor
-                vistos.add(id_)
-        sin_fila = sorted(esperados[e] - vistos)
-        if sin_fila:
-            errores.append('%s: faltan %d ids de su copia, por ejemplo %s' % (
-                ruta.name, len(sin_fila), ', '.join(sin_fila[:3])))
-        etiquetas[e] = suyas
+        etiquetas[e], suyos = _leer_archivo(ruta, esperados[e], 'en su copia', 'de su copia')
+        errores += suyos
     return etiquetas, faltan, errores
+
+
+def leer_llm(carpeta, maestro):
+    """(etiquetas del LLM o None, su repetición del bloque común o None, errores). Los dos archivos son opcionales.
+    llm.csv debe traer todas las filas del maestro y llm_repeticion.csv justo las del bloque común."""
+    archivos = ((LLM, {h['id'] for h in maestro}, 'en el maestro', 'del maestro'),
+                (LLM_REPETICION, {h['id'] for h in maestro if h['bloque'] == 'comun'}, 'en el bloque común',
+                 'del bloque común'))
+    leidas, errores = {}, []
+    for nombre, esperados, en, de in archivos:
+        ruta = Path(carpeta) / 'etiquetas' / ('%s.csv' % nombre)
+        if ruta.exists():
+            leidas[nombre], suyos = _leer_archivo(ruta, esperados, en, de)
+            errores += suyos
+    if LLM_REPETICION in leidas and LLM not in leidas:
+        errores.append('%s.csv: está la repetición del LLM pero falta %s.csv' % (LLM_REPETICION, LLM))
+    return leidas.get(LLM), leidas.get(LLM_REPETICION), errores
 
 
 # ---------------------------------------------------------------- dataset y acuerdo
 
-def armar_dataset(maestro, etiquetas):
-    """Una fila por hallazgo con etiqueta. n_etiquetas cuenta las que decidieron la etiqueta final."""
+def armar_dataset(maestro, etiquetas, llm=None, cubrir=()):
+    """Una fila por hallazgo con etiqueta. n_etiquetas cuenta las etiquetas de personas que decidieron la final.
+    Las filas del reparto de los etiquetadores en `cubrir` llevan la etiqueta del LLM y n_etiquetas 0. Las del bloque
+    común nunca."""
     filas = []
     for h in maestro:
         quienes = CIEGOS if h['bloque'] == 'comun' else h['asignado_a']
         valores = [etiquetas[e][h['id']] for e in quienes if e in etiquetas]
-        if not valores:
+        if valores:
+            etiqueta = etiqueta_final(valores)
+        elif llm and h['bloque'] == 'reparto' and set(h['asignado_a']) & set(cubrir):
+            etiqueta = llm[h['id']]
+        else:
             continue
         c = h['caracteristicas']
         filas.append({'id': h['id'], 'plantilla': h['plantilla'], 'particion': h['particion'], 'tipo': c['tipo'],
                       'antiguedad_dias': c['antiguedad_dias'], 'exposicion': c['exposicion'],
-                      'sensibilidad': c['sensibilidad'], 'etiqueta': etiqueta_final(valores),
+                      'sensibilidad': c['sensibilidad'], 'etiqueta': etiqueta,
                       'n_etiquetas': len(valores), 'clase_reglas': CLASE_DE_SEVERIDAD[h['severity']]})
     return filas
+
+
+def finales_comun(maestro, etiquetas):
+    """{id: etiqueta final de las personas} en el bloque común, solo en las filas que etiquetó algún ciego."""
+    finales = {}
+    for h in maestro:
+        if h['bloque'] != 'comun':
+            continue
+        valores = [etiquetas[e][h['id']] for e in CIEGOS if e in etiquetas]
+        if valores:
+            finales[h['id']] = etiqueta_final(valores)
+    return finales
+
+
+def medir_llm(maestro, etiquetas, faltan, llm, repeticion):
+    """(sección llm de acuerdo.json, etiquetadores cuyas filas del reparto llena el LLM). El LLM no vota: aquí solo
+    se compara con las personas, y cubre a quien no entregó si su kappa contra la etiqueta final es de UMBRAL_LLM o
+    más."""
+    if llm is None:
+        return {'esta': False, 'umbral_kappa': UMBRAL_LLM, 'contra_final_personas': None, 'contra_cada_persona': {},
+                'repeticion': None, 'coincidencia': None, 'alcanza_umbral': False, 'cubre_faltantes': False,
+                'motivo': 'No hay etiquetas del LLM.', 'filas_cubiertas': {}}, []
+    sin_archivo = [e for e in faltan if e in CIEGOS]   # etiquetador_1 no tiene filas del reparto
+    comun = [h['id'] for h in maestro if h['bloque'] == 'comun']
+
+    def contra(referencia):
+        ids = [i for i in comun if i in referencia]
+        x, y = [llm[i] for i in ids], [referencia[i] for i in ids]
+        return {'filas': len(ids), 'cohen_kappa': _r(cohen_kappa(x, y)), 'acuerdo_simple': _parte(list(zip(x, y)))}
+
+    contra_final = contra(finales_comun(maestro, etiquetas))
+    kappa = contra_final['cohen_kappa']
+    alcanza = kappa is not None and kappa >= UMBRAL_LLM   # con el kappa redondeado, el mismo que sale en acuerdo.json
+    texto = 'kappa del LLM contra la etiqueta final de las personas en el bloque común'
+    if kappa is None:
+        motivo = 'No se pudo calcular el %s.' % texto
+    elif alcanza:
+        motivo = 'El %s es %s, de %s o más.' % (texto, kappa, UMBRAL_LLM)
+    else:
+        motivo = 'El %s es %s, menor que %s.' % (texto, kappa, UMBRAL_LLM)
+    if not sin_archivo:
+        motivo += ' No falta nadie del reparto.'
+    elif alcanza:
+        motivo += ' Cubre las filas del reparto de %s.' % ', '.join(sin_archivo)
+    else:
+        motivo += ' Las filas del reparto de %s salen del dataset.' % ', '.join(sin_archivo)
+    cubrir = sin_archivo if alcanza else []
+    seccion = {
+        'esta': True,
+        'umbral_kappa': UMBRAL_LLM,
+        'contra_final_personas': contra_final,
+        'contra_cada_persona': {e: contra(etiquetas[e]) for e in ETIQUETADORES if e in etiquetas},
+        'repeticion': None if repeticion is None else contra(repeticion),
+        'coincidencia': {
+            'clase_reglas': _parte([(llm[h['id']], CLASE_DE_SEVERIDAD[h['severity']]) for h in maestro]),
+            'sensibilidad': _parte([(llm[h['id']], h['caracteristicas']['sensibilidad']) for h in maestro])},
+        'alcanza_umbral': alcanza,
+        'cubre_faltantes': bool(cubrir),
+        'motivo': motivo,
+        'filas_cubiertas': {e: sum(h['bloque'] == 'reparto' and h['asignado_a'] == [e] for h in maestro)
+                            for e in cubrir},
+    }
+    return seccion, cubrir
 
 
 def _grupo(comun, etiquetas, quienes):
@@ -178,7 +280,10 @@ def _sin_mayoria(comun, etiquetas):
     return n
 
 
-def medir_acuerdo(maestro, etiquetas, faltan, dataset):
+def medir_acuerdo(maestro, etiquetas, faltan, dataset, llm=None):
+    """acuerdo.json. `llm` es la sección que da medir_llm(). Sin ella dice que no hay LLM."""
+    if llm is None:
+        llm, _ = medir_llm(maestro, etiquetas, faltan, None, None)
     comun = [h for h in maestro if h['bloque'] == 'comun']
     presentes = [e for e in ETIQUETADORES if e in etiquetas]
     pares = {}
@@ -207,6 +312,9 @@ def medir_acuerdo(maestro, etiquetas, faltan, dataset):
         'filas_dataset': len(dataset),
         'faltan': faltan,
         'por_clase': por_clase,
+        # sin las filas que llenó el LLM (n_etiquetas 0)
+        'por_clase_solo_personas': {c: sum(f['etiqueta'] == c and f['n_etiquetas'] > 0 for f in dataset)
+                                    for c in CLASES},
         'por_particion': {p: sum(f['particion'] == p for f in dataset) for p in PARTICIONES},
         'al_menos_60_por_clase': all(n >= MINIMO_POR_CLASE for n in por_clase.values()),
         # F1 macro en el set de prueba de lo que #34 tiene que superar: predecir clase_reglas o copiar la sensibilidad
@@ -225,6 +333,7 @@ def medir_acuerdo(maestro, etiquetas, faltan, dataset):
         'coincidencia': coincidencia,
         'lote_trivial': con_reglas is not None and con_reglas >= UMBRAL_TRIVIAL,
         'rubrica_trivial': con_rubrica is not None and con_rubrica >= UMBRAL_TRIVIAL,
+        'llm': llm,
     }
 
 
@@ -242,12 +351,15 @@ def procesar(carpeta):
     """(dataset, acuerdo, errores). Con errores no escribe nada."""
     maestro = leer_maestro(carpeta)
     etiquetas, faltan, errores = leer_etiquetas(carpeta, maestro)
+    llm, repeticion, errores_llm = leer_llm(carpeta, maestro)
+    errores += errores_llm
     if not etiquetas and not errores:
-        errores = ['no hay etiquetas en %s' % (Path(carpeta) / 'etiquetas')]
+        errores = ['no hay etiquetas de personas en %s' % (Path(carpeta) / 'etiquetas')]
     if errores:
         return None, None, errores
-    dataset = armar_dataset(maestro, etiquetas)
-    acuerdo = medir_acuerdo(maestro, etiquetas, faltan, dataset)
+    seccion_llm, cubrir = medir_llm(maestro, etiquetas, faltan, llm, repeticion)
+    dataset = armar_dataset(maestro, etiquetas, llm, cubrir)
+    acuerdo = medir_acuerdo(maestro, etiquetas, faltan, dataset, seccion_llm)
     escribir(carpeta, dataset, acuerdo)
     return dataset, acuerdo, []
 
@@ -271,8 +383,22 @@ def _main(argv=None):
     base = acuerdo['linea_base_prueba']
     print('F1 macro en prueba que #34 tiene que superar: %s con clase_reglas y %s copiando la sensibilidad.' % (
         base['f1_macro_clase_reglas'], base['f1_macro_sensibilidad']))
+    llm = acuerdo['llm']
+    if llm['esta']:
+        cubiertas = llm['filas_cubiertas']
+        print('Etiquetador LLM (no vota): kappa de Cohen %s contra la etiqueta final de las personas en el bloque '
+              'común. Filas que cubre: %s.' % (llm['contra_final_personas']['cohen_kappa'],
+                                               ', '.join('%s %d' % kv for kv in cubiertas.items()) or 'ninguna'))
+    else:
+        print('Etiquetador LLM: no hay etiquetas del LLM.')
     if acuerdo['faltan']:
-        print('aviso: faltan las etiquetas de %s. Sus filas del reparto no están en el dataset.' % ', '.join(acuerdo['faltan']))
+        fuera = [e for e in acuerdo['faltan'] if e in CIEGOS and e not in llm['filas_cubiertas']]
+        texto = 'aviso: faltan las etiquetas de %s.' % ', '.join(acuerdo['faltan'])
+        if llm['filas_cubiertas']:
+            texto += ' El LLM cubre las filas del reparto de %s.' % ', '.join(llm['filas_cubiertas'])
+        if fuera:
+            texto += ' Las filas del reparto de %s no están en el dataset.' % ', '.join(fuera)
+        print(texto)
     if not acuerdo['al_menos_60_por_clase']:
         print('aviso: alguna clase tiene menos de %d filas.' % MINIMO_POR_CLASE)
     if acuerdo['lote_trivial']:
