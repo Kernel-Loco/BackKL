@@ -1,13 +1,17 @@
 """Características del reto para el ML (#33 a #36): tipo, antigüedad, exposición y sensibilidad.
 
-Salen de la evidencia del hallazgo con una sola rúbrica, la de sensibilidad(), para que el lote de #33 y los
-hallazgos reales usen los mismos valores. Hoy la API (cirdan/api/v1.py:26-27) y crt.sh (crtsh.py:390, 398 y 435)
-todavía ponen la sensibilidad fija por código. Que adopten calcular() va en otra tarjeta, antes de #36.
+Salen de la evidencia del hallazgo con una sola rúbrica, la de sensibilidad(). El lote de #33 la usa. Hoy la API
+(cirdan/api/v1.py:26-27) y crt.sh (crtsh.py:390, 398 y 435) todavía ponen la sensibilidad fija por código. Que adopten
+calcular() va en otra tarjeta, antes de #36. Mientras tanto el modelo ve en producción valores distintos a los del lote.
+
+calcular() ya acepta lo que crt.sh pone hoy en la evidencia: vence en cert_expired y primer_certificado en
+lookalike_domain. crt.sh no pone not_before en cert_expiring_soon, y ningún recolector pone primera_vez. Sin esas
+fechas la antigüedad cuenta desde detected_at o asset_first_seen, como v1.py:67-74, si quien llama las pasa.
 
 Rúbrica de sensibilidad, según lo que expone el hallazgo:
 - alta: credenciales, acceso remoto a un sistema o datos personales.
 - media: un servicio, el correo o información interna sin acceso directo.
-- baja: solo información pública o un activo sin uso.
+- baja: solo información pública, un activo sin uso o algo que otro registro ya protege.
 """
 from datetime import date, datetime
 
@@ -21,12 +25,12 @@ TIPO = {
 EXPOSICION_DIRECTA = {'outdated_software', 'exposed_rdp'}     # v1.py:26
 ACTIVOS_DIRECTOS = ('ip', 'service')                          # v1.py:80
 
-# De qué fecha de la evidencia cuenta la antigüedad. Los demás códigos cuentan desde primera_vez.
+# De qué fecha de la evidencia cuenta la antigüedad, en orden. Los demás códigos cuentan desde primera_vez.
 DESDE = {
-    'breach_exposure': 'breach_date',          # la brecha (v1.py:69-70)
-    'cert_expired': 'not_after',               # el vencimiento (v1.py:71-72)
-    'cert_expiring_soon': 'not_before',        # la emisión (crtsh.py:397)
-    'lookalike_domain': 'primer_certificado',  # el primer certificado del parecido (crtsh.py:434)
+    'breach_exposure': ('breach_date',),             # la brecha (v1.py:69-70)
+    'cert_expired': ('not_after', 'vence'),          # el vencimiento (v1.py:71-72). crt.sh lo pone en vence
+    'cert_expiring_soon': ('not_before',),           # la emisión (crtsh.py:397)
+    'lookalike_domain': ('primer_certificado',),     # el primer certificado del parecido (crtsh.py:434)
 }
 
 # Clases de datos de HIBP que cuentan como credenciales o datos personales. Correos, nombres y usuarios no.
@@ -43,6 +47,7 @@ USO = {
 }
 PALABRAS_SOSPECHOSAS = ('login', 'acceso', 'pago', 'cuenta', 'verifica', 'seguridad')
 DIAS_SIN_VER = 180   # un servicio que no se ve desde hace más de esto ya no da acceso confirmado
+SPF_NULO = 'v=spf1 -all'   # el dominio dice que ningún servidor manda su correo
 
 
 def _dia(valor):
@@ -53,9 +58,16 @@ def _dia(valor):
     return date.fromisoformat(str(valor)[:10])
 
 
-def antiguedad_dias(codigo, evidencia, referencia):
-    """Días desde que empezó la exposición hasta `referencia` (el día del escaneo). 0 si la evidencia no trae la fecha."""
-    desde = (evidencia or {}).get(DESDE.get(codigo, 'primera_vez'))
+def antiguedad_dias(codigo, evidencia, referencia, detectado=None, activo_visto=None):
+    """Días desde que empezó la exposición hasta `referencia` (el día del escaneo).
+
+    Cuenta desde la fecha de la evidencia que dice DESDE. Si la evidencia no la trae, cuenta desde `activo_visto`
+    (asset_first_seen) en outdated_software y exposed_rdp, y desde `detectado` (detected_at) en los demás, como
+    v1.py:67-74. 0 si no hay ninguna fecha."""
+    e = evidencia or {}
+    desde = next((e[k] for k in DESDE.get(codigo, ('primera_vez',)) if e.get(k)), None)
+    if not desde:
+        desde = (activo_visto if codigo in EXPOSICION_DIRECTA else None) or detectado
     if not desde:
         return 0
     return max(0, (_dia(referencia) - _dia(desde)).days)
@@ -75,23 +87,24 @@ def sensibilidad(codigo, evidencia, referencia):
         ultima = e.get('ultima_vez')
         sin_ver = ultima and (_dia(referencia) - _dia(ultima)).days > DIAS_SIN_VER
         return 'media' if sin_ver else 'alta'
-    if codigo in ('dmarc_missing', 'spf_missing'):
-        if not e.get('mx'):
-            return 'baja'        # el dominio no recibe correo
-        if codigo == 'spf_missing' and e.get('dmarc') == 'p=reject':
-            return 'baja'        # el DMARC ya rechaza el correo suplantado
-        return 'media'
+    if codigo == 'dmarc_missing':
+        # sin MX y con v=spf1 -all el dominio dice que no manda correo. Si no, alguien puede suplantar su correo
+        return 'baja' if not e.get('mx') and e.get('spf') == SPF_NULO else 'media'
+    if codigo == 'spf_missing':
+        return 'baja' if e.get('dmarc') == 'p=reject' else 'media'   # el DMARC ya rechaza el correo suplantado
     if codigo == 'lookalike_domain':
+        # no expone datos de la empresa. Es alta si apunta a credenciales o pagos
         nombres = [e.get('dominio_parecido') or ''] + list(e.get('nombres') or ())
         return 'alta' if any(p in n for n in nombres for p in PALABRAS_SOSPECHOSAS) else 'baja'
     return USO.get(e.get('uso'), 'media')   # outdated_software, cert_expired, cert_expiring_soon y códigos nuevos
 
 
-def calcular(codigo, tipo_activo, evidencia, referencia):
-    """Las 4 características del reto, con las claves y valores del contrato de plugin (#13)."""
+def calcular(codigo, tipo_activo, evidencia, referencia, detectado=None, activo_visto=None):
+    """Las 4 características del reto, con las claves y valores del contrato de plugin (#13). `detectado` y
+    `activo_visto` solo se usan si la evidencia no trae la fecha de inicio (antiguedad_dias)."""
     return {
         'tipo': TIPO.get(codigo, codigo),
-        'antiguedad_dias': antiguedad_dias(codigo, evidencia, referencia),
+        'antiguedad_dias': antiguedad_dias(codigo, evidencia, referencia, detectado, activo_visto),
         'exposicion': exposicion(codigo, tipo_activo),
         'sensibilidad': sensibilidad(codigo, evidencia, referencia),
     }

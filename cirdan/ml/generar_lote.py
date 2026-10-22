@@ -91,7 +91,7 @@ def texto_evidencia(h):
         return '%s:%d responde con %s %s. %s %s Se vio por primera vez el %s.' % (
             h['asset'], e['port'], e['producto'], e['version'], soporte, USO_ES[e['uso']], _cuando(e['primera_vez']))
     if c == 'exposed_rdp':
-        return ('%s tiene abierto el puerto 3389 (escritorio remoto). La IP es de %s. Nombre del equipo en su '
+        return ('En %s se vio abierto el puerto 3389 (escritorio remoto). La IP es de %s. Nombre del equipo en su '
                 'certificado RDP: %s. Se vio por primera vez el %s y por última vez el %s.') % (
             e['ip'], e['host'], e['equipo'], _cuando(e['primera_vez']), _cuando(e['ultima_vez']))
     if c in ('cert_expired', 'cert_expiring_soon'):
@@ -109,18 +109,21 @@ def texto_evidencia(h):
         else:
             texto = '%s no publica registro SPF (ningún TXT empieza con v=spf1).' % e['record']
         texto += ' Tiene MX: %s.' % ', '.join(e['mx']) if e['mx'] else ' No tiene registros MX.'
-        if c == 'dmarc_missing' and e['spf']:
+        if c == 'dmarc_missing' and e['spf'] == caracteristicas.SPF_NULO:
+            texto += ' Su SPF no autoriza a ningún servidor a enviar correo (%s).' % e['spf']
+        elif c == 'dmarc_missing' and e['spf']:
             texto += ' Su SPF autoriza servidores de envío: %s.' % e['spf']
         if c == 'spf_missing':
             texto += ' Su DMARC tiene la política %s.' % e['dmarc'] if e['dmarc'] else ' Tampoco tiene DMARC.'
         return texto + ' Se vio por primera vez el %s.' % _cuando(e['primera_vez'])
     if c == 'lookalike_domain':
         n = e['certificados']
+        vencio = date.fromisoformat(e['vence']) < REFERENCIA
         return ('Dominio parecido: %s (%s). Nombres en sus certificados: %s. %s, el primero del %s. El más reciente '
-                'vence el %s. Emisor: %s.') % (
+                '%s el %s. Emisor: %s.') % (
             e['dominio_parecido'], PARECIDO_ES[e['tipo_parecido']], ', '.join(e['nombres']),
-            '%d certificados' % n if n > 1 else '1 certificado', _cuando(e['primer_certificado']), _fecha(e['vence']),
-            e['emisor'])
+            '%d certificados' % n if n > 1 else '1 certificado', _cuando(e['primer_certificado']),
+            'venció' if vencio else 'vence', _cuando(e['vence']), e['emisor'])
     raise ValueError('código sin texto de evidencia: %s' % c)
 
 

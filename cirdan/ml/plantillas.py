@@ -5,7 +5,9 @@ evidencia de un hallazgo con datos que un recolector da hoy o va a dar: crt.sh (
 versiones (#18) y HIBP (#19). La clase esperada solo sirve para balancear el lote. Nunca es la etiqueta.
 
 Todo es ficticio y se puede publicar: dominios bajo .example (RFC 2606), IP de documentación (RFC 5737), brechas
-DemoBreach, productos de demostración y CVE del año 2099.
+DemoBreach, productos de demostración y CVE del año 2099. Lo que se repite entre filas no se contradice: una empresa
+tiene un solo perfil de correo, una brecha una sola fecha, una versión un solo fin de soporte y un host un solo
+hallazgo de certificado.
 """
 import ipaddress
 import re
@@ -14,6 +16,7 @@ from datetime import date, timedelta
 from functools import partial
 from typing import Callable
 
+from cirdan.ml.caracteristicas import SPF_NULO
 from cirdan.recolectores import crtsh
 
 REFERENCIA = date(2026, 10, 20)   # día del escaneo de todo el lote
@@ -43,9 +46,13 @@ CLASE_DE_SEVERIDAD = {'critical': 'alta', 'high': 'alta', 'medium': 'media', 'lo
 # ---------------------------------------------------------------- empresas ficticias
 
 # Perfil de correo de cada empresa -> cuántas hay. Así un mismo dominio no dice en una fila que tiene MX y en otra que no.
-PERFILES = {'sin_mx': 28, 'mx_spf': 20, 'mx_sin_spf': 28, 'mx_reject': 28}
+# sin_mx_spf_nulo: sin MX, con SPF que no autoriza a nadie (v=spf1 -all) y sin DMARC.
+# sin_mx_reject: sin MX ni SPF, con DMARC p=reject.
+# mx_spf: MX y SPF, sin DMARC. mx_sin_spf: MX, sin SPF ni DMARC. mx_reject: MX y DMARC p=reject, sin SPF.
+PERFILES = {'sin_mx_spf_nulo': 20, 'sin_mx_reject': 28, 'mx_spf': 16, 'mx_sin_spf': 28, 'mx_reject': 28}
 CON_MX = ('mx_spf', 'mx_sin_spf', 'mx_reject')
-SIN_DMARC = ('sin_mx', 'mx_spf', 'mx_sin_spf')
+SIN_DMARC = ('sin_mx_spf_nulo', 'mx_spf', 'mx_sin_spf')   # los subdominios de las demás heredan su p=reject
+CON_REJECT = ('sin_mx_reject', 'mx_reject')
 _INICIOS = ('nor', 'tec', 'bri', 'cor', 'dun', 'fon', 'gar', 'lir', 'men', 'olv', 'pra', 'quin', 'riv', 'sol', 'tar',
             'ves', 'zan', 'cal', 'bel', 'tor')
 _MEDIOS = ('a', 'e', 'i', 'o', 'ar', 'en', 'is', 'or')
@@ -69,7 +76,8 @@ def empresas(rng):
 
 
 class Contexto:
-    """Lo que una plantilla usa para armar una fila: el azar del lote, las empresas y las IP libres."""
+    """Lo que una plantilla usa para armar una fila: el azar del lote, las empresas, las IP libres y los hosts que ya
+    tienen un hallazgo de certificado."""
 
     def __init__(self, rng, lista):
         self.rng = rng
@@ -78,6 +86,7 @@ class Contexto:
                      for ip in ipaddress.ip_network(red).hosts()]
         rng.shuffle(self._ips)
         self._usadas = set()
+        self.con_certificado = set()
 
     def nueva_plantilla(self):
         self._usadas = set()
@@ -103,33 +112,75 @@ def _hace(dias):
 # ---------------------------------------------------------------- cómo se arma cada código
 # Cada función devuelve la empresa, el activo, su tipo, la evidencia y los datos de la CVE si tiene.
 
-BRECHAS = ('DemoBreach-Foro', 'DemoBreach-Tienda', 'DemoBreach-Viajes', 'DemoBreach-Juegos', 'DemoBreach-Cupones',
-           'DemoBreach-Encuestas')
-CON_CONTRASENAS = (('Email addresses', 'Passwords'), ('Email addresses', 'Passwords', 'Usernames'),
-                   ('Email addresses', 'Names', 'Passwords'), ('Email addresses', 'Passwords', 'Phone numbers'))
-SIN_CONTRASENAS = (('Email addresses',), ('Email addresses', 'Names'), ('Email addresses', 'Names', 'Usernames'))
+# Brechas ficticias: (nombre, fecha, clases de datos de HIBP). Cada una sale igual en todas sus filas.
+BRECHAS_RECIENTES = (   # con contraseñas, de hace menos de 6 meses
+    ('DemoBreach-Boletos', '2026-09-28', ('Email addresses', 'Passwords', 'Phone numbers')),
+    ('DemoBreach-Foro', '2026-09-14', ('Email addresses', 'Passwords', 'Usernames')),
+    ('DemoBreach-Tienda', '2026-08-02', ('Email addresses', 'Names', 'Passwords')),
+    ('DemoBreach-Recetas', '2026-07-11', ('Email addresses', 'Passwords')),
+    ('DemoBreach-Viajes', '2026-06-18', ('Email addresses', 'Passwords', 'Usernames')),
+    ('DemoBreach-Gimnasio', '2026-05-07', ('Email addresses', 'Names', 'Passwords')),
+)
+BRECHAS_VIEJAS = (      # con contraseñas, de hace más de 3 años
+    ('DemoBreach-Citas', '2023-05-04', ('Email addresses', 'Passwords', 'Phone numbers')),
+    ('DemoBreach-Mudanzas', '2022-08-30', ('Email addresses', 'Names', 'Passwords')),
+    ('DemoBreach-Fotos', '2022-01-19', ('Email addresses', 'Passwords')),
+    ('DemoBreach-Juegos', '2021-03-09', ('Email addresses', 'Passwords', 'Usernames')),
+    ('DemoBreach-Musica', '2020-06-15', ('Email addresses', 'Passwords', 'Usernames')),
+    ('DemoBreach-Cupones', '2019-11-22', ('Email addresses', 'Passwords')),
+)
+BRECHAS_SIN_CONTRASENAS = (   # solo correos, nombres o usuarios, de 2 meses a 4 años
+    ('DemoBreach-Concursos', '2026-08-21', ('Email addresses', 'Names', 'Usernames')),
+    ('DemoBreach-Catalogo', '2026-03-02', ('Email addresses',)),
+    ('DemoBreach-Encuestas', '2025-02-12', ('Email addresses',)),
+    ('DemoBreach-Webinars', '2024-07-29', ('Email addresses', 'Names')),
+    ('DemoBreach-Boletin', '2023-11-03', ('Email addresses', 'Names')),
+    ('DemoBreach-Eventos', '2022-12-06', ('Email addresses', 'Names', 'Usernames')),
+)
 
 
-def brecha(ctx, edad, clases):
-    r, e = ctx.rng, ctx.empresa()
-    evidencia = {'emails_exposed': r.randint(2, 60), 'breach_name': r.choice(BRECHAS),
-                 'breach_date': _hace(r.randint(*edad)), 'data_classes': list(r.choice(clases))}
+def brecha(ctx, brechas):
+    """Correos de una empresa con MX en una de `brechas`."""
+    r, e = ctx.rng, ctx.empresa(*CON_MX)
+    nombre, fecha, clases = r.choice(brechas)
+    evidencia = {'emails_exposed': r.randint(2, 60), 'breach_name': nombre, 'breach_date': fecha,
+                 'data_classes': list(clases)}
     return {'empresa': e, 'asset': e.dominio, 'asset_type': 'domain', 'evidence': evidencia, 'cve': None}
 
 
-def software(ctx, hosts, uso, producto, versiones, sin_soporte, cve):
-    """`sin_soporte`: hace cuántos días terminó el soporte de la versión (None si sigue con soporte).
-    `cve`: rangos de CVSS y EPSS y si está en KEV (None si no tiene CVE)."""
+# Productos ficticios: versión -> (fin de soporte o None si sigue con soporte, CVE como (id, CVSS, EPSS, KEV)).
+# Cada versión sale con la misma fecha y las mismas CVE en todas sus filas.
+VERSIONES = {
+    'PanelDemo': {
+        '2.1': ('2024-05-01', (('CVE-2099-10231', 9.8, 0.974, True), ('CVE-2099-11872', 8.8, 0.412, True))),
+        '2.3': ('2024-11-15', (('CVE-2099-12045', 9.1, 0.633, True), ('CVE-2099-13390', 8.1, 0.027, True))),
+        '2.4': ('2025-06-30', (('CVE-2099-14417', 9.8, 0.215, True), ('CVE-2099-15102', 8.6, 0.058, True))),
+        '3.0': ('2026-03-31', (('CVE-2099-16583', 8.8, 0.891, True), ('CVE-2099-17220', 8.1, 0.094, True))),
+    },
+    'ServidorDemo': {
+        '9.2': (None, (('CVE-2099-20114', 6.5, 0.214, False), ('CVE-2099-21876', 4.3, 0.002, False))),
+        '9.4': (None, (('CVE-2099-22931', 5.3, 0.018, False), ('CVE-2099-23408', 6.1, 0.296, False))),
+        '10.1': (None, (('CVE-2099-24750', 4.0, 0.001, False), ('CVE-2099-25663', 5.9, 0.087, False))),
+    },
+    'libreria-demo.js': {
+        '1.4': ('2021-06-30', ()),
+        '1.7': ('2022-12-31', ()),
+        '1.9': ('2024-08-31', ()),
+    },
+}
+
+
+def software(ctx, hosts, uso, producto):
     r, e = ctx.rng, ctx.empresa()
     host = '%s.%s' % (r.choice(hosts), e.dominio)
-    evidencia = {'port': 443, 'producto': producto, 'version': r.choice(versiones),
-                 'fin_de_soporte': _hace(r.randint(*sin_soporte)) if sin_soporte else None, 'uso': uso,
+    version = r.choice(sorted(VERSIONES[producto]))
+    fin, cves = VERSIONES[producto][version]
+    evidencia = {'port': 443, 'producto': producto, 'version': version, 'fin_de_soporte': fin, 'uso': uso,
                  'primera_vez': _hace(r.randint(5, 300))}
     datos_cve = None
-    if cve:
-        cvss, epss, kev = cve
-        datos_cve = {'cve_id': 'CVE-2099-%05d' % r.randint(1000, 49999), 'cvss': round(r.uniform(*cvss), 1),
-                     'epss': round(r.uniform(*epss), 3), 'in_kev': kev}
+    if cves:
+        cve_id, cvss, epss, kev = r.choice(cves)
+        datos_cve = {'cve_id': cve_id, 'cvss': cvss, 'epss': epss, 'in_kev': kev}
     return {'empresa': e, 'asset': host, 'asset_type': 'subdomain', 'evidence': evidencia, 'cve': datos_cve}
 
 
@@ -158,11 +209,15 @@ EMISORES = ('Autoridad Demo R3', 'Autoridad Demo R4', 'CA Ejemplo TLS')
 
 def certificado(ctx, codigo, usos, vidas, dias):
     """`usos`: pares (uso, hosts) posibles. `vidas`: días de vigencia posibles del certificado. `dias`: rango de días
-    vencido (cert_expired) o para vencer (cert_expiring_soon)."""
+    vencido (cert_expired) o para vencer (cert_expiring_soon). Un host tiene un solo hallazgo de certificado en todo
+    el lote, así no sale vencido en una fila y por vencer en otra."""
     r = ctx.rng
-    uso, hosts = r.choice(usos)
-    e = ctx.empresa(*(CON_MX if uso == 'correo' else ()))
-    host = '%s.%s' % (r.choice(hosts), e.dominio)
+    host = None
+    while host is None or host in ctx.con_certificado:
+        uso, hosts = r.choice(usos)
+        e = ctx.empresa(*(CON_MX if uso == 'correo' else ()))
+        host = '%s.%s' % (r.choice(hosts), e.dominio)
+    ctx.con_certificado.add(host)
     d = r.randint(*dias)
     vence = REFERENCIA + timedelta(days=-d if codigo == 'cert_expired' else d)
     emitido = vence - timedelta(days=r.choice(vidas))
@@ -177,6 +232,7 @@ def certificado(ctx, codigo, usos, vidas, dias):
 
 SUBDOMINIOS_CAMPANAS = ('boletin', 'campanas', 'promociones', 'noticias')
 PROVEEDOR_ENVIOS = 'envios.correo-demo.example'
+SPF_DE_PERFIL = {'mx_spf': 'v=spf1 mx include:%s -all' % PROVEEDOR_ENVIOS, 'sin_mx_spf_nulo': SPF_NULO}
 
 
 def dmarc(ctx, perfiles, primera, campanas=False):
@@ -188,7 +244,7 @@ def dmarc(ctx, perfiles, primera, campanas=False):
     else:
         nombre = e.dominio
         mx = ['mx1.' + nombre] if e.perfil in CON_MX else []
-        spf = 'v=spf1 mx include:%s -all' % PROVEEDOR_ENVIOS if e.perfil == 'mx_spf' else None
+        spf = SPF_DE_PERFIL.get(e.perfil)
     evidencia = {'record': '_dmarc.' + nombre, 'observed': 'NXDOMAIN', 'mx': mx, 'spf': spf,
                  'primera_vez': _hace(r.randint(*primera))}
     return {'empresa': e, 'asset': nombre, 'asset_type': 'subdomain' if campanas else 'domain', 'evidence': evidencia,
@@ -199,7 +255,7 @@ def spf(ctx, perfil, primera):
     r, e = ctx.rng, ctx.empresa(perfil)
     evidencia = {'record': e.dominio, 'observed': 'sin TXT v=spf1',
                  'mx': ['mx1.' + e.dominio] if perfil in CON_MX else [],
-                 'dmarc': 'p=reject' if perfil == 'mx_reject' else None, 'primera_vez': _hace(r.randint(*primera))}
+                 'dmarc': 'p=reject' if perfil in CON_REJECT else None, 'primera_vez': _hace(r.randint(*primera))}
     return {'empresa': e, 'asset': e.dominio, 'asset_type': 'domain', 'evidence': evidencia, 'cve': None}
 
 
@@ -207,28 +263,32 @@ PALABRAS_PARECIDO = ('login', 'pagos', 'acceso', 'cuenta')
 OTROS_TLD = ('net', 'org', 'info')
 
 
-def _con_error(rng, marca):
-    """La marca con una letra cambiada por un homoglifo (crtsh.HOMOGLIFOS) o dos letras volteadas."""
-    letras = [i for i, c in enumerate(marca) if c in crtsh.HOMOGLIFOS]
-    if letras and rng.random() < 0.6:
-        i = rng.choice(letras)
-        return marca[:i] + crtsh.HOMOGLIFOS[marca[i]] + marca[i + 1:]
-    i = rng.randrange(len(marca) - 1)
-    return marca[:i] + marca[i + 1] + marca[i] + marca[i + 2:]
+def variantes_de_crtsh(marca):
+    """Las variantes de marca.com que crt.sh consulta con --con-parecidos (crtsh.candidatos_parecidos), en orden."""
+    return crtsh.candidatos_parecidos(marca + '.com', crtsh.MAX_CANDIDATOS)
 
 
-def parecido(ctx, tipo, primero, certificados):
-    """Dominio parecido con certificado. `primero`: rango de hace cuántos días salió su primer certificado."""
+def parecido(ctx, tipo, primero, certificados, vencido=None):
+    """Dominio parecido con certificado. `primero`: rango de hace cuántos días salió su primer certificado.
+    `vencido`: rango de hace cuántos días venció el último (None si sigue vigente). crt.sh lo sigue reportando hasta
+    90 días después (crtsh.VENTANA_PARECIDOS_DIAS). Los errores tipográficos y los otros TLD salen de las variantes que
+    crt.sh consulta, con .example al final."""
     r, e = ctx.rng, ctx.empresa()
     marca = e.dominio.split('.')[0]
     if tipo == 'contiene_marca':
         dominio = '%s-%s.com.example' % (marca, r.choice(PALABRAS_PARECIDO))
-    elif tipo == 'otro_tld':
-        dominio = '%s.%s.example' % (marca, r.choice(OTROS_TLD))
     else:
-        dominio = '%s.com.example' % _con_error(r, marca)
+        variantes = [v.split('.', 1) for v in variantes_de_crtsh(marca)]
+        if tipo == 'otro_tld':
+            opciones = ['%s.%s' % (n, s) for n, s in variantes if n == marca and s in OTROS_TLD]
+        else:   # error_tipografico: los homoglifos de crtsh.HOMOGLIFOS
+            opciones = ['%s.%s' % (n, s) for n, s in variantes if n != marca and s == 'com']
+        dominio = r.choice(opciones) + '.example'
     edad = r.randint(*primero)
-    vence = REFERENCIA + timedelta(days=90 - edad if edad < 90 else r.randint(10, 85))
+    if vencido:
+        vence = REFERENCIA - timedelta(days=r.randint(*vencido))
+    else:
+        vence = REFERENCIA + timedelta(days=90 - edad if edad < 90 else r.randint(10, 85))
     evidencia = {'dominio_parecido': dominio, 'tipo_parecido': tipo, 'nombres': [dominio, 'www.' + dominio],
                  'certificados': r.randint(*certificados), 'primer_certificado': _hace(edad),
                  'vence': vence.isoformat(), 'emisor': r.choice(EMISORES)}
@@ -246,7 +306,7 @@ def titulo(codigo, asset, e):
     if codigo == 'outdated_software':
         return '%s usa %s %s, una versión desactualizada' % (asset, e['producto'], e['version'])
     if codigo == 'exposed_rdp':
-        return 'El puerto 3389 (RDP) responde en %s' % e['ip']
+        return 'El puerto 3389 (RDP) se vio abierto en %s' % e['ip']   # la evidencia dice cuándo
     if codigo == 'cert_expired':
         return 'Certificado vencido en %s' % asset
     if codigo == 'cert_expiring_soon':
@@ -277,24 +337,21 @@ class Plantilla:
 _P = Plantilla
 PLANTILLAS = (
     _P('brecha_contrasenas_reciente', 'breach_exposure', 'alta', 24, False,
-       'Brecha con contraseñas de hace menos de 6 meses', partial(brecha, edad=(20, 175), clases=CON_CONTRASENAS)),
+       'Brecha con contraseñas de hace menos de 6 meses', partial(brecha, brechas=BRECHAS_RECIENTES)),
     _P('brecha_contrasenas_vieja', 'breach_exposure', 'alta', 24, True,
-       'Brecha con contraseñas de hace más de 3 años', partial(brecha, edad=(1100, 2600), clases=CON_CONTRASENAS)),
+       'Brecha con contraseñas de hace más de 3 años', partial(brecha, brechas=BRECHAS_VIEJAS)),
     _P('brecha_solo_correos', 'breach_exposure', 'media', 13, False,
-       'Brecha solo con correos, nombres o usuarios, de 1 mes a 4 años', partial(brecha, edad=(30, 1500),
-                                                                               clases=SIN_CONTRASENAS)),
+       'Brecha solo con correos, nombres o usuarios, de 2 meses a 4 años',
+       partial(brecha, brechas=BRECHAS_SIN_CONTRASENAS)),
     _P('software_panel_kev', 'outdated_software', 'alta', 24, False,
-       'Panel de acceso sin soporte con una CVE en KEV, EPSS de 0.02 a 0.97',
-       partial(software, hosts=('admin', 'panel', 'acceso'), uso='inicio_de_sesion', producto='PanelDemo',
-               versiones=('2.1', '2.3', '2.4', '3.0'), sin_soporte=(200, 900), cve=((8.1, 9.8), (0.02, 0.97), True))),
+       'Panel de acceso sin soporte con una CVE en KEV, EPSS de 0.027 a 0.974',
+       partial(software, hosts=('admin', 'panel', 'acceso'), uso='inicio_de_sesion', producto='PanelDemo')),
     _P('software_servidor_con_soporte', 'outdated_software', 'media', 13, True,
-       'Aplicación con soporte y una CVE con CVSS de 4.0 a 6.9, EPSS de 0.001 a 0.3',
-       partial(software, hosts=('app', 'tienda', 'reservas'), uso='servidor', producto='ServidorDemo',
-               versiones=('9.2', '9.4', '10.1'), sin_soporte=None, cve=((4.0, 6.9), (0.001, 0.3), False))),
+       'Aplicación con soporte y una CVE con CVSS de 4.0 a 6.5, EPSS de 0.001 a 0.296',
+       partial(software, hosts=('app', 'tienda', 'reservas'), uso='servidor', producto='ServidorDemo')),
     _P('software_libreria_sitio_estatico', 'outdated_software', 'baja', 16, False,
        'Librería sin soporte en un sitio informativo, sin CVE',
-       partial(software, hosts=('www', 'blog', 'landing'), uso='sitio_publico', producto='libreria-demo.js',
-               versiones=('1.4', '1.7', '1.9'), sin_soporte=(400, 2000), cve=None)),
+       partial(software, hosts=('www', 'blog', 'landing'), uso='sitio_publico', producto='libreria-demo.js')),
     _P('rdp_produccion', 'exposed_rdp', 'alta', 24, False,
        'RDP de un servidor de producción, visto por primera vez hace 2 a 400 días',
        partial(rdp, equipos=EQUIPOS_PRODUCCION, primera=(2, 400), ultima=(0, 3))),
@@ -318,10 +375,10 @@ PLANTILLAS = (
        'Sitio principal con certificado de 90 días y menos de 7 para vencer',
        partial(certificado, codigo='cert_expiring_soon', usos=(('sitio_publico', ('www',)),), vidas=(90,),
                dias=(1, 6))),
-    _P('por_vencer_api_o_correo', 'cert_expiring_soon', 'media', 13, False,
+    _P('por_vencer_api_o_correo', 'cert_expiring_soon', 'media', 13, True,
        'API o correo con certificado de 90 días y 8 a 20 para vencer',
        partial(certificado, codigo='cert_expiring_soon', usos=API_O_CORREO, vidas=(90,), dias=(8, 20))),
-    _P('por_vencer_sitio_secundario', 'cert_expiring_soon', 'baja', 16, True,
+    _P('por_vencer_sitio_secundario', 'cert_expiring_soon', 'baja', 16, False,
        'Sitio secundario con certificado de un año y 20 a 29 días para vencer',
        partial(certificado, codigo='cert_expiring_soon', usos=(('sitio_publico', HOSTS_SECUNDARIOS),), vidas=(365,),
                dias=(20, 29))),
@@ -329,12 +386,13 @@ PLANTILLAS = (
        'Dominio con MX y SPF que manda correo, visto por primera vez hace 1 a 500 días',
        partial(dmarc, perfiles=('mx_spf',), primera=(1, 500))),
     _P('dmarc_sin_mx', 'dmarc_missing', 'baja', 16, False,
-       'Dominio sin MX', partial(dmarc, perfiles=('sin_mx',), primera=(5, 300))),
+       'Dominio sin MX, con un SPF que no autoriza a nadie a enviar (v=spf1 -all)',
+       partial(dmarc, perfiles=('sin_mx_spf_nulo',), primera=(5, 300))),
     _P('dmarc_subdominio_campanas', 'dmarc_missing', 'media', 13, True,
        'Subdominio de campañas con MX de un proveedor de envíos',
        partial(dmarc, perfiles=SIN_DMARC, primera=(5, 300), campanas=True)),
     _P('spf_sin_mx', 'spf_missing', 'baja', 24, False,
-       'Dominio sin MX', partial(spf, perfil='sin_mx', primera=(5, 300))),
+       'Dominio sin MX, con DMARC p=reject', partial(spf, perfil='sin_mx_reject', primera=(5, 300))),
     _P('spf_con_mx_y_dmarc_reject', 'spf_missing', 'baja', 24, True,
        'Dominio con MX y DMARC p=reject', partial(spf, perfil='mx_reject', primera=(5, 300))),
     _P('spf_con_mx_sin_dmarc', 'spf_missing', 'media', 24, False,
@@ -344,8 +402,8 @@ PLANTILLAS = (
        'Parecido con la marca y login, pagos, acceso o cuenta, con su primer certificado de hace menos de 30 días',
        partial(parecido, tipo='contiene_marca', primero=(2, 29), certificados=(1, 3))),
     _P('parecido_viejo', 'lookalike_domain', 'baja', 15, False,
-       'Error tipográfico con certificados desde hace más de un año',
-       partial(parecido, tipo='error_tipografico', primero=(400, 1500), certificados=(4, 15))),
+       'Error tipográfico con certificados desde hace más de un año, el último vencido hace 20 a 85 días',
+       partial(parecido, tipo='error_tipografico', primero=(400, 1500), certificados=(4, 15), vencido=(20, 85))),
     _P('parecido_otro_tld', 'lookalike_domain', 'baja', 15, True,
        'La marca con otro TLD, sin nombres sospechosos, primer certificado de hace 10 a 800 días',
        partial(parecido, tipo='otro_tld', primero=(10, 800), certificados=(1, 8))),

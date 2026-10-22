@@ -5,13 +5,15 @@
 
 Lee maestro.jsonl y las etiquetas devueltas en etiquetas/etiquetador_N.csv, con las columnas id y etiqueta (nota es
 opcional). Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media
-o baja. Si hay un error no escribe nada. Si falta el archivo de un etiquetador, sus filas del reparto salen del
-dataset y lo demás sigue (plan B del reparto).
+o baja. Si hay un error, o si no hay ningún archivo de etiquetas, no escribe nada. Si falta el archivo de un
+etiquetador, sus filas del reparto salen del dataset y lo demás sigue (plan B del reparto).
 
 En el bloque común la etiqueta final es la mayoría de etiquetador_2 a etiquetador_4, y media si no hay mayoría.
+Si falta uno de los tres, deciden los otros dos: si no coinciden queda media, y n_etiquetas es 2.
 etiquetador_1 conoce la clase esperada de cada plantilla, así que su etiqueta solo cuenta en el acuerdo.
 Escribe dataset.csv y acuerdo.json: kappa de Fleiss con los 4 y sin etiquetador_1, acuerdo simple, kappa de Cohen
-por pares y qué parte de las etiquetas coincide con clase_reglas y con la sensibilidad.
+por pares, qué parte de las etiquetas coincide con clase_reglas y con la sensibilidad, y el F1 macro que sacan en el
+set de prueba las dos líneas base que #34 tiene que superar: las reglas y copiar la sensibilidad.
 """
 import argparse
 import csv
@@ -28,7 +30,9 @@ CIEGOS = tuple(e for e in ETIQUETADORES if e != SOLO_COMUN)   # deciden la etiqu
 COLUMNAS_DATASET = ('id', 'plantilla', 'particion', 'tipo', 'antiguedad_dias', 'exposicion', 'sensibilidad',
                     'etiqueta', 'n_etiquetas', 'clase_reglas')
 MINIMO_POR_CLASE = 60          # lo que pide #33
-UMBRAL_TRIVIAL = 0.9           # si tantas etiquetas finales coinciden con clase_reglas, el lote es casi trivial
+UMBRAL_TRIVIAL = 0.9           # si tantas etiquetas finales coinciden con clase_reglas o con la sensibilidad, el
+                               # modelo casi solo puede copiarlas
+PARTICIONES = ('entrenamiento', 'prueba')
 
 
 # ---------------------------------------------------------------- medidas
@@ -62,6 +66,19 @@ def cohen_kappa(a, b):
     if esperado == 1:
         return None
     return (observado - esperado) / (1 - esperado)
+
+
+def macro_f1(reales, predichas):
+    """F1 macro: el promedio del F1 de cada clase que sale en `reales` o en `predichas`. None si no hay filas."""
+    if len(reales) != len(predichas):
+        raise ValueError('las dos listas deben tener las mismas filas')
+    if not reales:
+        return None
+    f1 = []
+    for c in sorted(set(reales) | set(predichas)):
+        aciertos = sum(r == p == c for r, p in zip(reales, predichas))
+        f1.append(2 * aciertos / (reales.count(c) + predichas.count(c)))
+    return sum(f1) / len(f1)
 
 
 def etiqueta_final(valores):
@@ -168,22 +185,36 @@ def medir_acuerdo(maestro, etiquetas, faltan, dataset):
     for a, b in combinations(presentes, 2):
         x, y = [etiquetas[a][h['id']] for h in comun], [etiquetas[b][h['id']] for h in comun]
         pares['%s con %s' % (a, b)] = {'cohen_kappa': _r(cohen_kappa(x, y)), 'acuerdo_simple': _parte(list(zip(x, y)))}
-    coincidencia = {'final': {'clase_reglas': _parte([(f['etiqueta'], f['clase_reglas']) for f in dataset]),
-                              'sensibilidad': _parte([(f['etiqueta'], f['sensibilidad']) for f in dataset])}}
+    def con_referencias(filas):
+        return {'clase_reglas': _parte([(f['etiqueta'], f['clase_reglas']) for f in filas]),
+                'sensibilidad': _parte([(f['etiqueta'], f['sensibilidad']) for f in filas])}
+
+    coincidencia = {'final': con_referencias(dataset)}
+    for p in PARTICIONES:
+        coincidencia['final_%s' % p] = con_referencias([f for f in dataset if f['particion'] == p])
     for e in presentes:
         suyas = [h for h in maestro if h['id'] in etiquetas[e]]
         coincidencia[e] = {
             'clase_reglas': _parte([(etiquetas[e][h['id']], CLASE_DE_SEVERIDAD[h['severity']]) for h in suyas]),
             'sensibilidad': _parte([(etiquetas[e][h['id']], h['caracteristicas']['sensibilidad']) for h in suyas])}
+    prueba = [f for f in dataset if f['particion'] == 'prueba']
+    reales = [f['etiqueta'] for f in prueba]
     por_clase = {c: sum(f['etiqueta'] == c for f in dataset) for c in CLASES}
     con_reglas = coincidencia['final']['clase_reglas']
+    con_rubrica = coincidencia['final']['sensibilidad']
     return {
         'filas_maestro': len(maestro),
         'filas_dataset': len(dataset),
         'faltan': faltan,
         'por_clase': por_clase,
-        'por_particion': {p: sum(f['particion'] == p for f in dataset) for p in ('entrenamiento', 'prueba')},
+        'por_particion': {p: sum(f['particion'] == p for f in dataset) for p in PARTICIONES},
         'al_menos_60_por_clase': all(n >= MINIMO_POR_CLASE for n in por_clase.values()),
+        # F1 macro en el set de prueba de lo que #34 tiene que superar: predecir clase_reglas o copiar la sensibilidad
+        'linea_base_prueba': {
+            'filas': len(prueba),
+            'f1_macro_clase_reglas': _r(macro_f1(reales, [f['clase_reglas'] for f in prueba])),
+            'f1_macro_sensibilidad': _r(macro_f1(reales, [f['sensibilidad'] for f in prueba])),
+        },
         'bloque_comun': {
             'filas': len(comun),
             'los_4': _grupo(comun, etiquetas, ETIQUETADORES),
@@ -193,6 +224,7 @@ def medir_acuerdo(maestro, etiquetas, faltan, dataset):
         },
         'coincidencia': coincidencia,
         'lote_trivial': con_reglas is not None and con_reglas >= UMBRAL_TRIVIAL,
+        'rubrica_trivial': con_rubrica is not None and con_rubrica >= UMBRAL_TRIVIAL,
     }
 
 
@@ -210,6 +242,8 @@ def procesar(carpeta):
     """(dataset, acuerdo, errores). Con errores no escribe nada."""
     maestro = leer_maestro(carpeta)
     etiquetas, faltan, errores = leer_etiquetas(carpeta, maestro)
+    if not etiquetas and not errores:
+        errores = ['no hay etiquetas en %s' % (Path(carpeta) / 'etiquetas')]
     if errores:
         return None, None, errores
     dataset = armar_dataset(maestro, etiquetas)
@@ -226,7 +260,7 @@ def _main(argv=None):
     a = p.parse_args(argv)
     dataset, acuerdo, errores = procesar(a.carpeta)
     if errores:
-        print('No se escribió nada. Errores en las etiquetas:', *errores, sep='\n  ')
+        print('No se escribió nada. Errores:', *errores, sep='\n  ')
         return 1
     comun = acuerdo['bloque_comun']
     print('dataset.csv: %d filas (%s).' % (len(dataset), ', '.join('%s %d' % kv for kv in acuerdo['por_clase'].items())))
@@ -234,6 +268,9 @@ def _main(argv=None):
         comun['los_4']['fleiss_kappa'], comun['sin_etiquetador_1']['fleiss_kappa']))
     print('Coinciden con clase_reglas: %s. Con la sensibilidad: %s.' % (
         acuerdo['coincidencia']['final']['clase_reglas'], acuerdo['coincidencia']['final']['sensibilidad']))
+    base = acuerdo['linea_base_prueba']
+    print('F1 macro en prueba que #34 tiene que superar: %s con clase_reglas y %s copiando la sensibilidad.' % (
+        base['f1_macro_clase_reglas'], base['f1_macro_sensibilidad']))
     if acuerdo['faltan']:
         print('aviso: faltan las etiquetas de %s. Sus filas del reparto no están en el dataset.' % ', '.join(acuerdo['faltan']))
     if not acuerdo['al_menos_60_por_clase']:
@@ -241,6 +278,9 @@ def _main(argv=None):
     if acuerdo['lote_trivial']:
         print('aviso: el %.0f %% de las etiquetas finales coincide con clase_reglas. El lote es casi trivial.' % (
             100 * acuerdo['coincidencia']['final']['clase_reglas']))
+    if acuerdo['rubrica_trivial']:
+        print('aviso: el %.0f %% de las etiquetas finales coincide con la sensibilidad. El modelo casi solo puede '
+              'copiar la rúbrica.' % (100 * acuerdo['coincidencia']['final']['sensibilidad']))
     return 0
 
 

@@ -13,7 +13,8 @@ import re
 import sys
 import tempfile
 import unittest
-from collections import Counter
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -122,6 +123,41 @@ class Maestro(unittest.TestCase):
             if 'breach_name' in h['evidence']:
                 self.assertTrue(h['evidence']['breach_name'].startswith('DemoBreach'))
 
+    def test_8_lo_que_se_repite_no_se_contradice(self):
+        vistos = defaultdict(set)
+        con_certificado = Counter()
+        for h in MAESTRO:
+            e, c = h['evidence'], h['rule_code']
+            if c == 'breach_exposure':
+                vistos['brecha', e['breach_name']].add((e['breach_date'], tuple(e['data_classes'])))
+                vistos['mx', h['asset']].add('con_mx')   # una empresa sin MX no tiene correos en una brecha
+            if c == 'outdated_software':
+                vistos['version', e['producto'], e['version']].add(e['fin_de_soporte'])
+            if h['cve_id']:
+                vistos['cve', h['cve_id']].add((h['cvss'], h['epss'], h['in_kev']))
+            if c in ('cert_expired', 'cert_expiring_soon'):
+                con_certificado[h['asset']] += 1
+                if e['uso'] == 'correo':
+                    vistos['mx', h['asset'].split('.', 1)[1]].add('con_mx')
+            if c in ('dmarc_missing', 'spf_missing') and h['asset_type'] == 'domain':
+                vistos['mx', h['asset']].add('con_mx' if e['mx'] else 'sin_mx')
+            if c == 'exposed_rdp':
+                self.assertNotIn('responde', h['title'])   # puede que ya no se vea: el título no dice que siga abierto
+        for clave, valores in vistos.items():
+            self.assertEqual(len(valores), 1, (clave, valores))
+        self.assertEqual(max(con_certificado.values()), 1)   # un host, un solo hallazgo de certificado
+
+    def test_9_parecidos_que_crtsh_puede_encontrar(self):
+        for h in MAESTRO:
+            if h['rule_code'] != 'lookalike_domain':
+                continue
+            e, marca = h['evidence'], h['asset'].split('.')[0]
+            self.assertNotEqual(e['dominio_parecido'], h['asset'])
+            if e['tipo_parecido'] == 'contiene_marca':
+                self.assertIn(marca, e['dominio_parecido'])   # lo encuentra la consulta %marca%
+            else:   # está entre las variantes que consulta crt.sh, con .example al final
+                self.assertIn(e['dominio_parecido'][:-len('.example')], plantillas.variantes_de_crtsh(marca))
+
 
 class Balance(unittest.TestCase):
 
@@ -168,6 +204,17 @@ class Balance(unittest.TestCase):
             self.assertEqual(h['particion'], 'prueba' if plantillas.POR_ID[h['plantilla']].prueba else 'entrenamiento')
         entrenamiento = {h['caracteristicas']['tipo'] for h in MAESTRO if h['particion'] == 'entrenamiento'}
         self.assertEqual(entrenamiento, set(caracteristicas.TIPO.values()))
+
+    def test_5_prueba_sin_celdas_que_contradigan_al_entrenamiento(self):
+        # una plantilla de prueba no comparte (tipo, exposicion, sensibilidad) con una de entrenamiento de otra clase
+        # esperada: con esas características el modelo no podría distinguirlas
+        celdas = defaultdict(set)
+        for h in MAESTRO:
+            c = h['caracteristicas']
+            celdas[h['particion'], c['tipo'], c['exposicion'], c['sensibilidad']].add(h['clase_esperada'])
+        for (particion, *celda), clases in celdas.items():
+            if particion == 'prueba':
+                self.assertLessEqual(celdas.get(('entrenamiento', *celda), clases), clases, celda)
 
 
 class Copias(unittest.TestCase):
@@ -270,10 +317,14 @@ class Caracteristicas(unittest.TestCase):
             ('cert_expired', {'uso': 'correo'}, 'media'),
             ('cert_expiring_soon', {'uso': 'sitio_publico'}, 'baja'),
             ('cert_expired', {'uso': 'sin_contenido'}, 'baja'),
-            ('dmarc_missing', {'mx': ['mx1.a.example']}, 'media'),
-            ('dmarc_missing', {'mx': []}, 'baja'),
+            ('dmarc_missing', {'mx': ['mx1.a.example'], 'spf': None}, 'media'),
+            ('dmarc_missing', {'mx': [], 'spf': None}, 'media'),            # se puede suplantar aunque no reciba
+            ('dmarc_missing', {'mx': [], 'spf': 'v=spf1 -all'}, 'baja'),    # dice que no manda correo
+            ('dmarc_missing', {'mx': ['mx1.a.example'], 'spf': 'v=spf1 -all'}, 'media'),
             ('spf_missing', {'mx': ['mx1.a.example'], 'dmarc': 'p=reject'}, 'baja'),
+            ('spf_missing', {'mx': [], 'dmarc': 'p=reject'}, 'baja'),
             ('spf_missing', {'mx': ['mx1.a.example'], 'dmarc': None}, 'media'),
+            ('spf_missing', {'mx': [], 'dmarc': None}, 'media'),
             ('lookalike_domain', {'dominio_parecido': 'a-pagos.com.example', 'nombres': []}, 'alta'),
             ('lookalike_domain', {'dominio_parecido': 'a.net.example', 'nombres': ['www.a.net.example']}, 'baja'),
         ]
@@ -294,6 +345,45 @@ class Caracteristicas(unittest.TestCase):
         self.assertEqual(a('lookalike_domain', {'primer_certificado': '2026-10-10'}, ref), 10)
         self.assertEqual(a('spf_missing', {'primera_vez': '2026-10-21'}, ref), 0)   # nunca negativa
         self.assertEqual(a('dmarc_missing', {}, ref), 0)
+        self.assertEqual(a('cert_expired', {'vence': '2026-10-08'}, ref), 12)   # la clave que pone crt.sh
+        # sin la fecha en la evidencia: detected_at, o asset_first_seen en outdated_software y exposed_rdp (v1.py:67-74)
+        self.assertEqual(a('dmarc_missing', {}, ref, detectado='2026-10-01T09:00:00-06:00'), 19)
+        self.assertEqual(a('exposed_rdp', {}, ref, detectado='2026-10-19', activo_visto='2026-09-20'), 30)
+        self.assertEqual(a('exposed_rdp', {}, ref, detectado='2026-10-19'), 1)
+
+    def test_5_con_la_evidencia_que_da_crtsh(self):
+        # crt.sh pone vence y no not_after en cert_expired, y no pone not_before en cert_expiring_soon (crtsh.py:369)
+        ahora = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+        certs = [cert(1, ['api.menorvento.example'], '2026-05-01T00:00:00', '2026-10-08T00:00:00'),
+                 cert(2, ['www.menorvento.example'], '2026-07-26T00:00:00', '2026-11-01T00:00:00')]
+        _, hallazgos = crtsh._subdominios('menorvento.example', certs, ahora)
+        h = {x.codigo: x for x in hallazgos}
+        self.assertEqual(set(h), {'cert_expired', 'cert_expiring_soon'})
+        calc = caracteristicas.calcular
+        vencido = h['cert_expired']
+        self.assertNotIn('not_after', vencido.evidencia)
+        self.assertEqual(calc('cert_expired', 'subdomain', vencido.evidencia, ahora)['antiguedad_dias'],
+                         vencido.caracteristicas['antiguedad_dias'])   # 12, desde vence
+        por_vencer = h['cert_expiring_soon']
+        self.assertNotIn('not_before', por_vencer.evidencia)
+        self.assertEqual(calc('cert_expiring_soon', 'subdomain', por_vencer.evidencia, ahora,
+                              detectado='2026-10-15')['antiguedad_dias'], 5)   # sin not_before, desde detected_at
+        con_emision = dict(por_vencer.evidencia, not_before='2026-07-26')
+        self.assertEqual(calc('cert_expiring_soon', 'subdomain', con_emision, ahora)['antiguedad_dias'],
+                         por_vencer.caracteristicas['antiguedad_dias'])   # 86, cuando crt.sh agregue not_before
+        parecido = cert(3, ['menorvento-pagos.example', 'www.menorvento-pagos.example'], '2026-10-01T00:00:00',
+                        '2026-12-30T00:00:00')
+        p, = crtsh._parecidos('menorvento.example', [('contiene_marca', [parecido], lambda n: True)], set(), ahora)
+        self.assertEqual(calc(p.codigo, 'domain', p.evidencia, ahora)['antiguedad_dias'],
+                         p.caracteristicas['antiguedad_dias'])   # 19, desde el primer certificado
+        self.assertEqual(calc(p.codigo, 'domain', p.evidencia, ahora)['sensibilidad'], 'alta')
+
+
+def cert(id_, nombres, inicio, fin):
+    """Un certificado como los que devuelve crt.sh (pruebas/test_crtsh.py:24)."""
+    return {'id': id_, 'issuer_ca_id': 1, 'issuer_name': 'CA Ejemplo TLS', 'common_name': nombres[0],
+            'name_value': '\n'.join(nombres), 'not_before': inicio, 'not_after': fin, 'serial_number': '%040x' % id_,
+            'result_count': 1}
 
 
 def escribir_etiquetas(carpeta, etiquetador, valores):
@@ -345,6 +435,13 @@ class Acuerdo(unittest.TestCase):
         self.assertEqual([f(['alta', 'alta', 'baja']), f(['alta', 'media', 'baja']), f(['baja', 'alta']), f(['baja']),
                           f([])], ['alta', 'media', 'media', 'baja', None])
 
+    def test_4b_f1_macro_con_un_ejemplo_a_mano(self):
+        # alta 2/3, media 2/4 y baja 0: F1 macro 7/18
+        self.assertAlmostEqual(acuerdo.macro_f1(['alta', 'alta', 'media', 'baja'],
+                                                ['alta', 'media', 'media', 'media']), 7 / 18)
+        self.assertEqual(acuerdo.macro_f1(['alta', 'baja'], ['alta', 'baja']), 1.0)
+        self.assertIsNone(acuerdo.macro_f1([], []))
+
     def test_5_etiquetas_falsas_en_el_lote(self):
         dataset, r, errores = self.procesar()
         self.assertEqual(errores, [])
@@ -369,6 +466,11 @@ class Acuerdo(unittest.TestCase):
         with open(self.carpeta / 'dataset.csv', encoding='utf-8', newline='') as f:
             self.assertEqual(tuple(csv.DictReader(f).fieldnames), acuerdo.COLUMNAS_DATASET)
         self.assertEqual(json.loads((self.carpeta / 'acuerdo.json').read_text(encoding='utf-8')), r)
+        prueba = [f for f in dataset if f['particion'] == 'prueba']
+        self.assertEqual(r['linea_base_prueba']['filas'], len(prueba))
+        self.assertEqual(r['linea_base_prueba']['f1_macro_sensibilidad'], round(acuerdo.macro_f1(
+            [f['etiqueta'] for f in prueba], [f['sensibilidad'] for f in prueba]), 4))
+        self.assertEqual(set(r['coincidencia']), {'final', 'final_entrenamiento', 'final_prueba', *ETIQUETADORES})
 
     def test_6_sin_mayoria_queda_media(self):
         id_ = next(h['id'] for h in COPIAS['etiquetador_1'])
@@ -393,6 +495,13 @@ class Acuerdo(unittest.TestCase):
         self.assertIn('hzzzzzzz', texto)
         self.assertFalse((self.carpeta / 'dataset.csv').exists())
 
+    def test_7b_sin_etiquetas_no_escribe_nada(self):
+        dataset, _, errores = acuerdo.procesar(self.carpeta)
+        self.assertIsNone(dataset)
+        self.assertIn('no hay etiquetas', errores[0])
+        self.assertFalse((self.carpeta / 'dataset.csv').exists())
+        self.assertFalse((self.carpeta / 'acuerdo.json').exists())
+
     def test_8_si_falta_un_etiquetador_sus_filas_salen(self):
         del self.etiquetas['etiquetador_3']
         dataset, r, errores = self.procesar()
@@ -401,6 +510,31 @@ class Acuerdo(unittest.TestCase):
         self.assertEqual(len(dataset), 425 - len(suyas))
         self.assertFalse(suyas & {f['id'] for f in dataset})
         self.assertEqual(r['bloque_comun']['sin_etiquetador_1']['etiquetadores'], ['etiquetador_2', 'etiquetador_4'])
+        comun = [f for f in dataset if POR_ID[f['id']]['bloque'] == 'comun']
+        self.assertEqual({f['n_etiquetas'] for f in comun}, {2})   # con 2 ciegos, si no coinciden queda media
+        self.assertEqual({f['etiqueta'] for f in comun if POR_ID[f['id']]['clase_esperada'] != 'media'}, {'media'})
+
+    def test_9_si_las_etiquetas_siguen_la_clase_esperada(self):
+        for e in ETIQUETADORES:
+            self.etiquetas[e] = {h['id']: h['clase_esperada'] for h in COPIAS[e]}
+        _, r, _ = self.procesar()
+        # En prueba la sensibilidad es igual a la clase esperada: copiarla da F1 1.0 y rubrica_trivial avisa
+        self.assertEqual(r['linea_base_prueba']['f1_macro_sensibilidad'], 1.0)
+        self.assertTrue(r['rubrica_trivial'])
+        self.assertFalse(r['lote_trivial'])
+        # clase_reglas en las 138 de prueba: alta 2*47/(47+73), media 2*26/(52+41) y baja 2*24/(39+24)
+        self.assertEqual(r['linea_base_prueba']['f1_macro_clase_reglas'],
+                         round((94 / 120 + 52 / 93 + 48 / 63) / 3, 4))
+
+
+class DatasetDelRepo(unittest.TestCase):
+
+    @unittest.skipUnless((generar_lote.CARPETA / 'dataset.csv').exists(), 'todavía no hay etiquetas')
+    def test_1_al_menos_60_por_clase_en_las_etiquetas_finales(self):
+        with open(generar_lote.CARPETA / 'dataset.csv', encoding='utf-8', newline='') as f:
+            por_clase = Counter(fila['etiqueta'] for fila in csv.DictReader(f))
+        for clase in plantillas.CLASES:
+            self.assertGreaterEqual(por_clase[clase], acuerdo.MINIMO_POR_CLASE, clase)
 
 
 if __name__ == '__main__':
