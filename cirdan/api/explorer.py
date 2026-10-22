@@ -1,8 +1,10 @@
 """Explorador visual de la base `cirdan` para la demo (página /demo).
 
 Solo existe con `DEMO_EXPLORER=true` (RC-58) y pide sesión como el resto de la API: la empresa
-sale de la cookie `lt_session`, nunca de un encabezado. Todo pasa por el rol `cirdan_app`, así que
-los conteos y las filas que se ven son los que Row-Level Security deja ver a esa empresa.
+sale de la cookie `lt_session`, nunca de un encabezado. Las tablas solo las ve el rol `admin`,
+porque traen lo que la API reserva a Administración (usuarios, bitácora y valores TXT). Todo pasa
+por el rol `cirdan_app`, así que los conteos y las filas que se ven son los que Row-Level Security
+deja ver a esa empresa.
 """
 import uuid
 from pathlib import Path
@@ -11,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from psycopg import sql
 
-from cirdan.auth.deps import Session, current_session
+from cirdan.auth.deps import Session, require_roles
 from cirdan.db import transaction
 
 router = APIRouter()
@@ -46,8 +48,8 @@ def demo_page():
     return HTMLResponse(Path(__file__).with_name('demo.html').read_text(encoding='utf-8'))
 
 
-@router.get('/db/tables', tags=['base de datos'], summary='Las 23 tablas con las filas que ve la empresa de la sesión')
-def db_tables(session: Session = Depends(current_session)):
+@router.get('/db/tables', tags=['base de datos'], summary='Las 23 tablas con las filas que ve la empresa de la sesión (solo admin)')
+def db_tables(session: Session = Depends(require_roles('admin'))):
     with transaction(session.org_id) as conn:
         rls = {r['relname']: r['relforcerowsecurity'] for r in conn.execute(
             "SELECT relname, relforcerowsecurity FROM pg_class "
@@ -62,8 +64,8 @@ def db_tables(session: Session = Depends(current_session)):
     return {'organization': name['name'] if name else None, 'role': role, 'tables': out}
 
 
-@router.get('/db/tables/{table}/rows', tags=['base de datos'], summary='Primeras filas de una tabla que ve la empresa de la sesión')
-def db_rows(table: str, session: Session = Depends(current_session)):
+@router.get('/db/tables/{table}/rows', tags=['base de datos'], summary='Primeras filas de una tabla que ve la empresa de la sesión (solo admin)')
+def db_rows(table: str, session: Session = Depends(require_roles('admin'))):
     if table not in TABLES:
         raise HTTPException(404, 'Tabla no encontrada')
     with transaction(session.org_id) as conn:

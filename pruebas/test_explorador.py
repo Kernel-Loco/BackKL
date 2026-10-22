@@ -1,7 +1,8 @@
 """Pruebas del explorador de la base (/db) y de la página /demo (RC-58).
 
 DEMO_EXPLORER se lee al arrancar la API. Por eso estas pruebas levantan dentro del contenedor dos
-API propias sobre la misma base y el mismo Valkey, una sin la variable y otra con DEMO_EXPLORER=true:
+API propias sobre la misma base y el mismo Valkey, una con DEMO_EXPLORER=false, como queda por
+omisión, y otra con DEMO_EXPLORER=true:
 
     docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest -v pruebas/test_explorador.py
 
@@ -17,6 +18,7 @@ import unittest
 import urllib.error
 import urllib.request
 
+from cirdan.api.explorer import TABLES
 from cirdan.auth import sessions
 
 ACME = '20000000-0000-4000-8000-000000000001'
@@ -24,7 +26,10 @@ BETA = '20000000-0000-4000-8000-000000000002'
 # Usuarios de la semilla, los mismos de cirdan/auth/demo.py
 ALEX = {'user_id': '30000000-0000-4000-8000-000000000001', 'org_id': ACME, 'role': 'admin', 'email': 'alex.morgan@acme-demo.mx'}
 DANA = {'user_id': '30000000-0000-4000-8000-000000000004', 'org_id': BETA, 'role': 'admin', 'email': 'dana.cruz@beta-corp.mx'}
+MAYA = {'user_id': '30000000-0000-4000-8000-000000000002', 'org_id': ACME, 'role': 'manager', 'email': 'maya.reed@acme-demo.mx'}
+JORDAN = {'user_id': '30000000-0000-4000-8000-000000000003', 'org_id': ACME, 'role': 'analyst', 'email': 'jordan.tate@acme-demo.mx'}
 SIN_SESION = 'Tu sesión terminó. Vuelve a iniciar sesión.'
+SIN_PERMISO = 'Tu rol no tiene permiso para esta acción.'
 RUTAS = ('/db/tables', '/db/tables/users/rows', '/demo')
 
 
@@ -33,7 +38,8 @@ class Api:
 
     def __init__(self, puerto, **variables):
         self.base = 'http://127.0.0.1:%d' % puerto
-        entorno = {k: v for k, v in os.environ.items() if k != 'DEMO_EXPLORER'}
+        # false aunque haya un .env con true: config() lee primero el entorno
+        entorno = dict(os.environ, DEMO_EXPLORER='false')
         entorno.update(variables)
         self.proc = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'cirdan.api.main:app', '--host', '127.0.0.1',
                                       '--port', str(puerto), '--log-level', 'warning'], env=entorno)
@@ -88,10 +94,10 @@ class Explorador(unittest.TestCase):
 
 
 class ExploradorApagado(Explorador):
-    """Sin DEMO_EXPLORER, como queda por omisión."""
+    """Con DEMO_EXPLORER=false, como queda por omisión."""
     puerto = 8101
 
-    def test_1_sin_la_variable_no_existen_db_ni_demo(self):
+    def test_1_por_omision_no_existen_db_ni_demo(self):
         for ruta in RUTAS:
             for nombre, sesion in (('sin sesión', None), ('con la sesión de Acme', self.acme)):
                 with self.subTest(ruta=ruta, caso=nombre):
@@ -115,7 +121,8 @@ class ExploradorEncendido(Explorador):
             for nombre, sesion in (('sin cookie', None), ('cookie que no es una sesión', 'no-es-una-sesion')):
                 with self.subTest(ruta=ruta, caso=nombre):
                     code, body = self.api.get(ruta, sesion, org=BETA)
-                    self.assertEqual((code, body['detail']), (401, SIN_SESION))
+                    self.assertEqual(code, 401, body)
+                    self.assertEqual(body['detail'], SIN_SESION)
         self.assertEqual(self.api.get('/domains', org=BETA)[1]['detail'], SIN_SESION, 'la misma respuesta que /domains')
 
     def test_4_acme_ve_solo_lo_suyo_aunque_el_encabezado_diga_beta(self):
@@ -135,9 +142,14 @@ class ExploradorEncendido(Explorador):
         self.assertEqual(body['organization'], 'Beta Corp')
         filas = {t['table']: t['rows'] for t in body['tables']}
         self.assertEqual((filas['domains'], filas['findings'], filas['users']), (1, 1, 1))
-        for tabla in ('users', 'domains', 'findings', 'assets'):
+        # Las 23 tablas: si una tabla nueva del explorador entra sin RLS, falla aquí
+        for tabla in TABLES:
             with self.subTest(tabla=tabla):
-                self.assertLessEqual({f['organization_id'] for f in self.filas(tabla, self.beta, ACME)}, {'Beta Corp'})
+                filas = self.filas(tabla, self.beta, ACME)
+                self.assertLessEqual({f.get('organization_id', 'Beta Corp') for f in filas}, {'Beta Corp'})
+                texto = json.dumps(filas, ensure_ascii=False).lower()
+                self.assertNotIn('acme', texto)
+                self.assertNotIn('olmardo', texto)
         self.assertEqual([u['email'] for u in self.filas('users', self.beta, ACME)], ['dana.cruz@beta-corp.mx'])
         dominios = [d['fqdn'] for d in self.filas('domains', self.beta, ACME)]
         self.assertNotIn('acme-demo.mx', dominios)
@@ -153,6 +165,19 @@ class ExploradorEncendido(Explorador):
         # Ya no trae los ids de las empresas para elegir una: la empresa solo sale de la sesión.
         self.assertNotIn(ACME, html)
         self.assertNotIn(BETA, html)
+
+    def test_7_las_tablas_son_solo_para_admin(self):
+        # Traen usuarios, bitácora y valores TXT, que la API solo da a Administración (GET /api/v1/domains/txt).
+        for rol, datos in (('analista', JORDAN), ('gerente', MAYA)):
+            token = sessions.create(datos)
+            self.addCleanup(sessions.delete, token)
+            for ruta in ('/db/tables', '/db/tables/users/rows', '/db/tables/dns_txt_verifications/rows'):
+                with self.subTest(rol=rol, ruta=ruta):
+                    code, body = self.api.get(ruta, token, org=BETA)
+                    self.assertEqual(code, 403, body)
+                    self.assertEqual(body['detail'], SIN_PERMISO)
+            self.assertEqual(self.api.get('/api/v1/domains/txt', token)[0], 403, 'la misma regla que la API v1')
+            self.assertEqual(self.api.get('/domains', token)[0], 200, 'los dominios de la página sí le responden')
 
 
 if __name__ == '__main__':
