@@ -150,6 +150,9 @@ class ExploradorEncendido(Explorador):
         for ruta in ('/api/v1/auth/me', '/api/v1/auth/login', '/api/v1/auth/mfa/verify', '/api/v1/auth/logout'):
             self.assertIn(ruta, html)
         self.assertNotIn('X-Organization', html)
+        # Ya no trae los ids de las empresas para elegir una: la empresa solo sale de la sesión.
+        self.assertNotIn(ACME, html)
+        self.assertNotIn(BETA, html)
 
 
 if __name__ == '__main__':
