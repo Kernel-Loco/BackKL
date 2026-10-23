@@ -31,9 +31,9 @@ validación de personas ni acuerdo entre personas. por_clase_solo_personas cuent
 Otros LLM del bloque común, opcionales y declarados: etiquetas/llm_sonnet.csv y llm_haiku.csv (LLMS_COMUN) traen
 justo las filas del bloque común, etiquetadas a ciegas por otros dos modelos. Se revisan como llm_repeticion.csv, y
 sin llm.csv son un error. Tampoco votan ni cambian dataset.csv. Sin personas, como en la versión 1, cada fila
-sigue con su etiqueta de llm.csv. Solo entran en llm.acuerdo_entre_llm, que mide en el bloque común el kappa de Fleiss, el acuerdo simple y
-el kappa de Cohen por pares entre llm.csv y los que estén. Es None si hay menos de 2. Así el lote mide un acuerdo
-sin personas: entre LLM, y declarado así.
+sigue con su etiqueta de llm.csv. Solo entran en llm.acuerdo_entre_llm, que mide en el bloque común el kappa de
+Fleiss, el acuerdo simple y el kappa de Cohen por pares entre llm.csv y los que estén. Es None si hay menos de 2.
+Así el lote mide un acuerdo sin personas: entre LLM, y declarado así.
 """
 import argparse
 import csv
@@ -57,7 +57,7 @@ LLM = 'llm'                        # etiquetas/llm.csv: las etiquetas del LLM de
 LLM_REPETICION = 'llm_repeticion'  # etiquetas/llm_repeticion.csv: el bloque común otra vez, en otro orden
 LLMS_COMUN = ('llm_sonnet', 'llm_haiku')   # etiquetas/llm_sonnet.csv y llm_haiku.csv: otros dos LLM, solo el bloque
                                            # común. Miden el acuerdo entre LLM y no votan
-UMBRAL_LLM = 0.6                  # kappa mínimo del LLM contra la etiqueta final de las personas para cubrir faltantes
+UMBRAL_LLM = 0.6                   # kappa mínimo del LLM contra la etiqueta final de las personas para cubrir faltantes
 
 
 # ---------------------------------------------------------------- medidas

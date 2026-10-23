@@ -101,7 +101,7 @@ Hoy la API (`cirdan/api/v1.py:26-27`) y crt.sh (`crtsh.py:390`, 398 y 435) ponen
 
 - Son 425 hallazgos: 142 de clase esperada alta, 141 de media y 142 de baja.
 - El bloque común tiene 60 filas: 20 por clase esperada y al menos 2 por plantilla. Va en la copia de los 4. Con etiquetas de personas, su etiqueta final la deciden `etiquetador_2`, `etiquetador_3` y `etiquetador_4`, porque `etiquetador_1` conoce la clase esperada. En esas 60 filas se mide hoy el acuerdo entre LLM (ver [Etiquetador LLM](#etiquetador-llm)).
-- Las otras 365 se reparten en turno entre `etiquetador_2`, `etiquetador_3` y `etiquetador_4`, 122, 122 y 121. Cada uno revisa 181 o 182 filas.
+- Las otras 365 se reparten en turno entre `etiquetador_2`, `etiquetador_3` y `etiquetador_4`, 122, 122 y 121. A cada uno le tocaban 181 o 182 filas.
 - `etiquetador_1` recibió solo el bloque común, porque armó el lote y conoce la clase esperada de cada plantilla. Por lo mismo ya no entrega etiquetas.
 
 En el maestro, `bloque` es `comun` o `reparto` y `asignado_a` dice quién etiqueta cada fila.
@@ -226,7 +226,7 @@ Las etiquetas de los LLM ya están en `datos/ml/rc65/etiquetas/`. Si algún día
 python -m cirdan.ml.acuerdo    # escribe datos/ml/rc65/dataset.csv y acuerdo.json
 ```
 
-Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media o baja. Hace lo mismo con `llm.csv`, `llm_repeticion.csv`, `llm_sonnet.csv` y `llm_haiku.csv` si están. Si encuentra un error, o si no hay etiquetas de personas ni del LLM, no escribe nada y sale con código 1. Si solo están las del LLM, escribe el dataset completo con sus etiquetas y lo avisa. En la terminal da una línea del LLM, con su kappa contra las personas y las filas que cubre, y otra con el kappa de Fleiss entre LLM en el bloque común. Si falta `etiquetador_1`, da el kappa de Fleiss entre los ciegos que entregaron y no uno con los 4. Cuando ya existe `dataset.csv`, una prueba revisa que haya al menos 60 filas por clase en las etiquetas finales. Antes de eso se salta. Otras pruebas revisan que `llm.csv`, `llm_repeticion.csv`, `llm_sonnet.csv` y `llm_haiku.csv` del repo pasen la revisión.
+Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media o baja. Hace lo mismo con `llm.csv`, `llm_repeticion.csv`, `llm_sonnet.csv` y `llm_haiku.csv` si están. Si encuentra un error, o si no hay etiquetas de personas ni del LLM, no escribe nada y sale con código 1. Si solo están las del LLM, escribe el dataset completo con sus etiquetas y lo avisa. En la terminal da una línea del LLM, con su kappa contra las personas y las filas que cubre. Si está `llm_sonnet.csv` o `llm_haiku.csv`, da otra con el kappa de Fleiss entre LLM en el bloque común. Si falta `etiquetador_1`, da el kappa de Fleiss entre los ciegos que entregaron y no uno con los 4. Cuando ya existe `dataset.csv`, una prueba revisa que haya al menos 60 filas por clase en las etiquetas finales. Antes de eso se salta. Otras pruebas revisan que `llm.csv`, `llm_repeticion.csv`, `llm_sonnet.csv` y `llm_haiku.csv` del repo pasen la revisión.
 
 ## Riesgos conocidos
 
