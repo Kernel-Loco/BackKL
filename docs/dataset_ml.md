@@ -1,10 +1,8 @@
 # Dataset semisintético del ML (#33)
 
-Lote de hallazgos ficticios que se etiqueta a ciegas para entrenar el clasificador alta, media y baja (#34). Es la tarjeta RC-65. Los etiquetadores aparecen como `etiquetador_1` a `etiquetador_4`. Aparte hay un etiquetador LLM declarado, que no es una persona y nunca vota (ver [Etiquetador LLM](#etiquetador-llm)).
+Lote de hallazgos ficticios etiquetado a ciegas para entrenar el clasificador alta, media y baja (#34). Es la tarjeta RC-65. Las etiquetas son de un etiquetador LLM declarado, que no es una persona (ver [Etiquetador LLM](#etiquetador-llm)). El lote se armó para 4 personas, que aparecen como `etiquetador_1` a `etiquetador_4`, pero su etiquetado se canceló.
 
-**Si estás etiquetando el lote, no sigas leyendo.** No abras este documento, `datos/ml/rc65/` ni el código de `cirdan/ml/` hasta entregar tu Excel. El maestro, las plantillas, el dataset y las etiquetas del LLM dicen la clase de cada fila. Si los lees antes de etiquetar, tu etiquetado deja de ser ciego.
-
-**Versión 1, del 22 oct 2026.** `dataset.csv` y `acuerdo.json` salen completos del etiquetador LLM (`llm.solo_llm` es verdadero), porque RC-65 se tenía que entregar antes de que regresaran las etiquetas de las personas. Esta versión no tiene validación de personas ni acuerdo medido, y así se tiene que reportar. Las personas siguen etiquetando. Cuando regresen sus Excel, otro PR agrega sus etiquetas y vuelve a correr `acuerdo.py`. Entonces deciden ellas y el LLM solo cubre a quien falte, con la regla de la sección [Etiquetador LLM](#etiquetador-llm).
+**Versión 1, del 22 oct 2026. Es la versión final.** `dataset.csv` y `acuerdo.json` salen completos del etiquetador LLM (`llm.solo_llm` es verdadero). El 22 oct Ernesto canceló el etiquetado de personas para que el lote no dependa de ellas. Por eso el dataset no tiene validación de personas. El acuerdo que se mide es entre LLM: el de 3 modelos en el bloque común (`llm.acuerdo_entre_llm`) y el de Opus consigo mismo en la repetición (`llm.repeticion`). Así se tiene que reportar: como acuerdo entre LLM, no entre personas. `acuerdo.py` sigue aceptando etiquetas de personas, por si algún día llegan. Este documento explica cómo las trataría.
 
 ## Archivos
 
@@ -16,9 +14,10 @@ Lote de hallazgos ficticios que se etiqueta a ciegas para entrenar el clasificad
 | `cirdan/ml/acuerdo.py` | Junta las etiquetas, arma el dataset y mide el acuerdo |
 | `datos/ml/rc65/copias/etiquetador_N.csv` | Lo que ve cada etiquetador |
 | `datos/ml/rc65/maestro.jsonl` | Un hallazgo por línea con todo lo que el etiquetador no ve |
-| `datos/ml/rc65/etiquetas/etiquetador_N.csv` | Las etiquetas devueltas: `id`, `etiqueta` y `nota` |
+| `datos/ml/rc65/etiquetas/etiquetador_N.csv` | Las etiquetas de personas: `id`, `etiqueta` y `nota`. Hoy no hay ninguna |
 | `datos/ml/rc65/etiquetas/llm.csv` y `llm_repeticion.csv` | Las etiquetas del etiquetador LLM, con las mismas columnas |
-| `datos/ml/rc65/dataset.csv` y `acuerdo.json` | Los escribe `acuerdo.py` cuando llegan las etiquetas |
+| `datos/ml/rc65/etiquetas/llm_sonnet.csv` y `llm_haiku.csv` | Las de otros dos LLM en el bloque común, con las mismas columnas |
+| `datos/ml/rc65/dataset.csv` y `acuerdo.json` | Los escribe `acuerdo.py` a partir de las etiquetas |
 | `pruebas/test_dataset_ml.py` | Pruebas sin base ni red |
 
 El lote son archivos. No toca la base.
@@ -101,8 +100,8 @@ Hoy la API (`cirdan/api/v1.py:26-27`) y crt.sh (`crtsh.py:390`, 398 y 435) ponen
 ## Bloque común y reparto
 
 - Son 425 hallazgos: 142 de clase esperada alta, 141 de media y 142 de baja.
-- El bloque común tiene 60 filas: 20 por clase esperada y al menos 2 por plantilla. Va en la copia de los 4, pero lo etiquetan `etiquetador_2`, `etiquetador_3` y `etiquetador_4`, porque `etiquetador_1` ya no entrega (ver [Etiquetador LLM](#etiquetador-llm)).
-- Las otras 365 se reparten en turno entre `etiquetador_2`, `etiquetador_3` y `etiquetador_4`, 122, 122 y 121. Cada uno revisa 181 o 182 filas.
+- El bloque común tiene 60 filas: 20 por clase esperada y al menos 2 por plantilla. Va en la copia de los 4. Con etiquetas de personas, su etiqueta final la deciden `etiquetador_2`, `etiquetador_3` y `etiquetador_4`, porque `etiquetador_1` conoce la clase esperada. En esas 60 filas se mide hoy el acuerdo entre LLM (ver [Etiquetador LLM](#etiquetador-llm)).
+- Las otras 365 se reparten en turno entre `etiquetador_2`, `etiquetador_3` y `etiquetador_4`, 122, 122 y 121. A cada uno le tocaban 181 o 182 filas.
 - `etiquetador_1` recibió solo el bloque común, porque armó el lote y conoce la clase esperada de cada plantilla. Por lo mismo ya no entrega etiquetas.
 
 En el maestro, `bloque` es `comun` o `reparto` y `asignado_a` dice quién etiqueta cada fila.
@@ -129,6 +128,8 @@ Lo que mide la prueba: dentro de una plantilla solo cambia la antigüedad. En 5 
 
 `dataset.csv` trae `id`, `plantilla`, `particion`, `tipo`, `antiguedad_dias`, `exposicion`, `sensibilidad`, `etiqueta`, `n_etiquetas` y `clase_reglas`. No trae la clase esperada.
 
+En la versión 1 todas las filas llevan la etiqueta de `llm.csv`, con `n_etiquetas` 0. Lo que sigue es cómo `acuerdo.py` trataría las etiquetas de personas si algún día llegan:
+
 - Fuera del bloque común, la etiqueta es la de su etiquetador.
 - En el bloque común, la etiqueta final es la de la mayoría entre `etiquetador_2`, `etiquetador_3` y `etiquetador_4`. Si los 3 difieren, queda media. La de `etiquetador_1`, si entregara, solo contaría en el acuerdo.
 - `n_etiquetas` cuenta las etiquetas de personas que decidieron la final: 3 en el bloque común y 1 fuera. Es 0 en las filas que llenó el LLM.
@@ -137,7 +138,7 @@ Lo que mide la prueba: dentro de una plantilla solo cambia la antigüedad. En 5 
 
 `acuerdo.json` trae:
 
-- El kappa de Fleiss en el bloque común con los 4 y sin `etiquetador_1`, que conoce la clase esperada. Como `etiquetador_1` no entrega, `los_4` queda con los mismos etiquetadores que `sin_etiquetador_1`.
+- El kappa de Fleiss entre personas en el bloque común, con los 4 y sin `etiquetador_1`, que conoce la clase esperada. Como `etiquetador_1` no entrega, `los_4` queda con los mismos etiquetadores que `sin_etiquetador_1`. En la versión 1 nadie entregó, así que los dos salen vacíos y en `null`.
 - El acuerdo simple, que es la parte de las filas en que todos coinciden, y el kappa de Cohen por pares.
 - Cuántas filas del bloque común quedaron en media por no tener mayoría.
 - Qué parte de las etiquetas coincide con `clase_reglas` y con `sensibilidad`: en las finales, en cada partición y por etiquetador.
@@ -145,7 +146,7 @@ Lo que mide la prueba: dentro de una plantilla solo cambia la antigüedad. En 5 
 - `linea_base_prueba`: el F1 macro en el set de prueba de predecir `clase_reglas` y de copiar `sensibilidad`.
 - `lote_trivial`, que es verdadero si el 90 % o más de las etiquetas finales coincide con `clase_reglas`. En ese caso el clasificador solo empataría con las reglas, y se dice.
 - `rubrica_trivial`, que es verdadero si el 90 % o más coincide con `sensibilidad`. En ese caso el modelo casi solo puede copiar la rúbrica, y se dice.
-- `llm`, la comparación del etiquetador LLM con las personas. Se explica abajo.
+- `llm`, el etiquetador LLM: su repetición, el acuerdo entre LLM y su comparación con las personas. Se explica abajo.
 
 #34 tiene que reportar en el mismo set de prueba el F1 macro de las reglas, el de copiar la sensibilidad y el del modelo. Los dos primeros ya vienen en `linea_base_prueba`. Si el modelo no supera a copiar la sensibilidad, no aprendió más que la rúbrica.
 
@@ -153,7 +154,7 @@ Si alguien no entrega, sus filas del reparto salen del dataset y lo demás sigue
 
 ## Etiquetador LLM
 
-Además de las personas hay un etiquetador LLM. Está declarado: no es una persona y sus etiquetas nunca van a nombre de nadie del equipo. Es Claude Opus 5.5 (`claude-opus-5-5`), corrido el 22 oct 2026.
+El etiquetador LLM está declarado: no es una persona y sus etiquetas nunca van a nombre de nadie del equipo. Es Claude Opus 5.5 (`claude-opus-5-5`), corrido el 22 oct 2026. Sus etiquetas son las del dataset.
 
 Etiquetó a ciegas, solo con el texto del Excel:
 
@@ -163,7 +164,9 @@ Etiquetó a ciegas, solo con el texto del Excel:
 - Etiquetó las 425 filas en orden al azar, en 5 partes de 85, cada una con un agente nuevo.
 - Etiquetó otra vez las 60 del bloque común, en otro orden y con otro agente. Así se ve si repite sus etiquetas.
 
-`etiquetador_1` ya no entrega etiquetas, porque armó el lote y las suyas no serían a ciegas. En `acuerdo.json` sale en `faltan`. Nada más cambia.
+Para medir un acuerdo sin personas, otros dos LLM etiquetaron a ciegas las 60 filas del bloque común el 22 oct 2026: Claude Sonnet 5.5 (`claude-sonnet-5-5`) y Claude Haiku 5.5 (`claude-haiku-5-5`). Cada uno recibió el mismo texto que Opus en su repetición y las mismas instrucciones. Etiquetaron por su cuenta, sin ver las etiquetas de Opus ni las del otro. Tampoco vieron el maestro, las plantillas ni el repo.
+
+El 22 oct Ernesto canceló el etiquetado de personas, para que el lote no dependa de ellas. Los 4 etiquetadores salen en `faltan` de `acuerdo.json`. `etiquetador_1` tampoco iba a entregar, porque armó el lote y sus etiquetas no serían a ciegas.
 
 ### Archivos
 
@@ -171,18 +174,21 @@ Etiquetó a ciegas, solo con el texto del Excel:
 |---|---|
 | `datos/ml/rc65/etiquetas/llm.csv` | Las etiquetas del LLM de las 425 filas del maestro: `id`, `etiqueta` y `nota` |
 | `datos/ml/rc65/etiquetas/llm_repeticion.csv` | La segunda pasada del LLM en las 60 filas del bloque común, con las mismas columnas |
+| `datos/ml/rc65/etiquetas/llm_sonnet.csv` | Las etiquetas de Claude Sonnet 5.5 en las 60 filas del bloque común, con las mismas columnas |
+| `datos/ml/rc65/etiquetas/llm_haiku.csv` | Las etiquetas de Claude Haiku 5.5 en las 60 filas del bloque común, con las mismas columnas |
 
-Los dos son opcionales. Si están, `acuerdo.py` los revisa igual que los de las personas: ids del maestro (o del bloque común en la repetición), sin repetir, sin faltantes y con alta, media o baja. La repetición sin `llm.csv` también es un error. Con un error no escribe nada. Si no están, todo funciona como antes y `llm.esta` es falso. El prompt y lo que recibió cada agente no están en el repo.
+Los cuatro son opcionales. Si están, `acuerdo.py` los revisa igual que los de las personas: ids del maestro en `llm.csv` y del bloque común en los otros tres, sin repetir, sin faltantes y con alta, media o baja. La repetición, `llm_sonnet.csv` o `llm_haiku.csv` sin `llm.csv` también son un error. Con un error no escribe nada. Si no están, todo funciona como antes y `llm.esta` es falso. Los nombres de `llm_sonnet` y `llm_haiku` están en `LLMS_COMUN`. El prompt y lo que recibió cada agente no están en el repo.
 
 ### Cómo se usa
 
-- **No vota.** No entra en la etiqueta final del bloque común, que siguen decidiendo `etiquetador_2`, `etiquetador_3` y `etiquetador_4`. Tampoco entra en el kappa de Fleiss (`los_4` y `sin_etiquetador_1`) ni en el kappa de Cohen entre personas.
-- **Se compara aparte**, en la sección `llm` de `acuerdo.json`.
+- **Ninguno de los LLM vota.** El LLM no entra en la etiqueta final del bloque común, que con etiquetas de personas deciden `etiquetador_2`, `etiquetador_3` y `etiquetador_4`. Tampoco entra en el kappa de Fleiss entre personas (`los_4` y `sin_etiquetador_1`) ni en el kappa de Cohen entre personas.
+- **Sonnet y Haiku solo miden el acuerdo entre LLM.** No cambian `dataset.csv`: la etiqueta de cada fila sigue siendo la de `llm.csv`. Solo entran en `llm.acuerdo_entre_llm`, que compara en el bloque común las etiquetas de `llm.csv` con las suyas. La repetición no entra ahí: va aparte, en `llm.repeticion`.
+- **Con etiquetas de personas, el LLM se compara aparte** con ellas, en la sección `llm` de `acuerdo.json`. Las reglas que siguen, hasta la de nadie entrega, son para ese caso.
 - **Cubre a quien no entrega, con condición.** Mira el kappa del LLM contra la etiqueta final de las personas en el bloque común. Si es de 0.6 o más (`UMBRAL_LLM`) y falta el archivo de `etiquetador_2`, `etiquetador_3` o `etiquetador_4`, sus filas del reparto se llenan con la etiqueta del LLM. Si es menor o no se puede calcular, esas filas salen del dataset y `llm.motivo` dice por qué. `etiquetador_1` no tiene filas del reparto, así que nunca se cubre.
 - **Ese kappa solo cuenta las filas en que las personas tienen mayoría.** Con 2 personas son las filas en que coinciden. En las otras la final queda media por regla, no porque alguien la pusiera. Si contaran, un LLM que pone media cuando duda ganaría puntos y uno que se queda con la etiqueta de una de las dos los perdería.
 - **Con una sola persona, la referencia es ella.** Si solo entrega un ciego, el kappa se mide contra él y el LLM puede cubrir a los otros dos. Entonces más de la mitad del dataset sale del LLM. `llm.motivo` y la terminal lo avisan.
 - **Mientras entregue alguna persona, nunca llena el bloque común.** Esas filas solo llevan etiquetas de personas.
-- **Si nadie entrega, todo sale del LLM.** Si ninguno de `etiquetador_2`, `etiquetador_3` y `etiquetador_4` entregó, no hay contra qué medir al LLM. Entonces llena las 425 filas, también el bloque común, con `n_etiquetas` 0, y `llm.solo_llm` es verdadero. Así el lote no depende de que las personas participen. Ese dataset no tiene validación de personas ni acuerdo medido, y así se tiene que reportar.
+- **Si nadie entrega, todo sale del LLM.** Si ninguno de `etiquetador_2`, `etiquetador_3` y `etiquetador_4` entregó, no hay contra qué medir al LLM. Entonces llena las 425 filas, también el bloque común, con `n_etiquetas` 0, y `llm.solo_llm` es verdadero. Es el caso de la versión 1. Así el lote no depende de que las personas participen. Ese dataset no tiene validación de personas ni acuerdo entre personas. El acuerdo que se reporta es entre LLM, en `llm.acuerdo_entre_llm` y `llm.repeticion`, y así se tiene que decir.
 - En `dataset.csv`, `n_etiquetas` 0 marca las filas del LLM: no tienen ninguna etiqueta de persona. Las columnas no cambian.
 - `por_clase_solo_personas` cuenta las filas por clase sin las del LLM. Lo demás (`al_menos_60_por_clase`, `linea_base_prueba`, `coincidencia`, `lote_trivial` y `rubrica_trivial`) sale del dataset completo.
 
@@ -195,6 +201,7 @@ La sección `llm` de `acuerdo.json` trae:
 | `contra_final_personas` | Filas, kappa de Cohen y acuerdo simple contra la etiqueta final de las personas en el bloque común. Solo cuenta las filas en que las personas tienen mayoría. `filas_sin_mayoria_excluidas` dice cuántas deja fuera y `personas`, quiénes dan la referencia |
 | `contra_cada_persona` | Lo mismo contra cada etiquetador que entregó |
 | `repeticion` | Kappa y acuerdo simple entre las dos pasadas del bloque común. `null` si no está `llm_repeticion.csv` |
+| `acuerdo_entre_llm` | El acuerdo entre LLM en el bloque común, con las etiquetas de `llm.csv` y las de `llm_sonnet.csv` y `llm_haiku.csv`. Trae `etiquetadores` (los que están), `filas`, `fleiss_kappa`, `acuerdo_simple` (la parte de las filas en que todos coinciden) y `cohen_por_pares`. `null` si hay menos de 2 |
 | `coincidencia` | Qué parte de sus 425 etiquetas coincide con `clase_reglas` y con `sensibilidad` |
 | `alcanza_umbral` | Si el kappa contra la etiqueta final es de 0.6 o más |
 | `cubre_faltantes` | Si llenó filas de alguien que no entregó |
@@ -206,20 +213,20 @@ La sección `llm` de `acuerdo.json` trae:
 
 ```bash
 python -m cirdan.ml.generar_lote                 # escribe datos/ml/rc65/copias/ y maestro.jsonl
-python -m unittest -v pruebas/test_dataset_ml.py # 62 pruebas sin base ni red
+python -m unittest -v pruebas/test_dataset_ml.py # 68 pruebas sin base ni red
 ```
 
-La semilla es fija (`SEMILLA = 65`). La misma semilla da los mismos bytes, y una prueba revisa que el lote del repo sea el que sale de ella. `.gitattributes` marca `datos/ml/` sin conversión de fin de línea para que esa comparación sirva en cualquier sistema. Si cambias una plantilla o el mapa de severidades, regenera el lote antes de repartirlo. Después de repartirlo, no lo regeneres: las copias que ya tienen los etiquetadores dejarían de coincidir con el maestro.
+La semilla es fija (`SEMILLA = 65`). La misma semilla da los mismos bytes, y una prueba revisa que el lote del repo sea el que sale de ella. `.gitattributes` marca `datos/ml/` sin conversión de fin de línea para que esa comparación sirva en cualquier sistema. Si cambias una plantilla o el mapa de severidades, regenera el lote antes de repartirlo. Después de repartirlo, no lo regeneres: las copias que ya se repartieron y las etiquetas de los LLM dejarían de coincidir con el maestro.
 
 ## Cómo medir el acuerdo
 
-Las etiquetas devueltas van en `datos/ml/rc65/etiquetas/etiquetador_N.csv`, con las columnas `id` y `etiqueta`, y `nota` si se quiere. Luego:
+Las etiquetas de los LLM ya están en `datos/ml/rc65/etiquetas/`. Si algún día llegan etiquetas de personas, van en `datos/ml/rc65/etiquetas/etiquetador_N.csv`, con las columnas `id` y `etiqueta`, y `nota` si se quiere. Luego:
 
 ```bash
 python -m cirdan.ml.acuerdo    # escribe datos/ml/rc65/dataset.csv y acuerdo.json
 ```
 
-Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media o baja. Hace lo mismo con `llm.csv` y `llm_repeticion.csv` si están. Si encuentra un error, o si no hay etiquetas de personas ni del LLM, no escribe nada y sale con código 1. Si solo están las del LLM, escribe el dataset completo con sus etiquetas y lo avisa. En la terminal da una línea del LLM, con su kappa contra las personas y las filas que cubre. Si falta `etiquetador_1`, da el kappa de Fleiss entre los ciegos que entregaron y no uno con los 4. Cuando ya existe `dataset.csv`, una prueba revisa que haya al menos 60 filas por clase en las etiquetas finales. Antes de eso se salta. Otra prueba revisa que `llm.csv` y `llm_repeticion.csv` del repo pasen la revisión.
+Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media o baja. Hace lo mismo con `llm.csv`, `llm_repeticion.csv`, `llm_sonnet.csv` y `llm_haiku.csv` si están. Si encuentra un error, o si no hay etiquetas de personas ni del LLM, no escribe nada y sale con código 1. Si solo están las del LLM, escribe el dataset completo con sus etiquetas y lo avisa. En la terminal da una línea del LLM, con su kappa contra las personas y las filas que cubre. Si está `llm_sonnet.csv` o `llm_haiku.csv`, da otra con el kappa de Fleiss entre LLM en el bloque común. Si falta `etiquetador_1`, da el kappa de Fleiss entre los ciegos que entregaron y no uno con los 4. Cuando ya existe `dataset.csv`, una prueba revisa que haya al menos 60 filas por clase en las etiquetas finales. Antes de eso se salta. Otras pruebas revisan que `llm.csv`, `llm_repeticion.csv`, `llm_sonnet.csv` y `llm_haiku.csv` del repo pasen la revisión.
 
 ## Riesgos conocidos
 
@@ -228,4 +235,5 @@ Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cad
 - La clase baja depende de lecturas que el criterio no fija, porque el criterio pone la suplantación en media. Por eso las plantillas baja de correo traen la protección que la evita: DMARC p=reject en `spf_missing` y `v=spf1 -all` sin MX en `dmarc_missing`. El parecido viejo ya no tiene un certificado vigente. Aun así, `parecido_otro_tld` (15 filas) puede salir media, y `por_vencer_sitio_secundario` (16) también, porque la columna Ejemplos del criterio pone en media un certificado que vence en menos de 30 días. Si las dos salen media quedan unas 111 de clase baja. Si quedan menos de 60, `acuerdo.json` lo dice en `al_menos_60_por_clase`.
 - Las variantes con MX, KEV, EPSS o el uso del host usan evidencia que hoy ningún recolector da. Llegará con #15, #17 y #18. Hasta entonces, en producción el modelo verá menos variación que en el lote.
 - Con 60 filas en el bloque común, el intervalo del kappa es ancho. El kappa del LLM contra las personas, que decide si cubre a quien no entrega, sale de esas mismas 60 filas, o de menos. Si falta un ciego, solo cuentan las filas en que los otros dos coinciden.
+- El acuerdo entre LLM no reemplaza la validación de personas. Los 3 modelos son de la misma familia y recibieron las mismas instrucciones, así que pueden compartir sesgos. Un kappa alto entre ellos dice que el criterio se aplica igual, no que las etiquetas sean correctas.
 - Si #30 trae códigos nuevos, el modelo no los conoce.

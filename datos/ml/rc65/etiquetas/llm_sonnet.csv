@@ -1,0 +1,61 @@
+id,etiqueta,nota
+h28cpy4g,alta,
+h2d2zvwg,baja,
+h2edbv64,baja,
+h2typptv,media,"Dudé con alta: hay contraseñas, pero la brecha es de 2023."
+h2vnxr7z,alta,
+h37z7wnu,media,"Dominio nuevo con la marca y la palabra pagos, huele a phishing, pero por sí solo no da acceso."
+h42nacwf,alta,
+h4yc3sfr,media,
+h4zuu5mg,alta,"Es un equipo de desarrollo, pero RDP abierto a internet y visto ayer."
+h73vea7g,baja,
+h78aqp77,media,"Dudé: servidor de producción con RDP, pero no se ve desde hace 262 días y puede estar cerrado."
+h7ax5ytd,baja,
+h7fb48ut,baja,"Sin SPF, pero DMARC p=reject frena la suplantación."
+h7sx8dkt,baja,"Vence en 15 días, hay tiempo para renovar."
+h958haxt,alta,
+h99npj6d,media,"Dudé con baja: SPF -all protege parcialmente, pero sin DMARC se puede suplantar el From."
+h9nqwnc7,media,
+ha7eqk2t,media,
+havtp8pb,media,
+hbbuzrdk,baja,
+hbzxdkcw,alta,
+hccrsz3m,media,Dudé con baja: es la misma marca con otra terminación y podría ser legítimo.
+hdc38r7r,baja,
+hdes4662,media,
+hdh542c3,baja,
+hdjpad99,media,
+he5aerqb,baja,
+heq5ax57,media,
+heyskhcw,media,"Dudé con baja: SPF -all protege parcialmente, pero sin DMARC se puede suplantar el From."
+hhmj99p9,baja,
+hjaq666n,alta,
+hjm2tw5j,alta,
+hjmhg6w4,baja,
+hk8a7zf7,baja,"Vence en 14 días, hay tiempo para renovar."
+hk9m7kq7,baja,
+hmamf84t,media,"Dominio nuevo con la marca y la palabra cuenta, huele a phishing, pero por sí solo no da acceso."
+hmw7gn4r,baja,
+hngwaeek,baja,
+hpsny58g,baja,
+hpt28hsf,media,"Dudé con alta: hay contraseñas, pero la brecha es de 2022."
+hqdrsanz,media,
+hqs5gn3g,alta,"Es un equipo de pruebas, pero RDP abierto a internet y visto hace 3 días."
+hrfjkq3p,baja,
+hrqbnung,baja,
+hrzaz96v,baja,Dudé con media: es un equipo de laboratorio y no se ve desde hace 290 días.
+ht8st3y2,baja,"Dudé con media: CVSS 5.3, EPSS bajo, sin KEV y la versión sigue con soporte."
+htes9dnr,alta,
+huj99qpp,media,
+hvt6zgzj,baja,
+hw4tdjvy,alta,
+hxe4c2x8,alta,
+hxevztgx,alta,"Es un equipo de QA, pero RDP abierto a internet y visto ayer."
+hy83gfjz,media,"Dudé con baja: misma marca con otra terminación, un solo certificado."
+hz4s8dty,media,
+hz9kh9uv,media,"Dudé con alta: hay contraseñas, pero la brecha es de 2022."
+hzatwqv2,media,"Dudé con baja: CVSS 5.9 y EPSS 0.087, sin KEV y la versión tiene soporte."
+hzcj8hrk,media,"Dudé con alta: hay contraseñas, pero la brecha es de 2023."
+hzdvrt3j,baja,
+hzv9gtbv,baja,
+hzwffygm,media,Dudé con baja: el último certificado venció hace 83 días y el dominio parece inactivo.
