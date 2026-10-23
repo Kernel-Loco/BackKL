@@ -9,5 +9,6 @@
 | [`cuentas_de_prueba.md`](cuentas_de_prueba.md) | **Cuentas de prueba del portal y cómo pasar el MFA** (para todo el equipo) | #25 |
 | [`politica_uso_etico.md`](politica_uso_etico.md) | Política de uso ético y alcance de LowTide: solo dominios autorizados, solo observación, datos personales, uso aceptable y cómo se cumple en el código | #6 |
 | [`plantilla_carta_autorizacion.md`](plantilla_carta_autorizacion.md) | Plantilla de la carta de autorización que firma quien controla cada dominio: alcance, vigencia, datos personales, firmas y Anexo A de actividades | #6 |
+| [`hallazgos_esperados.md`](hallazgos_esperados.md) | Hallazgos esperados del dominio de prueba olmardo.com, por fuente, con código, severidad, fecha y estado | #10b |
 
 La base de datos se documenta en [`db/README.md`](../db/README.md).
