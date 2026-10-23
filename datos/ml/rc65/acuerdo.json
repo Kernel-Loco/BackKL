@@ -1,0 +1,92 @@
+{
+  "filas_maestro": 425,
+  "filas_dataset": 425,
+  "faltan": [
+    "etiquetador_1",
+    "etiquetador_2",
+    "etiquetador_3",
+    "etiquetador_4"
+  ],
+  "por_clase": {
+    "alta": 99,
+    "media": 158,
+    "baja": 168
+  },
+  "por_clase_solo_personas": {
+    "alta": 0,
+    "media": 0,
+    "baja": 0
+  },
+  "por_particion": {
+    "entrenamiento": 287,
+    "prueba": 138
+  },
+  "al_menos_60_por_clase": true,
+  "linea_base_prueba": {
+    "filas": 138,
+    "f1_macro_clase_reglas": 0.5881,
+    "f1_macro_sensibilidad": 0.6153
+  },
+  "bloque_comun": {
+    "filas": 60,
+    "los_4": {
+      "etiquetadores": [],
+      "fleiss_kappa": null,
+      "acuerdo_simple": null
+    },
+    "sin_etiquetador_1": {
+      "etiquetadores": [],
+      "fleiss_kappa": null,
+      "acuerdo_simple": null
+    },
+    "sin_mayoria_queda_media": 0,
+    "cohen_por_pares": {}
+  },
+  "coincidencia": {
+    "final": {
+      "clase_reglas": 0.5035,
+      "sensibilidad": 0.7059
+    },
+    "final_entrenamiento": {
+      "clase_reglas": 0.4704,
+      "sensibilidad": 0.7561
+    },
+    "final_prueba": {
+      "clase_reglas": 0.5725,
+      "sensibilidad": 0.6014
+    }
+  },
+  "lote_trivial": false,
+  "rubrica_trivial": false,
+  "llm": {
+    "esta": true,
+    "umbral_kappa": 0.6,
+    "contra_final_personas": {
+      "filas": 0,
+      "cohen_kappa": null,
+      "acuerdo_simple": null,
+      "filas_sin_mayoria_excluidas": 0,
+      "personas": []
+    },
+    "contra_cada_persona": {},
+    "repeticion": {
+      "filas": 60,
+      "cohen_kappa": 0.8716,
+      "acuerdo_simple": 0.9167
+    },
+    "coincidencia": {
+      "clase_reglas": 0.5035,
+      "sensibilidad": 0.7059
+    },
+    "alcanza_umbral": false,
+    "cubre_faltantes": true,
+    "solo_llm": true,
+    "motivo": "Ninguno de etiquetador_2, etiquetador_3, etiquetador_4 entregó etiquetas. Todo el dataset sale del LLM, también el bloque común, con n_etiquetas 0 y sin validación de personas.",
+    "filas_cubiertas": {
+      "etiquetador_2": 122,
+      "etiquetador_3": 122,
+      "etiquetador_4": 121,
+      "bloque_comun": 60
+    }
+  }
+}

@@ -2,7 +2,9 @@
 
 Lote de hallazgos ficticios que se etiqueta a ciegas para entrenar el clasificador alta, media y baja (#34). Es la tarjeta RC-65. Los etiquetadores aparecen como `etiquetador_1` a `etiquetador_4`. Aparte hay un etiquetador LLM declarado, que no es una persona y nunca vota (ver [Etiquetador LLM](#etiquetador-llm)).
 
-**Esta rama se sube a GitHub solo cuando estén todas las etiquetas.** El maestro y las plantillas dicen la clase esperada y la severidad de cada fila. Si alguien los lee antes de etiquetar, el etiquetado deja de ser ciego.
+**Si estás etiquetando el lote, no sigas leyendo.** No abras este documento, `datos/ml/rc65/` ni el código de `cirdan/ml/` hasta entregar tu Excel. El maestro, las plantillas, el dataset y las etiquetas del LLM dicen la clase de cada fila. Si los lees antes de etiquetar, tu etiquetado deja de ser ciego.
+
+**Versión 1, del 22 oct 2026.** `dataset.csv` y `acuerdo.json` salen completos del etiquetador LLM (`llm.solo_llm` es verdadero), porque RC-65 se tenía que entregar antes de que regresaran las etiquetas de las personas. Esta versión no tiene validación de personas ni acuerdo medido, y así se tiene que reportar. Las personas siguen etiquetando. Cuando regresen sus Excel, otro PR agrega sus etiquetas y vuelve a correr `acuerdo.py`. Entonces deciden ellas y el LLM solo cubre a quien falte, con la regla de la sección [Etiquetador LLM](#etiquetador-llm).
 
 ## Archivos
 
