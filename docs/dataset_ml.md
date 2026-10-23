@@ -99,9 +99,9 @@ Hoy la API (`cirdan/api/v1.py:26-27`) y crt.sh (`crtsh.py:390`, 398 y 435) ponen
 ## Bloque común y reparto
 
 - Son 425 hallazgos: 142 de clase esperada alta, 141 de media y 142 de baja.
-- El bloque común tiene 60 filas: 20 por clase esperada y al menos 2 por plantilla. Lo etiquetan los 4.
+- El bloque común tiene 60 filas: 20 por clase esperada y al menos 2 por plantilla. Va en la copia de los 4, pero lo etiquetan `etiquetador_2`, `etiquetador_3` y `etiquetador_4`, porque `etiquetador_1` ya no entrega (ver [Etiquetador LLM](#etiquetador-llm)).
 - Las otras 365 se reparten en turno entre `etiquetador_2`, `etiquetador_3` y `etiquetador_4`, 122, 122 y 121. Cada uno revisa 181 o 182 filas.
-- `etiquetador_1` solo etiqueta el bloque común, porque armó el lote y conoce la clase esperada de cada plantilla.
+- `etiquetador_1` recibió solo el bloque común, porque armó el lote y conoce la clase esperada de cada plantilla. Por lo mismo ya no entrega etiquetas.
 
 En el maestro, `bloque` es `comun` o `reparto` y `asignado_a` dice quién etiqueta cada fila.
 
@@ -128,14 +128,14 @@ Lo que mide la prueba: dentro de una plantilla solo cambia la antigüedad. En 5 
 `dataset.csv` trae `id`, `plantilla`, `particion`, `tipo`, `antiguedad_dias`, `exposicion`, `sensibilidad`, `etiqueta`, `n_etiquetas` y `clase_reglas`. No trae la clase esperada.
 
 - Fuera del bloque común, la etiqueta es la de su etiquetador.
-- En el bloque común, la etiqueta final es la de la mayoría entre `etiquetador_2`, `etiquetador_3` y `etiquetador_4`. Si los 3 difieren, queda media. La de `etiquetador_1` solo cuenta en el acuerdo.
+- En el bloque común, la etiqueta final es la de la mayoría entre `etiquetador_2`, `etiquetador_3` y `etiquetador_4`. Si los 3 difieren, queda media. La de `etiquetador_1`, si entregara, solo contaría en el acuerdo.
 - `n_etiquetas` cuenta las etiquetas de personas que decidieron la final: 3 en el bloque común y 1 fuera. Es 0 en las filas que llenó el LLM.
-- Si falta uno de los 3, la final del bloque común sale de los otros 2. Si no coinciden queda media, y `n_etiquetas` es 2.
+- Si falta uno de los 3, la final del bloque común sale de los otros 2. Si no coinciden queda media, y `n_etiquetas` es 2. El LLM no desempata.
 - `clase_reglas` es la severidad de la regla en clases: crítica y alta cuentan como alta, media como media y baja como baja (`docs/criterio_criticidad.md:48`).
 
 `acuerdo.json` trae:
 
-- El kappa de Fleiss en el bloque común con los 4 y sin `etiquetador_1`, que conoce la clase esperada.
+- El kappa de Fleiss en el bloque común con los 4 y sin `etiquetador_1`, que conoce la clase esperada. Como `etiquetador_1` no entrega, `los_4` queda con los mismos etiquetadores que `sin_etiquetador_1`.
 - El acuerdo simple, que es la parte de las filas en que todos coinciden, y el kappa de Cohen por pares.
 - Cuántas filas del bloque común quedaron en media por no tener mayoría.
 - Qué parte de las etiquetas coincide con `clase_reglas` y con `sensibilidad`: en las finales, en cada partición y por etiquetador.
@@ -176,7 +176,9 @@ Los dos son opcionales. Si están, `acuerdo.py` los revisa igual que los de las 
 
 - **No vota.** No entra en la etiqueta final del bloque común, que siguen decidiendo `etiquetador_2`, `etiquetador_3` y `etiquetador_4`. Tampoco entra en el kappa de Fleiss (`los_4` y `sin_etiquetador_1`) ni en el kappa de Cohen entre personas.
 - **Se compara aparte**, en la sección `llm` de `acuerdo.json`.
-- **Cubre a quien no entrega, con condición.** Mira el kappa del LLM contra la etiqueta final de las personas en el bloque común. Si es de 0.6 o más (`UMBRAL_LLM`) y falta el archivo de `etiquetador_2`, `etiquetador_3` o `etiquetador_4`, sus filas del reparto se llenan con la etiqueta del LLM. Si es menor o no se puede calcular, esas filas salen del dataset y `llm.motivo` dice por qué.
+- **Cubre a quien no entrega, con condición.** Mira el kappa del LLM contra la etiqueta final de las personas en el bloque común. Si es de 0.6 o más (`UMBRAL_LLM`) y falta el archivo de `etiquetador_2`, `etiquetador_3` o `etiquetador_4`, sus filas del reparto se llenan con la etiqueta del LLM. Si es menor o no se puede calcular, esas filas salen del dataset y `llm.motivo` dice por qué. `etiquetador_1` no tiene filas del reparto, así que nunca se cubre.
+- **Ese kappa solo cuenta las filas en que las personas tienen mayoría.** Con 2 personas son las filas en que coinciden. En las otras la final queda media por regla, no porque alguien la pusiera. Si contaran, un LLM que pone media cuando duda ganaría puntos y uno que se queda con la etiqueta de una de las dos los perdería.
+- **Con una sola persona, la referencia es ella.** Si solo entrega un ciego, el kappa se mide contra él y el LLM puede cubrir a los otros dos. Entonces más de la mitad del dataset sale del LLM. `llm.motivo` y la terminal lo avisan.
 - **Nunca llena el bloque común.** Esas filas solo llevan etiquetas de personas.
 - En `dataset.csv`, `n_etiquetas` 0 marca las filas del LLM: no tienen ninguna etiqueta de persona. Las columnas no cambian.
 - `por_clase_solo_personas` cuenta las filas por clase sin las del LLM. Lo demás (`al_menos_60_por_clase`, `linea_base_prueba`, `coincidencia`, `lote_trivial` y `rubrica_trivial`) sale del dataset completo.
@@ -187,7 +189,7 @@ La sección `llm` de `acuerdo.json` trae:
 |---|---|
 | `esta` | Si hay `llm.csv` |
 | `umbral_kappa` | 0.6 |
-| `contra_final_personas` | Filas, kappa de Cohen y acuerdo simple contra la etiqueta final de las personas en el bloque común. Solo cuenta las filas que tienen etiqueta final de personas |
+| `contra_final_personas` | Filas, kappa de Cohen y acuerdo simple contra la etiqueta final de las personas en el bloque común. Solo cuenta las filas en que las personas tienen mayoría. `filas_sin_mayoria_excluidas` dice cuántas deja fuera y `personas`, quiénes dan la referencia |
 | `contra_cada_persona` | Lo mismo contra cada etiquetador que entregó |
 | `repeticion` | Kappa y acuerdo simple entre las dos pasadas del bloque común. `null` si no está `llm_repeticion.csv` |
 | `coincidencia` | Qué parte de sus 425 etiquetas coincide con `clase_reglas` y con `sensibilidad` |
@@ -200,7 +202,7 @@ La sección `llm` de `acuerdo.json` trae:
 
 ```bash
 python -m cirdan.ml.generar_lote                 # escribe datos/ml/rc65/copias/ y maestro.jsonl
-python -m unittest -v pruebas/test_dataset_ml.py # 53 pruebas sin base ni red
+python -m unittest -v pruebas/test_dataset_ml.py # 59 pruebas sin base ni red
 ```
 
 La semilla es fija (`SEMILLA = 65`). La misma semilla da los mismos bytes, y una prueba revisa que el lote del repo sea el que sale de ella. `.gitattributes` marca `datos/ml/` sin conversión de fin de línea para que esa comparación sirva en cualquier sistema. Si cambias una plantilla o el mapa de severidades, regenera el lote antes de repartirlo. Después de repartirlo, no lo regeneres: las copias que ya tienen los etiquetadores dejarían de coincidir con el maestro.
@@ -213,7 +215,7 @@ Las etiquetas devueltas van en `datos/ml/rc65/etiquetas/etiquetador_N.csv`, con 
 python -m cirdan.ml.acuerdo    # escribe datos/ml/rc65/dataset.csv y acuerdo.json
 ```
 
-Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media o baja. Hace lo mismo con `llm.csv` y `llm_repeticion.csv` si están. Si encuentra un error, o si no hay etiquetas de personas, no escribe nada y sale con código 1. En la terminal da una línea del LLM, con su kappa contra las personas y las filas que cubre. Cuando ya existe `dataset.csv`, una prueba revisa que haya al menos 60 filas por clase en las etiquetas finales. Antes de eso se salta. Otra prueba revisa que `llm.csv` y `llm_repeticion.csv` del repo pasen la revisión.
+Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media o baja. Hace lo mismo con `llm.csv` y `llm_repeticion.csv` si están. Si encuentra un error, o si no hay etiquetas de personas, no escribe nada y sale con código 1. En la terminal da una línea del LLM, con su kappa contra las personas y las filas que cubre. Si falta `etiquetador_1`, da el kappa de Fleiss entre los ciegos que entregaron y no uno con los 4. Cuando ya existe `dataset.csv`, una prueba revisa que haya al menos 60 filas por clase en las etiquetas finales. Antes de eso se salta. Otra prueba revisa que `llm.csv` y `llm_repeticion.csv` del repo pasen la revisión.
 
 ## Riesgos conocidos
 
@@ -221,5 +223,5 @@ Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cad
 - La sensibilidad de la rúbrica es la misma en todas las filas de una plantilla. Coincide con la clase esperada en 399 de las 425 filas y en las 138 de prueba. Si las etiquetas siguen la clase esperada, copiar la sensibilidad da F1 macro 1.0 en prueba y las reglas dan 0.70. Por eso `acuerdo.json` trae `linea_base_prueba` y `rubrica_trivial`.
 - La clase baja depende de lecturas que el criterio no fija, porque el criterio pone la suplantación en media. Por eso las plantillas baja de correo traen la protección que la evita: DMARC p=reject en `spf_missing` y `v=spf1 -all` sin MX en `dmarc_missing`. El parecido viejo ya no tiene un certificado vigente. Aun así, `parecido_otro_tld` (15 filas) puede salir media, y `por_vencer_sitio_secundario` (16) también, porque la columna Ejemplos del criterio pone en media un certificado que vence en menos de 30 días. Si las dos salen media quedan unas 111 de clase baja. Si quedan menos de 60, `acuerdo.json` lo dice en `al_menos_60_por_clase`.
 - Las variantes con MX, KEV, EPSS o el uso del host usan evidencia que hoy ningún recolector da. Llegará con #15, #17 y #18. Hasta entonces, en producción el modelo verá menos variación que en el lote.
-- Con 60 filas en el bloque común, el intervalo del kappa es ancho. El kappa del LLM contra las personas, que decide si cubre a quien no entrega, sale de esas mismas 60 filas.
+- Con 60 filas en el bloque común, el intervalo del kappa es ancho. El kappa del LLM contra las personas, que decide si cubre a quien no entrega, sale de esas mismas 60 filas, o de menos. Si falta un ciego, solo cuentan las filas en que los otros dos coinciden.
 - Si #30 trae códigos nuevos, el modelo no los conoce.

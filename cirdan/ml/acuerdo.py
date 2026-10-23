@@ -10,7 +10,8 @@ sus filas del reparto salen del dataset y lo demás sigue (plan B del reparto), 
 
 En el bloque común la etiqueta final es la mayoría de etiquetador_2 a etiquetador_4, y media si no hay mayoría.
 Si falta uno de los tres, deciden los otros dos: si no coinciden queda media, y n_etiquetas es 2.
-etiquetador_1 conoce la clase esperada de cada plantilla, así que su etiqueta solo cuenta en el acuerdo.
+etiquetador_1 conoce la clase esperada de cada plantilla, así que su etiqueta solo cuenta en el acuerdo. Ya no
+entrega: sale en faltan, y entonces los_4 tiene los mismos etiquetadores que sin_etiquetador_1.
 Escribe dataset.csv y acuerdo.json: kappa de Fleiss con los 4 y sin etiquetador_1, acuerdo simple, kappa de Cohen
 por pares, qué parte de las etiquetas coincide con clase_reglas y con la sensibilidad, y el F1 macro que sacan en el
 set de prueba las dos líneas base que #34 tiene que superar: las reglas y copiar la sensibilidad.
@@ -19,9 +20,11 @@ Etiquetador LLM, opcional y declarado: etiquetas/llm.csv trae todas las filas de
 una segunda pasada del bloque común. Se revisan igual que los de las personas. El LLM nunca vota: no entra en la
 etiqueta final, en el kappa de Fleiss ni en el kappa de Cohen entre personas. La sección llm de acuerdo.json trae su
 kappa contra la etiqueta final de las personas en el bloque común y contra cada persona, si repite sus etiquetas y
-cuánto coincide con clase_reglas y con la sensibilidad. Si falta el archivo de etiquetador_2, etiquetador_3 o
-etiquetador_4 y ese kappa es de UMBRAL_LLM o más, el LLM llena sus filas del reparto con n_etiquetas 0. Si no, esas
-filas salen del dataset. Nunca llena el bloque común. por_clase_solo_personas cuenta las clases sin las filas del LLM.
+cuánto coincide con clase_reglas y con la sensibilidad. El kappa contra la etiqueta final solo cuenta las filas en que
+las personas tienen mayoría: la media por empate es una regla y no una etiqueta de personas. Si falta el archivo de
+etiquetador_2, etiquetador_3 o etiquetador_4 y ese kappa es de UMBRAL_LLM o más, el LLM llena sus filas del reparto
+con n_etiquetas 0. Si no, esas filas salen del dataset. Nunca llena el bloque común. por_clase_solo_personas cuenta
+las clases sin las filas del LLM.
 """
 import argparse
 import csv
@@ -92,12 +95,19 @@ def macro_f1(reales, predichas):
     return sum(f1) / len(f1)
 
 
+def mayoria(valores):
+    """La clase que tiene más de la mitad de los valores. None si ninguna la tiene o si no hay valores."""
+    if not valores:
+        return None
+    clase, veces = Counter(valores).most_common(1)[0]
+    return clase if veces * 2 > len(valores) else None
+
+
 def etiqueta_final(valores):
     """La de la mayoría. media si no hay mayoría, por ejemplo cuando los tres difieren."""
     if not valores:
         return None
-    clase, veces = Counter(valores).most_common(1)[0]
-    return clase if veces > len(valores) / 2 else 'media'
+    return mayoria(valores) or 'media'
 
 
 def _r(x):
@@ -199,15 +209,20 @@ def armar_dataset(maestro, etiquetas, llm=None, cubrir=()):
 
 
 def finales_comun(maestro, etiquetas):
-    """{id: etiqueta final de las personas} en el bloque común, solo en las filas que etiquetó algún ciego."""
-    finales = {}
+    """({id: etiqueta final de las personas}, filas sin mayoría) en el bloque común. Solo trae las filas en que los
+    ciegos que entregaron tienen mayoría. En las otras la final queda media por regla, no porque las personas la
+    pusieran. Con 2 ciegos son las filas en que coinciden. Con 1, todas."""
+    finales, sin_mayoria = {}, 0
     for h in maestro:
         if h['bloque'] != 'comun':
             continue
         valores = [etiquetas[e][h['id']] for e in CIEGOS if e in etiquetas]
-        if valores:
-            finales[h['id']] = etiqueta_final(valores)
-    return finales
+        clase = mayoria(valores)
+        if clase:
+            finales[h['id']] = clase
+        elif valores:
+            sin_mayoria += 1
+    return finales, sin_mayoria
 
 
 def medir_llm(maestro, etiquetas, faltan, llm, repeticion):
@@ -226,7 +241,9 @@ def medir_llm(maestro, etiquetas, faltan, llm, repeticion):
         x, y = [llm[i] for i in ids], [referencia[i] for i in ids]
         return {'filas': len(ids), 'cohen_kappa': _r(cohen_kappa(x, y)), 'acuerdo_simple': _parte(list(zip(x, y)))}
 
-    contra_final = contra(finales_comun(maestro, etiquetas))
+    finales, sin_mayoria = finales_comun(maestro, etiquetas)
+    personas = [e for e in CIEGOS if e in etiquetas]
+    contra_final = dict(contra(finales), filas_sin_mayoria_excluidas=sin_mayoria, personas=personas)
     kappa = contra_final['cohen_kappa']
     alcanza = kappa is not None and kappa >= UMBRAL_LLM   # con el kappa redondeado, el mismo que sale en acuerdo.json
     texto = 'kappa del LLM contra la etiqueta final de las personas en el bloque común'
@@ -236,6 +253,8 @@ def medir_llm(maestro, etiquetas, faltan, llm, repeticion):
         motivo = 'El %s es %s, de %s o más.' % (texto, kappa, UMBRAL_LLM)
     else:
         motivo = 'El %s es %s, menor que %s.' % (texto, kappa, UMBRAL_LLM)
+    if len(personas) == 1:
+        motivo += ' La referencia es una sola persona, %s.' % personas[0]
     if not sin_archivo:
         motivo += ' No falta nadie del reparto.'
     elif alcanza:
@@ -269,15 +288,6 @@ def _grupo(comun, etiquetas, quienes):
     return {'etiquetadores': quienes,
             'fleiss_kappa': _r(fleiss_kappa([[f.count(c) for c in CLASES] for f in filas])),
             'acuerdo_simple': _r(sum(len(set(f)) == 1 for f in filas) / len(filas))}
-
-
-def _sin_mayoria(comun, etiquetas):
-    """Filas del bloque común en que los ciegos no tienen mayoría, así que la etiqueta final queda en media."""
-    n = 0
-    for h in comun:
-        valores = [etiquetas[e][h['id']] for e in CIEGOS if e in etiquetas]
-        n += bool(valores) and Counter(valores).most_common(1)[0][1] * 2 <= len(valores)
-    return n
 
 
 def medir_acuerdo(maestro, etiquetas, faltan, dataset, llm=None):
@@ -327,7 +337,7 @@ def medir_acuerdo(maestro, etiquetas, faltan, dataset, llm=None):
             'filas': len(comun),
             'los_4': _grupo(comun, etiquetas, ETIQUETADORES),
             'sin_etiquetador_1': _grupo(comun, etiquetas, CIEGOS),
-            'sin_mayoria_queda_media': _sin_mayoria(comun, etiquetas),
+            'sin_mayoria_queda_media': finales_comun(maestro, etiquetas)[1],   # la final queda en media
             'cohen_por_pares': pares,
         },
         'coincidencia': coincidencia,
@@ -376,8 +386,13 @@ def _main(argv=None):
         return 1
     comun = acuerdo['bloque_comun']
     print('dataset.csv: %d filas (%s).' % (len(dataset), ', '.join('%s %d' % kv for kv in acuerdo['por_clase'].items())))
-    print('Bloque común: kappa de Fleiss %s con los 4 y %s sin etiquetador_1.' % (
-        comun['los_4']['fleiss_kappa'], comun['sin_etiquetador_1']['fleiss_kappa']))
+    if SOLO_COMUN in acuerdo['faltan']:   # los_4 tiene los mismos etiquetadores que sin_etiquetador_1
+        print('Bloque común: kappa de Fleiss %s entre %s. %s no entregó, así que no hay kappa con los 4.' % (
+            comun['sin_etiquetador_1']['fleiss_kappa'], ', '.join(comun['sin_etiquetador_1']['etiquetadores']),
+            SOLO_COMUN))
+    else:
+        print('Bloque común: kappa de Fleiss %s con los 4 y %s sin etiquetador_1.' % (
+            comun['los_4']['fleiss_kappa'], comun['sin_etiquetador_1']['fleiss_kappa']))
     print('Coinciden con clase_reglas: %s. Con la sensibilidad: %s.' % (
         acuerdo['coincidencia']['final']['clase_reglas'], acuerdo['coincidencia']['final']['sensibilidad']))
     base = acuerdo['linea_base_prueba']
@@ -389,6 +404,8 @@ def _main(argv=None):
         print('Etiquetador LLM (no vota): kappa de Cohen %s contra la etiqueta final de las personas en el bloque '
               'común. Filas que cubre: %s.' % (llm['contra_final_personas']['cohen_kappa'],
                                                ', '.join('%s %d' % kv for kv in cubiertas.items()) or 'ninguna'))
+        if cubiertas and len(llm['contra_final_personas']['personas']) == 1:
+            print('aviso: el LLM cubre con un kappa medido contra una sola persona.')
     else:
         print('Etiquetador LLM: no hay etiquetas del LLM.')
     if acuerdo['faltan']:

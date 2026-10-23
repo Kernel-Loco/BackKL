@@ -596,7 +596,9 @@ class EtiquetadorLlm(ConLote):
         self.assertEqual(errores, [])
         x = r['llm']
         self.assertEqual(x['contra_final_personas'], {'filas': 60, 'cohen_kappa': 0.6,
-                                                      'acuerdo_simple': round(44 / 60, 4)})
+                                                      'acuerdo_simple': round(44 / 60, 4),
+                                                      'filas_sin_mayoria_excluidas': 0,
+                                                      'personas': ['etiquetador_2', 'etiquetador_4']})
         self.assertEqual((x['alcanza_umbral'], x['cubre_faltantes']), (True, True))
         self.assertEqual(x['filas_cubiertas'], {'etiquetador_3': len(suyas)})
         self.assertIn('Cubre las filas del reparto de etiquetador_3.', x['motivo'])
@@ -649,7 +651,9 @@ class EtiquetadorLlm(ConLote):
         self.llm.update({id_: 'media' for id_ in COMUN})   # todo media en el bloque: coinciden en todo, sin kappa
         dataset, r, _ = self.procesar(llm=self.llm)
         x = r['llm']
-        self.assertEqual(x['contra_final_personas'], {'filas': 60, 'cohen_kappa': None, 'acuerdo_simple': 1.0})
+        self.assertEqual(x['contra_final_personas'], {'filas': 60, 'cohen_kappa': None, 'acuerdo_simple': 1.0,
+                                                      'filas_sin_mayoria_excluidas': 0,
+                                                      'personas': ['etiquetador_2', 'etiquetador_4']})
         self.assertFalse(x['cubre_faltantes'])
         self.assertTrue(x['motivo'].startswith('No se pudo calcular el kappa'))
         self.assertEqual(len(dataset), 425 - len(suyas))
@@ -665,7 +669,8 @@ class EtiquetadorLlm(ConLote):
             del self.etiquetas[e]
         dataset, r, errores = self.procesar(llm=self.llm)
         self.assertEqual((errores, dataset), ([], []))
-        self.assertEqual(r['llm']['contra_final_personas'], {'filas': 0, 'cohen_kappa': None, 'acuerdo_simple': None})
+        self.assertEqual(r['llm']['contra_final_personas'], {'filas': 0, 'cohen_kappa': None, 'acuerdo_simple': None,
+                                                             'filas_sin_mayoria_excluidas': 0, 'personas': []})
         self.assertFalse(r['llm']['cubre_faltantes'])
 
     def test_6_valida_llm_y_su_repeticion(self):
@@ -760,6 +765,145 @@ class EtiquetadorLlm(ConLote):
 
     def test_12_columnas_de_dataset_sin_cambio(self):
         self.assertEqual(acuerdo.COLUMNAS_DATASET, COLUMNAS_DATASET)
+
+    def salida_de_main(self):
+        salida = io.StringIO()
+        with contextlib.redirect_stdout(salida):
+            self.assertEqual(acuerdo._main(['--carpeta', str(self.carpeta)]), 0)
+        return salida.getvalue()
+
+    def test_13_con_2_personas_las_filas_sin_mayoria_no_cuentan_y_no_las_desempata(self):
+        # Con 2 ciegos, donde no coinciden la final queda media por regla. Esas filas no cuentan en el kappa del LLM:
+        # da lo mismo si ahí pone media o la etiqueta de una de las dos personas. Y el LLM no las desempata.
+        self.sin_un_ciego()
+        difieren = [id_ for id_ in COMUN if POR_ID[id_]['clase_esperada'] != 'media'][::2]   # 20, de alta o baja
+        for id_ in difieren:
+            self.etiquetas['etiquetador_4'][id_] = OTRA[self.etiquetas['etiquetador_4'][id_]]
+        cuentan = [id_ for id_ in COMUN if id_ not in difieren]
+        for id_ in cuentan[:8]:   # se equivoca en 8 de las 40 filas con mayoría
+            self.llm[id_] = OTRA[self.llm[id_]]
+        suave, duro = dict(self.llm), dict(self.llm)
+        for id_ in difieren:
+            suave[id_] = 'media'                                # media donde las personas no coinciden
+            duro[id_] = self.etiquetas['etiquetador_2'][id_]    # la etiqueta de una de las dos
+        dataset_sin, sin, _ = self.procesar()
+        dataset_suave, con_suave, _ = self.procesar(llm=suave)
+        dataset, r, errores = self.procesar(llm=duro)
+        self.assertEqual(errores, [])
+        x = r['llm']['contra_final_personas']
+        self.assertEqual(x, con_suave['llm']['contra_final_personas'])
+        self.assertEqual((x['filas'], x['filas_sin_mayoria_excluidas'], x['personas']),
+                         (40, 20, ['etiquetador_2', 'etiquetador_4']))
+        self.assertEqual(x['cohen_kappa'], round(acuerdo.cohen_kappa(
+            [duro[i] for i in cuentan], [POR_ID[i]['clase_esperada'] for i in cuentan]), 4))
+        self.assertGreaterEqual(x['cohen_kappa'], acuerdo.UMBRAL_LLM)
+        self.assertEqual(con_suave['llm']['filas_cubiertas'], r['llm']['filas_cubiertas'])
+        self.assertEqual(dataset_suave, dataset)
+        # El LLM no desempata: esas 20 filas quedan en media con 2 etiquetas, como sin el LLM
+        self.assertEqual(r['bloque_comun'], sin['bloque_comun'])
+        self.assertEqual(r['bloque_comun']['sin_mayoria_queda_media'], 20)
+        comun = [f for f in dataset if POR_ID[f['id']]['bloque'] == 'comun']
+        self.assertEqual(comun, [f for f in dataset_sin if POR_ID[f['id']]['bloque'] == 'comun'])
+        self.assertEqual({(f['etiqueta'], f['n_etiquetas']) for f in comun if f['id'] in difieren}, {('media', 2)})
+
+    def test_14_sin_etiquetador_1_no_cubre_a_nadie(self):
+        # El caso del domingo: etiquetador_1 no entrega. Sale en faltan y nada más cambia
+        del self.etiquetas['etiquetador_1']
+        dataset_sin, sin, _ = self.procesar()
+        dataset, r, errores = self.procesar(llm=self.llm)
+        self.assertEqual((errores, r['faltan']), ([], ['etiquetador_1']))
+        x = r['llm']
+        self.assertTrue(x['alcanza_umbral'])
+        self.assertEqual((x['cubre_faltantes'], x['filas_cubiertas']), (False, {}))
+        self.assertIn('No falta nadie del reparto.', x['motivo'])
+        self.assertEqual(x['contra_final_personas']['personas'], list(acuerdo.CIEGOS))
+        self.assertEqual(set(x['contra_cada_persona']), set(acuerdo.CIEGOS))
+        self.assertEqual(dataset, dataset_sin)
+        self.assertNotIn(0, {f['n_etiquetas'] for f in dataset})
+        self.assertEqual({k: v for k, v in r.items() if k != 'llm'}, {k: v for k, v in sin.items() if k != 'llm'})
+        comun = r['bloque_comun']
+        self.assertEqual(comun['los_4'], comun['sin_etiquetador_1'])   # los_4 queda con los mismos 3
+        self.assertEqual(len(comun['cohen_por_pares']), 3)
+        texto = self.salida_de_main()
+        self.assertIn('Bloque común: kappa de Fleiss 0.25 entre etiquetador_2, etiquetador_3, etiquetador_4. '
+                      'etiquetador_1 no entregó', texto)
+        self.assertNotIn('con los 4 y', texto)
+        self.assertIn('aviso: faltan las etiquetas de etiquetador_1.\n', texto)
+        self.assertNotIn('El LLM cubre', texto)
+        self.assertNotIn('no están en el dataset', texto)
+
+    def test_15_sin_etiquetador_1_ni_etiquetador_3_solo_cubre_a_etiquetador_3(self):
+        del self.etiquetas['etiquetador_1']
+        suyas = self.sin_un_ciego('etiquetador_3')
+        dataset, r, errores = self.procesar(llm=self.llm)
+        self.assertEqual((errores, r['faltan']), ([], ['etiquetador_1', 'etiquetador_3']))
+        x = r['llm']
+        self.assertEqual(x['filas_cubiertas'], {'etiquetador_3': len(suyas)})
+        self.assertTrue(x['motivo'].endswith(' Cubre las filas del reparto de etiquetador_3.'), x['motivo'])
+        self.assertEqual(len(dataset), 425)
+        self.assertEqual({f['id'] for f in dataset if f['n_etiquetas'] == 0}, suyas)
+        texto = self.salida_de_main()
+        self.assertIn('aviso: faltan las etiquetas de etiquetador_1, etiquetador_3. El LLM cubre las filas del '
+                      'reparto de etiquetador_3.\n', texto)
+        self.assertNotIn('no están en el dataset', texto)
+        self.assertNotIn('una sola persona', texto)
+
+    def test_16_con_una_sola_persona_cubre_y_lo_avisa(self):
+        # Si solo entrega un ciego, la referencia es esa persona. Con kappa de 0.6 o más cubre a los otros dos y lo dice
+        del self.etiquetas['etiquetador_1']
+        del self.etiquetas['etiquetador_4']
+        suyas = self.sin_un_ciego('etiquetador_3')
+        de_4 = {h['id'] for h in MAESTRO if h['bloque'] == 'reparto' and h['asignado_a'] == ['etiquetador_4']}
+        dataset, r, errores = self.procesar(llm=self.llm)
+        self.assertEqual(errores, [])
+        x = r['llm']
+        self.assertEqual(x['contra_final_personas'], {'filas': 60, 'cohen_kappa': 1.0, 'acuerdo_simple': 1.0,
+                                                      'filas_sin_mayoria_excluidas': 0, 'personas': ['etiquetador_2']})
+        self.assertIn('La referencia es una sola persona, etiquetador_2.', x['motivo'])
+        self.assertEqual(x['filas_cubiertas'], {'etiquetador_3': len(suyas), 'etiquetador_4': len(de_4)})
+        self.assertEqual(len(dataset), 425)
+        self.assertEqual(Counter(f['n_etiquetas'] for f in dataset), {0: len(suyas) + len(de_4), 1: 182})
+        self.assertEqual(r['bloque_comun']['cohen_por_pares'], {})
+        self.assertIsNone(r['bloque_comun']['los_4']['fleiss_kappa'])
+        self.assertIn('aviso: el LLM cubre con un kappa medido contra una sola persona.', self.salida_de_main())
+
+    def test_17_al_menos_60_por_clase_cuenta_las_filas_del_llm(self):
+        suyas = self.sin_un_ciego()
+        for e in ('etiquetador_2', 'etiquetador_4'):   # fuera del bloque común las personas no ponen baja
+            for id_, valor in self.etiquetas[e].items():
+                if POR_ID[id_]['bloque'] == 'reparto' and valor == 'baja':
+                    self.etiquetas[e][id_] = 'media'
+        for id_ in suyas:
+            self.llm[id_] = 'baja'
+        _, r, errores = self.procesar(llm=self.llm)
+        self.assertEqual(errores, [])
+        self.assertEqual(r['por_clase_solo_personas']['baja'], 20)   # solo las del bloque común
+        self.assertEqual(r['por_clase']['baja'], 20 + len(suyas))
+        self.assertTrue(r['al_menos_60_por_clase'])
+
+    def test_18_lote_y_rubrica_trivial_cuentan_las_filas_del_llm(self):
+        # Las personas coinciden con la referencia en 267 de sus 303 filas (0.88) y el LLM en todas las que cubre.
+        # Con el dataset completo son 389 de 425 (0.915), así que el aviso sale.
+        suyas = self.sin_un_ciego()
+        referencias = {'clase_reglas': lambda h: plantillas.CLASE_DE_SEVERIDAD[h['severity']],
+                       'sensibilidad': lambda h: h['caracteristicas']['sensibilidad']}
+        otras = [h['id'] for h in MAESTRO if h['bloque'] == 'reparto' and h['asignado_a'] != ['etiquetador_3']][:36]
+        for cual, aviso in (('clase_reglas', 'lote_trivial'), ('sensibilidad', 'rubrica_trivial')):
+            with self.subTest(cual):
+                ref = referencias[cual]
+                for e in ('etiquetador_2', 'etiquetador_4'):
+                    self.etiquetas[e] = {h['id']: ref(h) for h in COPIAS[e]}
+                for id_ in otras:
+                    e = POR_ID[id_]['asignado_a'][0]
+                    self.etiquetas[e][id_] = OTRA[self.etiquetas[e][id_]]
+                self.llm = {h['id']: ref(h) for h in MAESTRO}
+                dataset, r, errores = self.procesar(llm=self.llm)
+                self.assertEqual(errores, [])
+                self.assertEqual(r['llm']['filas_cubiertas'], {'etiquetador_3': len(suyas)})
+                personas = [f for f in dataset if f['n_etiquetas'] > 0]
+                self.assertEqual((len(personas), sum(f['etiqueta'] == f[cual] for f in personas)), (303, 267))
+                self.assertEqual(r['coincidencia']['final'][cual], round(389 / 425, 4))
+                self.assertTrue(r[aviso])
 
 
 class DatasetDelRepo(unittest.TestCase):
