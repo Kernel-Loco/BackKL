@@ -1,0 +1,61 @@
+id,etiqueta,nota
+h28cpy4g,alta,
+h2d2zvwg,baja,
+h2edbv64,baja,Sin SPF pero DMARC p=reject frena la suplantación; dudé con media.
+h2typptv,media,"Hay contraseñas, pero la brecha es de 2023; dudé con alta."
+h2vnxr7z,alta,
+h37z7wnu,media,
+h42nacwf,alta,
+h4yc3sfr,media,Página con login y certificado vencido; dudé con alta.
+h4zuu5mg,alta,
+h73vea7g,baja,No envía correo y su SPF es -all; dudé con media.
+h78aqp77,media,"RDP de producción, pero visto por última vez hace 262 días; puede ya no estar abierto."
+h7ax5ytd,baja,
+h7fb48ut,baja,Sin SPF pero DMARC p=reject frena la suplantación; dudé con media.
+h7sx8dkt,baja,
+h958haxt,alta,
+h99npj6d,media,
+h9nqwnc7,media,Página con login y certificado vencido; dudé con alta.
+ha7eqk2t,media,
+havtp8pb,media,
+hbbuzrdk,baja,
+hbzxdkcw,alta,
+hccrsz3m,media,
+hdc38r7r,baja,
+hdes4662,media,Página con login y certificado vencido; dudé con alta.
+hdh542c3,baja,
+hdjpad99,media,
+he5aerqb,baja,No envía correo y su SPF es -all; dudé con media.
+heq5ax57,media,
+heyskhcw,media,
+hhmj99p9,baja,Solo correos y nombres de una brecha antigua; dudé con media.
+hjaq666n,alta,
+hjm2tw5j,alta,
+hjmhg6w4,baja,
+hk8a7zf7,baja,
+hk9m7kq7,baja,
+hmamf84t,media,
+hmw7gn4r,baja,
+hngwaeek,baja,
+hpsny58g,baja,
+hpt28hsf,media,"Hay contraseñas, pero la brecha es de 2022; dudé con alta."
+hqdrsanz,baja,Dominio parecido con el último certificado vencido; parece inactivo.
+hqs5gn3g,alta,
+hrfjkq3p,baja,
+hrqbnung,baja,Sin SPF pero DMARC p=reject frena la suplantación; dudé con media.
+hrzaz96v,media,Visto por última vez hace 290 días y es un equipo de laboratorio; dudé con baja.
+ht8st3y2,media,
+htes9dnr,alta,
+huj99qpp,media,
+hvt6zgzj,baja,
+hw4tdjvy,alta,
+hxe4c2x8,alta,
+hxevztgx,alta,
+hy83gfjz,media,
+hz4s8dty,media,
+hz9kh9uv,media,"Hay contraseñas, pero la brecha es de 2022; dudé con alta."
+hzatwqv2,media,
+hzcj8hrk,media,"Hay contraseñas, pero la brecha es de 2023; dudé con alta."
+hzdvrt3j,baja,
+hzv9gtbv,baja,
+hzwffygm,baja,Dominio parecido con el último certificado vencido; parece inactivo.

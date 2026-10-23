@@ -1,2 +1,4 @@
 * text=auto
 *.sh text eol=lf
+# El lote del ML se compara byte a byte con lo que genera cirdan/ml/generar_lote.py: sin cambiar fines de línea
+datos/ml/** -text
