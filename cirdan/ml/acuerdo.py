@@ -464,9 +464,13 @@ def _main(argv=None):
     llm = acuerdo['llm']
     if llm['esta']:
         cubiertas = llm['filas_cubiertas']
-        print('Etiquetador LLM (no vota): kappa de Cohen %s contra la etiqueta final de las personas en el bloque '
-              'común. Filas que cubre: %s.' % (llm['contra_final_personas']['cohen_kappa'],
-                                               ', '.join('%s %d' % kv for kv in cubiertas.items()) or 'ninguna'))
+        if llm['solo_llm']:   # sin personas su kappa es None: no hay contra quién medirlo
+            medida = 'no hay personas contra quién medirlo'
+        else:
+            medida = 'kappa de Cohen %s contra la etiqueta final de las personas en el bloque común' % (
+                llm['contra_final_personas']['cohen_kappa'])
+        print('Etiquetador LLM (no vota): %s. Filas que cubre: %s.' % (
+            medida, ', '.join('%s %d' % kv for kv in cubiertas.items()) or 'ninguna'))
         entre = llm['acuerdo_entre_llm']
         if entre:
             print('Acuerdo entre LLM en el bloque común (no votan): kappa de Fleiss %s entre %s, en %d filas.' % (
