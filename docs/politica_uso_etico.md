@@ -95,7 +95,7 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 |---|---|---|
 | Solo dominios con carta vigente y TXT verificado | Trigger en `scans` y orquestador | Existen los dos. El orquestador es de la tarjeta #22 |
 | Solo activos del dominio autorizado | Filtro de alcance de `ejecutar()` | Existe. El CLI de un recolector no pasa por él |
-| Cada empresa solo ve sus datos | RLS con ENABLE y FORCE en las 18 tablas por cliente | Existe en la base. Desde la tarjeta #25 la API toma la empresa de la sesión. Solo el modo demo de `/demo` y `/db/tables` usa todavía el encabezado `X-Organization` |
+| Cada empresa solo ve sus datos | RLS con ENABLE y FORCE en las 18 tablas por cliente | Existe en la base. Desde la tarjeta #25 la API toma la empresa de la sesión, y desde RC-58 también el explorador de `/demo` y `/db`, que solo existe con `DEMO_EXPLORER=true`. Ninguna ruta acepta ya el encabezado `X-Organization` |
 | La carta no se edita | `domain_authorizations` inmutable salvo `revoked_at` | Existe |
 | Una revocación no se deshace | Bloquear que `revoked_at` vuelva a NULL | Falta. Hoy el trigger deja regresarlo. Una migración que lo impide está propuesta en un comentario de la tarjeta #26 (13 oct), sin decidir |
 | Revocar una carta desde el portal | Pantalla o API para fijar `revoked_at` | Falta. Propuesto en el mismo comentario de la tarjeta #26 (13 oct), sin decidir |

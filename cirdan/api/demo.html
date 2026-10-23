@@ -115,17 +115,22 @@
 </main>
 <script>
 // La empresa sale de la sesión (cookie httpOnly lt_session), igual que en el portal. La página no la elige.
-let me = null, mfaToken = null, selTable = 'domains', selDomain = null, last = {};
+let me = null, mfaToken = null, selTable = 'domains', selDomain = null, last = {}, gen = 0;
 const $ = id => document.getElementById(id);
+const SUB = $('sub').textContent;  // el encabezado sin sesión
+const never = () => new Promise(() => {});  // la respuesta ya no se pinta
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
 const detail = b => typeof b?.detail === 'string' ? b.detail : 'Revisa los datos e inténtalo de nuevo.';
 async function api(path, data) {
+  const g = gen;
   const r = await fetch(path, data === undefined ? {credentials: 'same-origin'}
     : {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)});
   const text = await r.text();
+  // Si la sesión se cerró mientras llegaba, la respuesta es de la sesión anterior: no se pinta
+  if (g !== gen) return never();
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = {detail: text}; }  // p. ej. un 500 en texto plano
-  if (r.status === 401 && me && !path.startsWith('/api/v1/auth/')) showLogin(detail(body));
+  if (r.status === 401 && me && !path.startsWith('/api/v1/auth/')) { showLogin(detail(body)); return never(); }
   return {status: r.status, body};
 }
 // Si una carga no da 200, su recuadro muestra el motivo y no se quedan datos de otra sesión.
@@ -199,9 +204,11 @@ async function refresh() { await Promise.all([loadTables(), loadRows(), loadDoma
 
 // Sin sesión no se ve nada: la página pide correo, contraseña y el código MFA a /api/v1/auth.
 function showLogin(message = '') {
-  me = null; mfaToken = null;
+  me = null; mfaToken = null; gen++;
   ['main', 'who', 'logout', 'role'].forEach(id => $(id).hidden = true);
   ['groups', 'rows', 'domains', 'detail', 'probeOut'].forEach(id => $(id).innerHTML = '');
+  // Que no quede a la vista qué empresa estaba abierta
+  $('sub').textContent = SUB; $('who').textContent = ''; $('role').textContent = 'rol: …'; $('probe').textContent = 'Intentar';
   $('login').hidden = false; $('code').hidden = true; $('code').required = false; $('code').value = '';
   $('loginErr').textContent = message;
 }
