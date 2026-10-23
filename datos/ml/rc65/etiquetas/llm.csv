@@ -1,0 +1,426 @@
+id,etiqueta,nota
+h2543nrz,baja,
+h27vc9fr,baja,"Tiene MX, pero DMARC p=reject frena la suplantación."
+h28cpy4g,alta,
+h28se5eq,alta,
+h29erbd3,baja,
+h29ux3wr,media,Certificado vencido en página de login; facilita MITM pero requiere otra condición.
+h2bavceb,baja,
+h2cyamqu,media,"CVSS 5.9 con EPSS bajo; la versión tiene soporte y no está en KEV, podría ser baja."
+h2d2t9k9,media,
+h2d2zvwg,baja,
+h2ectjp9,baja,
+h2edbv64,baja,
+h2ezpm9j,baja,
+h2ghn23n,baja,
+h2hxkm8p,media,
+h2kaa7mu,media,
+h2typptv,media,"Expone contraseñas, pero la brecha tiene unos 3.5 años."
+h2vnxr7z,alta,
+h2xzjupj,baja,
+h2zjdrxa,media,
+h33wn2t2,baja,
+h34v4a4s,baja,
+h35mecrv,baja,"Tiene MX, pero DMARC p=reject frena la suplantación."
+h3797edy,media,"Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+h37z7wnu,media,
+h39yxvhk,media,
+h3eafa9c,alta,
+h3h9g765,media,CVSS 6.5 pero EPSS 0.214 relativamente alto; versión con soporte y sin KEV.
+h3vfqq37,media,
+h3x3qmed,media,
+h42nacwf,alta,
+h465pdnz,baja,
+h483usbh,baja,
+h48u7bxm,media,Certificado vencido en página de login; facilita MITM pero requiere otra condición.
+h4j5gww2,baja,
+h4rqjfm6,alta,
+h4sccnxx,alta,
+h4tjgujg,baja,"El CVSS de 4.3 es medio, pero el EPSS es muy bajo, no está en KEV y la versión sigue con soporte."
+h4ud5j4b,baja,"Dominio sin MX y SPF -all; aún cabe suplantar el From sin DMARC, podría ser media."
+h4yc3sfr,media,Página de login con certificado vencido; el MITM necesita posición en la red.
+h4zuu5mg,alta,
+h52dtdpb,baja,
+h53s72kw,media,Brecha de 2021 con contraseñas; por antigüedad la bajé de alta.
+h577hugn,media,"Es reciente, tiene certificado vigente y usa 'pagos', lo que apunta a phishing; aun así es suplantación."
+h5mmuxh9,media,"Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+h5mqj2cg,alta,
+h5qn2uyz,baja,
+h5u457kn,media,API con certificado vencido; dudé entre media y baja.
+h5vmh92y,baja,
+h5w5v2z2,baja,
+h5y59a53,media,
+h642tn3k,baja,
+h68mrpzd,media,"No se ve desde hace 192 días, así que probablemente ya está cerrado; si sigue abierto sería alta."
+h68vns5s,alta,
+h6a7ynm2,media,Es un subdominio y podría heredar el DMARC del dominio padre; el texto no lo dice.
+h6bydfhb,baja,
+h6dghg6v,baja,
+h6eayzrz,media,Brecha de 2021 con contraseñas; por antigüedad la bajé de alta.
+h6f9sjv3,alta,
+h6fnyfcr,media,
+h6gkbfwy,alta,
+h6jqjrj5,alta,
+h6kydwc8,media,Brecha con contraseñas pero de hace más de 4 años; dudé entre media y baja.
+h6nrc9mc,media,Brecha con contraseñas pero de hace casi 7 años; podría ser baja.
+h6qfgu92,baja,
+h6qmw9p3,baja,
+h6swmrqd,alta,
+h6wu73wf,alta,
+h6xarq6g,media,Brecha con contraseñas pero de hace más de 3 años; dudé entre media y alta.
+h6xw7zn3,baja,
+h73jqj9c,media,Certificado vencido en página de login; facilita MITM pero requiere otra condición.
+h73vea7g,baja,
+h73xgxn6,baja,"Tiene MX, pero DMARC p=reject frena la suplantación."
+h75buhp9,alta,
+h75xnn8h,media,
+h78aqp77,media,"No se ve desde hace 262 días, así que probablemente ya está cerrado; si sigue abierto sería alta."
+h79f7hx7,baja,
+h7ah43ym,media,Brecha con contraseñas pero de hace más de 6 años; podría ser baja.
+h7ax5ytd,baja,
+h7efcyzf,baja,Se vio por última vez hace 247 días; es probable que el puerto ya esté cerrado.
+h7ewzuwt,media,"Typosquat, pero su último certificado ya venció y podría estar inactivo."
+h7fb48ut,baja,"Tiene MX, pero DMARC p=reject frena la suplantación."
+h7m58gdn,media,"Sus certificados vencieron hace 59 días, así que puede estar inactivo, pero sigue sirviendo para suplantar."
+h7nq9hfs,alta,
+h7sx8dkt,baja,
+h7tpgy2b,alta,
+h7ux6crz,media,
+h7xgchvm,alta,
+h82vpsgz,baja,"Dominio sin MX y SPF -all; aún cabe suplantar el From sin DMARC, podría ser media."
+h85khx8x,media,
+h85ytkqv,baja,
+h86tyust,alta,
+h8eptdhs,media,"Página de login con certificado vencido; el MITM necesita posición en la red, podría verse como alta."
+h8fwexgn,baja,
+h8gvcycf,alta,
+h8kgnrq7,baja,"Tiene MX, pero DMARC p=reject frena la suplantación."
+h8n8y9rw,baja,
+h8pgn4g9,alta,"Equipo de laboratorio, pero RDP expuesto sigue siendo exposición seria."
+h8rnhukm,baja,
+h8w8znpg,media,
+h8whmh84,media,
+h8xqpvm3,media,
+h8zt7ss7,alta,
+h92ucpww,media,
+h949pfbd,media,Página de login con certificado vencido; el MITM necesita posición en la red.
+h94fetqw,media,
+h958haxt,alta,
+h99evjhu,alta,
+h99npj6d,media,
+h9cawzyb,media,Brecha de 2022 con contraseñas; por antigüedad la bajé de alta.
+h9dnw6sc,baja,
+h9gte76j,media,"Expuso contraseñas, pero la brecha tiene más de 5 años; sería alta si se reutilizan."
+h9nqwnc7,media,"Es una página de acceso, lo que facilita interceptar contraseñas, pero hace falta un ataque de intermediario."
+h9p7dxsv,media,
+h9twpabc,media,
+h9zmfjts,alta,
+ha27z2r7,baja,
+ha2buxnq,baja,Solo expuso correos y nombres; podría verse como media porque facilita el phishing.
+ha6cmaqs,alta,
+ha7eqk2t,media,
+ha8mpzg6,alta,
+hac6478m,baja,
+hadxzccw,baja,
+harx9t9n,media,"Es una página de acceso, lo que facilita interceptar contraseñas, pero hace falta un ataque de intermediario."
+has6fdjm,baja,
+hatzfysw,baja,
+haumvdbe,baja,"Tiene MX, pero DMARC p=reject bloquea la suplantación."
+haun24st,baja,
+hav8uva3,media,
+havq6f6s,media,
+havtp8pb,media,
+haxkfdyy,baja,
+hazwnc9f,baja,
+hb27zhz7,media,
+hb44m3a4,alta,
+hb5pp4fr,alta,
+hb6ncqgy,alta,
+hb8trxat,media,
+hbbuzrdk,baja,
+hbgarrd3,media,"El certificado más reciente ya venció, así que no está claro que siga activo."
+hbhv34g7,media,
+hbqg8c96,media,Es un subdominio y podría heredar el DMARC del dominio padre; el texto no lo dice.
+hbqrgvy9,media,
+hbzxdkcw,alta,
+hc3napfd,baja,
+hc5kqwu2,alta,
+hc89ee2z,baja,
+hc99b2tg,baja,
+hcbv9xnz,baja,
+hccrsz3m,media,Misma marca con otra terminación; podría ser legítimo (baja).
+hcdgm5pt,alta,
+hcgg5xh4,baja,
+hchu38g9,alta,
+hck4xbmh,media,Certificado vencido en una API activa: facilita un MITM si los clientes ignoran el error.
+hckx49q5,media,
+hcm787g7,media,
+hcn8kswa,media,
+hcnrnuq5,media,
+hcrehx26,alta,
+hct9jagf,baja,"Dominio sin MX y SPF -all; aún cabe suplantar el From sin DMARC, podría ser media."
+hcu9fssf,baja,
+hcusat8f,alta,
+hcvtxkn9,baja,"El CVSS de 4.3 es medio, pero el EPSS es muy bajo, no está en KEV y la versión sigue con soporte."
+hd29cch6,alta,
+hd3f97jm,alta,
+hd3rpg4d,baja,
+hd3v2hrc,alta,
+hd65dk3q,media,Misma marca con otra terminación y activo desde hace tiempo; podría ser legítimo (baja).
+hd757e23,media,
+hd88kwtx,baja,
+hdc38r7r,baja,
+hdes4662,media,Certificado vencido en página de login; facilita MITM pero requiere otra condición.
+hdh542c3,baja,
+hdjpad99,media,
+hdr4bbzu,baja,
+hdr73v63,alta,
+hdu8mweu,baja,
+hdvbkcdj,alta,
+hdvyhr3d,baja,"Tiene MX, pero DMARC p=reject bloquea la suplantación."
+hdyd779m,baja,
+hdywwrbh,baja,
+hdyym69y,media,
+he55wq3m,baja,
+he5aerqb,baja,"El dominio no envía correo (sin MX y con SPF -all), aunque sin DMARC el campo From aún se puede falsificar."
+he8rp63x,media,
+hedmn83h,baja,"RDP no se ve desde hace 232 días, probablemente ya cerrado."
+heera79s,media,Brecha de 2020 con contraseñas; por antigüedad la bajé de alta.
+heg67x89,baja,
+hehkhet5,media,Brecha de 2020 con contraseñas; por antigüedad la bajé de alta.
+hemycjyn,baja,"Es un dominio parecido, pero su último certificado venció hace 73 días; parece inactivo."
+hepcbrxb,baja,"RDP no se ve desde hace 228 días, probablemente ya cerrado."
+heq5ax57,media,
+heva7rjy,media,
+hevjhzp9,baja,
+heyskhcw,media,
+hfdd98yg,alta,
+hfhb4cx7,media,Es un subdominio y podría heredar el DMARC del dominio padre; el texto no lo dice.
+hfpax4ek,baja,
+hfr4bq4r,media,
+hfr95mpc,media,
+hfsbj68q,baja,
+hfv8fk7b,baja,
+hfyk4zhs,media,"Expone contraseñas, pero la brecha es de 2019 (hace casi 7 años)."
+hfzcy7qe,media,Su último certificado venció hace 31 días; puede estar inactivo.
+hg48dgzh,alta,
+hg4sjg5q,media,"El certificado más reciente ya venció, así que no está claro que siga activo."
+hg545qnv,baja,
+hgggt5d6,media,
+hggwse4s,baja,
+hgq6wshq,baja,"RDP no se ve desde hace 268 días, probablemente ya cerrado; sería alta si sigue abierto."
+hgsxa2dc,baja,
+hgt5fjp7,alta,"Equipo de laboratorio, pero RDP expuesto sigue siendo exposición seria."
+hgvgmmqw,baja,Brecha antigua sin contraseñas; usuarios y nombres podrían facilitar phishing (media).
+hh7xtcab,media,
+hhfy8bpp,alta,
+hhgmfykf,media,
+hhh8jber,baja,"El dominio no envía correo (sin MX y con SPF -all), aunque sin DMARC el campo From aún se puede falsificar."
+hhjynv63,baja,Se vio por última vez hace 219 días; es probable que el puerto ya esté cerrado.
+hhmj99p9,baja,Solo expuso correos y nombres; podría verse como media porque facilita el phishing.
+hhnsqfu7,media,
+hhq3s5w2,media,
+hhsqkevy,baja,"RDP no se ve desde hace 196 días, probablemente ya cerrado."
+hhtaphyx,alta,"Expone contraseñas, pero la brecha tiene más de 4 años y pueden haberse cambiado."
+hhtzvyd4,baja,
+hhyq6a6v,alta,
+hhzh7mse,alta,
+hj3b8pb2,baja,
+hj62xt9s,media,"CVSS 6.1 con EPSS alto (0.296), pero la versión tiene soporte y no está en KEV."
+hj6bqnmy,baja,"Tiene MX, pero DMARC p=reject frena la suplantación."
+hj79ubxa,baja,
+hj7ys96v,alta,
+hjaq666n,alta,
+hjckp2q2,media,API con certificado vencido; dudé entre media y baja.
+hjd6ck97,alta,
+hjgydbd7,alta,"El EPSS es bajo (0.027), pero está en KEV y el panel de login no tiene soporte."
+hjj3taw8,media,
+hjk8t9eq,baja,
+hjm2tw5j,alta,
+hjmhg6w4,baja,
+hjmtgbzc,baja,"El CVSS de 4.3 es medio, pero el EPSS es muy bajo, no está en KEV y la versión sigue con soporte."
+hjsw95c2,media,
+hjt2jjav,baja,
+hjtjjgc7,baja,
+hjzhq4mv,media,
+hk6stqsj,media,
+hk8a7zf7,baja,"Servicio de correo, pero el certificado aún no vence."
+hk8ejg56,media,"Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+hk9m7kq7,baja,
+hkbdsyw2,baja,"Tiene MX, pero DMARC p=reject frena la suplantación."
+hkbzthj8,alta,
+hkc6gkrb,media,
+hkjbbjxs,baja,
+hkkrukfs,media,
+hkp59d33,baja,
+hkpaj528,baja,
+hkptq3az,media,"El certificado más reciente ya venció, así que no está claro que siga activo."
+hkxw6284,media,
+hky5e75d,media,"Es una página de acceso, lo que facilita interceptar contraseñas, pero hace falta un ataque de intermediario."
+hky8ebjk,media,"Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+hkz8yj6q,media,Certificado vencido en una API activa: facilita un MITM si los clientes ignoran el error.
+hmamf84t,media,"Es reciente, tiene certificado vigente y usa 'cuenta', lo que apunta a phishing; aun así es suplantación."
+hmdvgzzr,media,"Hay contraseñas, pero la brecha es de 2022; el riesgo depende de que se reutilicen."
+hmenekfc,baja,
+hmjh3vrn,media,
+hmjzg5ef,alta,
+hmmu99za,media,"Dominio reciente y activo que usa 'acceso'; huele a phishing de credenciales, pero por sí solo no da acceso."
+hmq783fa,baja,
+hmqxagvd,baja,
+hmvnxvur,media,Su último certificado venció hace 52 días; puede estar inactivo.
+hmw7gn4r,baja,
+hmxe8fmx,media,"Dominio de hace 2 días que usa 'acceso'; huele a phishing, pero por sí solo no da acceso."
+hn2zytdf,media,
+hn3u7hdd,alta,
+hnf48c8x,alta,
+hngwaeek,baja,
+hnn3nbs9,media,"Hay contraseñas, pero la brecha es de 2019; el riesgo depende de que se reutilicen."
+hnqqd87q,media,
+hnrdq2d2,baja,
+hns9a8k4,media,
+hnw5tn9h,media,
+hp2zqcjh,baja,
+hp69sypc,media,"Expone contraseñas, pero la brecha es de 2019 (hace casi 7 años)."
+hpbfmwvd,media,
+hpbw3gms,media,
+hphafesm,baja,
+hpmw4xqp,alta,
+hpn3jqus,media,
+hpshvm99,baja,
+hpsny58g,baja,
+hpt28hsf,media,"Hay contraseñas, pero la brecha es de 2022; el riesgo depende de que se reutilicen."
+hpt2atgy,baja,
+hpwf2qkb,baja,
+hpybz4az,alta,
+hq2c892k,media,
+hq36k8bc,media,
+hq6u8q7v,baja,
+hq7ukd6v,media,Tiene un certificado vigente con la misma marca y otra terminación; podría ser de la propia empresa.
+hq9wkqjw,alta,
+hq9zkpbd,media,
+hqbr66tj,baja,
+hqdrsanz,media,"El certificado más reciente ya venció, así que no está claro que siga activo."
+hqf7haj6,baja,
+hqr6qy36,media,
+hqrnm7bs,baja,"Solo expone correos, que facilitan poco el phishing."
+hqs5gn3g,alta,
+hqsv7kt6,baja,
+hr678tmz,alta,
+hr6frmwf,baja,
+hr9wsnca,baja,Se vio por última vez hace 249 días; es probable que el puerto ya esté cerrado.
+hrcj5kcm,baja,
+hrfchaks,baja,
+hrfjkq3p,baja,No expone contraseñas; los nombres solo ayudan a dirigir el phishing (podría ser media).
+hrfuusk8,baja,
+hrjpx7nv,baja,
+hrme7cre,baja,
+hrqbnung,baja,"Tiene MX, pero DMARC p=reject frena la suplantación."
+hrrbkr9s,media,"Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+hrv6u7q5,baja,
+hrvysqtq,media,Servidor IMAP con certificado vencido; dudé entre media y baja.
+hry33zjq,alta,
+hryrbgex,alta,
+hrzaz96v,baja,Se vio por última vez hace 290 días; es probable que el puerto ya esté cerrado.
+hs58zxc2,baja,
+hs83fsbw,media,Brecha de 2020 con contraseñas; por antigüedad la bajé de alta.
+hs9htg3h,media,
+hsbxmnz6,baja,
+hseahtv8,baja,
+hsecb5ux,baja,Se vio por última vez hace 238 días; es probable que el puerto ya esté cerrado.
+hsp4rm7k,media,Brecha de 2019 con contraseñas; por antigüedad la bajé de alta.
+hssr7rba,baja,Se vio por última vez hace 278 días; es probable que el puerto ya esté cerrado.
+hsutwj53,alta,
+hsxv2u24,alta,
+hsxzbrey,alta,
+hszewnjf,alta,
+ht4n3tdk,baja,
+ht4rtcv9,baja,
+ht7v5w57,alta,
+ht8st3y2,baja,CVE con CVSS 5.3 y EPSS muy bajo en una versión con soporte; podría ser media.
+ht9nxvwa,media,Misma marca con otra terminación y activo desde hace tiempo; podría ser legítimo (baja).
+hta6hyzu,baja,
+htdhawh9,media,
+htdsatc4,alta,
+htes9dnr,alta,
+htm2u3t4,media,Certificado vencido en página de login; facilita MITM pero requiere otra condición.
+htm6jauc,alta,
+htt4a6we,baja,
+htv2bbnh,media,"El certificado más reciente ya venció, así que no está claro que siga activo."
+htx56zxf,media,
+htxk6tfs,media,
+hu2km52w,media,"Sus certificados vencieron hace 71 días, así que puede estar inactivo, pero sigue sirviendo para suplantar."
+hu6mx2xn,media,"Es una página de acceso, lo que facilita interceptar contraseñas, pero hace falta un ataque de intermediario."
+hu7zem9q,alta,"Expone contraseñas, pero la brecha tiene más de 4 años y pueden haberse cambiado."
+hu93f2bg,alta,
+huavc8pa,baja,
+huf68ent,baja,
+hufg292p,alta,
+huj99qpp,media,
+hujzdck3,media,
+hukx57ap,baja,
+humctzqg,media,"Expone contraseñas, pero la brecha es de 2021 (hace más de 5 años)."
+hurswacf,media,
+hut6tuw6,alta,
+hute33e8,baja,
+hutt4ygb,alta,
+huv5fg73,baja,
+huv5xpk3,alta,
+huvgtda9,alta,
+huxhf2zs,media,
+hv3fc9rz,alta,"Expone contraseñas, pero la brecha tiene más de 3 años y pueden haberse cambiado."
+hv8adde9,baja,"Tiene MX, pero DMARC p=reject frena la suplantación."
+hvf59rh4,baja,
+hvgsddft,baja,
+hvhnb79j,alta,
+hvmh8acs,media,
+hvne6chz,alta,
+hvt6zgzj,baja,
+hw2y6q29,alta,
+hw2ymjkc,baja,
+hw4tdjvy,alta,
+hw5h2vzw,baja,
+hw96j4hz,media,
+hwbvd7zn,alta,
+hwedwycf,baja,
+hwnmgtvp,alta,
+hws6ayvg,alta,
+hwxhgtzw,baja,
+hwyczzfc,alta,
+hxanrmfp,media,Su último certificado venció hace 45 días; puede estar inactivo.
+hxb7znfg,baja,
+hxdyavb6,alta,
+hxe4c2x8,alta,
+hxevztgx,alta,
+hxfsxfad,media,
+hxkdmz5c,media,Página de login con certificado vencido; el MITM necesita posición en la red.
+hxmcdkqr,alta,
+hxqv4pzu,baja,
+hxws7zzc,media,
+hxzaxtzj,baja,
+hxzmmv8j,baja,"Es un dominio parecido, pero su último certificado venció hace 72 días; parece inactivo."
+hy3be5qv,alta,
+hy83gfjz,media,
+hyatq2ja,alta,
+hyb53pnf,alta,
+hyfyc7u5,media,
+hyg7hs7g,media,CVSS 5.9 y EPSS bajo; podría ser baja.
+hymkfmt3,media,
+hynqydpa,baja,
+hyy4zffs,media,"El certificado más reciente ya venció, así que no está claro que siga activo."
+hz2z2jdz,baja,
+hz4s8dty,media,Certificado vencido en un servidor de correo IMAP activo: facilita un MITM de credenciales si los clientes ignoran el error.
+hz5h2n5e,alta,
+hz92nh24,baja,
+hz9kh9uv,media,"Hay contraseñas, pero la brecha es de 2022; el riesgo depende de que se reutilicen."
+hzatwqv2,media,"CVSS 5.9 con EPSS bajo; la versión tiene soporte y no está en KEV, podría ser baja."
+hzc9tsv7,media,"No se ve desde hace 208 días, así que probablemente ya está cerrado; si sigue abierto sería alta."
+hzcj8hrk,alta,"Expone contraseñas, pero la brecha tiene más de 3 años y pueden haberse cambiado."
+hzcugkb6,baja,
+hzdvrt3j,baja,
+hzjb2ckg,alta,
+hzr8satz,baja,"Dominio sin MX y SPF -all; aún cabe suplantar el From sin DMARC, podría ser media."
+hzrg5mfv,media,
+hzs4ndtn,baja,
+hztjgup2,baja,"Servicio de correo, pero el certificado aún no vence."
+hzv9gtbv,baja,
+hzwffygm,media,"Sus certificados vencieron hace 83 días, así que puede estar inactivo, pero sigue sirviendo para suplantar."
