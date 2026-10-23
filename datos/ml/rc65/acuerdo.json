@@ -74,6 +74,30 @@
       "cohen_kappa": 0.8716,
       "acuerdo_simple": 0.9167
     },
+    "acuerdo_entre_llm": {
+      "etiquetadores": [
+        "llm",
+        "llm_sonnet",
+        "llm_haiku"
+      ],
+      "filas": 60,
+      "fleiss_kappa": 0.8643,
+      "acuerdo_simple": 0.8667,
+      "cohen_por_pares": {
+        "llm con llm_sonnet": {
+          "cohen_kappa": 0.9743,
+          "acuerdo_simple": 0.9833
+        },
+        "llm con llm_haiku": {
+          "cohen_kappa": 0.8232,
+          "acuerdo_simple": 0.8833
+        },
+        "llm_sonnet con llm_haiku": {
+          "cohen_kappa": 0.7975,
+          "acuerdo_simple": 0.8667
+        }
+      }
+    },
     "coincidencia": {
       "clase_reglas": 0.5035,
       "sensibilidad": 0.7059

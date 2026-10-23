@@ -2,7 +2,8 @@
 
 Revisan que el maestro tenga la forma de #21, que las copias no delaten la severidad, el bloque común, el reparto y la
 partición, que la misma semilla dé los mismos bytes, que acuerdo.py calcule bien el kappa y que el etiquetador LLM
-nunca vote y solo cubra a quien no entregó cuando su kappa contra las personas alcanza el umbral.
+nunca vote y solo cubra a quien no entregó cuando su kappa contra las personas alcanza el umbral. Los otros LLM del
+bloque común (llm_sonnet.csv y llm_haiku.csv) tampoco votan: solo miden el acuerdo entre LLM.
 
     python -m unittest -v pruebas/test_dataset_ml.py
 """
@@ -13,6 +14,7 @@ import io
 import ipaddress
 import json
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -417,14 +419,22 @@ class ConLote(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
-    def procesar(self, llm=None, repeticion=None):
+    def procesar(self, llm=None, repeticion=None, otros=None):
         for e, valores in self.etiquetas.items():
             escribir_etiquetas(self.carpeta, e, valores)
         if llm is not None:
             escribir_etiquetas(self.carpeta, acuerdo.LLM, llm)
         if repeticion is not None:
             escribir_etiquetas(self.carpeta, acuerdo.LLM_REPETICION, repeticion)
+        for nombre, valores in (otros or {}).items():   # llm_sonnet y llm_haiku
+            escribir_etiquetas(self.carpeta, nombre, valores)
         return acuerdo.procesar(self.carpeta)
+
+    def salida_de_main(self):
+        salida = io.StringIO()
+        with contextlib.redirect_stdout(salida):
+            self.assertEqual(acuerdo._main(['--carpeta', str(self.carpeta)]), 0)
+        return salida.getvalue()
 
 
 class Acuerdo(ConLote):
@@ -811,12 +821,6 @@ class EtiquetadorLlm(ConLote):
     def test_12_columnas_de_dataset_sin_cambio(self):
         self.assertEqual(acuerdo.COLUMNAS_DATASET, COLUMNAS_DATASET)
 
-    def salida_de_main(self):
-        salida = io.StringIO()
-        with contextlib.redirect_stdout(salida):
-            self.assertEqual(acuerdo._main(['--carpeta', str(self.carpeta)]), 0)
-        return salida.getvalue()
-
     def test_13_con_2_personas_las_filas_sin_mayoria_no_cuentan_y_no_las_desempata(self):
         # Con 2 ciegos, donde no coinciden la final queda media por regla. Esas filas no cuentan en el kappa del LLM:
         # da lo mismo si ahí pone media o la etiqueta de una de las dos personas. Y el LLM no las desempata.
@@ -951,6 +955,102 @@ class EtiquetadorLlm(ConLote):
                 self.assertTrue(r[aviso])
 
 
+class OtrosLlm(ConLote):
+    """llm_sonnet.csv y llm_haiku.csv: otros dos LLM que etiquetaron el bloque común. No votan ni cambian dataset.csv.
+    Solo miden el acuerdo entre LLM, contra las etiquetas de llm.csv."""
+
+    def setUp(self):
+        super().setUp()
+        self.llm = {h['id']: h['clase_esperada'] for h in MAESTRO}
+        # Sonnet repite al LLM en el bloque común. Haiku cambia 4 filas de cada clase por otra, así cada uno sigue con
+        # 20 filas por clase
+        self.sonnet = {id_: self.llm[id_] for id_ in COMUN}
+        self.haiku = dict(self.sonnet)
+        for clase in plantillas.CLASES:
+            for id_ in [i for i in COMUN if POR_ID[i]['clase_esperada'] == clase][:4]:
+                self.haiku[id_] = OTRA[clase]
+        self.otros = {'llm_sonnet': self.sonnet, 'llm_haiku': self.haiku}
+
+    def test_1_fleiss_entre_3_llm(self):
+        # La repetición pone baja en todo: el acuerdo entre LLM usa llm.csv, no la repetición
+        _, r, errores = self.procesar(llm=self.llm, repeticion={id_: 'baja' for id_ in COMUN}, otros=self.otros)
+        self.assertEqual(errores, [])
+        # 48 filas con los 3 iguales y 12 con 2 contra 1: P = (48 + 12 / 3) / 60 = 13/15. Cada clase tiene 60 de los
+        # 180 votos: Pe = 1/3 y kappa = (13/15 - 1/3) / (2/3) = 0.8. Por pares con 20 por clase: (0.8 - 1/3) / (2/3)
+        self.assertEqual(r['llm']['acuerdo_entre_llm'], {
+            'etiquetadores': ['llm', 'llm_sonnet', 'llm_haiku'], 'filas': 60, 'fleiss_kappa': 0.8,
+            'acuerdo_simple': 0.8, 'cohen_por_pares': {
+                'llm con llm_sonnet': {'cohen_kappa': 1.0, 'acuerdo_simple': 1.0},
+                'llm con llm_haiku': {'cohen_kappa': 0.7, 'acuerdo_simple': 0.8},
+                'llm_sonnet con llm_haiku': {'cohen_kappa': 0.7, 'acuerdo_simple': 0.8}}})
+        self.assertEqual(json.loads((self.carpeta / 'acuerdo.json').read_text(encoding='utf-8')), r)
+        self.assertIn('Acuerdo entre LLM en el bloque común (no votan): kappa de Fleiss 0.8 entre llm, llm_sonnet, '
+                      'llm_haiku, en 60 filas.', self.salida_de_main())
+
+    def test_2_no_votan_ni_cambian_el_dataset(self):
+        # Ponen baja en todo el bloque común. Si votaran, cambiaría la etiqueta final, con personas o sin ellas
+        otros = {nombre: {id_: 'baja' for id_ in COMUN} for nombre in acuerdo.LLMS_COMUN}
+        for con_personas in (True, False):
+            with self.subTest(con_personas=con_personas):
+                shutil.rmtree(self.carpeta / 'etiquetas', ignore_errors=True)
+                if not con_personas:
+                    self.etiquetas = {}
+                dataset_sin, sin, _ = self.procesar(llm=self.llm)
+                csv_sin = (self.carpeta / 'dataset.csv').read_bytes()
+                dataset, con, errores = self.procesar(llm=self.llm, otros=otros)
+                self.assertEqual(errores, [])
+                self.assertEqual(dataset, dataset_sin)
+                self.assertEqual((self.carpeta / 'dataset.csv').read_bytes(), csv_sin)
+                self.assertEqual(con['llm']['solo_llm'], not con_personas)
+                self.assertIsNone(sin['llm']['acuerdo_entre_llm'])
+                self.assertIsNotNone(con['llm'].pop('acuerdo_entre_llm'))
+                sin['llm'].pop('acuerdo_entre_llm')
+                self.assertEqual(con, sin)   # fuera de acuerdo_entre_llm, acuerdo.json no cambia
+                if not con_personas:   # cada fila lleva la etiqueta de llm.csv
+                    self.assertEqual({f['id']: f['etiqueta'] for f in dataset}, self.llm)
+
+    def test_3_sin_los_otros_o_con_uno_solo(self):
+        _, r, errores = self.procesar(llm=self.llm)
+        self.assertEqual(errores, [])
+        self.assertIsNone(r['llm']['acuerdo_entre_llm'])   # solo llm: menos de 2
+        self.assertNotIn('Acuerdo entre LLM', self.salida_de_main())
+        (self.carpeta / 'etiquetas' / 'llm.csv').unlink()
+        _, r, errores = self.procesar()
+        self.assertEqual(errores, [])
+        self.assertEqual((r['llm']['esta'], r['llm']['acuerdo_entre_llm']), (False, None))
+        # Con uno solo son 2: un par, y el Fleiss de 2 con 48 de 60 iguales y Pe = 1/3 da (0.8 - 1/3) / (2/3)
+        _, r, errores = self.procesar(llm=self.llm, otros={'llm_haiku': self.haiku})
+        self.assertEqual(errores, [])
+        self.assertEqual(r['llm']['acuerdo_entre_llm'], {
+            'etiquetadores': ['llm', 'llm_haiku'], 'filas': 60, 'fleiss_kappa': 0.7, 'acuerdo_simple': 0.8,
+            'cohen_por_pares': {'llm con llm_haiku': {'cohen_kappa': 0.7, 'acuerdo_simple': 0.8}}})
+
+    def test_4_valida_ids_y_valores(self):
+        reparto = next(h['id'] for h in MAESTRO if h['bloque'] == 'reparto')
+        sonnet = [(id_, self.sonnet[id_]) for id_ in COMUN[1:]]   # falta COMUN[0]
+        sonnet[0] = (COMUN[1], 'alto')
+        sonnet += [(COMUN[2], 'baja'), (reparto, 'media')]       # uno repetido y uno que no está en el bloque común
+        dataset, _, errores = self.procesar(llm=self.llm, otros={'llm_sonnet': sonnet, 'llm_haiku': self.haiku})
+        self.assertIsNone(dataset)
+        texto = '\n'.join(errores)
+        self.assertIn("llm_sonnet.csv, línea 2: la etiqueta de %s es 'alto'" % COMUN[1], texto)
+        self.assertIn('llm_sonnet.csv, línea 61: el id %s está repetido' % COMUN[2], texto)
+        self.assertIn('llm_sonnet.csv, línea 62: el id %r no está en el bloque común' % reparto, texto)
+        self.assertIn('llm_sonnet.csv: faltan 1 ids del bloque común, por ejemplo %s' % COMUN[0], texto)
+        self.assertNotIn('llm_haiku', texto)
+        self.assertFalse((self.carpeta / 'dataset.csv').exists())
+        self.assertFalse((self.carpeta / 'acuerdo.json').exists())
+
+    def test_5_sin_llm_csv_son_un_error(self):
+        self.etiquetas = {}   # sin personas ni llm.csv, con solo los otros dos no escribe nada
+        dataset, _, errores = self.procesar(otros=self.otros)
+        self.assertIsNone(dataset)
+        self.assertEqual(errores, ['llm_sonnet.csv: están las etiquetas de llm_sonnet pero falta llm.csv',
+                                   'llm_haiku.csv: están las etiquetas de llm_haiku pero falta llm.csv'])
+        self.assertFalse((self.carpeta / 'dataset.csv').exists())
+        self.assertFalse((self.carpeta / 'acuerdo.json').exists())
+
+
 class DatasetDelRepo(unittest.TestCase):
 
     @unittest.skipUnless((generar_lote.CARPETA / 'dataset.csv').exists(), 'todavía no hay etiquetas')
@@ -968,6 +1068,15 @@ class DatasetDelRepo(unittest.TestCase):
         self.assertEqual(set(llm), {h['id'] for h in maestro})
         if repeticion is not None:
             self.assertEqual(set(repeticion), {h['id'] for h in maestro if h['bloque'] == 'comun'})
+
+    @unittest.skipUnless((generar_lote.CARPETA / 'etiquetas' / 'llm.csv').exists(), 'no hay etiquetas del LLM')
+    def test_3_las_etiquetas_de_sonnet_y_haiku_pasan_la_revision(self):
+        maestro = acuerdo.leer_maestro(generar_lote.CARPETA)
+        otros, errores = acuerdo.leer_llms_comun(generar_lote.CARPETA, maestro, True)
+        self.assertEqual(errores, [])
+        self.assertEqual(set(otros), set(acuerdo.LLMS_COMUN))
+        for nombre, suyas in otros.items():
+            self.assertEqual(set(suyas), {h['id'] for h in maestro if h['bloque'] == 'comun'}, nombre)
 
 
 if __name__ == '__main__':
