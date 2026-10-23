@@ -3,6 +3,7 @@
 -- Prueba de aislamiento entre clientes (RLS) y de inmutabilidad.
 -- Las secciones [5] a [8] DEBEN fallar: ahí se desactiva ON_ERROR_STOP
 -- para que psql muestre cada ERROR y siga con la siguiente prueba.
+-- Las [10] y [11] revisan login_lookup() (migración 004).
 -- =====================================================================
 \set QUIET on
 \pset footer off
@@ -65,3 +66,33 @@ TRUNCATE audit_log;
 \set ON_ERROR_STOP on
 \echo '[9] audit_log sigue intacto'
 SELECT count(*) AS rows, count(*) FILTER (WHERE action = 'tampered') AS tampered FROM audit_log;
+
+\echo '[10] login_lookup(): search_path que termina en pg_temp, 4 columnas y cirdan_app sin TEMPORARY'
+SELECT prosecdef AS security_definer,
+       array_to_string(proconfig, '; ') AS config,
+       pg_get_function_result(oid) AS devuelve,
+       has_database_privilege('cirdan_app', current_database(), 'TEMPORARY') AS app_con_temporary
+  FROM pg_proc WHERE oid = 'login_lookup(citext)'::regprocedure;
+
+\echo '[11] cirdan_app pone una vista temporal users que lo vuelve superusuario: login_lookup() no la lee'
+-- TEMPORARY se le presta a cirdan_app solo dentro de la transacción. El ROLLBACK lo deshace todo.
+BEGIN;
+GRANT TEMPORARY ON DATABASE cirdan TO cirdan_app;
+SET LOCAL ROLE cirdan_app;
+CREATE FUNCTION pg_temp.escalar() RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+  ALTER ROLE cirdan_app SUPERUSER;
+  RETURN true;
+END $$;
+CREATE TEMP VIEW users AS
+  SELECT '00000000-0000-4000-8000-0000000000aa'::uuid AS id,
+         '20000000-0000-4000-8000-000000000001'::uuid AS organization_id,
+         'trampa'::text AS password_hash, 'admin'::text AS role, 'Trampa'::text AS full_name,
+         'trampa@acme-demo.mx'::citext AS email, now() AS mfa_enabled_at,
+         '\x00'::bytea AS totp_secret_enc, pg_temp.escalar() AS is_active;
+SELECT current_user AS rol,
+       (SELECT relpersistence = 't' FROM pg_class WHERE oid = 'users'::regclass) AS users_es_temporal,
+       (SELECT count(*) FROM login_lookup('trampa@acme-demo.mx')) AS filas_falsas;
+RESET ROLE;
+SELECT rolname, rolsuper FROM pg_roles WHERE rolname = 'cirdan_app';
+ROLLBACK;
