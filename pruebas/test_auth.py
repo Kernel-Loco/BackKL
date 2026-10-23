@@ -2,9 +2,12 @@
 
     python -m unittest -v pruebas/test_auth.py      (con `docker compose up -d`, DEMO_ACCOUNTS=true)
 """
+import http.client
+import json
 import secrets
 import time
 import unittest
+from urllib.parse import urlsplit
 
 from pruebas import sesion
 from pruebas.sesion import AUTH, PASSWORD, Client
@@ -128,6 +131,25 @@ class Login(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertEqual(int(scalar(contar, user='postgres')), antes + 1)
+
+    def test_11_si_la_bitacora_falla_la_conexion_sigue_abierta(self):
+        # 'no-es-ip' no cabe en audit_log.ip_address (inet), así que la escritura del fallo truena después
+        # del 401. Eso no debe cerrar la conexión, porque con un correo que no existe sigue abierta.
+        # Solo aplica si la API confía en X-Forwarded-For (FORWARDED_ALLOW_IPS='*', como en docker compose).
+        contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                  "AND a.action = 'auth.login_failed';" % JORDAN)
+        antes = int(scalar(contar, user='postgres'))
+        url = urlsplit(sesion.BASE)
+        conn = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+        self.addCleanup(conn.close)
+        for email in (JORDAN, 'nadie@acme-demo.mx'):
+            conn.request('POST', '/api/v1/auth/login', json.dumps({'email': email, 'password': 'no-es-la-contrasena'}),
+                         {'Content-Type': 'application/json', 'X-Forwarded-For': 'no-es-ip'})
+            r = conn.getresponse()
+            self.assertEqual((r.status, json.loads(r.read())['detail']), (401, INVALID), email)
+            time.sleep(0.5)  # tiempo para que corra la escritura de la bitácora
+        if int(scalar(contar, user='postgres')) != antes:
+            self.skipTest('la API no confía en X-Forwarded-For y la bitácora no falló: no se probó nada')
 
 
 if __name__ == '__main__':

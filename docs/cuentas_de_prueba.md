@@ -4,9 +4,9 @@ Cuentas para entrar al portal LowTide en tu PC mientras desarrollamos. Son **sol
 
 ## Antes de entrar
 
-1. **Backend:** en BackKL, ten en el `.env` la línea `DEMO_ACCOUNTS=true` (viene así en `.env.example`) y levántalo con `docker compose up -d`. Cada vez que arranca, el contenedor `demo-accounts` les pone contraseña y MFA a estas cuentas.
+1. **Backend:** en BackKL, ten en el `.env` la línea `DEMO_ACCOUNTS=true` (viene así en `.env.example`) y levántalo con `docker compose up -d --build`. El `--build` hace que la imagen traiga el código actual cada vez que haces pull. Cada vez que arranca, el contenedor `demo-accounts` les pone contraseña y MFA a estas cuentas.
 2. **Portal:** en FrontKL, `npm run dev` y abre **http://localhost:3000**. Tiene que ser el puerto 3000: la API solo acepta inicios de sesión del portal en ese puerto y de su propia página en el 8000. Rechaza los que vienen de otro origen.
-3. **Explorador de la base (opcional):** pon `DEMO_EXPLORER=true` en el `.env` de BackKL y vuelve a correr `docker compose up -d`, porque la API lee esa línea al arrancar. Luego abre **http://127.0.0.1:8000/demo** y entra con `alex.morgan@acme-demo.mx` o `dana.cruz@beta-corp.mx`. Las tablas solo las ve un Administrador. Más detalle en 'Vista visual de la base' del README.
+3. **Explorador de la base (opcional):** pon `DEMO_EXPLORER=true` en el `.env` de BackKL y vuelve a levantarlo con `docker compose up -d --build`, porque la API lee esa línea al arrancar. Luego abre **http://127.0.0.1:8000/demo** y entra con `alex.morgan@acme-demo.mx` o `dana.cruz@beta-corp.mx`. Las tablas solo las ve un Administrador. Más detalle en 'Vista visual de la base' del README.
 
 ## Las cuentas
 

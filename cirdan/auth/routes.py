@@ -3,6 +3,8 @@
 Los errores de credenciales usan siempre el mismo mensaje y el mismo tiempo, exista o no el
 correo, para que nadie pueda saber qué cuentas existen.
 """
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -13,6 +15,7 @@ from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_
 from cirdan.db import audit, transaction
 
 router = APIRouter(prefix='/api/v1/auth', tags=['sesión'])
+log = logging.getLogger(__name__)
 
 INVALID = 'Correo o contraseña incorrectos.'
 LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
@@ -57,8 +60,13 @@ def _start_session(response, conn, user, ip, via):
 
 
 def _audit_bad_password(org, user_id, ip):
-    with transaction(org) as conn:
-        audit(conn, org, 'auth.login_failed', user_id, ip, 'user', user_id, {'reason': 'password'})
+    # Corre después del 401. Si falla, queda solo en el log: una excepción aquí haría que uvicorn
+    # cerrara la conexión, y eso solo pasaría con correos que existen.
+    try:
+        with transaction(org) as conn:
+            audit(conn, org, 'auth.login_failed', user_id, ip, 'user', user_id, {'reason': 'password'})
+    except Exception:
+        log.exception('No se pudo escribir auth.login_failed del usuario %s', user_id)
 
 
 @router.post('/login',summary='Correo y contraseña; si la cuenta tiene MFA, pide el código')

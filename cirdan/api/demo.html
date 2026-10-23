@@ -241,7 +241,8 @@ $('loginForm').onsubmit = async e => {
   if (mfaToken && detail(r.body).includes('Inicia sesión de nuevo')) return showLogin(detail(r.body));
   $('loginErr').textContent = detail(r.body);
 };
-$('logout').onclick = async () => { await api('/api/v1/auth/logout', {}); showLogin(); };
+// Al salir a propósito tampoco queda el correo de la cuenta (al vencer la sesión sí, para volver a entrar)
+$('logout').onclick = async () => { $('email').value = ''; $('password').value = ''; await api('/api/v1/auth/logout', {}); showLogin(); };
 start();
 </script>
 </body>
