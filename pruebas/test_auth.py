@@ -115,6 +115,20 @@ class Login(unittest.TestCase):
                 self.assertEqual(client.post('/api/v1/domains/no-existe.acme-demo.mx/scans')[0], scan,
                                  'el gerente no puede pedir escaneos')
 
+    def test_10_la_contrasena_mala_queda_en_la_bitacora(self):
+        # La API escribe el fallo después de mandar el 401, para que el tiempo no delate que el correo
+        # existe. Con raise HTTPException esa tarea no correría y el fallo no quedaría en la bitácora.
+        contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                  "AND a.action = 'auth.login_failed' AND a.details->>'reason' = 'password';" % JORDAN)
+        antes = int(scalar(contar, user='postgres'))
+        code, body = Client().post(AUTH + '/login', {'email': JORDAN, 'password': 'no-es-la-contrasena'})
+        self.assertEqual((code, body['detail']), (401, INVALID))
+        for _ in range(50):  # hasta 5 s
+            if int(scalar(contar, user='postgres')) > antes:
+                break
+            time.sleep(0.1)
+        self.assertEqual(int(scalar(contar, user='postgres')), antes + 1)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

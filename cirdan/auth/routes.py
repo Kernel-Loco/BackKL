@@ -4,7 +4,9 @@ Los errores de credenciales usan siempre el mismo mensaje y el mismo tiempo, exi
 correo, para que nadie pueda saber qué cuentas existen.
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from cirdan.auth import passwords, sessions, totp
 from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session
@@ -54,7 +56,12 @@ def _start_session(response, conn, user, ip, via):
     return _user(conn, user['id'])
 
 
-@router.post('/login', summary='Correo y contraseña; si la cuenta tiene MFA, pide el código')
+def _audit_bad_password(org, user_id, ip):
+    with transaction(org) as conn:
+        audit(conn, org, 'auth.login_failed', user_id, ip, 'user', user_id, {'reason': 'password'})
+
+
+@router.post('/login',summary='Correo y contraseña; si la cuenta tiene MFA, pide el código')
 def login(body: LoginIn, request: Request, response: Response):
     email = body.email.strip().lower()
     ip = client_ip(request)
@@ -71,9 +78,11 @@ def login(body: LoginIn, request: Request, response: Response):
     org, user_id = str(found['organization_id']), str(found['user_id'])
     if not passwords.verify_password(found['password_hash'], body.password):
         sessions.register_fail(email, ip)
-        with transaction(org) as conn:
-            audit(conn, org, 'auth.login_failed', user_id, ip, 'user', user_id, {'reason': 'password'})
-        raise HTTPException(401, INVALID)
+        # La bitácora se escribe después de mandar el 401. Escrita antes, la conexión y el INSERT
+        # hacían que un correo que existe tardara unos 17 ms más que uno que no existe.
+        # Con raise HTTPException la tarea no correría: por eso se devuelve el mismo 401 a mano.
+        return JSONResponse({'detail': INVALID}, status_code=401,
+                            background=BackgroundTask(_audit_bad_password, org, user_id, ip))
 
     sessions.clear_fails(email)
     with transaction(org) as conn:
