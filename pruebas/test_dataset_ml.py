@@ -658,20 +658,23 @@ class EtiquetadorLlm(ConLote):
         self.assertTrue(x['motivo'].startswith('No se pudo calcular el kappa'))
         self.assertEqual(len(dataset), 425 - len(suyas))
 
-    def test_5_nunca_llena_el_bloque_comun(self):
-        # aunque se le pida cubrir a los 3 ciegos, solo llena filas del reparto
+    def test_5_solo_llena_el_bloque_comun_sin_ningun_ciego(self):
+        # aunque se le pida cubrir a los 3 ciegos, sin solo_llm solo llena filas del reparto
         filas = acuerdo.armar_dataset(MAESTRO, {}, self.llm, acuerdo.CIEGOS)
         self.assertEqual(len(filas), 365)
         self.assertEqual({POR_ID[f['id']]['bloque'] for f in filas}, {'reparto'})
         self.assertEqual({f['n_etiquetas'] for f in filas}, {0})
-        # sin ningún ciego no hay etiqueta final de personas: no hay kappa y el bloque común no sale
+        # sin ningún ciego no hay etiqueta final de personas ni kappa: todo sale del LLM, también el bloque común
         for e in acuerdo.CIEGOS:
             del self.etiquetas[e]
         dataset, r, errores = self.procesar(llm=self.llm)
-        self.assertEqual((errores, dataset), ([], []))
+        self.assertEqual(errores, [])
+        self.assertEqual(len(dataset), len(MAESTRO))
         self.assertEqual(r['llm']['contra_final_personas'], {'filas': 0, 'cohen_kappa': None, 'acuerdo_simple': None,
                                                              'filas_sin_mayoria_excluidas': 0, 'personas': []})
-        self.assertFalse(r['llm']['cubre_faltantes'])
+        self.assertTrue(r['llm']['solo_llm'])
+        self.assertTrue(r['llm']['cubre_faltantes'])
+        self.assertFalse(r['llm']['alcanza_umbral'])
 
     def test_6_valida_llm_y_su_repeticion(self):
         ids = [h['id'] for h in MAESTRO]
@@ -745,12 +748,54 @@ class EtiquetadorLlm(ConLote):
         self.assertIn('Etiquetador LLM: no hay etiquetas del LLM.', salida.getvalue())
         self.assertIn('Las filas del reparto de etiquetador_3 no están en el dataset.', salida.getvalue())
 
-    def test_10_solo_el_llm_no_escribe_nada(self):
+    def test_10_sin_personas_todo_sale_del_llm(self):
+        # Ninguna persona entregó: el dataset completo sale del LLM, también el bloque común, con n_etiquetas 0.
+        self.llm[COMUN[0]] = OTRA[self.llm[COMUN[0]]]   # para ver que el bloque común sí lleva la etiqueta del LLM
         escribir_etiquetas(self.carpeta, acuerdo.LLM, self.llm)
+        dataset, r, errores = acuerdo.procesar(self.carpeta)
+        self.assertEqual(errores, [])
+        self.assertEqual(len(dataset), len(MAESTRO))
+        self.assertEqual({f['id']: f['etiqueta'] for f in dataset}, self.llm)
+        self.assertEqual({f['n_etiquetas'] for f in dataset}, {0})
+        x = r['llm']
+        self.assertTrue(x['solo_llm'])
+        self.assertTrue(x['cubre_faltantes'])
+        self.assertIsNone(x['contra_final_personas']['cohen_kappa'])
+        self.assertEqual(x['filas_cubiertas']['bloque_comun'], len(COMUN))
+        self.assertEqual(sum(x['filas_cubiertas'].values()), len(MAESTRO))
+        self.assertIn('Todo el dataset sale del LLM', x['motivo'])
+        self.assertEqual(r['faltan'], list(ETIQUETADORES))
+        self.assertEqual(r['por_clase_solo_personas'], {c: 0 for c in plantillas.CLASES})
+        self.assertIsNone(r['bloque_comun']['sin_etiquetador_1']['fleiss_kappa'])
+        self.assertEqual(r['bloque_comun']['cohen_por_pares'], {})
+        self.assertTrue((self.carpeta / 'dataset.csv').exists())
+        texto = self.salida_de_main()
+        self.assertIn('aviso: ninguna persona entregó etiquetas. Todo el dataset sale del LLM', texto)
+        self.assertIn('Bloque común: ninguno de etiquetador_2, etiquetador_3, etiquetador_4 entregó', texto)
+        self.assertIn('El LLM cubre las filas del reparto de etiquetador_2, etiquetador_3, etiquetador_4.', texto)
+
+    def test_10b_solo_etiquetador_1_tambien_es_todo_del_llm(self):
+        # etiquetador_1 no decide la final: si solo él entregara, el bloque común también sale del LLM.
+        escribir_etiquetas(self.carpeta, acuerdo.SOLO_COMUN, self.etiquetas[acuerdo.SOLO_COMUN])
+        escribir_etiquetas(self.carpeta, acuerdo.LLM, self.llm)
+        dataset, r, errores = acuerdo.procesar(self.carpeta)
+        self.assertEqual(errores, [])
+        self.assertTrue(r['llm']['solo_llm'])
+        self.assertEqual(len(dataset), len(MAESTRO))
+        self.assertEqual({f['n_etiquetas'] for f in dataset}, {0})
+
+    def test_10c_sin_personas_ni_llm_no_escribe_nada(self):
         dataset, _, errores = acuerdo.procesar(self.carpeta)
         self.assertIsNone(dataset)
-        self.assertIn('no hay etiquetas de personas', errores[0])
+        self.assertIn('no hay etiquetas de personas ni del LLM', errores[0])
         self.assertFalse((self.carpeta / 'dataset.csv').exists())
+
+    def test_10d_con_personas_no_es_solo_llm(self):
+        self.sin_un_ciego()
+        _, r, errores = self.procesar(llm=self.llm)
+        self.assertEqual(errores, [])
+        self.assertFalse(r['llm']['solo_llm'])
+        self.assertNotIn('bloque_comun', r['llm']['filas_cubiertas'])
 
     def test_11_main_imprime_el_llm(self):
         suyas = self.sin_un_ciego()

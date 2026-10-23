@@ -179,7 +179,8 @@ Los dos son opcionales. Si están, `acuerdo.py` los revisa igual que los de las 
 - **Cubre a quien no entrega, con condición.** Mira el kappa del LLM contra la etiqueta final de las personas en el bloque común. Si es de 0.6 o más (`UMBRAL_LLM`) y falta el archivo de `etiquetador_2`, `etiquetador_3` o `etiquetador_4`, sus filas del reparto se llenan con la etiqueta del LLM. Si es menor o no se puede calcular, esas filas salen del dataset y `llm.motivo` dice por qué. `etiquetador_1` no tiene filas del reparto, así que nunca se cubre.
 - **Ese kappa solo cuenta las filas en que las personas tienen mayoría.** Con 2 personas son las filas en que coinciden. En las otras la final queda media por regla, no porque alguien la pusiera. Si contaran, un LLM que pone media cuando duda ganaría puntos y uno que se queda con la etiqueta de una de las dos los perdería.
 - **Con una sola persona, la referencia es ella.** Si solo entrega un ciego, el kappa se mide contra él y el LLM puede cubrir a los otros dos. Entonces más de la mitad del dataset sale del LLM. `llm.motivo` y la terminal lo avisan.
-- **Nunca llena el bloque común.** Esas filas solo llevan etiquetas de personas.
+- **Mientras entregue alguna persona, nunca llena el bloque común.** Esas filas solo llevan etiquetas de personas.
+- **Si nadie entrega, todo sale del LLM.** Si ninguno de `etiquetador_2`, `etiquetador_3` y `etiquetador_4` entregó, no hay contra qué medir al LLM. Entonces llena las 425 filas, también el bloque común, con `n_etiquetas` 0, y `llm.solo_llm` es verdadero. Así el lote no depende de que las personas participen. Ese dataset no tiene validación de personas ni acuerdo medido, y así se tiene que reportar.
 - En `dataset.csv`, `n_etiquetas` 0 marca las filas del LLM: no tienen ninguna etiqueta de persona. Las columnas no cambian.
 - `por_clase_solo_personas` cuenta las filas por clase sin las del LLM. Lo demás (`al_menos_60_por_clase`, `linea_base_prueba`, `coincidencia`, `lote_trivial` y `rubrica_trivial`) sale del dataset completo.
 
@@ -195,14 +196,15 @@ La sección `llm` de `acuerdo.json` trae:
 | `coincidencia` | Qué parte de sus 425 etiquetas coincide con `clase_reglas` y con `sensibilidad` |
 | `alcanza_umbral` | Si el kappa contra la etiqueta final es de 0.6 o más |
 | `cubre_faltantes` | Si llenó filas de alguien que no entregó |
+| `solo_llm` | Si ninguna persona de las que deciden entregó y todo el dataset salió del LLM |
 | `motivo` | Por qué cubre o no cubre |
-| `filas_cubiertas` | Cuántas filas llenó, por etiquetador |
+| `filas_cubiertas` | Cuántas filas llenó, por etiquetador. Con `solo_llm` también trae `bloque_comun` |
 
 ## Cómo regenerar el lote
 
 ```bash
 python -m cirdan.ml.generar_lote                 # escribe datos/ml/rc65/copias/ y maestro.jsonl
-python -m unittest -v pruebas/test_dataset_ml.py # 59 pruebas sin base ni red
+python -m unittest -v pruebas/test_dataset_ml.py # 62 pruebas sin base ni red
 ```
 
 La semilla es fija (`SEMILLA = 65`). La misma semilla da los mismos bytes, y una prueba revisa que el lote del repo sea el que sale de ella. `.gitattributes` marca `datos/ml/` sin conversión de fin de línea para que esa comparación sirva en cualquier sistema. Si cambias una plantilla o el mapa de severidades, regenera el lote antes de repartirlo. Después de repartirlo, no lo regeneres: las copias que ya tienen los etiquetadores dejarían de coincidir con el maestro.
@@ -215,7 +217,7 @@ Las etiquetas devueltas van en `datos/ml/rc65/etiquetas/etiquetador_N.csv`, con 
 python -m cirdan.ml.acuerdo    # escribe datos/ml/rc65/dataset.csv y acuerdo.json
 ```
 
-Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media o baja. Hace lo mismo con `llm.csv` y `llm_repeticion.csv` si están. Si encuentra un error, o si no hay etiquetas de personas, no escribe nada y sale con código 1. En la terminal da una línea del LLM, con su kappa contra las personas y las filas que cubre. Si falta `etiquetador_1`, da el kappa de Fleiss entre los ciegos que entregaron y no uno con los 4. Cuando ya existe `dataset.csv`, una prueba revisa que haya al menos 60 filas por clase en las etiquetas finales. Antes de eso se salta. Otra prueba revisa que `llm.csv` y `llm_repeticion.csv` del repo pasen la revisión.
+Revisa que cada archivo traiga justo los ids de su copia, sin repetir, y que cada etiqueta sea alta, media o baja. Hace lo mismo con `llm.csv` y `llm_repeticion.csv` si están. Si encuentra un error, o si no hay etiquetas de personas ni del LLM, no escribe nada y sale con código 1. Si solo están las del LLM, escribe el dataset completo con sus etiquetas y lo avisa. En la terminal da una línea del LLM, con su kappa contra las personas y las filas que cubre. Si falta `etiquetador_1`, da el kappa de Fleiss entre los ciegos que entregaron y no uno con los 4. Cuando ya existe `dataset.csv`, una prueba revisa que haya al menos 60 filas por clase en las etiquetas finales. Antes de eso se salta. Otra prueba revisa que `llm.csv` y `llm_repeticion.csv` del repo pasen la revisión.
 
 ## Riesgos conocidos
 
