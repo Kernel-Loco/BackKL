@@ -6,7 +6,7 @@ Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa 
 
 | Carpeta | Qué tiene |
 |---|---|
-| `cirdan/api/` | API en FastAPI y la página `/demo` |
+| `cirdan/api/` | API en FastAPI y la página `/demo` (solo con `DEMO_EXPLORER=true`) |
 | `cirdan/auth/` | Inicio de sesión (#25): contraseña con argon2id, MFA con TOTP, sesiones en Valkey y cuentas de demo |
 | `cirdan/orquestador/` | Orquestador de escaneos (#22): solo escanea con autorización vigente y TXT verificado |
 | `cirdan/recolectores/` | Contrato de plugin (#13), recolectores OSINT pasivos (crt.sh, #14, y uno de ejemplo para pruebas) y sus respuestas grabadas para el respaldo de las demos (hoy solo está la del recolector de ejemplo) |
@@ -33,7 +33,7 @@ Todos los comandos se corren desde la raíz del repo.
 2. Copia `.env.example` como `.env`, cambia las tres contraseñas (`POSTGRES_PASSWORD`, `CIRDAN_APP_PASSWORD` y `VALKEY_PASSWORD`) y genera `TOTP_ENCRYPTION_KEY` con el comando que trae el archivo.
 3. Levanta todo: `docker compose up -d --build`. La primera vez crea la base `cirdan` y carga migraciones y semillas (tarda unos segundos). La API queda en http://127.0.0.1:8000.
 4. Comprueba: `curl http://127.0.0.1:8000/health` responde 200 con `"role": "cirdan_app"`, y `docker compose ps` muestra los tres contenedores `healthy`.
-5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (47, contra la base y la API), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py` (12, el orquestador dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py` (149, sin base ni red).
+5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (48, contra la base y la API), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py` (19, el orquestador y el explorador de la base dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py` (149, sin base ni red).
 6. Instala el candado de secretos una vez: `pip install pre-commit && pre-commit install`. Desde ahí gitleaks revisa cada commit.
 
 Otros comandos: `docker compose logs -f api` (ver la API), `docker compose down` (apagar, la base se conserva) y `docker compose down -v` (borrar la base para volver a cargarla desde cero en el siguiente `up`). Para revisar todo el historial con gitleaks: `docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 git /repo`.
@@ -117,7 +117,7 @@ docker compose exec api python -m cirdan.auth.demo codigo jordan.tate@acme-demo.
 
 Con los datos demo de Acme responden igual que los JSON de `docs/api_v1/` (lo revisa `pruebas/test_api_v1.py`). Mientras #23 no guarde las características del reto en la evidencia, la API las calcula con las mismas reglas del contrato. La semilla `003_titulos_espanol.sql` pone en español los títulos de los hallazgos demo.
 
-`cirdan/api/explorer.py` agrega los 2 endpoints que usa `/demo`, `GET /db/tables` y `GET /db/tables/{table}/rows`. Es el único lugar donde sigue el modo demo con `X-Organization`.
+`cirdan/api/explorer.py` agrega la página `/demo` y los 2 endpoints que usa, `GET /db/tables` y `GET /db/tables/{table}/rows`. Solo existen con `DEMO_EXPLORER=true` (ver Vista visual de la base). Piden sesión y toman la empresa de la sesión, como el resto de la API. Las tablas solo las ve el rol Admin, como `GET /api/v1/domains/txt`, porque traen usuarios, bitácora y valores TXT. Ninguna ruta acepta ya `X-Organization` (RC-58).
 
 Con `docker compose up -d` la API ya está corriendo; su documentación está en http://127.0.0.1:8000/docs.
 
@@ -159,7 +159,9 @@ El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de esca
 
 ## Vista visual de la base (para la demo)
 
-Con la API arriba, abre **http://127.0.0.1:8000/demo**. Muestra las 23 tablas agrupadas con las filas que ve el cliente elegido (Acme Demo, Beta Corp o sin cliente), las filas reales de la tabla que selecciones (sin columnas secretas), los dominios con su score y, al elegir uno, su desglose por categoría y sus hallazgos. El botón "Intentar como Beta Corp" muestra el 404 al pedir un dominio de Acme. Todo pasa por el rol `cirdan_app`, así que lo que se ve es lo que RLS deja ver. Archivos: `cirdan/api/explorer.py` y `cirdan/api/demo.html`.
+Solo existe con `DEMO_EXPLORER=true` en el `.env`. Por omisión es `false` y entonces `/demo` y `/db` responden 404. Nunca va en `true` en producción. Con la línea puesta, corre `docker compose up -d` y abre **http://127.0.0.1:8000/demo** (también sirve `localhost:8000`). La página inicia sesión desde su propio origen. La API lo permite porque `ALLOWED_ORIGINS` ya trae esos dos orígenes. Desde otro origen, el inicio de sesión responde 403. Sin sesión, la página solo muestra el inicio de sesión y no trae datos.
+
+La página pide correo, contraseña y código MFA de una cuenta de demo con rol Admin (`alex.morgan@acme-demo.mx` o `dana.cruz@beta-corp.mx`) y muestra solo la empresa de esa sesión: las 23 tablas agrupadas con las filas que ve, las filas reales de la tabla que selecciones (sin columnas secretas), los dominios con su score y, al elegir uno, su desglose por categoría y sus hallazgos. Para ver otra empresa, cierra sesión y entra con su cuenta. Con la sesión de Beta Corp (`dana.cruz@beta-corp.mx`), el botón 'Intentar como Beta Corp' muestra el 404 al pedir los hallazgos de acme-demo.mx, que es de Acme. Con la de Acme, el botón dice 'Intentar como Acme Demo' y responde 200. Con una cuenta de Analista o Gerente, las tablas responden 403 y la página lo dice, pero los dominios y el botón sí funcionan. Todo pasa por el rol `cirdan_app`, así que lo que se ve es lo que RLS deja ver. Archivos: `cirdan/api/explorer.py` y `cirdan/api/demo.html`. Sus pruebas, `pruebas/test_explorador.py`, levantan dentro del contenedor una API con la variable en `false` y otra con `true`.
 
 ## Recolector de crt.sh (#14)
 

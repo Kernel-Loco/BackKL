@@ -59,6 +59,9 @@ services:
       # Dominios que el orquestador puede consultar en vivo (DNS y fuentes). Los de la demo
       # (acme-demo.mx...) no son del equipo: nunca en vivo. En producción, "*".
       DOMINIOS_EN_VIVO: ${DOMINIOS_EN_VIVO:-olmardo.com}
+      # Explorador de la base para la demo (/demo y /db), siempre con sesión (RC-58). Con false
+      # esas rutas no existen. Nunca true en producción.
+      DEMO_EXPLORER: ${DEMO_EXPLORER:-false}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
