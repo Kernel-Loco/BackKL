@@ -75,9 +75,9 @@ Todo es ficticio y se puede publicar: empresas con nombres inventados bajo `.com
 
 | Característica | Cómo sale |
 |---|---|
-| `tipo` | Del código de regla, con los mismos nombres que `cirdan/api/v1.py:20-25` |
-| `antiguedad_dias` | Días hasta el escaneo desde `breach_date` en brechas, `not_after` o `vence` en certificados vencidos, `not_before` en certificados por vencer, el primer certificado en dominios parecidos y `primera_vez` en los demás. Si la evidencia no trae esa fecha, desde `detected_at`, o `asset_first_seen` en `outdated_software` y `exposed_rdp`, como `v1.py:67-74` |
-| `exposicion` | `directa` en `outdated_software` y `exposed_rdp`, y cuando el activo es una `ip` o un `service` (`v1.py:26` y 80). En los demás casos `publica` |
+| `tipo` | Del código de regla, con los mismos nombres que `cirdan/api/v1.py:21-26` |
+| `antiguedad_dias` | Días hasta el escaneo desde `breach_date` en brechas, `not_after` o `vence` en certificados vencidos, `not_before` en certificados por vencer, el primer certificado en dominios parecidos y `primera_vez` en los demás. Si la evidencia no trae esa fecha, desde `detected_at`, o `asset_first_seen` en `outdated_software` y `exposed_rdp`, como `v1.py:59-66` |
+| `exposicion` | `directa` en `outdated_software` y `exposed_rdp`, y cuando el activo es una `ip` o un `service` (`v1.py:27` y 72). En los demás casos `publica` |
 | `sensibilidad` | La rúbrica de abajo, a partir de la evidencia |
 
 La rúbrica de sensibilidad vive en una sola función, `caracteristicas.sensibilidad()`. Se basa en lo que expone el hallazgo, no en su severidad:
@@ -95,7 +95,7 @@ La rúbrica de sensibilidad vive en una sola función, `caracteristicas.sensibil
 | `spf_missing` | | Sin DMARC que rechace | Con DMARC p=reject, que ya rechaza el correo suplantado |
 | `lookalike_domain` | El parecido o sus nombres llevan login, acceso, pago, cuenta, verifica o seguridad | | Sin esas palabras. No expone datos de la empresa |
 
-Hoy la API (`cirdan/api/v1.py:26-27`) y crt.sh (`crtsh.py:390`, 398 y 435) ponen la sensibilidad fija por código. Que adopten `calcular()` va en otra tarjeta, antes de #36. Hasta entonces el modelo verá en producción valores distintos a los del entrenamiento. `calcular()` ya lee lo que crt.sh pone hoy en la evidencia (`vence` y `primer_certificado`). crt.sh no pone `not_before` en `cert_expiring_soon` y ningún recolector pone `primera_vez`. Para esos casos quien llama pasa `detectado` y `activo_visto`. La tarjeta de adopción debe agregar `not_before` a la evidencia de crt.sh.
+Hoy la API (`cirdan/api/v1.py:27-28`) y crt.sh (`crtsh.py:390`, 398 y 435) ponen la sensibilidad fija por código. Que adopten `calcular()` va en otra tarjeta, antes de #36. Hasta entonces el modelo verá en producción valores distintos a los del entrenamiento. `calcular()` ya lee lo que crt.sh pone hoy en la evidencia (`vence` y `primer_certificado`). crt.sh no pone `not_before` en `cert_expiring_soon` y ningún recolector pone `primera_vez`. Para esos casos quien llama pasa `detectado` y `activo_visto`. La tarjeta de adopción debe agregar `not_before` a la evidencia de crt.sh.
 
 ## Bloque común y reparto
 

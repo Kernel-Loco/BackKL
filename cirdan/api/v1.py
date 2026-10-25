@@ -3,6 +3,7 @@
 Todo con sesión: la empresa sale de la cookie y RLS filtra en la base. Las bandas, el ponderado y
 el piso salen del criterio de criticidad (cirdan/score/criterio.py, #29).
 """
+import uuid
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,17 +27,8 @@ TIPO = {
 EXPOSICION_DIRECTA = {'outdated_software', 'exposed_rdp'}
 SENSIBILIDAD = {'breach_exposure': 'alta', 'exposed_rdp': 'alta', 'spf_missing': 'baja'}
 
-# Qué hacer con cada tipo de hallazgo (la API real del motor de score, #31, lo traerá por hallazgo).
-RECOMENDACION = {
-    'breach_exposure': 'Fuerza el cambio de contraseña de las cuentas afectadas y activa MFA en todas ellas.',
-    'cert_expired': 'Renueva el certificado o, si el sitio ya no se usa, elimina su registro DNS.',
-    'cert_expiring_soon': 'Renueva el certificado antes de que venza o activa la renovación automática.',
-    'outdated_software': 'Actualiza el software a la versión con soporte más reciente y revisa sus complementos.',
-    'exposed_rdp': 'Cierra el escritorio remoto a internet y úsalo solo a través de una VPN con MFA.',
-    'dmarc_missing': 'Publica un registro DMARC en _dmarc.<dominio>, empezando con p=none para monitorear.',
-    'spf_missing': 'Publica un registro SPF que liste solo los servidores que envían correo de la empresa.',
-    'lookalike_domain': 'Revisa quién registró el dominio parecido y, si suplanta a la empresa, pide su baja.',
-}
+# El título, qué significa y qué hacer de cada regla salen de scoring_rule_texts (#30, migración 003).
+# No hay respaldo: la llave foránea y los NOT NULL de la 003 obligan a que toda regla tenga los tres textos.
 RESUMEN = {
     'critical': 'Es crítico porque alguien de fuera lo puede aprovechar ya, sin pasos extra, y obtener acceso a cuentas, sistemas o datos.',
     'high': 'Es alto porque es una exposición seria, aunque aprovecharla necesita otro paso o una condición.',
@@ -279,11 +271,13 @@ EXPLANATION_SQL = '''
 SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, f.severity, r.base_severity, r.category,
        r.code AS rule_code, r.max_penalty, a.value AS asset, a.asset_type, a.first_seen_at AS asset_first_seen,
        f.detected_at, sc.queued_at AS scan_at, b.breach_date,
-       ds.id::text AS score_id, ds.computed_at, ds.method, x.penalty, x.factors
+       ds.id::text AS score_id, ds.computed_at, ds.method, x.penalty, x.factors,
+       t.title AS rule_title, t.meaning, t.recommendation
   FROM findings f
   JOIN domains d ON d.id = f.domain_id
   JOIN assets a ON a.id = f.asset_id
   JOIN scoring_rules r ON r.id = f.rule_id
+  JOIN scoring_rule_texts t ON t.code = r.code
   LEFT JOIN scans sc ON sc.id = f.last_scan_id
   LEFT JOIN breach_exposures b ON b.finding_id = f.id
   LEFT JOIN LATERAL (SELECT * FROM domain_scores s WHERE s.domain_id = f.domain_id ORDER BY s.computed_at DESC LIMIT 1) ds ON true
@@ -295,9 +289,11 @@ SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, f.severity,
 @router.get('/findings/{finding_id}/explanation', summary='Por qué el hallazgo tiene su severidad y cuánto suma al score')
 def finding_explanation(finding_id: str, session: Session = Depends(current_session)):
     try:
-        rows = _query(session, EXPLANATION_SQL, (finding_id,))
-    except Exception:
-        rows = []  # un id mal formado se responde igual que uno de otra empresa
+        finding_id = str(uuid.UUID(finding_id))
+    except ValueError:
+        raise HTTPException(404, 'Hallazgo no encontrado')  # un id mal formado se responde igual que uno de otra empresa
+    # Sin try: un error de la base (por ejemplo, sin la migración 003) llega al log y responde 500, no 404.
+    rows = _query(session, EXPLANATION_SQL, (finding_id,))
     if not rows:
         raise HTTPException(404, 'Hallazgo no encontrado')
     f = rows[0]
@@ -306,11 +302,12 @@ def finding_explanation(finding_id: str, session: Session = Depends(current_sess
     return {
         'finding_id': f['finding_id'], 'domain': f['domain'], 'title': f['evidence'].get('title', f['rule_code']),
         'severity': f['severity'], 'base_severity': f['base_severity'], 'category': f['category'], 'rule_code': f['rule_code'],
+        'rule_title': f['rule_title'], 'meaning': f['meaning'],
         'score_id': f['score_id'], 'computed_at': f['computed_at'], 'method': f['method'] or 'rules',
         'penalty': float(f['penalty']) if f['penalty'] is not None else 0.0, 'max_penalty': float(f['max_penalty']),
         'factors': factors, 'caracteristicas': caracteristicas(f),
         'summary': RESUMEN[f['severity']],
-        'recommendation': RECOMENDACION.get(f['rule_code'], 'Revisa el hallazgo con el equipo responsable del activo.'),
+        'recommendation': f['recommendation'],
         'confidence': None, 'shap': None,
     }
 
@@ -321,8 +318,10 @@ def finding_explanation(finding_id: str, session: Session = Depends(current_sess
 def scoring_weights(session: Session = Depends(current_session)):
     with transaction(session.org_id) as conn:
         rs = conn.execute('SELECT id, version, category_weights, activated_at, validated_by FROM scoring_rule_sets WHERE is_active').fetchone()
-        rules = conn.execute('SELECT code, category, base_severity, weight, max_penalty FROM scoring_rules '
-                             'WHERE rule_set_id = %s ORDER BY id', (rs['id'],)).fetchall()
+        rules = conn.execute('SELECT r.code, r.category, r.base_severity, r.weight, r.max_penalty, '
+                             't.title, t.meaning, t.recommendation FROM scoring_rules r '
+                             'JOIN scoring_rule_texts t ON t.code = r.code '
+                             'WHERE r.rule_set_id = %s ORDER BY r.id', (rs['id'],)).fetchall()
     return {
         'rule_set_version': rs['version'], 'is_active': True, 'activated_at': rs['activated_at'],
         'validated_by': rs['validated_by'], 'category_weights': {k: float(v) for k, v in rs['category_weights'].items()},

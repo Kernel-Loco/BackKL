@@ -23,7 +23,8 @@ GROUPS = [
     ('Dominios y autorización', ['domains', 'domain_authorizations', 'dns_txt_verifications']),
     ('Escaneos e ingesta', ['data_sources', 'scans', 'scan_source_runs']),
     ('Activos y hallazgos', ['assets', 'findings', 'breach_exposures']),
-    ('Inteligencia y score', ['cves', 'scoring_rule_sets', 'scoring_rules', 'domain_scores', 'score_contributions']),
+    ('Inteligencia y score', ['cves', 'scoring_rule_sets', 'scoring_rules', 'scoring_rule_texts', 'domain_scores',
+                              'score_contributions']),
     ('Entrega e integraciones', ['integrations', 'alerts', 'deliveries', 'reports']),
     ('Auditoría', ['audit_log']),
 ]
@@ -48,7 +49,7 @@ def demo_page():
     return HTMLResponse(Path(__file__).with_name('demo.html').read_text(encoding='utf-8'))
 
 
-@router.get('/db/tables', tags=['base de datos'], summary='Las 23 tablas con las filas que ve la empresa de la sesión (solo admin)')
+@router.get('/db/tables', tags=['base de datos'], summary='Las 24 tablas con las filas que ve la empresa de la sesión (solo admin)')
 def db_tables(session: Session = Depends(require_roles('admin'))):
     with transaction(session.org_id) as conn:
         rls = {r['relname']: r['relforcerowsecurity'] for r in conn.execute(

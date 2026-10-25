@@ -2,6 +2,7 @@
 
 Cada recolector es un módulo de cirdan/recolectores/ con:
 - FUENTE: el código de su fila en data_sources (por ejemplo 'ct_logs').
+- CODIGOS: código de regla -> severidad base, con todo lo que puede emitir (pruebas/test_catalogo_reglas.py, #30).
 - crear_cliente(modo, dominio): su cliente para 'vivo', 'grabar' o 'reproducir'.
 - recolectar(dominio, cliente=None, ahora=None, propios=()): devuelve un Resultado.
 
@@ -10,8 +11,7 @@ excepción, revisa que el resultado cumpla este esquema y aplica el filtro de al
 recolector falla o rompe el contrato, la fuente queda en 'failed' y el escaneo sigue con las demás.
 Si la fuente respondió pero no pudo revisar algunos códigos, los pone en sin_cobertura y el escaneo
 termina 'partial', así el portal no los muestra como 0 hallazgos.
-La limpieza de datos y el límite diario por fuente son de #13b. El documento completo está en
-docs/contrato_plugin.md.
+La limpieza de datos y el límite diario por fuente son de #13b. El documento completo está en docs/contrato_plugin.md.
 """
 import http.client
 import ipaddress

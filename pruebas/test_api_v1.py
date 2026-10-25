@@ -3,8 +3,8 @@
     python -m unittest -v pruebas/test_api_v1.py      (con `docker compose up -d`)
 
 Con los datos demo de Acme, las respuestas deben coincidir con los JSON de docs/api_v1/. Las únicas
-diferencias aceptadas son los campos «propuestos» del portal (signer_email, recommendation,
-confidence) y los textos que todavía no calcula el motor de score (#31).
+diferencias aceptadas son los campos «propuestos» del portal (signer_email, confidence) y los
+textos que todavía no calcula el motor de score (#31). Los textos de cada regla (#30) sí se comparan.
 """
 import json
 import unittest
@@ -13,7 +13,7 @@ from pathlib import Path
 from pruebas import sesion
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
-PROPUESTOS = {'signer_email', 'recommendation', 'confidence'}
+PROPUESTOS = {'signer_email', 'confidence'}
 
 
 def ejemplo(nombre):
@@ -64,7 +64,8 @@ class ApiV1(unittest.TestCase):
     def test_4_explicacion_y_pesos(self):
         exp = sin_propuestos(self.get(self.acme, '/api/v1/findings/80000000-0000-4000-8000-000000000001/explanation'))
         esperado = ejemplo('explicacion.json')
-        for campo in ('title', 'severity', 'penalty', 'max_penalty', 'factors', 'caracteristicas', 'score_id', 'shap'):
+        for campo in ('title', 'severity', 'penalty', 'max_penalty', 'factors', 'caracteristicas', 'score_id', 'shap',
+                      'rule_title', 'meaning', 'recommendation'):
             self.assertEqual(exp[campo], esperado[campo], campo)
         pesos = self.get(self.acme, '/api/v1/scoring/weights')
         esperado = ejemplo('pesos.json')

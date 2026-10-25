@@ -142,7 +142,8 @@ class ExploradorEncendido(Explorador):
         self.assertEqual(body['organization'], 'Beta Corp')
         filas = {t['table']: t['rows'] for t in body['tables']}
         self.assertEqual((filas['domains'], filas['findings'], filas['users']), (1, 1, 1))
-        # Las 23 tablas: si una tabla nueva del explorador entra sin RLS, falla aquí
+        # Las 24 tablas: si una tabla nueva del explorador entra sin RLS, falla aquí. scoring_rule_texts no tiene
+        # RLS pero es un catálogo global, y sus textos no nombran a ningún cliente
         for tabla in TABLES:
             with self.subTest(tabla=tabla):
                 filas = self.filas(tabla, self.beta, ACME)

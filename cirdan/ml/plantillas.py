@@ -22,9 +22,10 @@ from cirdan.recolectores import crtsh
 REFERENCIA = date(2026, 10, 20)   # día del escaneo de todo el lote
 
 # Código -> (categoría, severidad base). Las 7 reglas de db/semillas/001_datos_demo.sql:36-42 y cert_expiring_soon,
-# que solo está en cirdan/recolectores/crtsh.py:79 mientras #30 no la agregue al catálogo. Los certificados van a
-# infrastructure (db/cirdan_esquema.dbml:223). Si #30 o #31 cambian una severidad base, se cambia aquí, se regenera
-# el lote y se recalcula clase_reglas. pruebas/test_dataset_ml.py revisa que coincida con las dos fuentes.
+# que emite cirdan/recolectores/crtsh.py:79 y que #30 agregó al catálogo en db/semillas/004_reglas_recolectores.sql.
+# Los certificados van a infrastructure (db/cirdan_esquema.dbml:223). Si #31 cambia una severidad base, se cambia
+# aquí, se regenera el lote y se recalcula clase_reglas. pruebas/test_dataset_ml.py revisa que coincida con la
+# semilla 001 y con crtsh.py, y pruebas/test_catalogo_reglas.py que crtsh.py coincida con el catálogo.
 REGLAS = {
     'breach_exposure': ('data_leaks', 'critical'),
     'cert_expired': ('infrastructure', 'high'),

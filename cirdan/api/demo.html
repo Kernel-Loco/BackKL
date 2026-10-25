@@ -69,7 +69,7 @@
   <div class="logo">⛵</div>
   <div>
     <h1>Cirdan · Base de datos en vivo</h1>
-    <div class="sub" id="sub">PostgreSQL 16 · 23 tablas · consultas reales a través de la API</div>
+    <div class="sub" id="sub">PostgreSQL 16 · 24 tablas · consultas reales a través de la API</div>
   </div>
   <div class="spacer"></div>
   <span class="sub" id="who" hidden></span>
@@ -89,7 +89,7 @@
 </section>
 <main id="main" hidden>
   <section class="card">
-    <h2>Las 23 tablas y las filas que ve esta empresa</h2>
+    <h2>Las 24 tablas y las filas que ve esta empresa</h2>
     <div class="hint">Morado = protegida con Row-Level Security. Gris = catálogo compartido. Clic en una tabla para ver sus filas.</div>
     <div id="groups"></div>
   </section>
@@ -142,7 +142,7 @@ async function loadTables() {
   const res = await api('/db/tables'), {status, body} = res;
   if (status !== 200) return failed('groups', res);
   $('role').textContent = 'rol: ' + body.role;
-  $('sub').textContent = 'PostgreSQL 16 · 23 tablas · cliente activo: ' + (body.organization || 'ninguno');
+  $('sub').textContent = 'PostgreSQL 16 · 24 tablas · cliente activo: ' + (body.organization || 'ninguno');
   const groups = {};
   body.tables.forEach(t => (groups[t.group] = groups[t.group] || []).push(t));
   $('groups').innerHTML = Object.entries(groups).map(([g, ts]) => `
@@ -217,7 +217,7 @@ async function start() {
   if (r.status !== 200) return showLogin(r.status === 401 ? '' : 'HTTP ' + r.status + ': ' + detail(r.body));
   me = r.body;
   $('who').textContent = me.email + ' · ' + me.organization_name;
-  $('sub').textContent = 'PostgreSQL 16 · 23 tablas · cliente activo: ' + me.organization_name;
+  $('sub').textContent = 'PostgreSQL 16 · 24 tablas · cliente activo: ' + me.organization_name;
   $('probe').textContent = 'Intentar como ' + me.organization_name;
   $('probeOut').innerHTML = '';
   $('login').hidden = true;

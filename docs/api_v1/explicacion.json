@@ -6,6 +6,8 @@
   "base_severity": "critical",
   "category": "data_leaks",
   "rule_code": "breach_exposure",
+  "rule_title": "Correos de la empresa en una filtración con contraseñas u otros datos de acceso que tenía menos de un año al detectarla",
+  "meaning": "Al menos un correo de la empresa aparece en la filtración de datos de un servicio de internet que, cuando se detectó, había ocurrido hacía menos de un año e incluía contraseñas, preguntas de seguridad u otros datos para entrar a cuentas. Quien tenga esos datos puede intentar entrar a las cuentas de esas personas, también a las de la empresa si repiten la contraseña.",
   "score_id": "a0000000-0000-4000-8000-000000000001",
   "computed_at": "2026-09-30T14:24:30-06:00",
   "method": "rules",
@@ -19,5 +21,6 @@
   ],
   "caracteristicas": {"tipo": "correos_en_brecha", "antiguedad_dias": 104, "exposicion": "publica", "sensibilidad": "alta"},
   "summary": "Es crítico porque alguien de fuera puede usar ya esas contraseñas para entrar a cuentas de la empresa, sin pasos extra.",
+  "recommendation": "Pide a todo el personal que cambie ya la contraseña y las preguntas de seguridad de las cuentas que abrió con su correo de trabajo y de cualquier cuenta donde repita esa contraseña, sobre todo la de la empresa, y que cierre las sesiones abiertas. Activa la verificación en dos pasos en las cuentas de la empresa y, si quieres saber qué correos aparecen, consulta la búsqueda por dominio de Have I Been Pwned, que te pide verificar el dominio en ese servicio.",
   "shap": null
 }
