@@ -12,7 +12,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -280,11 +280,18 @@ class GrabarYReproducir(unittest.TestCase):
                 codigo = crtsh._main(list(argv))
             return codigo, salida.getvalue()
 
+        # El CLI usa la fecha de hoy, no AHORA: el de api.acme-demo.mx vence en 10 días contados desde hoy.
+        hoy = datetime.now(timezone.utc)
+
+        def dia(delta):
+            return (hoy + timedelta(days=delta)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        emisiones = [emision('9002', ['api.acme-demo.mx'], dia(-80), dia(10)) if e['id'] == '9002' else e
+                     for e in EMISIONES]
         cobertura = ('Cobertura parcial: no se revisaron certificados vencidos (cert_expired) ni dominios parecidos '
                      '(lookalike_domain).')
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
-            with mock.patch.object(crtsh, '_descargar', RespaldoSimulado()):
+            with mock.patch.object(crtsh, '_descargar', RespaldoSimulado(paginas=[emisiones])):
                 codigo, texto = correr('acme-demo.mx', '--grabar')
             self.assertEqual(codigo, 2)
             self.assertIn(cobertura, texto)
