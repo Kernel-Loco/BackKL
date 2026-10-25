@@ -57,9 +57,9 @@ Imprime el código vigente de esa cuenta. Cámbiale el correo para las otras. Es
 | Mensaje en el portal | Qué pasa y qué hacer |
 |---|---|
 | «Correo o contraseña incorrectos.» | Revisa el correo y la contraseña. Si cambiaste la contraseña desde «Mi perfil», vuelve a la de demo con `docker compose run --rm demo-accounts`. Si `DEMO_ACCOUNTS` no está en `true`, las cuentas no tienen contraseña válida |
-| «El código no es válido o ya expiró.» | Espera al siguiente código: **con la misma cuenta, un código no se puede usar dos veces**, aunque sea en otra pestaña u otro navegador. Revisa también que la hora de tu celular o PC esté en automático |
-| «Tu verificación expiró. Inicia sesión de nuevo.» | Pasaron más de 5 minutos o hubo 5 códigos equivocados después de la contraseña. Vuelve a escribir correo y contraseña |
-| «Demasiados intentos. Espera 15 minutos…» | Hubo 5 fallos con ese correo (o 20 desde tu PC). Espera 15 minutos o desbloquéalo con el comando de abajo |
+| «El código no es válido o ya expiró.» | Espera al siguiente código: **con la misma cuenta, un código no se puede usar dos veces**, aunque sea en otra pestaña u otro navegador. Revisa también que la hora de tu celular o PC esté en automático. Cada código equivocado cuenta para el bloqueo de abajo |
+| «Tu verificación expiró. Inicia sesión de nuevo.» | Pasaron más de 5 minutos: vuelve a escribir correo y contraseña. Si fueron 5 códigos equivocados, el correo ya quedó bloqueado y el login responde «Demasiados intentos» (fila siguiente) |
+| «Demasiados intentos. Espera 15 minutos…» | Hubo 5 fallos con ese correo, sumando contraseñas y códigos equivocados (o 20 desde tu PC). Escribir bien la contraseña no los borra: se borran al entrar con el código correcto. Espera 15 minutos o desbloquéalo con el comando de abajo |
 | La pantalla regresa al login con «Tu sesión expiró…» | Pasaron 15 minutos sin actividad, o 8 horas desde que entraste. Vuelve a iniciar sesión |
 | «Origen no permitido» o el login no responde | El portal no está en http://localhost:3000, o el backend no está corriendo (`docker compose ps` debe mostrar los contenedores `healthy`) |
 

@@ -5,8 +5,10 @@
 import http.client
 import json
 import secrets
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
 from pruebas import sesion
@@ -16,7 +18,17 @@ from pruebas.test_aislamiento import scalar
 JORDAN = 'jordan.tate@acme-demo.mx'   # analista de Acme
 MAYA = 'maya.reed@acme-demo.mx'       # gerente de Acme
 ALEX = 'alex.morgan@acme-demo.mx'     # admin de Acme
+DANA = 'dana.cruz@beta-corp.mx'       # de Beta, para las pruebas que la dejan bloqueada
 INVALID = 'Correo o contraseña incorrectos.'
+MFA_INVALID = 'El código no es válido o ya expiró.'
+MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
+
+
+def codigos_malos(email, n):
+    """n códigos que no sirven ahora para la cuenta (ninguno de los pasos que la API acepta)."""
+    paso = int(time.time() // sesion.STEP)
+    validos = {sesion.totp(sesion.SECRETS[email], s) for s in range(paso - 2, paso + 3)}
+    return [c for c in ('%06d' % i for i in range(n + len(validos))) if c not in validos][:n]
 
 
 class Login(unittest.TestCase):
@@ -150,6 +162,80 @@ class Login(unittest.TestCase):
             time.sleep(0.5)  # tiempo para que corra la escritura de la bitácora
         if int(scalar(contar, user='postgres')) != antes:
             self.skipTest('la API no confía en X-Forwarded-For y la bitácora no falló: no se probó nada')
+
+    def test_12_con_la_contrasena_los_codigos_malos_tambien_bloquean(self):
+        # La contraseña correcta ya no borra los fallos del correo y cada código malo cuenta. Antes, quien
+        # tenía la contraseña repetía el login y 5 códigos sin llegar nunca al 429.
+        self.addCleanup(sesion.reset)
+        client = Client()
+        _, body = client.post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+        guardado = body['mfa_token']
+        for i, malo in enumerate(codigos_malos(DANA, 5)):
+            code, body = client.post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+            self.assertEqual((code, body.get('mfa_required')), (200, True), 'login %d' % (i + 1))
+            code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': malo})
+            self.assertEqual((code, body['detail']), (401, MFA_INVALID), 'código %d' % (i + 1))
+        code, body = client.post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+        self.assertEqual(code, 429, 'la contraseña correcta no debe saltarse el bloqueo')
+        code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': guardado, 'code': sesion.next_code(DANA)})
+        self.assertEqual(code, 429, 'un mfa_token sacado antes tampoco debe saltárselo, ni con el código bueno')
+        self.assertIsNone(client.cookie())
+
+    def test_13_codigos_en_paralelo_no_pasan_de_cinco(self):
+        # 30 códigos a la vez con el mismo mfa_token. Cada uno gasta su intento en Valkey antes de
+        # revisarse, así que solo 5 se revisan. Antes todos leían attempts=0 y se revisaban todos.
+        self.addCleanup(sesion.reset)
+        contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                  "AND a.action = 'auth.mfa_failed';" % DANA)
+        antes = int(scalar(contar, user='postgres'))
+        _, body = Client().post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+        token, codigos = body['mfa_token'], codigos_malos(DANA, 30)
+        salida = threading.Barrier(len(codigos))
+
+        def intento(codigo):
+            salida.wait()
+            code, body = Client().post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': codigo})
+            return code, (body or {}).get('detail')
+
+        with ThreadPoolExecutor(len(codigos)) as pool:
+            respuestas = list(pool.map(intento, codigos))
+        self.assertEqual(respuestas.count((401, MFA_INVALID)), 5, respuestas)
+        self.assertEqual(respuestas.count((401, MFA_EXPIRED)), len(codigos) - 5, respuestas)
+        self.assertEqual(int(scalar(contar, user='postgres')) - antes, 5, 'cada código revisado queda en la bitácora')
+        code, body = Client().post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': sesion.next_code(DANA)})
+        self.assertEqual((code, body['detail']), (401, MFA_EXPIRED), 'gastados los 5 intentos, el token ya no sirve')
+
+    def test_14_varios_tokens_en_paralelo_no_pasan_de_cinco(self):
+        # Un código por mfa_token, 20 tokens a la vez. El límite de cada token no frena nada aquí: lo frena
+        # el fallo del correo, que se cuenta antes de revisar el código. Los logins correctos no cuentan.
+        self.addCleanup(sesion.reset)
+        tokens = [Client().post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})[1]['mfa_token'] for _ in range(20)]
+        salida = threading.Barrier(len(tokens))
+
+        def intento(par):
+            token, codigo = par
+            salida.wait()
+            code, body = Client().post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': codigo})
+            return code, (body or {}).get('detail')
+
+        with ThreadPoolExecutor(len(tokens)) as pool:
+            respuestas = list(pool.map(intento, zip(tokens, codigos_malos(DANA, len(tokens)))))
+        self.assertEqual(respuestas.count((401, MFA_INVALID)), 5, respuestas)
+        self.assertEqual([r[0] for r in respuestas].count(429), len(tokens) - 5, respuestas)
+
+    def test_15_entrar_bien_varias_veces_no_deja_fallos(self):
+        # Cada código cuenta como fallo antes de revisarse y el correcto borra los fallos. Sin ese borrado,
+        # el sexto inicio de sesión correcto en 15 min respondería 429.
+        self.addCleanup(sesion.reset)
+        for i in range(6):
+            # Sin último código usado, el mismo código vuelve a servir y no hay que esperar 30 s por cada uno
+            scalar("UPDATE users SET last_totp_step = NULL WHERE email = '%s' RETURNING 1;" % DANA, user='postgres')
+            sesion._last_step.pop(DANA, None)
+            client = Client()
+            code, body = client.post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+            self.assertEqual(code, 200, 'login %d' % (i + 1))
+            code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': sesion.next_code(DANA)})
+            self.assertEqual(code, 200, 'código %d' % (i + 1))
 
 
 if __name__ == '__main__':

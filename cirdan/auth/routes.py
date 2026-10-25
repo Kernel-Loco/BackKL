@@ -59,6 +59,15 @@ def _start_session(response, conn, user, ip, via):
     return _user(conn, user['id'])
 
 
+def _clear_fails(email):
+    # Corre cuando la sesión ya se creó. Si Valkey falla aquí, el contador vence solo en 15 min:
+    # un 500 dejaría al usuario sin cookie con la sesión creada y el código ya gastado.
+    try:
+        sessions.clear_fails(email)
+    except Exception:
+        log.exception('No se pudieron borrar los fallos del correo después de iniciar sesión')
+
+
 def _audit_bad_password(org, user_id, ip):
     # Corre después del 401. Si falla, queda solo en el log: una excepción aquí haría que uvicorn
     # cerrara la conexión, y eso solo pasaría con correos que existen.
@@ -92,27 +101,36 @@ def login(body: LoginIn, request: Request, response: Response):
         return JSONResponse({'detail': INVALID}, status_code=401,
                             background=BackgroundTask(_audit_bad_password, org, user_id, ip))
 
-    sessions.clear_fails(email)
     with transaction(org) as conn:
         if passwords.needs_rehash(found['password_hash']):
             conn.execute('UPDATE users SET password_hash = %s WHERE id = %s', (passwords.hash_password(body.password), user_id))
         if found['mfa_enabled']:
-            return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org})}
+            # Los fallos del correo se borran hasta que el código sea correcto. Borrados aquí, quien
+            # tiene la contraseña repetiría el login y 5 códigos sin llegar nunca al bloqueo.
+            return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
         # login_lookup() no devuelve el rol (migración 004): se lee aquí con RLS, como en /mfa/verify
         row = conn.execute('SELECT role FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
         if not row:  # se desactivó la cuenta entre la búsqueda y aquí
             raise HTTPException(401, INVALID)
         user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': email}, ip, 'password')
+    _clear_fails(email)
     return {'mfa_required': False, 'user': user}
 
 
 @router.post('/mfa/verify', summary='Segundo paso: código de 6 dígitos de la app autenticadora')
 def verify_mfa(body: MfaIn, request: Request, response: Response):
-    pending = sessions.get_mfa(body.mfa_token)
+    # El intento se gasta antes de revisar el código, en el mfa_token y en el correo, para que ni
+    # las peticiones en paralelo ni volver a iniciar sesión den más de 5 códigos.
+    pending = sessions.take_mfa(body.mfa_token)
+    if pending and 'email' not in pending:  # token creado antes de este cambio
+        sessions.delete_mfa(body.mfa_token)
+        pending = None
     if not pending:
         raise HTTPException(401, MFA_EXPIRED)
     ip = client_ip(request)
-    org, user_id = pending['org_id'], pending['user_id']
+    org, user_id, email = pending['org_id'], pending['user_id'], pending['email']
+    if not sessions.take_mfa_attempt(email, ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
     with transaction(org) as conn:
         row = conn.execute(
             'SELECT email::text, role, totp_secret_enc, last_totp_step FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
@@ -129,8 +147,9 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
             sessions.delete_mfa(body.mfa_token)
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, 'totp')
     if fail:
-        sessions.fail_mfa(body.mfa_token, pending)
+        sessions.register_mfa_fail(ip)
         raise HTTPException(401, MFA_INVALID)
+    _clear_fails(email)
     return {'user': user}
 
 
