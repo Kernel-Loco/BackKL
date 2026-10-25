@@ -54,7 +54,7 @@ Por categoría: infrastructure 14, digital_identity 4, configuration 6 y data_le
 
 ## Cobertura parcial
 
-Si crt.sh no responde, la fuente `ct_logs` sigue con el respaldo de Cert Spotter (#14b), que no da certificados vencidos ni dominios parecidos. En esa corrida `cert_expired` y `lookalike_domain` quedan sin cobertura: van en `sin_cobertura` y no se muestran como 0 hallazgos (`SIN_COBERTURA` de `cirdan/recolectores/certspotter.py`). `lookalike_domain` además queda sin cobertura en todo escaneo, porque el orquestador nunca prende la búsqueda de dominios parecidos ([`contrato_plugin.md`](contrato_plugin.md)).
+Si crt.sh no responde, la fuente `ct_logs` sigue con el respaldo de Cert Spotter (#14b), que no da certificados vencidos ni dominios parecidos. En esa corrida `cert_expired` y `lookalike_domain` quedan sin cobertura: van en `sin_cobertura` y no se muestran como 0 hallazgos (`SIN_COBERTURA` de `cirdan/recolectores/certspotter.py`). Si crt.sh responde, Cert Spotter suma los certificados vigentes que crt.sh no trae y la cobertura no cambia. `lookalike_domain` además queda sin cobertura en todo escaneo, porque el orquestador nunca prende la búsqueda de dominios parecidos ([`contrato_plugin.md`](contrato_plugin.md)).
 
 ## Cómo agregar un código
 

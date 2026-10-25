@@ -15,9 +15,11 @@ parcial, nunca 0 parecidos. --sin-parecidos se sigue aceptando y hace lo mismo q
 
 Modos: 'vivo' consulta crt.sh; 'grabar' además guarda cada respuesta en
 cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/; 'reproducir' solo lee esas respuestas, sin red
-(pruebas y respaldo de las demos). Si crt.sh no responde después de los
-reintentos, los subdominios y certificados vigentes salen de Cert Spotter (#14b, certspotter.py), sin
-vencidos ni dominios parecidos: esos dos códigos quedan en sin_cobertura. Si Cert Spotter tampoco
+(pruebas y respaldo de las demos). Cada corrida también consulta Cert Spotter (#14b,
+certspotter.py). Si crt.sh responde, Cert Spotter suma los certificados vigentes que crt.sh no trae, sin
+contar dos veces el mismo, y si Cert Spotter no responde queda lo de crt.sh con un aviso. Si crt.sh no
+responde después de los reintentos, los subdominios y certificados vigentes salen solo de Cert Spotter,
+sin vencidos ni dominios parecidos: esos dos códigos quedan en sin_cobertura. Si Cert Spotter tampoco
 responde, el resultado queda en 'failed' y no trae activos ni hallazgos.
 
     python -m cirdan.recolectores.crtsh olmardo.com
@@ -32,13 +34,13 @@ dominio de prueba.
 
 --grabar empieza con la carpeta del dominio vacía. --completar solo consulta
 lo que aún no se grabó desde ese inicio, para terminar una grabación que
-crt.sh dejó a medias. Si se grabó el respaldo de Cert Spotter, también se graba que crt.sh no
-respondió, así --reproducir lo repite igual, y --completar vuelve a probar crt.sh sin repetir la
-consulta a Cert Spotter. Código de salida: 0 bien, 1 si el
-resultado queda en 'failed', 2 si quedan avisos (grabación incompleta, variantes sin respuesta o
-respaldo de Cert Spotter). Con el respaldo de Cert Spotter el código 2 es lo esperado. No corras
---completar salvo que quieras cambiarlo por crt.sh: si crt.sh responde, aunque traiga menos
-certificados, reemplaza el respaldo.
+crt.sh dejó a medias. Las páginas de Cert Spotter se graban en la misma carpeta. Si se grabó el
+respaldo de Cert Spotter, también se graba que crt.sh no respondió, así --reproducir lo repite igual,
+y --completar vuelve a probar crt.sh sin repetir la consulta a Cert Spotter. Si crt.sh ya responde,
+sus certificados se unen a los de Cert Spotter grabados y la grabación deja de ser respaldo. Código de
+salida: 0 bien, 1 si el resultado queda en 'failed', 2 si quedan avisos (grabación incompleta,
+variantes sin respuesta, Cert Spotter sin responder o respaldo de Cert Spotter). Con el respaldo de
+Cert Spotter el código 2 es lo esperado.
 """
 import argparse
 import hashlib
@@ -194,10 +196,11 @@ class ClienteCrtsh:
             self.grabadora.guardar(FALLA + consulta, str(error))
 
     def pedir(self, consulta, url, fuente='crt.sh', intentos=INTENTOS, timeout=None, pausa=0, sin_reintento=(),
-              texto=None):
+              texto=None, valida=None):
         """La lista JSON de `url` con reintentos. Sale del disco si la grabación la trae y, al grabar, se guarda.
         Lo usan crt.sh y su respaldo Cert Spotter (certspotter.py). Un código HTTP de `sin_reintento` corta los
-        intentos, por ejemplo el 429 de Cert Spotter. `texto` se muestra en el error en lugar de `consulta`."""
+        intentos, por ejemplo el 429 de Cert Spotter. `texto` se muestra en el error en lugar de `consulta`. Una
+        respuesta con la que `valida(datos)` da False cuenta como una que no llegó, no se graba y no se reintenta."""
         del_disco, datos = self.grabadora.de_disco(consulta)
         if del_disco:
             return datos
@@ -212,6 +215,9 @@ class ClienteCrtsh:
                 datos = json.loads(cuerpo or b'[]')
                 if not isinstance(datos, list):
                     raise ValueError('respuesta inesperada')
+                if valida and not valida(datos):
+                    ultimo = 'ValueError: respuesta que no se puede leer'
+                    break  # la fuente sí respondió y otro intento daría lo mismo
             except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
                 ultimo = '%s: %s' % (type(e).__name__, e)
                 if isinstance(e, urllib.error.HTTPError) and e.code in sin_reintento:
@@ -249,7 +255,16 @@ def _resolver_dns(nombre):
 
 
 def _con_fechas(certs):
-    return [c for c in certs if isinstance(c, dict) and c.get('not_before') and c.get('not_after')]
+    """Los certificados con una vigencia que se puede leer. Uno con fechas raras se salta y no tumba la corrida."""
+    return [c for c in certs if isinstance(c, dict) and _se_lee(c.get('not_before')) and _se_lee(c.get('not_after'))]
+
+
+def _se_lee(texto):
+    try:
+        _fecha(texto)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _fecha(texto):
@@ -294,6 +309,18 @@ def _serie(cert):
     """Lo que distingue al certificado en la huella: su vigencia. crt.sh y Cert Spotter la dan igual (Cert Spotter no da
     el número de serie), así el mismo certificado no se duplica en findings cuando cambia la fuente."""
     return '%s/%s' % (_fecha(cert['not_before']).isoformat(), _fecha(cert['not_after']).isoformat())
+
+
+def _unir(certs, otros, dominio):
+    """Los certificados de `certs` (crt.sh) más los de `otros` (Cert Spotter) que no están en `certs`. El mismo
+    certificado tiene en las dos fuentes la misma vigencia y los mismos nombres del dominio, aunque cada una le dé su
+    propio id: queda el de crt.sh, con la marca de revocado de Cert Spotter, que crt.sh no da."""
+    def clave(c):
+        return _serie(c), tuple(n for n in _nombres(c) if n[0] == dominio or n[0].endswith('.' + dominio))
+    revocados = {clave(c) for c in otros if c.get('revocado')} - {clave(c) for c in otros if not c.get('revocado')}
+    vistos = {clave(c) for c in certs}
+    return ([dict(c, revocado=True) if clave(c) in revocados else c for c in certs] +
+            [c for c in otros if clave(c) not in vistos])
 
 
 def candidatos_parecidos(dominio, maximo=MAX_CANDIDATOS):
@@ -342,10 +369,10 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
     por_nombre, comodines = {}, set()
     vistos = set()
     for c in certs:
-        if c.get('id') in vistos:
+        if (c.get('origen'), c.get('id')) in vistos:  # crt.sh y Cert Spotter numeran por separado
             continue
-        vistos.add(c.get('id'))
-        vigente = _fecha(c['not_before']) <= ahora < _fecha(c['not_after'])
+        vistos.add((c.get('origen'), c.get('id')))
+        vigente = _fecha(c['not_before']) <= ahora < _fecha(c['not_after']) and not c.get('revocado')
         for nombre, comodin in _nombres(c):
             if nombre != dominio and not nombre.endswith('.' + dominio):
                 continue
@@ -358,7 +385,7 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
     activos, hallazgos = [], []
     for nombre in sorted(por_nombre):
         g = por_nombre[nombre]
-        reciente = max(g['certs'], key=lambda c: _fecha(c['not_after']))
+        reciente = max(g['certs'], key=lambda c: (not c.get('revocado'), _fecha(c['not_after'])))  # revocado, al final
         vence = _fecha(reciente['not_after'])
         primero = min(_fecha(c['not_before']) for c in g['certs'])
         dias = (vence - ahora).total_seconds() / 86400
@@ -486,6 +513,16 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             res.avisos.append(str(falla_comodin) if isinstance(falla_comodin, SinGrabacion) else
                               'crt.sh no respondió a %%.%s. Se usó la búsqueda por nombre y pueden faltar subdominios'
                               % dominio)
+        try:  # crt.sh no siempre lee todos los logs: Cert Spotter suma los certificados vigentes que le falten (#14b)
+            de_cert_spotter, completos = certspotter.certificados(cliente, dominio, **certspotter.COMPLEMENTO)
+        except SinGrabacion as e:  # grabación de antes de que #14 consultara siempre Cert Spotter
+            res.avisos.append(str(e))
+        except FuenteNoResponde as e:
+            res.avisos.append('%s. %s' % (e, certspotter.SIN_COMPLEMENTO))
+        else:
+            certs = _unir(certs, _con_fechas(de_cert_spotter), dominio)
+            if not completos:
+                res.avisos.append(certspotter.INCOMPLETO)
     res.consultas = cliente.consultas
     desconocidos = []
 
@@ -557,7 +594,13 @@ def _cuantos(n, singular, plural):
 
 def resumen(res, cliente=None, maximo_activos=20):
     """Líneas en español para leer el resultado en una terminal o en una demo."""
-    origen = 'Cert Spotter (crt.sh no respondió)' if certspotter.AVISO in res.avisos else 'crt.sh'
+    if certspotter.AVISO in res.avisos:
+        origen = 'Cert Spotter (crt.sh no respondió)'
+    elif res.estado != 'succeeded' or any(a.endswith(certspotter.SIN_COMPLEMENTO) or
+                                          a.startswith(SIN_GRABACION + certspotter.PREFIJO) for a in res.avisos):
+        origen = 'crt.sh'
+    else:
+        origen = 'crt.sh y Cert Spotter'
     cabecera = '%s · %s · %s' % (res.dominio, origen, res.estado)
     leidas = cliente.leidas if cliente else []
     if cliente and cliente.modo == 'reproducir':
@@ -656,8 +699,9 @@ def _main(argv=None):
             p.error('--completar continúa una grabación de este dominio, primero corre --grabar')
         desde = Grabadora.inicio(carpeta)
         if _archivo_grabado(FALLA + dominio, carpeta).exists():  # solo se graba si se usó Cert Spotter
-            print('aviso: esta grabación es el respaldo de Cert Spotter. Si crt.sh responde, aunque traiga menos '
-                  'certificados, lo reemplaza.', file=sys.stderr)
+            print('aviso: esta grabación es el respaldo de Cert Spotter. Si crt.sh responde, sus certificados se unen a '
+                  'los de Cert Spotter y la grabación deja de ser respaldo. Las páginas de Cert Spotter se quedan como '
+                  'se grabaron: para tener las de hoy, corre --grabar sin --completar.', file=sys.stderr)
     cliente = ClienteCrtsh(modo=modo, carpeta=carpeta, completar=a.completar, desde=desde,
                            nueva=a.grabar and not a.completar)
     res = recolectar(dominio, cliente, parecidos=a.con_parecidos)
@@ -665,6 +709,10 @@ def _main(argv=None):
         print(json.dumps(res.a_dict(), ensure_ascii=False, indent=1))
     else:
         print('\n'.join(resumen(res, cliente)))
+    if a.grabar and any(x.endswith(certspotter.SIN_COMPLEMENTO) or x == certspotter.INCOMPLETO for x in res.avisos):
+        print('aviso: Cert Spotter no quedó grabado completo y pueden faltar sus certificados. Si fue un 429 o un error '
+              'de red, repite con --grabar --completar cuando vuelva a responder (con 429, después de su Retry-After).',
+              file=sys.stderr)
     return codigo_salida(res)
 
 

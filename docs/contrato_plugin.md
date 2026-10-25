@@ -13,7 +13,7 @@ Cada recolector es un módulo de `cirdan/recolectores/` con cuatro cosas:
 | `crear_cliente(modo, dominio)` | Su cliente para `vivo`, `grabar` o `reproducir` |
 | `recolectar(dominio, cliente=None, ahora=None, propios=())` | Devuelve un `Resultado`. `propios` son los otros dominios de la misma empresa. Puede aceptar más opciones, pero lo que consulte fuera del dominio autorizado va apagado por defecto, porque `ejecutar()` solo pasa estas cuatro |
 
-Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `cargar(fuente)` devuelve su módulo. Hoy están `ct_logs` (crt.sh con el respaldo de Cert Spotter, #14 y #14b) y `ejemplo`, que no consulta nada y sirve para probar el orquestador sin red.
+Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `cargar(fuente)` devuelve su módulo. Hoy están `ct_logs` (crt.sh con Cert Spotter como complemento y respaldo, #14 y #14b) y `ejemplo`, que no consulta nada y sirve para probar el orquestador sin red.
 
 ## Esquema del resultado
 
@@ -99,7 +99,7 @@ La clase `Grabadora` guarda y reproduce las respuestas de una fuente para un dom
 | `grabar` | Consulta y guarda. Con `nueva`, vacía la carpeta y marca el inicio con la primera respuesta válida, así una grabación fallida deja intacta la anterior. Con `completar`, reutiliza lo grabado desde ese inicio. `crear_cliente('grabar', dominio)` empieza una grabación nueva |
 | `reproducir` | Solo lee del disco. Si falta una respuesta, lanza `SinGrabacion`. El recolector puede tomarla como aviso, como hace crt.sh con las variantes, pero si llega a `ejecutar()` la fuente queda en `failed` igual que con cualquier otra excepción |
 
-Las pruebas de cada recolector usan respuestas grabadas o un transporte simulado, nunca la red. El día anterior a cada sesión se graba el dominio de prueba como respaldo de la demo. En crt.sh se usa `python -m cirdan.recolectores.crtsh <dominio> --grabar`. Si crt.sh no responde y Cert Spotter sí, la misma carpeta guarda las páginas de Cert Spotter y la falla de crt.sh, así `--reproducir` repite el respaldo con los mismos avisos.
+Las pruebas de cada recolector usan respuestas grabadas o un transporte simulado, nunca la red. El día anterior a cada sesión se graba el dominio de prueba como respaldo de la demo. En crt.sh se usa `python -m cirdan.recolectores.crtsh <dominio> --grabar`. La misma carpeta guarda las páginas de Cert Spotter, que se consulta en cada corrida, y la falla de crt.sh si no responde, así `--reproducir` repite lo mismo con los mismos avisos. Si la primera página de Cert Spotter no llegó al grabar, esa falla no se graba y `--reproducir` la muestra como respuesta faltante. Si faltó una de las siguientes, sale el aviso de que pueden faltar subdominios. En los dos casos se completa con `--grabar --completar`.
 
 ## Cómo agregar un recolector
 

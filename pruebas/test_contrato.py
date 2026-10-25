@@ -370,6 +370,8 @@ class Ejecutar(unittest.TestCase):
                                         propios=['acme-demo.com.mx'], codigos=set(crtsh.CODIGOS))
             consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
             self.assertEqual(consultas, ['%.acme-demo.mx'], modo)  # ni %acme-demo% ni variantes como acme-dem0.mx
+            dominios = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['domain'] for u in t.cert_spotter]
+            self.assertEqual(dominios, [['acme-demo.mx']], modo)  # Cert Spotter tampoco sale del dominio autorizado
             self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']), modo)
             self.assertEqual({h.codigo for h in res.hallazgos}, {'cert_expired', 'cert_expiring_soon'}, modo)
 
