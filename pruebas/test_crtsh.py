@@ -59,19 +59,25 @@ CANDIDATO = [cert(30, ['acme-dem0.mx', 'www.acme-dem0.mx', 'ajeno.org'], '2026-1
 
 
 class CrtshSimulado:
-    """Transporte falso: responde según la consulta y puede fallar las primeras veces."""
+    """Transporte falso: responde según la consulta y puede fallar las primeras veces. Las consultas a Cert Spotter (#14b)
+    van aparte, en `cert_spotter`, y por defecto no suman certificados."""
 
-    def __init__(self, fallas=0, respuestas=None, sin_dns=()):
+    def __init__(self, fallas=0, respuestas=None, sin_dns=(), emisiones=()):
         self.fallas, self.urls, self.sin_dns, self.dns = fallas, [], set(sin_dns), []
         self.respuestas = respuestas if respuestas is not None else {
             '%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': CONTIENE_MARCA, 'acme-dem0.mx': CANDIDATO}
+        self.emisiones, self.cert_spotter = list(emisiones), []
 
     def __call__(self, url, timeout):
-        self.urls.append(url)
+        partes = crtsh.urllib.parse.urlparse(url)
+        cert_spotter = partes.netloc == 'api.certspotter.com'
+        (self.cert_spotter if cert_spotter else self.urls).append(url)
         if self.fallas:
             self.fallas -= 1
             raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
-        q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query)['q'][0]
+        if cert_spotter:  # una página con las emisiones y la vacía que cierra
+            return json.dumps([] if 'after' in crtsh.urllib.parse.parse_qs(partes.query) else self.emisiones).encode()
+        q = crtsh.urllib.parse.parse_qs(partes.query)['q'][0]
         return json.dumps(self.respuestas.get(q, [])).encode()
 
     def resolver(self, nombre):
@@ -199,7 +205,7 @@ class FallasYGrabacion(unittest.TestCase):
         t = CrtshSimulado(fallas=2)
         res = recolectar(t, parecidos=False)
         self.assertEqual(res.estado, 'succeeded')
-        self.assertEqual(res.consultas, 3)
+        self.assertEqual(res.consultas, 4)  # 2 fallas, crt.sh y Cert Spotter (#14b)
 
     def test_2_si_no_responde_queda_failed(self):
         t = CrtshSimulado(fallas=100)
@@ -207,7 +213,8 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(res.estado, 'failed')
         self.assertEqual((res.activos, res.hallazgos), ([], []))
         self.assertIn('502', res.error)
-        self.assertEqual(len(t.urls), 3 * crtsh.INTENTOS)  # comodín, búsqueda por nombre y Cert Spotter (#14b)
+        # comodín y búsqueda por nombre en crt.sh, y el respaldo de Cert Spotter (#14b)
+        self.assertEqual((len(t.urls), len(t.cert_spotter)), (2 * crtsh.INTENTOS, crtsh.INTENTOS))
         self.assertIn('Cert Spotter no respondió', res.error)
 
     def test_3_falla_en_parecidos_no_tumba_el_escaneo(self):
@@ -223,8 +230,8 @@ class FallasYGrabacion(unittest.TestCase):
     def test_4_si_crtsh_esta_saturado_deja_de_probar_variantes(self):
         class SinVariantes(CrtshSimulado):
             def __call__(self, url, timeout):
-                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query)['q'][0]
-                if not q.startswith('%'):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')  # Cert Spotter no lleva q
+                if q and not q[0].startswith('%'):
                     self.urls.append(url)
                     raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
                 return super().__call__(url, timeout)
@@ -269,9 +276,9 @@ class FallasYGrabacion(unittest.TestCase):
             self.assertTrue(t.urls)                                              # las variantes sí se consultan
             leidas = [n for n, _ in segunda.leidas]
             self.assertEqual(leidas[0], 'subdominios_acme-demo.mx.json')
-            self.assertEqual(sorted(leidas[1:]), ['dns_%s.json' % n for n in (
+            self.assertEqual(sorted(leidas[1:]), ['certspotter_acme-demo.mx.json'] + ['dns_%s.json' % n for n in (
                 'acme-demo.mx', 'api.acme-demo.mx', 'dev.acme-demo.mx', 'tienda.acme-demo.mx', 'www.acme-demo.mx')])
-            self.assertEqual(t.dns, [])  # las respuestas de DNS también estaban grabadas
+            self.assertEqual((t.dns, t.cert_spotter), ([], []))  # el DNS y Cert Spotter también estaban grabados
             self.assertTrue((Path(d) / 'acme-dem0.mx.json').exists())
 
     def test_8_falta_de_grabacion_no_es_saturacion(self):
@@ -343,7 +350,7 @@ class FallasYGrabacion(unittest.TestCase):
             caidas = {'acme-demo.com', 'acme-demo.com.mx', 'acme-demo.net'}
 
             def __call__(self, url, timeout):
-                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query)['q'][0]
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q', [''])[0]
                 if q in self.caidas:
                     self.urls.append(url)
                     raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
@@ -377,7 +384,7 @@ class FallasYGrabacion(unittest.TestCase):
             sana = CrtshSimulado()
             with mock.patch.object(crtsh, '_descargar', sana):
                 codigo, _ = correr('acme-demo.mx', '--grabar', '--completar', '--con-parecidos')
-            self.assertEqual((codigo, len(sana.urls)), (0, 10))
+            self.assertEqual((codigo, len(sana.urls), sana.cert_spotter), (0, 10, []))
 
             codigo, texto = correr('acme-demo.mx', '--reproducir', '--con-parecidos')
             self.assertEqual(codigo, 0)
@@ -584,7 +591,7 @@ class Resumen(unittest.TestCase):
     def test_1_severidad_y_caracteristicas_en_espanol(self):
         res = recolectar(CrtshSimulado(), parecidos=False)
         lineas = crtsh.resumen(res)
-        self.assertEqual(lineas[0], 'acme-demo.mx · crt.sh · succeeded · 1 consulta')
+        self.assertEqual(lineas[0], 'acme-demo.mx · crt.sh y Cert Spotter · succeeded · 2 consultas')
         self.assertIn('  [media] El certificado de api.acme-demo.mx vence en 10 días', lineas)
         self.assertIn('  [alta] Certificado vencido en dev.acme-demo.mx', lineas)
         self.assertIn('      tipo: certificado por vencer · antigüedad: 80 días · exposición: pública · sensibilidad: baja',

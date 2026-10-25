@@ -12,7 +12,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -213,14 +213,129 @@ class Respaldo(unittest.TestCase):
         self.assertEqual(len(t.de('api.certspotter.com')), 2)
         self.assertEqual(res.sin_cobertura, ['cert_expired', 'lookalike_domain'])
 
-    def test_9_si_crtsh_responde_no_consulta_cert_spotter(self):
+    def test_9_si_crtsh_responde_cert_spotter_suma_lo_que_le_falta_sin_repetir(self):
         t = RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS})
         res, _ = recolectar(t, parecidos=True)
-        self.assertEqual((t.de('api.certspotter.com'), res.sin_cobertura), ([], []))
-        h = {(h.codigo, h.activo): h for h in res.hallazgos}[('cert_expired', 'dev.acme-demo.mx')]
-        self.assertEqual((h.evidencia['origen'], h.evidencia['crtsh_id']), ('crtsh', 4))
-        self.assertNotIn('certspotter_id', h.evidencia)
-        self.assertTrue(crtsh.resumen(res)[0].startswith('acme-demo.mx · crt.sh · succeeded'))
+        self.assertEqual((len(t.de('api.certspotter.com')), res.sin_cobertura, res.avisos), (2, [], []))
+        activos = {a.valor: a.atributos for a in res.activos}
+        hallazgos = {(h.codigo, h.activo): h for h in res.hallazgos}
+        # 9001 a 9003 son los certificados 2, 3 y 6 de crt.sh (misma vigencia y mismos nombres): quedan los de crt.sh
+        self.assertEqual((activos['www.acme-demo.mx']['certificados'], activos['www.acme-demo.mx']['crtsh_id']), (2, 2))
+        self.assertEqual([k for k in hallazgos if k[0] == 'cert_expiring_soon'], [('cert_expiring_soon', 'api.acme-demo.mx')])
+        h = hallazgos[('cert_expiring_soon', 'api.acme-demo.mx')]
+        self.assertEqual((h.evidencia['origen'], h.evidencia['crtsh_id']), ('crtsh', 3))
+        # 9004, el comodín de SSL.com, solo lo trae Cert Spotter: es el más reciente del dominio y cubre al vencido de dev
+        dominio = activos['acme-demo.mx']
+        self.assertEqual((dominio['origen'], dominio['certspotter_id'], dominio['certificados']), ('certspotter', '9004', 3))
+        self.assertEqual(activos['dev.acme-demo.mx']['cubierto_por_comodin'], 'acme-demo.mx')
+        self.assertNotIn(('cert_expired', 'dev.acme-demo.mx'), hallazgos)
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        self.assertTrue(crtsh.resumen(res)[0].startswith('acme-demo.mx · crt.sh y Cert Spotter · succeeded · '))
+
+    def test_9b_si_cert_spotter_no_responde_queda_lo_de_crtsh_con_aviso(self):
+        t = RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS}, limite_en=0)  # 429 en la primera página
+        res, _ = recolectar(t)
+        self.assertEqual((res.estado, res.sin_cobertura, len(t.de('api.certspotter.com'))),
+                         ('succeeded', ['lookalike_domain'], 1))  # el 429 no se reintenta
+        self.assertEqual(len(res.avisos), 1)
+        self.assertTrue(res.avisos[0].startswith('Cert Spotter no respondió a acme-demo.mx después de 1 intento'))
+        self.assertTrue(res.avisos[0].endswith(certspotter.SIN_COMPLEMENTO))
+        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
+        self.assertEqual(crtsh.codigo_salida(res), 2)
+        self.assertTrue(crtsh.resumen(res)[0].startswith('acme-demo.mx · crt.sh · succeeded · '))
+
+    def test_9c_una_emision_que_no_se_puede_leer_no_tumba_lo_de_crtsh(self):
+        vigencia = ('2026-10-01T00:00:00Z', '2027-01-01T00:00:00Z')
+        raras = [dict(emision('9101', ['lista.acme-demo.mx'], *vigencia), id=['x']),
+                 dict(emision('9102', ['raro.acme-demo.mx'], *vigencia), not_before='2026-10-01 00:00:00 UTC'),
+                 dict(emision('9103', ['entero.acme-demo.mx'], *vigencia), not_after=1798761600),
+                 dict(emision('9104', [], *vigencia), dns_names=5)]
+        for caido in (False, True):  # con crt.sh arriba (complemento) y caído (respaldo)
+            t = RespaldoSimulado(paginas=[raras + EMISIONES], crtsh=None if caido else {'%.acme-demo.mx': SUBDOMINIOS})
+            res, _ = recolectar(t)
+            activos = {a.valor: a.atributos for a in res.activos}
+            self.assertEqual(res.estado, 'succeeded', caido)
+            self.assertEqual(activos['acme-demo.mx']['certspotter_id'], '9004', caido)
+            self.assertFalse({'lista.acme-demo.mx', 'raro.acme-demo.mx', 'entero.acme-demo.mx'} & set(activos), caido)
+            self.assertEqual(res.avisos[-1], certspotter.INCOMPLETO, caido)  # el id que no sirve no se calla
+            self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [], caido)
+
+    def test_9d_un_comodin_revocado_no_cubre_al_vencido_de_crtsh(self):
+        revocado = [dict(e, revoked=True) if e['id'] == '9004' else e for e in EMISIONES]
+        copia = cert(99, ['*.acme-demo.mx', 'acme-demo.mx'], '2026-10-01T00:00:00', '2027-01-01T00:00:00')
+        for subdominios in (SUBDOMINIOS, SUBDOMINIOS + [copia]):  # el comodín solo en Cert Spotter y en las dos
+            res, _ = recolectar(RespaldoSimulado(paginas=[revocado], crtsh={'%.acme-demo.mx': subdominios}))
+            activos = {a.valor: a.atributos for a in res.activos}
+            self.assertNotIn('cubierto_por_comodin', activos['dev.acme-demo.mx'], len(subdominios))
+            self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
+            dominio = activos['acme-demo.mx']
+            self.assertEqual((dominio['origen'], dominio['crtsh_id'], dominio['certificados']), ('crtsh', 2, 3))
+        gemelo = dict(EMISIONES[3], id='9005')  # misma vigencia y nombres, sin revocar: el comodín sigue vigente
+        res, _ = recolectar(RespaldoSimulado(paginas=[revocado + [gemelo]], crtsh={'%.acme-demo.mx': SUBDOMINIOS + [copia]}))
+        self.assertEqual({a.valor: a.atributos for a in res.activos}['dev.acme-demo.mx']['cubierto_por_comodin'],
+                         'acme-demo.mx')
+
+    def test_9e_si_ninguna_emision_se_puede_leer_cuenta_como_que_no_respondio(self):
+        ilegibles = [dict(e, not_after='pronto') for e in EMISIONES]
+        t = RespaldoSimulado(paginas=[ilegibles], crtsh={'%.acme-demo.mx': SUBDOMINIOS})
+        res, _ = recolectar(t)
+        self.assertEqual((res.estado, len(res.avisos)), ('succeeded', 1))
+        self.assertEqual(res.avisos[0], 'Cert Spotter no respondió a acme-demo.mx después de 1 intento (ValueError: '
+                         'respuesta que no se puede leer). ' + certspotter.SIN_COMPLEMENTO)
+        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
+        self.assertEqual(len(t.de('api.certspotter.com')), 1)  # sí respondió: otro intento solo gastaría cupo
+        t = RespaldoSimulado(paginas=[ilegibles])
+        res, _ = recolectar(t)  # con crt.sh caído no hay de dónde sacar nada
+        self.assertEqual(res.estado, 'failed')
+        self.assertIn('respuesta que no se puede leer', res.error)
+        self.assertEqual(len(t.de('api.certspotter.com')), 1)
+        t = RespaldoSimulado(paginas=[EMISIONES, [dict(EMISIONES[0], id='9100', not_after='pronto')]],
+                             crtsh={'%.acme-demo.mx': SUBDOMINIOS})
+        res, _ = recolectar(t)  # la segunda página no se lee: queda la primera, con aviso
+        self.assertEqual((res.estado, res.avisos), ('succeeded', [certspotter.INCOMPLETO]))
+        self.assertEqual(len(t.de('api.certspotter.com')), 2)
+
+    def test_9f_una_pagina_que_no_se_puede_leer_no_borra_la_grabacion_anterior(self):
+        ilegibles = [dict(e, not_after='pronto') for e in EMISIONES]
+        with tempfile.TemporaryDirectory() as d:
+            antes, _ = recolectar(RespaldoSimulado(), d, 'grabar', nueva=True)
+            fallida, _ = recolectar(RespaldoSimulado(paginas=[ilegibles]), d, 'grabar', nueva=True)
+            despues, _ = recolectar(sin_red, d, 'reproducir')
+        self.assertEqual(fallida.estado, 'failed')
+        for campo in ('estado', 'activos', 'hallazgos', 'avisos', 'sin_cobertura'):
+            self.assertEqual(getattr(despues, campo), getattr(antes, campo), campo)
+
+    def test_9g_un_id_muy_largo_o_cero_no_se_usa(self):
+        class CierraDespues(RespaldoSimulado):  # cualquier página siguiente viene vacía
+            def __call__(self, url, timeout):
+                if 'after' in urllib.parse.parse_qs(urllib.parse.urlparse(url).query):
+                    self.urls.append(url)
+                    return b'[]'
+                return super().__call__(url, timeout)
+        for raro in ('9' * 300, 0):  # el largo no cabe en el nombre del archivo, y con 0 se volvería a pedir la página 1
+            ultima = dict(emision('9000', ['raro.acme-demo.mx'], '2026-10-01T00:00:00Z', '2027-01-01T00:00:00Z'), id=raro)
+            t = CierraDespues(paginas=[EMISIONES + [ultima]], crtsh={'%.acme-demo.mx': SUBDOMINIOS})
+            with tempfile.TemporaryDirectory() as d:
+                res, _ = recolectar(t, d, 'grabar', nueva=True)
+            self.assertEqual((res.estado, res.avisos), ('succeeded', [certspotter.INCOMPLETO]), raro)
+            self.assertEqual(len(t.de('api.certspotter.com')), 2, raro)
+            self.assertNotIn('raro.acme-demo.mx', {a.valor for a in res.activos}, raro)
+
+    def test_9h_como_complemento_hace_2_intentos_de_20_s(self):
+        class Anota(RespaldoSimulado):
+            def __call__(self, url, timeout):
+                self.timeouts.append((urllib.parse.urlparse(url).netloc, timeout))
+                return super().__call__(url, timeout)
+        t, esperas = Anota(crtsh={'%.acme-demo.mx': SUBDOMINIOS}, certspotter_caido=True), []
+        t.timeouts = []
+        res = crtsh.recolectar('acme-demo.mx', crtsh.ClienteCrtsh(transporte=t, dormir=esperas.append), AHORA)
+        self.assertEqual([x for x in t.timeouts if x[0] == 'api.certspotter.com'], [('api.certspotter.com', 20)] * 2)
+        self.assertEqual(esperas, [5])
+        self.assertTrue(res.avisos[0].startswith('Cert Spotter no respondió a acme-demo.mx después de 2 intentos'))
+        t = Anota(certspotter_caido=True)  # como respaldo sigue con los 3 intentos de crt.sh
+        t.timeouts = []
+        crtsh.recolectar('acme-demo.mx', crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None), AHORA)
+        self.assertEqual(len([x for x in t.timeouts if x[0] == 'api.certspotter.com']), crtsh.INTENTOS)
 
 
 class GrabarYReproducir(unittest.TestCase):
@@ -280,11 +395,18 @@ class GrabarYReproducir(unittest.TestCase):
                 codigo = crtsh._main(list(argv))
             return codigo, salida.getvalue()
 
+        # El CLI usa la fecha de hoy, no AHORA: el de api.acme-demo.mx vence en 10 días contados desde hoy.
+        hoy = datetime.now(timezone.utc)
+
+        def dia(delta):
+            return (hoy + timedelta(days=delta)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        emisiones = [emision('9002', ['api.acme-demo.mx'], dia(-80), dia(10)) if e['id'] == '9002' else e
+                     for e in EMISIONES]
         cobertura = ('Cobertura parcial: no se revisaron certificados vencidos (cert_expired) ni dominios parecidos '
                      '(lookalike_domain).')
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
-            with mock.patch.object(crtsh, '_descargar', RespaldoSimulado()):
+            with mock.patch.object(crtsh, '_descargar', RespaldoSimulado(paginas=[emisiones])):
                 codigo, texto = correr('acme-demo.mx', '--grabar')
             self.assertEqual(codigo, 2)
             self.assertIn(cobertura, texto)
@@ -306,6 +428,25 @@ class GrabarYReproducir(unittest.TestCase):
                     contextlib.redirect_stderr(errores):
                 self.assertEqual(crtsh._main(['acme-demo.mx', '--grabar', '--completar']), 2)
         self.assertIn('aviso: esta grabación es el respaldo de Cert Spotter. Si crt.sh responde', errores.getvalue())
+
+    def test_5c_si_cert_spotter_no_queda_grabado_pide_completar(self):
+        for limite_en in (0, 1):  # 429 en la primera página o en la vacía que cierra
+            errores = io.StringIO()
+            with tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                    mock.patch.object(crtsh, '_descargar', RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS},
+                                                                            limite_en=limite_en)), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errores):
+                self.assertEqual(crtsh._main(['acme-demo.mx', '--grabar']), 2)
+            self.assertIn('aviso: Cert Spotter no quedó grabado completo', errores.getvalue(), limite_en)
+            self.assertIn('--grabar --completar', errores.getvalue(), limite_en)
+        errores = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                mock.patch.object(crtsh, '_descargar', RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS})), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errores):
+            self.assertEqual(crtsh._main(['acme-demo.mx', '--grabar']), 0)
+        self.assertEqual(errores.getvalue(), '')
 
     def test_7_si_falla_una_pagina_al_grabar_reproducir_da_lo_mismo(self):
         with tempfile.TemporaryDirectory() as d:
@@ -329,6 +470,17 @@ class GrabarYReproducir(unittest.TestCase):
             grabado, _ = recolectar(sin_red, d, 'reproducir', parecidos=True)
         self.assertIn('crt.sh no respondió a %.acme-demo.mx. Se usó la búsqueda por nombre', vivo.avisos[0])
         self.assertEqual((grabado.avisos, grabado.activos, grabado.sin_cobertura), (vivo.avisos, vivo.activos, []))
+
+    def test_9_si_cert_spotter_no_respondio_al_grabar_reproducir_pide_completarlo(self):
+        with tempfile.TemporaryDirectory() as d:
+            recolectar(RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS}, limite_en=0), d, 'grabar', nueva=True)
+            grabado, cliente = recolectar(sin_red, d, 'reproducir')
+            self.assertEqual(grabado.avisos, [contrato.SIN_GRABACION + 'certspotter:acme-demo.mx'])
+            self.assertIn('Falta 1 respuesta grabada: certspotter:acme-demo.mx. Se completa con --grabar --completar.',
+                          crtsh.resumen(grabado, cliente))
+            t = RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS})
+            completo, _ = recolectar(t, d, 'grabar', completar=True, desde=contrato.Grabadora.inicio(d))
+        self.assertEqual((t.de('crt.sh'), len(t.de('api.certspotter.com')), completo.avisos), ([], 2, []))
 
     def test_6_por_ejecutar_del_contrato(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)):
@@ -388,6 +540,21 @@ class RespuestaReal(unittest.TestCase):
         self.assertEqual((huella(por_crtsh).evidencia['origen'], huella(por_cert_spotter).evidencia['origen']),
                          ('crtsh', 'certspotter'))
         self.assertEqual(huella(por_crtsh).huella, huella(por_cert_spotter).huella)
+
+    def test_5_si_crtsh_no_trae_los_de_lets_encrypt_cert_spotter_los_suma(self):
+        """Lo que pasó el 23 oct: crt.sh respondió solo con el comodín de SSL.com, sin los 3 de Let's Encrypt."""
+        ssl_com = cert(29835188462, ['*.olmardo.com', 'olmardo.com'], '2026-10-14T10:24:56', '2027-01-12T01:00:49',
+                       emisor=OLMARDO[3]['issuer']['name'], serie='68e82773942c257582ffeaeec4de30cf')
+        t = RespaldoSimulado(paginas=[OLMARDO], crtsh={'%.olmardo.com': [ssl_com]})
+        res = crtsh.recolectar('olmardo.com', crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None),
+                               datetime(2026, 12, 20, 12, 0, tzinfo=timezone.utc))
+        activos = {a.valor: a.atributos for a in res.activos}
+        self.assertEqual(sorted(activos), ['camaras.olmardo.com', 'olmardo.com', 'reservas.olmardo.com'])
+        self.assertEqual((activos['olmardo.com']['certificados'], activos['olmardo.com']['origen']), (2, 'crtsh'))
+        por_vencer = {h.activo: h.evidencia['origen'] for h in res.hallazgos if h.codigo == 'cert_expiring_soon'}
+        self.assertEqual(por_vencer, {'olmardo.com': 'crtsh', 'reservas.olmardo.com': 'certspotter',
+                                      'camaras.olmardo.com': 'certspotter'})
+        self.assertEqual((res.sin_cobertura, res.avisos), (['lookalike_domain'], []))
 
     def test_4_al_reproducir_meses_despues_no_salen_vencidos_sin_cobertura(self):
         res, _ = self.recolectar(datetime(2027, 2, 1, tzinfo=timezone.utc))
