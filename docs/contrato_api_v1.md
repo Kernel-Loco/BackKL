@@ -65,12 +65,30 @@ Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo
 
 ## Explicación (`explicacion.json`)
 
-Viene de `score_contributions`. `penalty` es lo que el hallazgo suma a la nota de su categoría y `factors` lo desglosa, así que la suma de `points` es `penalty`, y nunca pasa de `max_penalty` de su regla. `summary` explica en una frase por qué tiene su severidad, con el criterio de «Qué hace crítico a un hallazgo» de #29. Con `method = 'ml'`, `shap` trae la contribución de cada característica según #35, como `[{"feature": "antiguedad_dias", "value": 104, "contribution": 0.21}]`. Con `rules` es `null`.
+Viene de `score_contributions`. `penalty` es lo que el hallazgo suma a la nota de su categoría, no al score final, y `factors` lo desglosa, así que la suma de `points` es `penalty`. `max_penalty` es el tope de su regla para cada hallazgo: un hallazgo nunca suma más que eso, pero varios hallazgos de la misma regla suman cada uno su `penalty`. `summary` explica en una frase por qué tiene su severidad, con el criterio de «Qué hace crítico a un hallazgo» de #29. Con `method = 'ml'`, `shap` trae la contribución de cada característica según #35, como `[{"feature": "antiguedad_dias", "value": 104, "contribution": 0.21}]`. Con `rules` es `null`.
+
+Los textos de la regla salen del catálogo `scoring_rule_texts` (#30), uno por código, en lenguaje simple y sin siglas. Siempre llegan los tres, nunca `null`, porque la migración 003 obliga a que toda regla tenga su texto:
+
+| Campo | Qué es |
+|---|---|
+| `title` | El título del hallazgo (`evidence.title`), igual que en `hallazgos.json`. No es el de la regla |
+| `rule_title` | El título de la regla, el mismo para todos los hallazgos con ese `rule_code` |
+| `meaning` | Qué significa el hallazgo, en una o dos frases |
+| `recommendation` | Qué hacer, en una o dos frases |
 
 ## Pesos (`pesos.json`)
 
 Los del juego de reglas v1 de la base: infraestructura 30 %, identidad digital 20 %, configuración 20 % y fugas de datos 30 %, con las bandas, el piso y el umbral de `cirdan/score/criterio.py`. Emilio los confirmó para este contrato, por eso `validated_by` dice `Emilio`. Si cambian, se crea el juego v2 (#32) y se actualizan este archivo y la semilla.
 La API real devuelve `validated_by` en `null`, porque la semilla no lo llena.
+
+`rules` trae las 30 reglas del juego v1 en orden de id: las 7 de la semilla 001 y las 23 de la semilla 004 (#14 a #20 y las previstas de #62 a #64). `pruebas/test_api_v1.py` las compara una por una con la API.
+
+| Campo | Qué es |
+|---|---|
+| `code`, `category`, `base_severity` | El código de la regla, su categoría y la severidad con que nace un hallazgo |
+| `weight` | Peso dentro de su categoría. Con la suma por categoría no cambia la nota, y las 23 reglas nuevas llevan `1.0` |
+| `max_penalty` | Lo más que suma cada hallazgo de esta regla a la nota de su categoría. El tope es por hallazgo, no por regla |
+| `title`, `meaning`, `recommendation` | Título, qué significa y qué hacer, de `scoring_rule_texts` (#30). Son los mismos que la explicación da como `rule_title`, `meaning` y `recommendation` |
 
 ## Qué cambia respecto a la API inicial
 

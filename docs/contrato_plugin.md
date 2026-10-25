@@ -4,11 +4,12 @@ Todos los recolectores OSINT (#14 a #20) cumplen este contrato, y el orquestador
 
 ## Qué expone cada recolector
 
-Cada recolector es un módulo de `cirdan/recolectores/` con tres cosas:
+Cada recolector es un módulo de `cirdan/recolectores/` con cuatro cosas:
 
 | Nombre | Qué es |
 |---|---|
 | `FUENTE` | El código de su fila en `data_sources`, por ejemplo `ct_logs` |
+| `CODIGOS` | Diccionario de código de regla a la severidad base de su regla, con todos los códigos que puede emitir. `pruebas/test_catalogo_reglas.py` falla si falta o si no coincide con el catálogo (#30) |
 | `crear_cliente(modo, dominio)` | Su cliente para `vivo`, `grabar` o `reproducir` |
 | `recolectar(dominio, cliente=None, ahora=None, propios=())` | Devuelve un `Resultado`. `propios` son los otros dominios de la misma empresa. Puede aceptar más opciones, pero lo que consulte fuera del dominio autorizado va apagado por defecto, porque `ejecutar()` solo pasa estas cuatro |
 
@@ -32,7 +33,7 @@ Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `carga
 
 | Campo | Regla |
 |---|---|
-| `codigo` | El código de su regla (`scoring_rules.code`). Tiene que existir en el catálogo (#30) |
+| `codigo` | El código de su regla (`scoring_rules.code`). Tiene que existir en el catálogo (#30), que lista [`codigos_reglas.md`](codigos_reglas.md). `pruebas/test_catalogo_reglas.py` revisa que cada código de `CODIGOS` del recolector tenga regla con la misma severidad. El recolector emite solo códigos de su `CODIGOS` |
 | `severidad` | La severidad base de su regla: `critical`, `high`, `medium` o `low`. El motor de score la puede subir (#29) |
 | `activo` | El valor del activo al que pertenece: el dominio o uno de los activos del mismo resultado |
 | `titulo` | En español y en lenguaje simple. También va en `evidencia['title']`, porque la base guarda ahí el título |
@@ -103,7 +104,7 @@ Las pruebas de cada recolector usan respuestas grabadas o un transporte simulado
 ## Cómo agregar un recolector
 
 1. Su fila en `data_sources` con su código.
-2. El módulo en `cirdan/recolectores/` con `FUENTE`, `crear_cliente()` y `recolectar()`, que usa `Grabadora` para sus respuestas.
+2. El módulo en `cirdan/recolectores/` con `FUENTE`, `CODIGOS` (código de regla y su severidad base), `crear_cliente()` y `recolectar()`, que usa `Grabadora` para sus respuestas. Un código nuevo se agrega como dice [`codigos_reglas.md`](codigos_reglas.md).
 3. Su línea en `REGISTRO`.
 4. Una prueba sin red que compruebe `validar(resultado, codigos=<los del catálogo>) == []`.
 5. Los títulos en español, y nada que no sea observación pasiva.

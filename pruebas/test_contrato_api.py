@@ -152,6 +152,11 @@ class Explicacion(unittest.TestCase):
         if EXPLICACION['method'] == 'rules':
             self.assertIsNone(EXPLICACION['shap'])
 
+    def test_4_textos_de_su_regla(self):
+        regla = next(r for r in PESOS['rules'] if r['code'] == EXPLICACION['rule_code'])
+        self.assertEqual((EXPLICACION['rule_title'], EXPLICACION['meaning'], EXPLICACION['recommendation']),
+                         (regla['title'], regla['meaning'], regla['recommendation']))
+
 
 class Dominios(unittest.TestCase):
 
@@ -175,6 +180,16 @@ class Dominios(unittest.TestCase):
         for h in HALLAZGOS['items']:
             conteo[h['severity']] += h['status'] == 'open'
         self.assertEqual(d['open_findings'], conteo)
+
+
+class Textos(unittest.TestCase):
+    # Al final del archivo para no recorrer las líneas que cita pruebas/test_dataset_ml.py:78.
+
+    def test_1_cada_regla_con_sus_textos(self):
+        for r in PESOS['rules']:
+            for campo in ('title', 'meaning', 'recommendation'):
+                self.assertIsInstance(r.get(campo), str, (r['code'], campo))
+                self.assertTrue(r[campo].strip(), (r['code'], campo))
 
 
 if __name__ == '__main__':

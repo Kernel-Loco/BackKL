@@ -33,7 +33,7 @@ Todos los comandos se corren desde la raíz del repo.
 2. Copia `.env.example` como `.env`, cambia las tres contraseñas (`POSTGRES_PASSWORD`, `CIRDAN_APP_PASSWORD` y `VALKEY_PASSWORD`) y genera `TOTP_ENCRYPTION_KEY` con el comando que trae el archivo.
 3. Levanta todo: `docker compose up -d --build`. La primera vez crea la base `cirdan` y carga migraciones y semillas (tarda unos segundos). La API queda en http://127.0.0.1:8000.
 4. Comprueba: `curl http://127.0.0.1:8000/health` responde 200 con `"role": "cirdan_app"`, y `docker compose ps` muestra los tres contenedores `healthy`.
-5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (54, contra la base y la API), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py` (19, el orquestador y el explorador de la base dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py` (149, sin base ni red).
+5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (54, contra la base y la API), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py` (19, el orquestador y el explorador de la base dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py pruebas/test_catalogo_reglas.py` (162, sin base ni red).
 6. Instala el candado de secretos una vez: `pip install pre-commit && pre-commit install`. Desde ahí gitleaks revisa cada commit.
 
 Otros comandos: `docker compose logs -f api` (ver la API), `docker compose down` (apagar, la base se conserva) y `docker compose down -v` (borrar la base para volver a cargarla desde cero en el siguiente `up`). Para revisar todo el historial con gitleaks: `docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 git /repo`.
@@ -42,7 +42,7 @@ Para trabajar en la API sin reconstruir la imagen: `docker compose stop api`, cr
 
 ## Base de datos
 
-23 tablas (18 con Row-Level Security por cliente y 5 catálogos compartidos), datos de Acme Demo y Beta Corp, el dominio de prueba olmardo.com de Grupo Olmardo, y el rol `cirdan_app` sin privilegios de más. Qué se creó, cómo cargarla y las decisiones respecto al DBML están en [`db/README.md`](db/README.md).
+24 tablas (18 con Row-Level Security por cliente y 6 catálogos compartidos), datos de Acme Demo y Beta Corp, el dominio de prueba olmardo.com de Grupo Olmardo, y el rol `cirdan_app` sin privilegios de más. Qué se creó, cómo cargarla y las decisiones respecto al DBML están en [`db/README.md`](db/README.md).
 
 ## Pruebas de la base
 
@@ -161,7 +161,7 @@ El 14 oct 2026: las 10 pruebas sin red del orquestador y las 6 de la API de esca
 
 Solo existe con `DEMO_EXPLORER=true` en el `.env`. Por omisión es `false` y entonces `/demo` y `/db` responden 404. Nunca va en `true` en producción. Con la línea puesta, corre `docker compose up -d --build` y abre **http://127.0.0.1:8000/demo** (también sirve `localhost:8000`). La página inicia sesión desde su propio origen. La API lo permite porque `ALLOWED_ORIGINS` ya trae esos dos orígenes. Desde otro origen, el inicio de sesión responde 403. Sin sesión, la página solo muestra el inicio de sesión y no trae datos.
 
-La página pide correo, contraseña y código MFA de una cuenta de demo con rol Admin (`alex.morgan@acme-demo.mx` o `dana.cruz@beta-corp.mx`) y muestra solo la empresa de esa sesión: las 23 tablas agrupadas con las filas que ve, las filas reales de la tabla que selecciones (sin columnas secretas), los dominios con su score y, al elegir uno, su desglose por categoría y sus hallazgos. Para ver otra empresa, cierra sesión y entra con su cuenta. Con la sesión de Beta Corp (`dana.cruz@beta-corp.mx`), el botón 'Intentar como Beta Corp' muestra el 404 al pedir los hallazgos de acme-demo.mx, que es de Acme. Con la de Acme, el botón dice 'Intentar como Acme Demo' y responde 200. Con una cuenta de Analista o Gerente, las tablas responden 403 y la página lo dice, pero los dominios y el botón sí funcionan. Todo pasa por el rol `cirdan_app`, así que lo que se ve es lo que RLS deja ver. Archivos: `cirdan/api/explorer.py` y `cirdan/api/demo.html`. Sus pruebas, `pruebas/test_explorador.py`, levantan dentro del contenedor una API con la variable en `false` y otra con `true`.
+La página pide correo, contraseña y código MFA de una cuenta de demo con rol Admin (`alex.morgan@acme-demo.mx` o `dana.cruz@beta-corp.mx`) y muestra solo la empresa de esa sesión: las 24 tablas agrupadas con las filas que ve, las filas reales de la tabla que selecciones (sin columnas secretas), los dominios con su score y, al elegir uno, su desglose por categoría y sus hallazgos. Para ver otra empresa, cierra sesión y entra con su cuenta. Con la sesión de Beta Corp (`dana.cruz@beta-corp.mx`), el botón 'Intentar como Beta Corp' muestra el 404 al pedir los hallazgos de acme-demo.mx, que es de Acme. Con la de Acme, el botón dice 'Intentar como Acme Demo' y responde 200. Con una cuenta de Analista o Gerente, las tablas responden 403 y la página lo dice, pero los dominios y el botón sí funcionan. Todo pasa por el rol `cirdan_app`, así que lo que se ve es lo que RLS deja ver. Archivos: `cirdan/api/explorer.py` y `cirdan/api/demo.html`. Sus pruebas, `pruebas/test_explorador.py`, levantan dentro del contenedor una API con la variable en `false` y otra con `true`.
 
 ## Recolector de crt.sh (#14)
 
@@ -206,12 +206,20 @@ Más alto = más riesgo. Bandas 0 a 39 bajo, 40 a 59 medio, 60 a 79 alto y 80 a 
 python -m unittest -v pruebas/test_criterio.py   # 13 pruebas, sin base de datos
 ```
 
+## Catálogo de reglas (#30)
+
+El juego de reglas v1 tiene 30 reglas en las 4 categorías: las 7 de la semilla 001 y las 23 de `db/semillas/004_reglas_recolectores.sql`, una por cada código que emiten o van a emitir #14 a #20 y las extras previstas #62 a #64. Cada regla tiene su título, qué significa y qué hacer en `scoring_rule_texts` (migración 003), en español simple y sin siglas. La lista de códigos, con su categoría, severidad base, tope, recolector y estado, y cómo agregar uno nuevo, está en `docs/codigos_reglas.md`. La prueba falla si un recolector declara en `CODIGOS` un código sin regla o con otra severidad, si una regla no tiene texto o si la lista no coincide con las semillas. Cada recolector debe emitir solo los códigos de su `CODIGOS`, y lo que emite de verdad la prueba solo lo revisa en `ejemplo`.
+
+```bash
+python -m unittest -v pruebas/test_catalogo_reglas.py   # 11 pruebas, sin base ni red
+```
+
 ## Contrato de API v1 (#21)
 
 Lo que devuelve la API v1 (`/api/v1`): dominios, hallazgos, score, histórico, explicación y pesos, con un JSON de ejemplo por respuesta en `docs/api_v1/`. La API v1 ya existe (ver API arriba) y el portal la lee desde el 15 oct 2026. Hoy los JSON de ejemplo los usan las pruebas de este repo y los datos simulados del portal. Los usará el dataset de ML (#33, RC-65). También sirven de plan B en las demos. El detalle está en `docs/contrato_api_v1.md`.
 
 ```bash
-python -m unittest -v pruebas/test_contrato_api.py   # 21 pruebas, sin base ni red
+python -m unittest -v pruebas/test_contrato_api.py   # 23 pruebas, sin base ni red
 ```
 
 ## Contrato de plugin (#13)
