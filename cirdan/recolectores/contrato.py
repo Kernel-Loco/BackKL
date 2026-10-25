@@ -2,14 +2,16 @@
 
 Cada recolector es un módulo de cirdan/recolectores/ con:
 - FUENTE: el código de su fila en data_sources (por ejemplo 'ct_logs').
+- CODIGOS: código de regla -> severidad base, con todo lo que puede emitir (pruebas/test_catalogo_reglas.py, #30).
 - crear_cliente(modo, dominio): su cliente para 'vivo', 'grabar' o 'reproducir'.
 - recolectar(dominio, cliente=None, ahora=None, propios=()): devuelve un Resultado.
 
 El orquestador (#22) no llama a recolectar() directo: llama a ejecutar(), que atrapa cualquier
 excepción, revisa que el resultado cumpla este esquema y aplica el filtro de alcance. Si el
 recolector falla o rompe el contrato, la fuente queda en 'failed' y el escaneo sigue con las demás.
-La limpieza de datos y el límite diario por fuente son de #13b. El documento completo está en
-docs/contrato_plugin.md.
+Si la fuente respondió pero no pudo revisar algunos códigos, los pone en sin_cobertura y el escaneo
+termina 'partial', así el portal no los muestra como 0 hallazgos.
+La limpieza de datos y el límite diario por fuente son de #13b. El documento completo está en docs/contrato_plugin.md.
 """
 import http.client
 import ipaddress
@@ -78,6 +80,7 @@ class Resultado:
     avisos: list = field(default_factory=list)
     activos: list = field(default_factory=list)
     hallazgos: list = field(default_factory=list)
+    sin_cobertura: list = field(default_factory=list)  # códigos que la fuente no pudo revisar: cobertura parcial, no 0
 
     def a_dict(self):
         return asdict(self)
@@ -149,6 +152,13 @@ def validar(res, codigos=None):
         errores.append('error debe ser texto')
     if not isinstance(res.avisos, list) or not all(isinstance(a, str) for a in res.avisos):
         errores.append('avisos debe ser una lista de textos')
+    sin = res.sin_cobertura
+    if not isinstance(sin, list) or not all(isinstance(c, str) and CODIGO_VALIDO.fullmatch(c) for c in sin):
+        errores.append('sin_cobertura debe ser una lista de códigos de regla')
+    elif len(set(sin)) != len(sin):
+        errores.append('sin_cobertura tiene códigos repetidos')
+    elif codigos is not None and set(sin) - set(codigos):
+        errores.append('sin_cobertura: %s no está en el catálogo de reglas' % ', '.join(sorted(set(sin) - set(codigos))))
     if not isinstance(res.activos, list) or not isinstance(res.hallazgos, list):
         return errores + ['activos y hallazgos deben ser listas']
     if res.estado == 'failed' and (res.activos or res.hallazgos):
@@ -178,6 +188,8 @@ def validar(res, codigos=None):
             errores.append('%s: código inválido' % donde)
         elif codigos is not None and h.codigo not in codigos:
             errores.append('%s: el código no está en el catálogo de reglas' % donde)
+        elif isinstance(sin, list) and h.codigo in sin:
+            errores.append('%s: el código está en sin_cobertura, no puede traer hallazgos' % donde)
         if h.severidad not in SEVERIDADES:
             errores.append('%s: severidad inválida %r' % (donde, h.severidad))
         if not isinstance(h.activo, str) or h.activo not in valores:
@@ -271,6 +283,8 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
     Si el dominio no es un nombre válido, no llama al recolector. El resultado tiene que ser del dominio
     autorizado y de la fuente del recolector. Primero se valida y luego se filtra por alcance, así un activo
     mal formado deja la fuente en 'failed' en lugar de perderse.
+    A recolectar() solo le pasa dominio, cliente, ahora y propios. Lo que un recolector apaga por defecto, como
+    la búsqueda de dominios parecidos de crt.sh, nunca se prende desde un escaneo.
     """
     fuente = getattr(recolector, 'FUENTE', '') or getattr(recolector, '__name__', '?')
     fuente = fuente if isinstance(fuente, str) else '?'

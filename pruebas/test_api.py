@@ -11,6 +11,7 @@ import unittest
 from pruebas import sesion
 
 ACME = '20000000-0000-4000-8000-000000000001'
+BETA = '20000000-0000-4000-8000-000000000002'
 
 
 class ApiCirdan(unittest.TestCase):
@@ -57,6 +58,12 @@ class ApiCirdan(unittest.TestCase):
         anonimo = sesion.Client()
         self.assertEqual(anonimo.get('/domains')[0], 401)
         self.assertEqual(anonimo.get('/domains', headers={'X-Organization': ACME})[0], 401)
+
+    def test_7_el_explorador_de_la_base_no_lee_otra_empresa_sin_sesion(self):
+        # RC-58: sin DEMO_EXPLORER=true, /db no existe (404). Con ella pide sesión (401). Nunca 200 por el encabezado.
+        # Los dos modos los prueba pruebas/test_explorador.py dentro del contenedor.
+        code, body = sesion.Client().get('/db/tables/users/rows', headers={'X-Organization': BETA})
+        self.assertIn(code, (401, 404), body)
 
 
 if __name__ == '__main__':

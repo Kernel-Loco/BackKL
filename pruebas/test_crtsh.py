@@ -59,19 +59,25 @@ CANDIDATO = [cert(30, ['acme-dem0.mx', 'www.acme-dem0.mx', 'ajeno.org'], '2026-1
 
 
 class CrtshSimulado:
-    """Transporte falso: responde según la consulta y puede fallar las primeras veces."""
+    """Transporte falso: responde según la consulta y puede fallar las primeras veces. Las consultas a Cert Spotter (#14b)
+    van aparte, en `cert_spotter`, y por defecto no suman certificados."""
 
-    def __init__(self, fallas=0, respuestas=None, sin_dns=()):
+    def __init__(self, fallas=0, respuestas=None, sin_dns=(), emisiones=()):
         self.fallas, self.urls, self.sin_dns, self.dns = fallas, [], set(sin_dns), []
         self.respuestas = respuestas if respuestas is not None else {
             '%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': CONTIENE_MARCA, 'acme-dem0.mx': CANDIDATO}
+        self.emisiones, self.cert_spotter = list(emisiones), []
 
     def __call__(self, url, timeout):
-        self.urls.append(url)
+        partes = crtsh.urllib.parse.urlparse(url)
+        cert_spotter = partes.netloc == 'api.certspotter.com'
+        (self.cert_spotter if cert_spotter else self.urls).append(url)
         if self.fallas:
             self.fallas -= 1
             raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
-        q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query)['q'][0]
+        if cert_spotter:  # una página con las emisiones y la vacía que cierra
+            return json.dumps([] if 'after' in crtsh.urllib.parse.parse_qs(partes.query) else self.emisiones).encode()
+        q = crtsh.urllib.parse.parse_qs(partes.query)['q'][0]
         return json.dumps(self.respuestas.get(q, [])).encode()
 
     def resolver(self, nombre):
@@ -83,6 +89,11 @@ class CrtshSimulado:
 def recolectar(transporte, **kw):
     cliente = crtsh.ClienteCrtsh(transporte=transporte, dormir=lambda s: None)
     return crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'], **kw)
+
+
+def consulta(url):
+    """El parámetro q de una URL de crt.sh: %.acme-demo.mx, %acme-demo% o una variante."""
+    return crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query)['q'][0]
 
 
 class Subdominios(unittest.TestCase):
@@ -132,7 +143,7 @@ class Subdominios(unittest.TestCase):
 class DominiosParecidos(unittest.TestCase):
 
     def setUp(self):
-        self.res = recolectar(CrtshSimulado())
+        self.res = recolectar(CrtshSimulado(), parecidos=True)
         self.parecidos = {h.evidencia['dominio_parecido']: h for h in self.res.hallazgos if h.codigo == 'lookalike_domain'}
 
     def test_1_encuentra_los_parecidos_recientes(self):
@@ -157,6 +168,36 @@ class DominiosParecidos(unittest.TestCase):
         self.assertEqual(v[:4], ['acme-demo.com', 'acme-demo.com.mx', 'acme-demo.net', 'acmedemo.mx'])
         self.assertIn('acme-dem0.mx', v)
 
+    def test_5_por_defecto_no_se_buscan_y_quedan_sin_cobertura(self):
+        t = CrtshSimulado()
+        res = recolectar(t)
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']))
+        self.assertEqual([consulta(u) for u in t.urls], ['%.acme-demo.mx'])  # ni %acme-demo% ni variantes
+        self.assertNotIn('lookalike_domain', {h.codigo for h in res.hallazgos})
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        self.assertEqual(crtsh.resumen(res)[-1],
+                         'Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).')
+
+    def test_6_la_linea_de_comandos_solo_los_busca_con_con_parecidos(self):
+        def correr(*argv):
+            t, salida = CrtshSimulado(), io.StringIO()
+            with mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                    contextlib.redirect_stdout(salida):
+                codigo = crtsh._main(['acme-demo.mx', '--json'] + list(argv))
+            return codigo, json.loads(salida.getvalue()), [consulta(u) for u in t.urls]
+
+        for argv in ((), ('--sin-parecidos',)):
+            codigo, res, consultas = correr(*argv)
+            self.assertEqual((codigo, res['sin_cobertura'], consultas), (0, ['lookalike_domain'], ['%.acme-demo.mx']),
+                             argv)
+        codigo, res, consultas = correr('--con-parecidos')
+        self.assertEqual(res['sin_cobertura'], [])
+        self.assertEqual(consultas[:2], ['%.acme-demo.mx', '%acme-demo%'])
+        self.assertIn('acme-dem0.mx', consultas)
+        with self.assertRaises(SystemExit) as salida, contextlib.redirect_stderr(io.StringIO()):
+            crtsh._main(['acme-demo.mx', '--con-parecidos', '--sin-parecidos'])
+        self.assertEqual(salida.exception.code, 2)
+
 
 class FallasYGrabacion(unittest.TestCase):
 
@@ -164,7 +205,7 @@ class FallasYGrabacion(unittest.TestCase):
         t = CrtshSimulado(fallas=2)
         res = recolectar(t, parecidos=False)
         self.assertEqual(res.estado, 'succeeded')
-        self.assertEqual(res.consultas, 3)
+        self.assertEqual(res.consultas, 4)  # 2 fallas, crt.sh y Cert Spotter (#14b)
 
     def test_2_si_no_responde_queda_failed(self):
         t = CrtshSimulado(fallas=100)
@@ -172,7 +213,9 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(res.estado, 'failed')
         self.assertEqual((res.activos, res.hallazgos), ([], []))
         self.assertIn('502', res.error)
-        self.assertEqual(len(t.urls), 2 * crtsh.INTENTOS)  # la consulta por comodín y la de respaldo
+        # comodín y búsqueda por nombre en crt.sh, y el respaldo de Cert Spotter (#14b)
+        self.assertEqual((len(t.urls), len(t.cert_spotter)), (2 * crtsh.INTENTOS, crtsh.INTENTOS))
+        self.assertIn('Cert Spotter no respondió', res.error)
 
     def test_3_falla_en_parecidos_no_tumba_el_escaneo(self):
         class SoloSubdominios(CrtshSimulado):
@@ -180,20 +223,20 @@ class FallasYGrabacion(unittest.TestCase):
                 if '%25acme-demo%25' in url or 'q=acme-' in url:
                     raise TimeoutError('timed out')
                 return super().__call__(url, timeout)
-        res = recolectar(SoloSubdominios())
+        res = recolectar(SoloSubdominios(), parecidos=True)
         self.assertEqual(res.estado, 'succeeded')
         self.assertTrue(res.avisos)
 
     def test_4_si_crtsh_esta_saturado_deja_de_probar_variantes(self):
         class SinVariantes(CrtshSimulado):
             def __call__(self, url, timeout):
-                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query)['q'][0]
-                if not q.startswith('%'):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')  # Cert Spotter no lleva q
+                if q and not q[0].startswith('%'):
                     self.urls.append(url)
                     raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
                 return super().__call__(url, timeout)
         t = SinVariantes()
-        res = recolectar(t)
+        res = recolectar(t, parecidos=True)
         self.assertEqual(res.estado, 'succeeded')
         variantes = [u for u in t.urls if 'q=%25' not in u]
         self.assertEqual(len(variantes), crtsh.FALLAS_SEGUIDAS * 2)  # 2 intentos por variante
@@ -202,13 +245,13 @@ class FallasYGrabacion(unittest.TestCase):
     def test_4b_grabar_y_reproducir_sin_red(self):
         with tempfile.TemporaryDirectory() as d:
             grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=CrtshSimulado(), dormir=lambda s: None)
-            vivo = crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'])
+            vivo = crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
             self.assertTrue((Path(d) / 'subdominios_acme-demo.mx.json').exists())
 
             def sin_red(url, timeout):
                 raise AssertionError('no debe usar la red')
             rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d, transporte=sin_red)
-            grabado = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'])
+            grabado = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
             self.assertEqual(sorted(h.huella for h in vivo.hallazgos), sorted(h.huella for h in grabado.hallazgos))
             self.assertEqual(rep.consultas, 0)
 
@@ -227,15 +270,15 @@ class FallasYGrabacion(unittest.TestCase):
             crtsh.recolectar('acme-demo.mx', primera, AHORA, parecidos=False)
             t = CrtshSimulado()
             segunda = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=t, dormir=lambda s: None, completar=True)
-            res = crtsh.recolectar('acme-demo.mx', segunda, AHORA, propios=['acme-demo.com.mx'])
+            res = crtsh.recolectar('acme-demo.mx', segunda, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
             self.assertEqual(res.estado, 'succeeded')
             self.assertFalse([u for u in t.urls if 'q=%25.acme-demo.mx' in u])  # la de subdominios ya estaba
             self.assertTrue(t.urls)                                              # las variantes sí se consultan
             leidas = [n for n, _ in segunda.leidas]
             self.assertEqual(leidas[0], 'subdominios_acme-demo.mx.json')
-            self.assertEqual(sorted(leidas[1:]), ['dns_%s.json' % n for n in (
+            self.assertEqual(sorted(leidas[1:]), ['certspotter_acme-demo.mx.json'] + ['dns_%s.json' % n for n in (
                 'acme-demo.mx', 'api.acme-demo.mx', 'dev.acme-demo.mx', 'tienda.acme-demo.mx', 'www.acme-demo.mx')])
-            self.assertEqual(t.dns, [])  # las respuestas de DNS también estaban grabadas
+            self.assertEqual((t.dns, t.cert_spotter), ([], []))  # el DNS y Cert Spotter también estaban grabados
             self.assertTrue((Path(d) / 'acme-dem0.mx.json').exists())
 
     def test_8_falta_de_grabacion_no_es_saturacion(self):
@@ -243,7 +286,7 @@ class FallasYGrabacion(unittest.TestCase):
             grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=CrtshSimulado(), dormir=lambda s: None)
             crtsh.recolectar('acme-demo.mx', grab, AHORA, parecidos=False)
             res = crtsh.recolectar('acme-demo.mx', crtsh.ClienteCrtsh(modo='reproducir', carpeta=d), AHORA,
-                                   propios=['acme-demo.com.mx'])
+                                   propios=['acme-demo.com.mx'], parecidos=True)
         self.assertEqual(res.estado, 'succeeded')
         self.assertTrue(res.avisos)
         self.assertTrue(all(a.startswith(crtsh.SIN_GRABACION) for a in res.avisos))
@@ -265,14 +308,14 @@ class FallasYGrabacion(unittest.TestCase):
             viejo.write_text(json.dumps({'grabado': '2026-10-08T18:00:00+00:00', 'consulta': 'acme-dem0.mx', 'datos': []}),
                              encoding='utf-8')
             grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=VarianteCaida(), dormir=lambda s: None, reloj=reloj)
-            res = crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'])
+            res = crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
             self.assertEqual(crtsh.codigo_salida(res), 2)
             self.assertFalse(viejo.exists())  # la respuesta vieja no pasa por la de hoy
 
             t = CrtshSimulado()
             completa = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=t, dormir=lambda s: None, reloj=reloj,
                                           completar=True, desde=inicio)
-            res = crtsh.recolectar('acme-demo.mx', completa, AHORA, propios=['acme-demo.com.mx'])
+            res = crtsh.recolectar('acme-demo.mx', completa, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
         self.assertEqual(len(t.urls), 1)
         self.assertIn('q=acme-dem0.mx', t.urls[0])
         self.assertEqual(crtsh.codigo_salida(res), 0)
@@ -307,7 +350,7 @@ class FallasYGrabacion(unittest.TestCase):
             caidas = {'acme-demo.com', 'acme-demo.com.mx', 'acme-demo.net'}
 
             def __call__(self, url, timeout):
-                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query)['q'][0]
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q', [''])[0]
                 if q in self.caidas:
                     self.urls.append(url)
                     raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
@@ -328,22 +371,22 @@ class FallasYGrabacion(unittest.TestCase):
             (otra / 'contiene_acme-demo.json').write_text('[]', encoding='utf-8')  # de otro dominio
 
             with mock.patch.object(crtsh, '_descargar', PrimerasVariantesCaidas()):
-                codigo, _ = correr('acme-demo.mx', '--grabar')
+                codigo, _ = correr('acme-demo.mx', '--grabar', '--con-parecidos')
             self.assertEqual(codigo, 2)
             self.assertFalse((propia / 'acme-dem0.mx.json').exists())
             self.assertTrue((otra / 'contiene_acme-demo.json').exists())
 
-            codigo, texto = correr('acme-demo.mx', '--reproducir')
+            codigo, texto = correr('acme-demo.mx', '--reproducir', '--con-parecidos')
             self.assertEqual(codigo, 2)
             self.assertIn('Faltan 10 respuestas grabadas', texto)  # 3 caídas y 7 omitidas por saturación
             self.assertNotIn('saturado', texto)
 
             sana = CrtshSimulado()
             with mock.patch.object(crtsh, '_descargar', sana):
-                codigo, _ = correr('acme-demo.mx', '--grabar', '--completar')
-            self.assertEqual((codigo, len(sana.urls)), (0, 10))
+                codigo, _ = correr('acme-demo.mx', '--grabar', '--completar', '--con-parecidos')
+            self.assertEqual((codigo, len(sana.urls), sana.cert_spotter), (0, 10, []))
 
-            codigo, texto = correr('acme-demo.mx', '--reproducir')
+            codigo, texto = correr('acme-demo.mx', '--reproducir', '--con-parecidos')
             self.assertEqual(codigo, 0)
             self.assertNotIn('Faltan', texto)
             self.assertIn('acme-dem0.mx', texto)
@@ -371,6 +414,20 @@ class FallasYGrabacion(unittest.TestCase):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 crtsh._main(['..', '--grabar'])
             self.assertTrue(fuera.exists())
+
+    def test_16_sin_ninguna_busqueda_de_parecidos_queda_sin_cobertura(self):
+        class SoloSubdominios(CrtshSimulado):
+            def __call__(self, url, timeout):
+                if 'q=%25.acme-demo.mx' not in url:
+                    self.urls.append(url)
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        res = recolectar(SoloSubdominios(), parecidos=True)
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']))
+        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        self.assertEqual(recolectar(CrtshSimulado(), parecidos=False).sin_cobertura, ['lookalike_domain'])
+        self.assertEqual(recolectar(CrtshSimulado(), parecidos=True).sin_cobertura, [])  # con una que responda basta
 
     def test_12_respaldo_por_nombre_deja_aviso(self):
         class SinComodin(CrtshSimulado):
@@ -420,7 +477,7 @@ class ErroresQueNoSonDeCrtsh(unittest.TestCase):
         t = CrtshSimulado(respuestas={
             '%.acme-demo.mx': [cert(40, ['nuevo.acme-demo.mx'], '2026-10-15T12:05:00', '2026-10-21T00:00:00')],
             'acme-dem0.mx': [cert(41, ['acme-dem0.mx'], '2026-10-15T12:00:01', '2026-12-30T00:00:00')]})
-        res = recolectar(t)
+        res = recolectar(t, parecidos=True)
         edades = {h.codigo: h.caracteristicas['antiguedad_dias'] for h in res.hallazgos}
         self.assertEqual(edades, {'lookalike_domain': 0})  # al recién emitido le queda toda su vida: no está por vencer
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
@@ -534,7 +591,7 @@ class Resumen(unittest.TestCase):
     def test_1_severidad_y_caracteristicas_en_espanol(self):
         res = recolectar(CrtshSimulado(), parecidos=False)
         lineas = crtsh.resumen(res)
-        self.assertEqual(lineas[0], 'acme-demo.mx · crt.sh · succeeded · 1 consulta')
+        self.assertEqual(lineas[0], 'acme-demo.mx · crt.sh y Cert Spotter · succeeded · 2 consultas')
         self.assertIn('  [media] El certificado de api.acme-demo.mx vence en 10 días', lineas)
         self.assertIn('  [alta] Certificado vencido en dev.acme-demo.mx', lineas)
         self.assertIn('      tipo: certificado por vencer · antigüedad: 80 días · exposición: pública · sensibilidad: baja',
@@ -577,7 +634,8 @@ class Resumen(unittest.TestCase):
             grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=CrtshSimulado(), dormir=lambda s: None)
             crtsh.recolectar('acme-demo.mx', grab, AHORA, parecidos=False)
             rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d)
-            lineas = crtsh.resumen(crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx']), rep)
+            res = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            lineas = crtsh.resumen(res, rep)
         faltan = [l for l in lineas if l.startswith('Faltan ')]
         self.assertEqual(len(faltan), 1)
         self.assertIn('%acme-demo%', faltan[0])
@@ -591,10 +649,14 @@ class Resumen(unittest.TestCase):
 
     def test_4_sin_hallazgos_lo_dice(self):
         solo = cert(40, ['acme-demo.mx'], '2026-09-20T00:00:00', '2026-12-19T00:00:00')
-        res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=False)
+        res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=True)
         lineas = crtsh.resumen(res)
         self.assertEqual(lineas[-1], 'Sin hallazgos.')
         self.assertIn('1 activo:', lineas)
+        # sin buscar parecidos (lo predeterminado) no es lo mismo que 0 parecidos
+        res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=False)
+        self.assertEqual(crtsh.resumen(res)[-2:], [
+            'Sin hallazgos.', 'Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).'])
 
 
 if __name__ == '__main__':

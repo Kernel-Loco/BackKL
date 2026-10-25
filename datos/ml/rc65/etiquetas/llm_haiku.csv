@@ -1,0 +1,61 @@
+id,etiqueta,nota
+h28cpy4g,alta,
+h2d2zvwg,baja,DMARC p=reject frena la suplantación; sin MX.
+h2edbv64,baja,DMARC p=reject frena la suplantación.
+h2typptv,alta,"Contraseñas expuestas, además de correos y teléfonos."
+h2vnxr7z,alta,
+h37z7wnu,media,"Nombre con 'pagos': riesgo de fraude, pero sin uso activo confirmado."
+h42nacwf,alta,Contraseñas expuestas.
+h4yc3sfr,media,"Vencido en página de login: facilita interceptación o phishing, sin dar acceso."
+h4zuu5mg,alta,
+h73vea7g,baja,Sin MX y SPF -all: no envía ni recibe correo.
+h78aqp77,media,"RDP abierto, pero visto por última vez hace 262 días; si sigue abierto, sube a alta."
+h7ax5ytd,baja,DMARC p=reject y sin MX: impacto menor.
+h7fb48ut,baja,DMARC p=reject ya frena la suplantación; solo falta SPF como buena práctica.
+h7sx8dkt,baja,"Aún no vence; si vence, pasa a media."
+h958haxt,alta,"Contraseñas expuestas, además de correos y nombres."
+h99npj6d,media,"Sin DMARC; SPF con -all limita el envío, pero la suplantación no se bloquea."
+h9nqwnc7,media,"Vencido en página de login: facilita interceptación o phishing, sin dar acceso."
+ha7eqk2t,media,Sin SPF ni DMARC y con MX: suplantación posible.
+havtp8pb,media,"Certificado vencido en servidor de correo: facilita interceptación, sin dar acceso."
+hbbuzrdk,baja,
+hbzxdkcw,alta,Contraseñas expuestas.
+hccrsz3m,media,
+hdc38r7r,baja,
+hdes4662,media,"Vencido en página de login: facilita interceptación o phishing, sin dar acceso."
+hdh542c3,baja,"Librería sin soporte, pero sitio informativo sin login ni formularios y sin CVE."
+hdjpad99,media,Sin DMARC con MX: suplantación no bloqueada.
+he5aerqb,baja,"Sin MX y SPF -all: no envía ni recibe correo, impacto menor."
+heq5ax57,media,Sin DMARC con MX y SPF de envío: suplantación no bloqueada.
+heyskhcw,media,"SPF con -all limita el envío, pero sin DMARC la suplantación no se bloquea."
+hhmj99p9,media,"Solo correos y nombres: facilita phishing, no da acceso."
+hjaq666n,alta,
+hjm2tw5j,alta,Contraseñas y nombres de usuario expuestos.
+hjmhg6w4,baja,
+hk8a7zf7,baja,"Aún no vence; si vence, pasa a media."
+hk9m7kq7,baja,"Librería sin soporte en sitio informativo, sin CVE."
+hmamf84t,media,"Nombre con 'cuenta': riesgo de phishing, pero sin uso activo confirmado."
+hmw7gn4r,baja,
+hngwaeek,baja,
+hpsny58g,baja,DMARC p=reject frena la suplantación; sin MX.
+hpt28hsf,alta,Contraseñas expuestas: sirven si se reusan o siguen vigentes.
+hqdrsanz,media,
+hqs5gn3g,alta,"Es un equipo de pruebas, pero el RDP se vio abierto hace 3 días."
+hrfjkq3p,media,
+hrqbnung,baja,DMARC p=reject frena la suplantación.
+hrzaz96v,media,"RDP visto por última vez hace 290 días; si sigue abierto, sube a alta."
+ht8st3y2,media,"Versión con soporte, pero con un CVE (CVSS 5.3) en una app web; sin KEV y EPSS bajo."
+htes9dnr,alta,
+huj99qpp,media,Sin SPF ni DMARC y con MX: la suplantación no está bloqueada.
+hvt6zgzj,baja,
+hw4tdjvy,alta,
+hxe4c2x8,alta,
+hxevztgx,alta,
+hy83gfjz,media,
+hz4s8dty,media,"Certificado vencido en servidor de correo: facilita interceptación, pero no da acceso."
+hz9kh9uv,alta,"Contraseñas expuestas, además de correos y nombres."
+hzatwqv2,media,"Versión con soporte, pero con un CVE (CVSS 5.9) en una app web; sin KEV y EPSS bajo."
+hzcj8hrk,alta,
+hzdvrt3j,baja,"Librería sin soporte en sitio informativo, sin CVE."
+hzv9gtbv,baja,
+hzwffygm,media,

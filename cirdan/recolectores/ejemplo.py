@@ -2,8 +2,8 @@
 
 Sirve para probar el orquestador (#22) y la normalización (#23) sin red. Con 'reproducir' lee
 cirdan/recolectores/respuestas_grabadas/ejemplo/<dominio>/resultado.json. Con 'vivo' o 'grabar' arma un resultado fijo:
-el dominio, su www y un hallazgo spf_missing (regla del catálogo demo). No está en data_sources:
-es solo para pruebas.
+el dominio, su www y un hallazgo spf_missing (regla del catálogo, docs/codigos_reglas.md). La semilla
+db/semillas/002_dominio_prueba.sql lo pone en data_sources deshabilitado: es solo para pruebas.
 """
 import hashlib
 
@@ -12,6 +12,9 @@ from cirdan.recolectores.contrato import Activo, Grabadora, Hallazgo, Resultado
 
 FUENTE = 'ejemplo'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'ejemplo'
+
+# Código de regla -> severidad base de su regla (scoring_rules). pruebas/test_catalogo_reglas.py revisa que coincida.
+CODIGOS = {'spf_missing': 'low'}
 
 
 def crear_cliente(modo, dominio):
@@ -23,7 +26,7 @@ def _fijo(dominio):
     return {
         'activos': [{'tipo': 'domain', 'valor': dominio, 'atributos': {}},
                     {'tipo': 'subdomain', 'valor': 'www.' + dominio, 'atributos': {}}],
-        'hallazgos': [{'codigo': 'spf_missing', 'severidad': 'low', 'activo': dominio, 'titulo': titulo,
+        'hallazgos': [{'codigo': 'spf_missing', 'severidad': CODIGOS['spf_missing'], 'activo': dominio, 'titulo': titulo,
                        'evidencia': {'title': titulo, 'registro': dominio, 'observado': 'sin TXT v=spf1'},
                        'caracteristicas': {'tipo': 'spf_faltante', 'antiguedad_dias': 0, 'exposicion': 'publica',
                                            'sensibilidad': 'baja'},

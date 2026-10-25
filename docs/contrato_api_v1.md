@@ -1,11 +1,11 @@
 # Contrato de API v1 (#21)
 
-Lo que devolverá la API v1 de Cirdan, con un JSON de ejemplo por respuesta en [`api_v1/`](api_v1/). Lo usan el portal (RC-17a, #40a), el dataset de ML (#33) y, como plan B, las demos: si la API no está arriba, el portal puede leer estos archivos tal cual. Los ejemplos salen de los datos demo de `db/semillas/001_datos_demo.sql` (Acme Demo), así que la API real debe devolver lo mismo con esa base. `pruebas/test_contrato_api.py` revisa que los ejemplos cumplan el criterio de criticidad (#29) y el contrato de plugin (#13).
+Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo por respuesta en [`api_v1/`](api_v1/). El portal (RC-17a, #40a) ya lee la API v1 real con la sesión (`src/services/queries.ts` en FrontKL). Si la API no está arriba, el portal no lee estos archivos en su lugar. Siguen sirviendo de plan B en las demos. FrontKL tiene una copia en `src/mocks/api/contrato.ts`, que hoy solo usa el alta simulada de dominios (#26). El dataset de ML (#33, RC-65) todavía no los usa. Los ejemplos salen de los datos demo de `db/semillas/001_datos_demo.sql` (Acme Demo), así que la API real debe devolver lo mismo con esa base. `pruebas/test_contrato_api.py` revisa que los ejemplos cumplan el criterio de criticidad (#29) y el contrato de plugin (#13).
 
 ## Reglas generales
 
-- **Prefijo:** todo cuelga de `/api/v1`, que es lo que el portal ya tiene en `NEXT_PUBLIC_API_URL`. `/health` se queda fuera del prefijo para Docker y el monitoreo.
-- **Cliente:** cada respuesta trae solo los datos de la empresa de quien llama, porque RLS filtra en la base. En el portal la empresa sale de la sesión (cookie httpOnly) y en integraciones de la llave de API (`api_keys`). Mientras no exista el login (Germán), el modo demo sigue aceptando el encabezado `X-Organization` como la API actual.
+- **Prefijo:** todo cuelga de `/api/v1`. En el portal (FrontKL), el navegador llama a `/api/v1` en el propio portal y `next.config.ts` reenvía esas rutas a FastAPI en `API_INTERNAL_URL`, así que la cookie de sesión es del mismo sitio. Las lecturas que hace el servidor de Next van directo a `API_INTERNAL_URL` (`src/lib/apiServer.ts`). `/health` se queda fuera del prefijo para Docker y el monitoreo.
+- **Cliente:** cada respuesta trae solo los datos de la empresa de quien llama, porque RLS filtra en la base. La empresa sale de la sesión (cookie httpOnly `lt_session`), que se crea al iniciar sesión en `/api/v1/auth` con contraseña y, si la cuenta lo tiene activo, código MFA (#25). La API nunca toma la empresa de un encabezado: ninguna ruta acepta `X-Organization`. `/db/tables` y `/db/tables/{table}/rows`, que usa la página `/demo`, solo existen con `DEMO_EXPLORER=true`, también toman la empresa de la sesión y solo responden al rol `admin` (RC-58). La tabla `api_keys` existe en la base, pero la API todavía no acepta llaves de API.
 - **Nombres de campos en inglés y valores con los códigos de la base:** `critical`, `infrastructure`, `ct_logs`, `open`. El portal muestra los nombres en español con `src/config/labels.ts`. La única excepción es `caracteristicas`, que conserva las claves en español del contrato de plugin (#13) para que el dataset de ML use los mismos nombres de punta a punta.
 - **Fechas:** ISO 8601 con zona, en hora de la Ciudad de México (`2026-09-30T14:24:30-06:00`). Las que son solo día, como la vigencia de una autorización, van como `2026-12-31`.
 - **Listas:** `{"items": [...], "total": n}`. Cuando haya paginación se agregan `limit` y `offset` sin romper lo demás.
@@ -17,7 +17,7 @@ Lo que devolverá la API v1 de Cirdan, con un JSON de ejemplo por respuesta en [
 | Método y ruta | Ejemplo | Qué devuelve |
 |---|---|---|
 | `GET /api/v1/domains` | [`dominios.json`](api_v1/dominios.json) | Dominios de la empresa con su autorización, TXT, si se pueden escanear, score y conteo de hallazgos abiertos |
-| `GET /api/v1/domains/{fqdn}/findings` | [`hallazgos.json`](api_v1/hallazgos.json) | Hallazgos del dominio, de más a menos severo. `?status=open` por defecto |
+| `GET /api/v1/domains/{fqdn}/findings` | [`hallazgos.json`](api_v1/hallazgos.json) | Hallazgos abiertos del dominio, de más a menos severo. Todavía no hay filtro `?status` |
 | `GET /api/v1/domains/{fqdn}/score` | [`score.json`](api_v1/score.json) | El score más reciente con su desglose por categoría |
 | `GET /api/v1/domains/{fqdn}/score/history` | [`historico.json`](api_v1/historico.json) | Todos los scores del dominio, del más viejo al más nuevo |
 | `GET /api/v1/findings/{id}/explanation` | [`explicacion.json`](api_v1/explicacion.json) | Por qué el hallazgo tiene su severidad y cuánto suma al score |
@@ -27,10 +27,10 @@ Lo que devolverá la API v1 de Cirdan, con un JSON de ejemplo por respuesta en [
 
 | Campo | Qué es |
 |---|---|
-| `status` | `domains.status`: `pending_verification`, `verified`, `paused` o `removed` |
-| `authorization.status` | `valid`, `expired`, `revoked` o `missing`, según la autorización firmada más reciente |
+| `status` | `domains.status`: `pending_verification`, `verified` o `paused`. Los dominios en `removed` no salen en la lista |
+| `authorization.status` | `valid`, `expired`, `revoked` o `missing`. Se toma la autorización vigente y, si no hay, la que vence más tarde. Una que todavía no entra en vigor cuenta como `missing` |
 | `txt.status` | `verified` si la última consulta encontró el registro, `missing` si no |
-| `scan_eligibility` | `can_scan` es `true` solo con autorización `valid`, TXT `verified` y dominio `verified`. Si es `false`, `reasons` dice por qué: `authorization_missing`, `authorization_expired`, `authorization_revoked`, `txt_not_verified`, `domain_paused` o `domain_removed`. El orquestador (#22) vuelve a consultar el TXT justo antes de escanear, así que esto es lo que el portal muestra, no el permiso final |
+| `scan_eligibility` | `can_scan` es `true` solo con autorización `valid`, TXT `verified` y dominio `verified`. Si es `false`, `reasons` dice por qué: `authorization_missing`, `authorization_not_started`, `authorization_expired`, `authorization_revoked`, `txt_not_verified` o `domain_paused`. El orquestador (#22) vuelve a consultar el TXT justo antes de escanear, así que esto es lo que el portal muestra, no el permiso final |
 | `score`, `band` | El score más reciente y su banda (#29). `null` si nunca se ha escaneado |
 | `open_findings` | Hallazgos abiertos por severidad |
 
@@ -43,7 +43,7 @@ Lo que devolverá la API v1 de Cirdan, con un JSON de ejemplo por respuesta en [
 | `category`, `rule_code` | La categoría del reto y el código de su regla (`scoring_rules`) |
 | `source` | `data_sources.code`: `ct_logs`, `dns`, `whois`, `shodan`, `hibp` o `censys` |
 | `severity`, `base_severity` | La vigente y la de su regla. Son distintas cuando el motor la subió (#29) |
-| `status` | `open`, `resolved`, `accepted_risk` o `false_positive` |
+| `status` | Hoy siempre es `open`, porque el endpoint solo trae abiertos. En la base también existen `resolved`, `accepted_risk` y `false_positive` |
 | `recurrence` | `new` si apareció en el último escaneo, `recurring` si ya venía de antes |
 | `cve_id`, `cvss`, `epss`, `in_kev` | Datos de la CVE cuando el hallazgo tiene una. Si no, `null`, `null`, `null` y `false` |
 | `evidence` | Lo que prueba el hallazgo, sin `title`. Nunca contraseñas, tokens ni datos de brechas más allá del hecho |
@@ -59,25 +59,44 @@ Lo que devolverá la API v1 de Cirdan, con un JSON de ejemplo por respuesta en [
 | `method` | `rules` o `ml` (#36) |
 | `rule_set_version` | Versión del juego de reglas con que se calculó |
 | `reason` | `scan`, `intel_update` o `rules_change` |
-| `partial_coverage` | `true` si alguna fuente falló en ese escaneo |
+| `partial_coverage` | `true` si alguna fuente falló en ese escaneo o no pudo revisar alguno de sus códigos (`sin_cobertura`) |
 | `categories` | En `score.json`, una fila por categoría con nota, banda y peso, en el orden del reto. En `historico.json`, un objeto `{categoría: nota}` para graficar |
 | `alert` | El umbral de la empresa y si este score dispara `score.above_threshold` |
 
 ## Explicación (`explicacion.json`)
 
-Viene de `score_contributions`. `penalty` es lo que el hallazgo suma a la nota de su categoría y `factors` lo desglosa, así que la suma de `points` es `penalty`, y nunca pasa de `max_penalty` de su regla. `summary` explica en una frase por qué tiene su severidad, con el criterio de «Qué hace crítico a un hallazgo» de #29. Con `method = 'ml'`, `shap` trae la contribución de cada característica según #35, como `[{"feature": "antiguedad_dias", "value": 104, "contribution": 0.21}]`. Con `rules` es `null`.
+Viene de `score_contributions`. `penalty` es lo que el hallazgo suma a la nota de su categoría, no al score final, y `factors` lo desglosa, así que la suma de `points` es `penalty`. `max_penalty` es el tope de su regla para cada hallazgo: un hallazgo nunca suma más que eso, pero varios hallazgos de la misma regla suman cada uno su `penalty`. `summary` explica en una frase por qué tiene su severidad, con el criterio de «Qué hace crítico a un hallazgo» de #29. Con `method = 'ml'`, `shap` trae la contribución de cada característica según #35, como `[{"feature": "antiguedad_dias", "value": 104, "contribution": 0.21}]`. Con `rules` es `null`.
+
+Los textos de la regla salen del catálogo `scoring_rule_texts` (#30), uno por código, en lenguaje simple y sin siglas. Siempre llegan los tres, nunca `null`, porque la migración 003 obliga a que toda regla tenga su texto:
+
+| Campo | Qué es |
+|---|---|
+| `title` | El título del hallazgo (`evidence.title`), igual que en `hallazgos.json`. No es el de la regla |
+| `rule_title` | El título de la regla, el mismo para todos los hallazgos con ese `rule_code` |
+| `meaning` | Qué significa el hallazgo, en una o dos frases |
+| `recommendation` | Qué hacer, en una o dos frases |
 
 ## Pesos (`pesos.json`)
 
 Los del juego de reglas v1 de la base: infraestructura 30 %, identidad digital 20 %, configuración 20 % y fugas de datos 30 %, con las bandas, el piso y el umbral de `cirdan/score/criterio.py`. Emilio los confirmó para este contrato, por eso `validated_by` dice `Emilio`. Si cambian, se crea el juego v2 (#32) y se actualizan este archivo y la semilla.
+La API real devuelve `validated_by` en `null`, porque la semilla no lo llena.
 
-## Qué cambia respecto a la API actual
+`rules` trae las 30 reglas del juego v1 en orden de id: las 7 de la semilla 001 y las 23 de la semilla 004 (#14 a #20 y las previstas de #62 a #64). `pruebas/test_api_v1.py` las compara una por una con la API.
 
-La API inicial (#2) sigue igual hasta que se implemente v1. Las diferencias:
+| Campo | Qué es |
+|---|---|
+| `code`, `category`, `base_severity` | El código de la regla, su categoría y la severidad con que nace un hallazgo |
+| `weight` | Peso dentro de su categoría. Con la suma por categoría no cambia la nota, y las 23 reglas nuevas llevan `1.0` |
+| `max_penalty` | Lo más que suma cada hallazgo de esta regla a la nota de su categoría. El tope es por hallazgo, no por regla |
+| `title`, `meaning`, `recommendation` | Título, qué significa y qué hacer, de `scoring_rule_texts` (#30). Son los mismos que la explicación da como `rule_title`, `meaning` y `recommendation` |
+
+## Qué cambia respecto a la API inicial
+
+La API v1 ya existe en `cirdan/api/v1.py`. La API inicial (#2) sigue en `cirdan/api/main.py`, sin prefijo y ya con sesión. Las diferencias:
 
 - Prefijo `/api/v1`.
 - Códigos de la base en lugar de nombres para mostrar (`high`, no `High`).
 - Más campos: ids, `scan_eligibility`, `caracteristicas`, piso y alerta.
 - El histórico, la explicación y los pesos tienen endpoint propio.
 
-En el portal, `FindingSource` cambia `ct` por `ct_logs` y agrega `whois`.
+En el portal, `FindingSource` ya usa `ct_logs` en lugar de `ct` y ya incluye `whois` (`src/types/findings.ts`).
