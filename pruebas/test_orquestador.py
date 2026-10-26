@@ -211,7 +211,8 @@ class Orquestador(unittest.TestCase):
         resumen = self.en_vivo(s, [FALLA, abandonar_y_responder], lambda segundos: None)
         self.assertEqual(resumen['status'], 'failed')
         run = self.corrida(s.scan_id)
-        self.assertEqual((run['status'], run['error']), ('failed', orquestador.ERROR_ABANDONO))  # no 'succeeded'
+        # sigue como la dejó el abandono, que conserva el error del primer intento: no 'succeeded' sin error
+        self.assertEqual((run['status'], run['attempt'], run['error']), ('failed', 1, FALLA.error))
 
     def test_3i_una_fuente_sin_cupo_no_se_reintenta_y_la_fila_suma_sus_intentos(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
