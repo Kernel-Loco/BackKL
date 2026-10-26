@@ -258,18 +258,27 @@ class Reglas(unittest.TestCase):
             self.assertEqual(explicacion[campo], valor, '%r: %s de docs/api_v1/explicacion.json no coincide con su '
                                                         'texto de scoring_rule_texts' % (code, campo))
 
-    def test_10_los_textos_de_las_reglas_osint_tienen_revisor(self):
-        # backlog.md fila 30: los textos de las reglas OSINT (#14 a #20) los revisa Ernesto y el resto alguien de otra área
+    def test_10_los_textos_osint_los_firma_ernesto_y_el_resto_otra_area(self):
+        # backlog.md fila 30: los textos de las reglas OSINT (#14 a #20) los revisa Ernesto y el resto alguien de otra área.
+        # Cuenta quién firmó el texto que queda al final: un UPDATE que cambia el texto sin reviewed_by lo deja sin firma
         revisor = {}
         for ruta in ARCHIVOS_SQL:
             for asignaciones, code in UPDATE_TEXTO.findall(ruta.read_text(encoding='utf-8')):
                 m = re.search(r"\breviewed_by\s*=\s*'([^']*)'", asignaciones)
                 if m:
-                    revisor[code] = m.group(1)
-        osint = sorted(f[1] for f in FILAS_DOC if 14 <= int(re.match(r'#(\d+)', f[5]).group(1)) <= 20)
+                    revisor[code] = m.group(1).strip()
+                elif CAMPO_TEXTO.search(asignaciones):
+                    revisor.pop(code, None)
+        osint, resto = [], []
+        for fila in FILAS_DOC:
+            numero = re.match(r'#(\d+)', fila[5])
+            self.assertIsNotNone(numero, '%r: su recolector en docs/codigos_reglas.md no empieza con #' % fila[1])
+            (osint if 14 <= int(numero.group(1)) <= 20 else resto).append(fila[1])
         self.assertEqual(len(osint), 25, 'docs/codigos_reglas.md ya no tiene 25 reglas de #14 a #20')
-        self.assertEqual([c for c in osint if not revisor.get(c, '').strip()], [],
-                         'reglas OSINT con reviewed_by vacío en las migraciones de db/')
+        self.assertEqual([c for c in sorted(osint) if revisor.get(c) != 'ErnestoDL'], [],
+                         'reglas OSINT cuyo texto final no firmó ErnestoDL en las migraciones de db/')
+        self.assertEqual([c for c in sorted(resto) if revisor.get(c) == 'ErnestoDL'], [],
+                         'reglas fuera de OSINT firmadas por ErnestoDL: las revisa alguien de otra área')
 
 
 if __name__ == '__main__':

@@ -8,30 +8,66 @@
 -- Un UPDATE por código con WHERE code = '...', como pide
 -- docs/codigos_reglas.md, así pruebas/test_catalogo_reglas.py lee el
 -- texto que queda al final. Nunca se edita la 003.
--- Corre en una sola transacción y se puede correr otra vez sin error.
+-- Corre en una sola transacción. Se puede correr otra vez sin error y
+-- sin cambiar textos, pero vuelve a mover updated_at.
 -- En una base que ya existe se aplica a mano (ver db/README.md).
 -- =====================================================================
 
 BEGIN;
 
--- Sin los textos de la 003, un UPDATE no cambiaría nada y no daría error.
+-- Antes de cambiar nada revisa las 29 filas. Sin los textos de la 003,
+-- un UPDATE no cambiaría nada y no daría error. Si un texto no es el de
+-- la 003 ni el de esta migración, o una regla OSINT la firmó otra
+-- persona, alguien lo cambió después y esta migración no lo pisa.
+-- antes y despues son el md5 del título, qué significa y qué hacer,
+-- separados por un salto de línea.
 DO $$
 DECLARE
   faltan text;
+  distintos text;
 BEGIN
-  SELECT string_agg(c, ', ') INTO faltan
-    FROM unnest(ARRAY[
-    'breach_exposure', 'cert_expired', 'outdated_software', 'exposed_rdp',
-    'dmarc_missing', 'spf_missing', 'lookalike_domain', 'cert_expiring_soon',
-    'domain_expiring_soon', 'spf_allow_all', 'dmarc_policy_none', 'secret_in_public_repo',
-    'email_in_public_commits', 'breach_exposure_old', 'breach_exposure_no_passwords', 'personal_email_exposed',
-    'email_pattern_exposed', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database',
-    'exposed_ot_device', 'exposed_iot_device', 'exposed_service', 'known_vulnerability',
-    'server_version_disclosed', 'public_bucket', 'subdomain_takeover_risk', 'exposed_api_docs',
-    'secret_in_container_image']) AS c
-   WHERE NOT EXISTS (SELECT 1 FROM scoring_rule_texts t WHERE t.code = c);
+  SELECT string_agg(e.code, ', ') FILTER (WHERE t.code IS NULL),
+         string_agg(e.code, ', ') FILTER (WHERE t.code IS NOT NULL AND (
+           md5(t.title || E'\n' || t.meaning || E'\n' || t.recommendation) NOT IN (e.antes, e.despues)
+           OR t.reviewed_by <> e.revisor))
+    INTO faltan, distintos
+    FROM (VALUES
+      ('breach_exposure', 'dc3ebce1cc103e6f701fb216e6c04c53', '6e6be463cb92e99bb13e92c09427eac6', 'ErnestoDL'),
+      ('cert_expired', '81603cf235798b119d0694e30ef2f1df', '10ce5ef8c40da02e8c11ff1001f61b36', 'ErnestoDL'),
+      ('outdated_software', '835bd900d65823da54903559404afddb', '4c933e1e05689371e1762e1f4be97040', 'ErnestoDL'),
+      ('exposed_rdp', '7f0774dbeffda84a64f9c5cb3a845105', 'febddd463aa1aa2e107b5848832965a6', 'ErnestoDL'),
+      ('dmarc_missing', '24a9229b2d315dc2e28178271494e575', '1ad311237af2c08a8cfda7a9f567ed1a', 'ErnestoDL'),
+      ('spf_missing', 'b2b56dca2b6200cf0f022cb66f3daf09', '717688b5c0965b36c3a56afc302a1436', 'ErnestoDL'),
+      ('lookalike_domain', '84cbc3d84ce3b301f9b5488eac4f4ef8', '038659fed0157a563fe4bc08305bb77b', 'ErnestoDL'),
+      ('cert_expiring_soon', '0a2ac71ab9463406dde3a445f8121292', 'd6cf7363b3cd2649901616798cf135bb', 'ErnestoDL'),
+      ('domain_expiring_soon', '540a9e94fbc0e2d51805976c7b7b25de', '540a9e94fbc0e2d51805976c7b7b25de', 'ErnestoDL'),
+      ('spf_allow_all', '48c305e835367cb96555c43524bed2f6', '48c305e835367cb96555c43524bed2f6', 'ErnestoDL'),
+      ('dmarc_policy_none', 'e39ace3f5d4ac18c99ffdaa25679f614', 'b48ec79a55433d3d00e0411209cdd42f', 'ErnestoDL'),
+      ('secret_in_public_repo', '3a1833b53f59eda05a15c145d109d3fa', '3a1833b53f59eda05a15c145d109d3fa', 'ErnestoDL'),
+      ('email_in_public_commits', '192406672e3b7b22a68f5d0678327241', 'a1f3b277953bcded7c30ad6f19f3b613', 'ErnestoDL'),
+      ('breach_exposure_old', '6f8562452ae40ceb3ee7a038075f053c', 'fd0900a2162918bb29568e3ed75a3c4e', 'ErnestoDL'),
+      ('breach_exposure_no_passwords', '723e7758c2faf4f9eb5fc558594aa1de', 'da54e5ed0513185f459e1769009e87b1', 'ErnestoDL'),
+      ('personal_email_exposed', 'c18d9477eefbad5809bea1f839eb6c64', 'c18d9477eefbad5809bea1f839eb6c64', 'ErnestoDL'),
+      ('email_pattern_exposed', '26c24e8174a4882b1d06788e9bc32b70', '26c24e8174a4882b1d06788e9bc32b70', 'ErnestoDL'),
+      ('exposed_remote_admin', '49a8cfc818ec49928171be102b594d6a', '643b88fb331a26fe4094c18bd2e2ba6c', 'ErnestoDL'),
+      ('exposed_file_sharing', 'e2097bd189166b5018b3686e8995cdd2', 'e2ea47142eb06c1752b24b89c02a21b6', 'ErnestoDL'),
+      ('exposed_database', '495cecd62f2ef5c0c7a0ea55d6a7b394', '7e0a68821aaa073fe34c7148f0c1abc7', 'ErnestoDL'),
+      ('exposed_ot_device', '8ee624f7e9cacc7610cb2ec29b42ebea', '2fbee490988aa7d855fa72e6d5e52719', 'ErnestoDL'),
+      ('exposed_iot_device', 'f0c3ab9a5ff21947973fed92261e5073', '7f40a31fc662701e9c5ef02067959175', 'ErnestoDL'),
+      ('exposed_service', '3d3b7e3e7ab48486c524013eaafc67a0', '319981e59c1c334753c1e1e10a1670e2', 'ErnestoDL'),
+      ('known_vulnerability', '95f80212e8175ebf6394c95a85ac2a73', '95f80212e8175ebf6394c95a85ac2a73', 'ErnestoDL'),
+      ('server_version_disclosed', 'cfb25d9fe8ed10d68be1cb5463032196', '58a775947940cd04883d8ac88e5c0917', 'ErnestoDL'),
+      ('public_bucket', '5c8eda0e56e741b1c4a75c6b485b28bb', '40ad96bf428a5ba3601c22fdebf2804b', NULL),
+      ('subdomain_takeover_risk', '9d54f85297c9fd791c95a1e2332b811e', 'b688922c68a6897921bb55aa7fc81a9f', NULL),
+      ('exposed_api_docs', '99a6f34baa18bd18329a7e0f83413ee5', 'fa31331d086fa694706ff67158e2c175', NULL),
+      ('secret_in_container_image', '1b7f1aa78c604142f83fd58d68f92d25', '4f3a3b6ee76aa43037c9c6dc8f9aa088', NULL)
+    ) AS e(code, antes, despues, revisor)
+    LEFT JOIN scoring_rule_texts t ON t.code = e.code;
   IF faltan IS NOT NULL THEN
     RAISE EXCEPTION 'Faltan los textos de la migración 003 para: %. Aplica primero la 003.', faltan;
+  END IF;
+  IF distintos IS NOT NULL THEN
+    RAISE EXCEPTION 'Estos textos no son los de la 003 ni los de la 005, o los firmó otra persona: %. Revísalos antes de aplicarla.', distintos;
   END IF;
 END $$;
 

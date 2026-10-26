@@ -98,13 +98,18 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 
 Las dos corren en una sola transacción cada una y se pueden correr otra vez sin error: la 003 no repite la tabla, los textos ni la FK, y la semilla 004 salta las reglas que ya existen.
 
-La 005 solo cambia textos y `reviewed_by`, y la API los lee de la base en cada petición, así que no hace falta reconstruirla. Necesita la 003, y si no la tiene, falla sin cambiar nada:
+La 005 solo cambia textos y `reviewed_by`, y la API los lee de la base en cada petición, así que no hace falta reconstruirla si ya la reconstruiste después de la 003. Desde el `git pull` hasta aplicarla, `pruebas/test_api_v1.py` falla porque `docs/api_v1/pesos.json` y `explicacion.json` ya traen los textos nuevos. Antes de aplicarla, respalda la base. El respaldo queda dentro del contenedor y se pierde si se recrea:
 
 ```bash
+MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 pg_dump -U postgres -Fc -f /tmp/cirdan_antes_005.dump cirdan
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/005_textos_revisados.sql
 ```
 
-Corre en una sola transacción y se puede correr otra vez sin error.
+Corre en una sola transacción. Antes de cambiar nada revisa las 29 filas que toca, y falla sin cambiar nada si falta un texto de la 003, si un texto no es el de la 003 ni el de la 005 o si una regla OSINT la firmó otra persona. Se puede correr otra vez sin error y sin cambiar textos, pero vuelve a mover `updated_at`. Esta consulta dice si ya está aplicada: da `25|5` (las 25 reglas OSINT firmadas por ErnestoDL y las 5 de #62 a #64 sin revisar) y antes de la 005 da `0|30`. Ya aplicada, `python -m unittest -v pruebas/test_api_v1.py` pasa:
+
+```bash
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FILTER (WHERE reviewed_by = 'ErnestoDL'), count(*) FILTER (WHERE reviewed_by IS NULL) FROM scoring_rule_texts"
+```
 
 ## Decisiones y desviaciones respecto al DBML
 
