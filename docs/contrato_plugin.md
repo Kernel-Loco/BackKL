@@ -79,7 +79,7 @@ Una fuente que respondió con códigos en `sin_cobertura` queda `succeeded` en `
 Hay dos niveles:
 
 - **Dentro de una corrida**, para fallas de segundos como un 502 pasajero: `con_reintentos()` hace hasta 3 intentos, con esperas de 5 y 15 segundos entre ellos. Un error HTTP 4xx, salvo 408 y 429, no se reintenta y lo interpreta el recolector, porque la fuente sí respondió: un 404 de HIBP significa «sin brechas». crt.sh sigue esta misma regla en su cliente.
-- **Entre corridas**, en `scan_source_runs`: `siguiente_estado()` da el `status`, el `attempt` y el `next_retry_at`.
+- **Entre corridas**, en `scan_source_runs`: `siguiente_estado()` da el `status`, el `attempt` y el `next_retry_at`. En vivo, el orquestador (#22) espera ese tiempo y vuelve a correr la fuente en el mismo escaneo, en la misma fila. Al reproducir o grabar no reintenta y la fuente queda en `failed`.
 
 | Corrida | Resultado | Queda en |
 |---|---|---|

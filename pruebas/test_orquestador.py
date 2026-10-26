@@ -12,6 +12,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import psycopg
@@ -45,6 +46,12 @@ def responde(*valores):
     return DnsSimulado(ConsultaTxt(tuple(valores)))
 
 
+# Resultados de una corrida, para probar los reintentos sin recolector ni red
+FALLA = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[],
+                        error='crt.sh no respondió')
+BIEN = SimpleNamespace(estado='succeeded', activos=[{}], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[], error='')
+
+
 class Orquestador(unittest.TestCase):
 
     def setUp(self):
@@ -62,6 +69,16 @@ class Orquestador(unittest.TestCase):
 
     def uno(self, sql, *params):
         return self.conn.execute(sql, params).fetchone()
+
+    def en_vivo(self, s, resultados, dormir):
+        """Corre `ejemplo` en vivo con estos resultados seguidos, sin red ni esperas reales."""
+        seguidos = iter(resultados)
+        with mock.patch.object(orquestador, 'ejecutar', lambda *a, **k: next(seguidos)), \
+                mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+            return orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], conn=self.conn, dormir=dormir)
+
+    def corrida(self, scan_id):
+        return self.uno('SELECT status, attempt, next_retry_at, error FROM scan_source_runs WHERE scan_id = %s', scan_id)
 
     # --------------------------------------------------------------------- acepta
 
@@ -86,7 +103,7 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(run['raw_payload']['hallazgos'], 1)
         self.assertEqual(self.uno('SELECT status FROM scans WHERE id = %s', s.scan_id)['status'], 'completed')
 
-    def test_3_una_fuente_que_falla_deja_el_escaneo_parcial_y_programa_el_reintento(self):
+    def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         # crt.sh no tiene respuestas grabadas de acme-demo.mx: falla sin salir a la red
         resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo', 'ct_logs'], modo='reproducir',
@@ -94,7 +111,8 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['status'], 'partial')
         fallida = self.uno("SELECT r.status, r.attempt, r.next_retry_at IS NOT NULL AS reintento, r.error FROM scan_source_runs r "
                            "JOIN data_sources d ON d.id = r.source_id WHERE r.scan_id = %s AND d.code = 'ct_logs'", s.scan_id)
-        self.assertEqual((fallida['status'], fallida['attempt'], fallida['reintento']), ('retrying', 1, True))
+        # la respuesta grabada sería la misma: no hay reintento que esperar
+        self.assertEqual((fallida['status'], fallida['attempt'], fallida['reintento']), ('failed', 0, False))
         self.assertTrue(fallida['error'])
 
     def test_3b_una_fuente_con_codigos_sin_cobertura_deja_el_escaneo_parcial(self):
@@ -131,6 +149,37 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['stats']['rules_without_coverage'], ['lookalike_domain'])
         self.assertEqual(resumen['sources'][0]['hallazgos'], 2)  # el vencido y el que vence pronto, ningún parecido
 
+    def test_3d_en_vivo_la_fuente_que_falla_se_reintenta_en_el_mismo_escaneo(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        esperas = []
+        resumen = self.en_vivo(s, [FALLA, FALLA, BIEN], esperas.append)
+        self.assertEqual(sum(esperas), 6 * 60)  # 1 y 5 minutos, de a lo más LATIDO segundos
+        self.assertLessEqual(max(esperas), orquestador.LATIDO)
+        run = self.corrida(s.scan_id)
+        self.assertEqual((run['status'], run['attempt'], run['next_retry_at'], run['error']), ('succeeded', 2, None, None))
+        self.assertEqual(self.uno('SELECT count(*) AS n FROM scan_source_runs WHERE scan_id = %s', s.scan_id)['n'], 1)
+        self.assertEqual(resumen['status'], 'completed')
+
+    def test_3e_en_vivo_despues_del_cuarto_intento_la_fuente_queda_fallida(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        esperas = []
+        resumen = self.en_vivo(s, [FALLA] * 4, esperas.append)
+        self.assertEqual(sum(esperas), 31 * 60)  # 1, 5 y 25 minutos
+        run = self.corrida(s.scan_id)
+        self.assertEqual((run['status'], run['attempt'], run['next_retry_at']), ('failed', 3, None))
+        self.assertEqual(resumen['status'], 'failed')  # su única fuente falló
+
+    def test_3f_si_dan_el_escaneo_por_caido_mientras_espera_deja_de_reintentar(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+
+        def cortar(segundos):  # otra petición lo da por caído durante la espera
+            self.conn.execute("UPDATE scans SET status = 'failed' WHERE id = %s", (s.scan_id,))
+        resumen = self.en_vivo(s, [FALLA, BIEN], cortar)
+        self.assertEqual(resumen['status'], 'failed')
+        run = self.corrida(s.scan_id)
+        self.assertEqual((run['status'], run['next_retry_at']), ('failed', None))
+        self.assertIsNone(self.uno("SELECT 1 FROM audit_log WHERE entity_id = %s AND action = 'scan.finished'", s.scan_id))
+
     # --------------------------------------------------------------------- rechaza
 
     def test_4_rechaza_sin_autorizacion_y_ni_consulta_el_dns(self):
@@ -145,6 +194,19 @@ class Orquestador(unittest.TestCase):
         s = self.solicitar('old-example.net', responde('cirdan-verification=3d7f9b1e5c82'))
         self.assertFalse(s.aceptada)
         self.assertIn('authorization_expired', s.motivos)
+
+    def test_5b_si_el_trigger_rechaza_el_motivo_sale_de_la_base_y_no_del_texto_del_error(self):
+        """Segundo candado: la carta se revoca entre la revisión y la fila de scans, y el trigger la rechaza."""
+        carta = self.uno("SELECT a.id::text FROM domain_authorizations a JOIN domains d ON d.id = a.domain_id "
+                         "WHERE d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL "
+                         "AND current_date BETWEEN a.valid_from AND a.valid_until ORDER BY a.valid_until DESC LIMIT 1")['id']
+        consulta = ConsultaTxt((TXT_ACME,))
+
+        def revoca_y_responde(fqdn):
+            self.conn.execute('UPDATE domain_authorizations SET revoked_at = now() WHERE id = %s', (carta,))
+            return consulta
+        s = self.solicitar('acme-demo.mx', revoca_y_responde)
+        self.assertEqual((s.aceptada, s.motivos), (False, ['authorization_revoked']))  # antes salía authorization_expired
 
     def test_6_rechaza_si_el_txt_no_coincide_y_guarda_la_evidencia(self):
         s = self.solicitar('acme-demo.mx', responde('cirdan-verification=otro-token'))
@@ -169,6 +231,28 @@ class Orquestador(unittest.TestCase):
         self.assertTrue(self.solicitar('acme-demo.mx', responde(TXT_ACME)).aceptada)
         segunda = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         self.assertEqual((segunda.aceptada, segunda.motivos), (False, ['scan_in_progress']))
+
+    def test_9b_un_escaneo_sin_marca_de_vida_se_da_por_caido_y_deja_pedir_otro(self):
+        primero = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        fuente = self.uno("SELECT id::text FROM data_sources WHERE code = 'ejemplo'")['id']
+        self.conn.execute("INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status, attempt, next_retry_at) "
+                          "VALUES (%s, %s, %s, 'retrying', 1, now())", (ACME, primero.scan_id, fuente))
+        # la API se cortó a mitad: el escaneo quedó en running y nadie marcó que siguiera vivo
+        self.conn.execute("UPDATE scans SET updated_at = now() - interval '31 minutes' WHERE id = %s", (primero.scan_id,))
+        segundo = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(segundo.aceptada, segundo.motivos)
+        viejo = self.uno('SELECT status, finished_at IS NOT NULL AS cerrado, stats FROM scans WHERE id = %s', primero.scan_id)
+        self.assertEqual((viejo['status'], viejo['cerrado'], viejo['stats']['error']), ('failed', True, orquestador.ERROR_ABANDONO))
+        run = self.corrida(primero.scan_id)
+        self.assertEqual((run['status'], run['next_retry_at'], run['error']), ('failed', None, orquestador.ERROR_ABANDONO))
+        self.assertTrue(self.uno("SELECT 1 FROM audit_log WHERE entity_id = %s AND action = 'scan.abandoned'", primero.scan_id))
+
+    def test_9c_con_marca_de_vida_reciente_sigue_en_curso(self):
+        primero = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.conn.execute("UPDATE scans SET updated_at = now() - interval '29 minutes' WHERE id = %s", (primero.scan_id,))
+        segundo = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertEqual((segundo.aceptada, segundo.motivos), (False, ['scan_in_progress']))
+        self.assertEqual(self.uno('SELECT status FROM scans WHERE id = %s', primero.scan_id)['status'], 'running')
 
     def test_10_un_dominio_de_otra_empresa_no_existe_para_mi(self):
         s = self.solicitar('olmardo.com', responde('cirdan-verification=ab439d2b39a7'))
