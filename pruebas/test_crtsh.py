@@ -575,6 +575,22 @@ class VigenciaReal(unittest.TestCase):
         self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
         self.assertTrue(any('No se pudo comprobar en DNS si dev.acme-demo.mx' in a for a in res.avisos))
 
+    def test_11_titulo_de_por_vencer_en_singular_y_con_menos_de_un_dia(self):
+        certs = [cert(53, ['horas.acme-demo.mx'], iso(-9), iso(0.5)),
+                 cert(54, ['uno.acme-demo.mx'], iso(-9), iso(1.5)),
+                 cert(55, ['dos.acme-demo.mx'], iso(-9), iso(2.5)),
+                 cert(56, ['justo1.acme-demo.mx'], iso(-9), iso(1)),   # justo un día: ya no es menos de un día
+                 cert(57, ['justo0.acme-demo.mx'], iso(-9), iso(0))]   # vence en este segundo: aún no está vencido
+        res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': certs}), parecidos=False)
+        por_vencer = {h.activo: (h.titulo, h.evidencia['dias_para_vencer'])
+                      for h in res.hallazgos if h.codigo == 'cert_expiring_soon'}
+        self.assertEqual(por_vencer, {
+            'horas.acme-demo.mx': ('El certificado de horas.acme-demo.mx vence en menos de un día', 0),
+            'uno.acme-demo.mx': ('El certificado de uno.acme-demo.mx vence en 1 día', 1),
+            'dos.acme-demo.mx': ('El certificado de dos.acme-demo.mx vence en 2 días', 2),
+            'justo1.acme-demo.mx': ('El certificado de justo1.acme-demo.mx vence en 1 día', 1),
+            'justo0.acme-demo.mx': ('El certificado de justo0.acme-demo.mx vence en menos de un día', 0)})
+
     def test_7_resolvedor_del_sistema(self):
         casos = [(None, True), (socket.gaierror(socket.EAI_NONAME, 'no existe'), False),
                  (socket.gaierror(socket.EAI_AGAIN, 'temporal'), None), (OSError('red'), None)]
