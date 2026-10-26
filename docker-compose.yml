@@ -59,8 +59,8 @@ services:
       # publicado (el portal y el host): la puerta de enlace de la red de Docker. Así el bloqueo
       # por IP es uno solo para todos. En el despliegue (#49) va la IP o el CIDR con que la API ve
       # llegar al portal (con el portal en el host, esa puerta de enlace, que da docker network
-      # inspect), detrás de un proxy que agregue la IP real al final del encabezado. "*" solo para
-      # una prueba local.
+      # inspect), detrás de un proxy que agregue la IP real al final del encabezado. La subred no
+      # está fija: revisa ese valor si se recrea la red. "*" solo para una prueba local.
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       # Dominios que el orquestador puede consultar en vivo (DNS y fuentes). Los de la demo
       # (acme-demo.mx...) no son del equipo: nunca en vivo. En producción, "*".
