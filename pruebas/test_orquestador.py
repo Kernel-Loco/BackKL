@@ -217,6 +217,16 @@ class Orquestador(unittest.TestCase):
         fuente = resumen['sources'][0]
         self.assertEqual((fuente['status'], fuente['consultas']), ('succeeded', 3))
         self.assertEqual(fuente['avisos'], ['Intento 1: crt.sh no respondió', 'Intento 2: crt.sh no respondió'])
+        guardado = self.uno('SELECT raw_payload FROM scan_source_runs WHERE scan_id = %s', s.scan_id)['raw_payload']
+        self.assertEqual((guardado['consultas'], guardado['avisos']), (3, fuente['avisos']))  # `ejemplo` guarda raw_payload
+
+    def test_3i2_una_fuente_sin_cupo_tambien_se_reintenta(self):
+        """crt.sh caído y Cert Spotter sin cupo: crt.sh no tiene cupo y puede volver en un minuto."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        sin_cupo = SimpleNamespace(**dict(vars(FALLA), error='crt.sh no respondió. Cert Spotter no respondió a '
+                                          'acme-demo.mx después de 1 intento (llegó a su límite de consultas, Retry-After 3600 s)'))
+        resumen = self.en_vivo(s, [sin_cupo, BIEN], lambda segundos: None)
+        self.assertEqual(resumen['sources'][0]['status'], 'succeeded')
 
     def test_3j_mientras_corre_una_fuente_un_hilo_marca_vida_y_para_al_terminar(self):
         latidos = []
@@ -238,6 +248,16 @@ class Orquestador(unittest.TestCase):
                 time.sleep(0.3)
         self.assertTrue(1 <= len(latidos) <= 5, latidos)  # una corrida colgada deja de marcar vida
 
+    def test_3k2_si_un_latido_falla_queda_un_aviso_en_el_log(self):
+        def falla(org, scan_id, conn=None):
+            raise psycopg.OperationalError('la base no respondió')
+        with mock.patch.object(orquestador, 'LATIDO', 0.01), mock.patch.object(orquestador, '_latido', falla), \
+                self.assertLogs('cirdan.orquestador', 'WARNING') as logs:
+            with orquestador._latiendo(ACME, 'escaneo', None):
+                time.sleep(0.1)
+            time.sleep(0.05)
+        self.assertIn('No se pudo marcar vida del escaneo escaneo: la base no respondió', logs.output[0])
+
     def test_3l_cada_paso_de_la_espera_escribe_la_marca_de_vida(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         frescas = []
@@ -254,6 +274,7 @@ class Orquestador(unittest.TestCase):
 
         @contextlib.contextmanager
         def latiendo(org, scan_id, conn):
+            self.assertEqual((org, scan_id), (ACME, s.scan_id))
             dentro.append(True)
             yield
             dentro.append(False)
@@ -349,6 +370,13 @@ class Orquestador(unittest.TestCase):
             orquestador.marcar_fallido(ACME, s.scan_id, KeyboardInterrupt())  # Ctrl+C no trae texto
         run = self.corrida(s.scan_id)
         self.assertEqual((run['status'], run['next_retry_at'], run['error']), ('failed', None, 'KeyboardInterrupt'))
+
+    def test_9e_marcar_fallido_con_ctrl_c_deja_el_motivo_en_el_escaneo(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(self.conn)):
+            orquestador.marcar_fallido(ACME, s.scan_id, KeyboardInterrupt())
+        scan = self.uno('SELECT status, stats FROM scans WHERE id = %s', s.scan_id)
+        self.assertEqual((scan['status'], scan['stats']['error']), ('failed', 'KeyboardInterrupt'))
 
     def test_10_un_dominio_de_otra_empresa_no_existe_para_mi(self):
         s = self.solicitar('olmardo.com', responde('cirdan-verification=ab439d2b39a7'))
