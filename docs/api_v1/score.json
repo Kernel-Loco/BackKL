@@ -6,6 +6,7 @@
   "weighted": 68,
   "floor": 60,
   "floor_applied": false,
+  "floor_message": null,
   "critical_open": 1,
   "method": "rules",
   "rule_set_version": 1,

@@ -55,6 +55,7 @@ Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo
 |---|---|
 | `score`, `band` | El score final y su banda |
 | `weighted`, `floor`, `floor_applied` | La suma ponderada, el piso por hallazgos críticos y si el piso subió el score. El portal muestra el aviso del piso cuando `floor_applied` es `true` (#29) |
+| `floor_message` | Explicación en español del piso cuando aplica; `null` si el ponderado ya alcanza el mínimo |
 | `critical_open` | Hallazgos que cuentan para el piso: `critical` y `open` o `accepted_risk` |
 | `method` | `rules` o `ml` (#36) |
 | `rule_set_version` | Versión del juego de reglas con que se calculó |

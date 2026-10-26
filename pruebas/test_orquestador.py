@@ -25,6 +25,7 @@ from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
 from cirdan.recolectores import certspotter, crtsh
+from cirdan.recolectores.contrato import Activo, Resultado
 from pruebas.test_certspotter import AHORA, RespaldoSimulado
 from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado
 
@@ -51,7 +52,7 @@ def responde(*valores):
 # Resultados de una corrida, para probar los reintentos sin recolector ni red
 FALLA = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[],
                         error='crt.sh no respondió')
-BIEN = SimpleNamespace(estado='succeeded', activos=[{}], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[], error='')
+BIEN = Resultado('acme-demo.mx', 'ejemplo', activos=[Activo('domain', 'acme-demo.mx')], consultas=1)
 
 
 class Orquestador(unittest.TestCase):
@@ -108,6 +109,30 @@ class Orquestador(unittest.TestCase):
         self.assertEqual((run['status'], run['attempt']), ('succeeded', 0))
         self.assertEqual(run['raw_payload']['hallazgos'], 1)
         self.assertEqual(self.uno('SELECT status FROM scans WHERE id = %s', s.scan_id)['status'], 'completed')
+        score = self.uno('SELECT id::text, score, category_scores, partial_coverage FROM domain_scores WHERE scan_id = %s',
+                 s.scan_id)
+        self.assertIsNotNone(score)
+        self.assertFalse(score['partial_coverage'])
+        self.assertTrue(0 <= score['score'] <= 100)
+        self.assertIn('configuration', score['category_scores'])
+        aportes = self.uno('SELECT count(*) AS n FROM score_contributions WHERE score_id = %s', score['id'])['n']
+        hallazgos_vigentes = self.uno("SELECT count(*) AS n FROM findings WHERE domain_id = %s "
+                          "AND status IN ('open', 'accepted_risk')", s.domain_id)['n']
+        self.assertEqual(aportes, hallazgos_vigentes)
+
+        conteo_activos = self.uno('SELECT count(*) AS n FROM assets WHERE domain_id = %s', s.domain_id)['n']
+        conteo_hallazgos = self.uno('SELECT count(*) AS n FROM findings WHERE domain_id = %s', s.domain_id)['n']
+        self.conn.execute("UPDATE findings SET status = 'resolved', resolved_at = now() WHERE domain_id = %s "
+                  "AND rule_id = (SELECT id FROM scoring_rules WHERE code = 'spf_missing' "
+                  "AND rule_set_id = '90000000-0000-4000-8000-000000000001')", (s.domain_id,))
+        repetido = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        orquestador.correr(ACME, repetido.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
+        self.assertEqual(self.uno('SELECT count(*) AS n FROM assets WHERE domain_id = %s', s.domain_id)['n'], conteo_activos)
+        self.assertEqual(self.uno('SELECT count(*) AS n FROM findings WHERE domain_id = %s', s.domain_id)['n'], conteo_hallazgos)
+        self.assertEqual(self.uno("SELECT status FROM findings WHERE domain_id = %s AND rule_id = "
+                      "(SELECT id FROM scoring_rules WHERE code = 'spf_missing' "
+                      "AND rule_set_id = '90000000-0000-4000-8000-000000000001')",
+                      s.domain_id)['status'], 'open')
 
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
@@ -120,6 +145,8 @@ class Orquestador(unittest.TestCase):
         # la respuesta grabada sería la misma: no hay reintento que esperar
         self.assertEqual((fallida['status'], fallida['attempt'], fallida['reintento']), ('failed', 0, False))
         self.assertTrue(fallida['error'])
+        score = self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertTrue(score['partial_coverage'])
 
     def test_3b_una_fuente_con_codigos_sin_cobertura_deja_el_escaneo_parcial(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
@@ -136,6 +163,8 @@ class Orquestador(unittest.TestCase):
         run = self.uno('SELECT status, attempt FROM scan_source_runs WHERE scan_id = %s', s.scan_id)
         self.assertEqual((run['status'], run['attempt']), ('succeeded', 0))
         self.assertEqual(self.uno('SELECT status FROM scans WHERE id = %s', s.scan_id)['status'], 'partial')
+        score = self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertTrue(score['partial_coverage'])
 
     def test_3c_un_escaneo_en_vivo_nunca_busca_dominios_parecidos(self):
         """Lo que corre POST /api/v1/domains/{fqdn}/scans: crt.sh solo consulta el dominio autorizado. El crt.sh es

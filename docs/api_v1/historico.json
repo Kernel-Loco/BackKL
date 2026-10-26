@@ -1,15 +1,15 @@
 {
   "domain": "acme-demo.mx",
   "items": [
-    {"score_id": "a0000000-0000-4000-8000-0000000000a1", "computed_at": "2026-09-02T10:35:00-06:00", "score": 29, "band": "low", "weighted": 29, "floor": 0, "floor_applied": false, "critical_open": 0, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": false,
+    {"score_id": "a0000000-0000-4000-8000-0000000000a1", "computed_at": "2026-09-02T10:35:00-06:00", "score": 29, "band": "low", "weighted": 29, "floor": 0, "floor_applied": false, "floor_message": null, "critical_open": 0, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": false,
      "categories": {"infrastructure": 50, "digital_identity": 40, "configuration": 30, "data_leaks": 0}},
-    {"score_id": "a0000000-0000-4000-8000-0000000000a2", "computed_at": "2026-09-09T14:24:00-06:00", "score": 33, "band": "low", "weighted": 33, "floor": 0, "floor_applied": false, "critical_open": 0, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": false,
+    {"score_id": "a0000000-0000-4000-8000-0000000000a2", "computed_at": "2026-09-09T14:24:00-06:00", "score": 33, "band": "low", "weighted": 33, "floor": 0, "floor_applied": false, "floor_message": null, "critical_open": 0, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": false,
      "categories": {"infrastructure": 60, "digital_identity": 45, "configuration": 30, "data_leaks": 0}},
-    {"score_id": "a0000000-0000-4000-8000-0000000000a3", "computed_at": "2026-09-16T14:24:00-06:00", "score": 38, "band": "low", "weighted": 38, "floor": 0, "floor_applied": false, "critical_open": 0, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": true,
+    {"score_id": "a0000000-0000-4000-8000-0000000000a3", "computed_at": "2026-09-16T14:24:00-06:00", "score": 38, "band": "low", "weighted": 38, "floor": 0, "floor_applied": false, "floor_message": null, "critical_open": 0, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": true,
      "categories": {"infrastructure": 70, "digital_identity": 55, "configuration": 30, "data_leaks": 0}},
-    {"score_id": "a0000000-0000-4000-8000-0000000000a4", "computed_at": "2026-09-23T14:24:00-06:00", "score": 41, "band": "medium", "weighted": 41, "floor": 0, "floor_applied": false, "critical_open": 0, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": false,
+    {"score_id": "a0000000-0000-4000-8000-0000000000a4", "computed_at": "2026-09-23T14:24:00-06:00", "score": 41, "band": "medium", "weighted": 41, "floor": 0, "floor_applied": false, "floor_message": null, "critical_open": 0, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": false,
      "categories": {"infrastructure": 80, "digital_identity": 55, "configuration": 30, "data_leaks": 0}},
-    {"score_id": "a0000000-0000-4000-8000-000000000001", "computed_at": "2026-09-30T14:24:30-06:00", "score": 68, "band": "high", "weighted": 68, "floor": 60, "floor_applied": false, "critical_open": 1, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": false,
+    {"score_id": "a0000000-0000-4000-8000-000000000001", "computed_at": "2026-09-30T14:24:30-06:00", "score": 68, "band": "high", "weighted": 68, "floor": 60, "floor_applied": false, "floor_message": null, "critical_open": 1, "method": "rules", "rule_set_version": 1, "reason": "scan", "partial_coverage": false,
      "categories": {"infrastructure": 80, "digital_identity": 55, "configuration": 30, "data_leaks": 90}}
   ],
   "total": 5
