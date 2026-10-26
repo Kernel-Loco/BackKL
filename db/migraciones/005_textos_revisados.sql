@@ -16,6 +16,10 @@
 -- En una base que ya existe se aplica a mano (ver db/README.md).
 -- =====================================================================
 
+-- Los textos van en UTF8 aunque psql corra en una consola con otra
+-- página de códigos, igual que las huellas que se revisan abajo.
+SET client_encoding = 'UTF8';
+
 BEGIN;
 
 -- Nadie más escribe la tabla entre la revisión y los UPDATE. La API,
