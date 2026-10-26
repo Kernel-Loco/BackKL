@@ -213,6 +213,11 @@ class Respaldo(unittest.TestCase):
         self.assertEqual(len(t.de('api.certspotter.com')), 2)
         self.assertEqual(res.sin_cobertura, ['cert_expired', 'lookalike_domain'])
 
+    def test_8d_con_paginas_incompletas_el_por_vencer_sigue_y_el_aviso_dice_que_puede_estar_renovado(self):
+        res, _ = recolectar(RespaldoSimulado(limite_en=1))
+        self.assertIn(('cert_expiring_soon', 'api.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
+        self.assertIn('un certificado por vencer puede estar ya renovado', res.avisos[-1])
+
     def test_9_si_crtsh_responde_cert_spotter_suma_lo_que_le_falta_sin_repetir(self):
         t = RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS})
         res, _ = recolectar(t, parecidos=True)

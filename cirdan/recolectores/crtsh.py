@@ -417,7 +417,8 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
                  'sensibilidad': 'media'},
                 _huella('cert_expired', nombre, _serie(reciente))))
         elif 0 <= dias < DIAS_POR_VENCER and dias * 86400 < (vence - _fecha(reciente['not_before'])).total_seconds() / FRACCION_POR_VENCER:
-            titulo = 'El certificado de %s vence en %d días' % (nombre, int(dias))
+            titulo = ('El certificado de %s vence en menos de un día' % nombre if dias < 1 else
+                      'El certificado de %s vence en %s' % (nombre, _cuantos(int(dias), 'día', 'días')))
             hallazgos.append(Hallazgo(
                 'cert_expiring_soon', CODIGOS['cert_expiring_soon'], nombre, titulo,
                 dict(evidencia, title=titulo, dias_para_vencer=int(dias)),
