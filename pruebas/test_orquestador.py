@@ -187,14 +187,21 @@ class Orquestador(unittest.TestCase):
             resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
                                          conn=self.conn)
         ct_logs = resumen['sources'][0]
-        self.assertEqual((ct_logs['status'], ct_logs['error']), ('succeeded', None))
-        salida = io.StringIO()
-        with mock.patch.object(cli, 'solicitar', lambda *a, **k: s), mock.patch.object(cli, 'correr', lambda *a, **k: resumen), \
-                contextlib.redirect_stdout(salida):
-            self.assertEqual(cli.main(['acme-demo.mx', '--org', 'ACME']), 0)
-        avisos = [l for l in salida.getvalue().splitlines() if l.startswith('    aviso: ')]
-        self.assertEqual(len(avisos), 1, salida.getvalue())
+        self.assertEqual((ct_logs['status'], ct_logs['error'], ct_logs['avisos_omitidos']), ('succeeded', None, 0))
+
+        def terminal(resumen):
+            salida = io.StringIO()
+            with mock.patch.object(cli, 'solicitar', lambda *a, **k: s), \
+                    mock.patch.object(cli, 'correr', lambda *a, **k: resumen), contextlib.redirect_stdout(salida):
+                self.assertEqual(cli.main(['acme-demo.mx', '--org', 'ACME']), 0)
+            return salida.getvalue().splitlines()
+        lineas = terminal(resumen)
+        avisos = [l for l in lineas if l.startswith('    aviso: ')]
+        self.assertEqual(len(avisos), 1, lineas)
         self.assertTrue(avisos[0].endswith(certspotter.SIN_COMPLEMENTO), avisos[0])
+        # La corrida guarda solo 10 avisos: la terminal dice cuántos más hubo
+        muchos = dict(resumen, sources=[dict(ct_logs, avisos=['aviso %d' % i for i in range(10)], avisos_omitidos=3)])
+        self.assertIn('    y 3 avisos más', terminal(muchos))
 
 
 if __name__ == '__main__':

@@ -50,6 +50,8 @@ def main(argv=None):
         for aviso in r['avisos']:  # por ejemplo, que Cert Spotter no respondió aunque la fuente quedó correcta
             if aviso != r['error']:
                 print('    aviso:', aviso)
+        if r.get('avisos_omitidos'):  # la corrida guarda solo los primeros 10
+            print('    y %d %s' % (r['avisos_omitidos'], 'aviso más' if r['avisos_omitidos'] == 1 else 'avisos más'))
     print('Resultado:', resumen['status'], '·', resumen['stats'])
     return 0
 
