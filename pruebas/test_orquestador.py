@@ -52,9 +52,6 @@ def responde(*valores):
 FALLA = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[],
                         error='crt.sh no respondió')
 BIEN = SimpleNamespace(estado='succeeded', activos=[{}], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[], error='')
-SIN_CUPO = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[],
-                           error='Cert Spotter no respondió a acme-demo.mx después de 1 intento (%s, Retry-After 3600 s)'
-                                 % orquestador.SIN_CUPO)
 
 
 class Orquestador(unittest.TestCase):
@@ -214,28 +211,59 @@ class Orquestador(unittest.TestCase):
         # sigue como la dejó el abandono, que conserva el error del primer intento: no 'succeeded' sin error
         self.assertEqual((run['status'], run['attempt'], run['error']), ('failed', 1, FALLA.error))
 
-    def test_3i_una_fuente_sin_cupo_no_se_reintenta_y_la_fila_suma_sus_intentos(self):
+    def test_3i_la_fila_suma_las_consultas_de_sus_intentos_y_guarda_los_errores_anteriores(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
-        esperas = []
-        resumen = self.en_vivo(s, [FALLA, SIN_CUPO], esperas.append)
-        self.assertEqual(sum(esperas), 60)  # solo la espera del primer reintento
-        run = self.corrida(s.scan_id)
-        self.assertEqual((run['status'], run['attempt'], run['next_retry_at']), ('failed', 1, None))
+        resumen = self.en_vivo(s, [FALLA, FALLA, BIEN], lambda segundos: None)
         fuente = resumen['sources'][0]
-        self.assertEqual(fuente['consultas'], 2)
-        self.assertEqual(fuente['avisos'][0], 'Intento 1: crt.sh no respondió')
+        self.assertEqual((fuente['status'], fuente['consultas']), ('succeeded', 3))
+        self.assertEqual(fuente['avisos'], ['Intento 1: crt.sh no respondió', 'Intento 2: crt.sh no respondió'])
 
-    def test_3j_mientras_corre_una_fuente_un_hilo_marca_vida_hasta_el_tope(self):
+    def test_3j_mientras_corre_una_fuente_un_hilo_marca_vida_y_para_al_terminar(self):
+        latidos = []
+        with mock.patch.object(orquestador, 'LATIDO', 0.01), \
+                mock.patch.object(orquestador, '_latido', lambda org, scan_id, conn=None: latidos.append(scan_id) or True):
+            with orquestador._latiendo(ACME, 'escaneo', None):  # el tope de 20 minutos no llega
+                time.sleep(0.2)
+            marcados = len(latidos)
+            time.sleep(0.1)
+        self.assertGreater(marcados, 0)
+        self.assertLessEqual(len(latidos), marcados + 1)  # a lo más la marca que ya iba en camino
+
+    def test_3k_el_hilo_de_latido_no_pasa_del_tope_de_una_corrida(self):
         latidos = []
         with mock.patch.object(orquestador, 'LATIDO', 0.01), \
                 mock.patch.object(orquestador, 'TOPE_CORRIDA', timedelta(seconds=0.05)), \
                 mock.patch.object(orquestador, '_latido', lambda org, scan_id, conn=None: latidos.append(scan_id) or True):
             with orquestador._latiendo(ACME, 'escaneo', None):
                 time.sleep(0.3)
-            marcados = len(latidos)
-            time.sleep(0.05)
-        self.assertTrue(1 <= marcados <= 5, marcados)  # marca vida, pero no más allá del tope
-        self.assertEqual(len(latidos), marcados)  # al terminar la corrida deja de marcar
+        self.assertTrue(1 <= len(latidos) <= 5, latidos)  # una corrida colgada deja de marcar vida
+
+    def test_3l_cada_paso_de_la_espera_escribe_la_marca_de_vida(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        frescas = []
+
+        def dormir(segundos):  # en cada paso revisa que la marca sea de ahora y luego la envejece
+            frescas.append(self.uno('SELECT updated_at = now() AS f FROM scans WHERE id = %s', s.scan_id)['f'])
+            self.conn.execute("UPDATE scans SET updated_at = now() - interval '1 hour' WHERE id = %s", (s.scan_id,))
+        self.en_vivo(s, [FALLA, FALLA, BIEN], dormir)
+        self.assertEqual(frescas, [True] * 6)  # 1 paso de la espera de 1 minuto y 5 de la de 5
+
+    def test_3m_cada_corrida_de_una_fuente_va_con_el_hilo_de_latido(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        dentro = []
+
+        @contextlib.contextmanager
+        def latiendo(org, scan_id, conn):
+            dentro.append(True)
+            yield
+            dentro.append(False)
+
+        def responder():
+            self.assertEqual(dentro, [True])  # ejecutar corre dentro de _latiendo
+            return BIEN
+        with mock.patch.object(orquestador, '_latiendo', latiendo):
+            self.en_vivo(s, [responder], lambda segundos: None)
+        self.assertEqual(dentro, [True, False])
 
     # --------------------------------------------------------------------- rechaza
 
@@ -311,6 +339,17 @@ class Orquestador(unittest.TestCase):
         self.assertEqual((segundo.aceptada, segundo.motivos), (False, ['scan_in_progress']))
         self.assertEqual(self.uno('SELECT status FROM scans WHERE id = %s', primero.scan_id)['status'], 'running')
 
+    def test_9d_marcar_fallido_cierra_las_fuentes_aunque_el_escaneo_ya_no_corra(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        fuente = self.uno("SELECT id::text FROM data_sources WHERE code = 'ejemplo'")['id']
+        self.conn.execute("INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status, attempt, next_retry_at) "
+                          "VALUES (%s, %s, %s, 'retrying', 1, now())", (ACME, s.scan_id, fuente))
+        self.conn.execute("UPDATE scans SET status = 'failed' WHERE id = %s", (s.scan_id,))  # lo dieron por caído antes
+        with mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(self.conn)):
+            orquestador.marcar_fallido(ACME, s.scan_id, KeyboardInterrupt())  # Ctrl+C no trae texto
+        run = self.corrida(s.scan_id)
+        self.assertEqual((run['status'], run['next_retry_at'], run['error']), ('failed', None, 'KeyboardInterrupt'))
+
     def test_10_un_dominio_de_otra_empresa_no_existe_para_mi(self):
         s = self.solicitar('olmardo.com', responde('cirdan-verification=ab439d2b39a7'))
         self.assertEqual((s.aceptada, s.motivos), (False, ['domain_not_found']))
@@ -343,6 +382,19 @@ class Orquestador(unittest.TestCase):
         # La corrida guarda solo 10 avisos: la terminal dice cuántos más hubo
         muchos = dict(resumen, sources=[dict(ct_logs, avisos=['aviso %d' % i for i in range(10)], avisos_omitidos=3)])
         self.assertIn('    y 3 avisos más', terminal(muchos))
+
+    def test_11b_con_ctrl_c_la_linea_de_comandos_cierra_el_escaneo(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        cerrados = []
+
+        def interrumpir(*a, **k):
+            raise KeyboardInterrupt
+        with mock.patch.object(cli, 'solicitar', lambda *a, **k: s), mock.patch.object(cli, 'correr', interrumpir), \
+                mock.patch.object(cli, 'marcar_fallido', lambda org, scan_id, e: cerrados.append((scan_id, type(e)))), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                cli.main(['acme-demo.mx', '--org', 'ACME'])
+        self.assertEqual(cerrados, [(s.scan_id, KeyboardInterrupt)])
 
 
 if __name__ == '__main__':

@@ -18,6 +18,7 @@ escribir en sus fuentes.
 
     python -m cirdan.orquestador olmardo.com            (ver __main__.py)
 """
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -31,7 +32,9 @@ from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar
-from cirdan.recolectores.contrato import SIN_CUPO, ejecutar, siguiente_estado
+from cirdan.recolectores.contrato import ejecutar, siguiente_estado
+
+log = logging.getLogger(__name__)
 
 # Por qué no se escanea: los mismos códigos de scan_eligibility.reasons del contrato #21, más los
 # que solo aparecen al pedir el escaneo.
@@ -271,8 +274,8 @@ def _latiendo(org, scan_id, conn):
             try:
                 if not _latido(org, scan_id):
                     return  # lo dieron por caído: el hilo principal lo verá al terminar la corrida
-            except Exception:
-                pass  # la base no respondió esta vez: se intenta en la siguiente marca
+            except Exception as e:  # la base no respondió esta vez: se intenta en la siguiente marca
+                log.warning('No se pudo marcar vida del escaneo %s: %s', scan_id, e)
     hilo = threading.Thread(target=latir, name='latido-' + str(scan_id), daemon=True)
     hilo.start()
     try:
@@ -305,8 +308,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
 
     Un recolector que falla no tumba el escaneo. En vivo, su fuente queda en 'retrying' y se vuelve a
     correr ahí mismo a 1, 5 y 25 minutos (siguiente_estado, #13). Mientras corre o espera, el escaneo marca
-    que sigue vivo y, si alguien lo dio por caído, deja de correr. No se reintenta una fuente que llegó a su
-    límite de consultas (SIN_CUPO), porque otro intento solo gastaría cupo. Al reproducir tampoco, porque la
+    que sigue vivo y, si alguien lo dio por caído, deja de correr. Al reproducir no se reintenta, porque la
     respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la
     fuente queda en 'failed'. Las consultas de la fila suman las de todos sus intentos y los errores de los
     intentos anteriores quedan en sus avisos.
@@ -338,9 +340,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             with _latiendo(org, scan_id, conn):
                 res = ejecutar(cargar(codigo), fqdn, modo, ahora=ahora, propios=propios)
             momento = datetime.now(timezone.utc)
-            sin_cupo = SIN_CUPO in (res.error or '')
-            status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta and not sin_cupo
-                                              else (res.estado, intento, None))
+            status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta
+                                              else (res.estado, 0, None))
             gastadas += res.consultas
             avisos = previos + res.avisos
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
@@ -391,8 +392,9 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
 
 def marcar_fallido(org, scan_id, error):
     """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando."""
+    texto = (str(error) or type(error).__name__)[:300]  # Ctrl+C (KeyboardInterrupt) no trae texto
     with transaction(org) as c:
         c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
-                  "WHERE id = %s AND status = 'running'", (Jsonb({'error': str(error)[:300]}), scan_id))
+                  "WHERE id = %s AND status = 'running'", (Jsonb({'error': texto}), scan_id))
         # también si ya no estaba en 'running' (lo dieron por caído antes): ninguna fuente se queda esperando
-        _cerrar_corridas(c, [scan_id], str(error)[:300])
+        _cerrar_corridas(c, [scan_id], texto)
