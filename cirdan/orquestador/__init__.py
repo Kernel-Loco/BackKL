@@ -208,7 +208,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None)
                 'raw_payload, error, finished_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())',
                 (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
                  Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
-        corridas.append({'source': codigo, 'status': status, 'error': res.error or None, **resumen})
+        corridas.append({'source': codigo, 'status': status, 'error': res.error or None,
+                         'avisos_omitidos': max(0, len(res.avisos) - len(resumen['avisos'])), **resumen})
         if res.estado == 'succeeded':
             activos += len(res.activos)
             hallazgos += len(res.hallazgos)

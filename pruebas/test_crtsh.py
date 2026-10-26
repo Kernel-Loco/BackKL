@@ -5,8 +5,11 @@
 import contextlib
 import io
 import json
+import functools
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -362,8 +365,10 @@ class FallasYGrabacion(unittest.TestCase):
                 codigo = crtsh._main(list(argv))
             return codigo, salida.getvalue()
 
+        # El CLI con la fecha de AHORA: con la de hoy, acme-dem0.mx deja de ser reciente el 30 mar 2027 y la prueba falla.
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
+                mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                mock.patch.object(crtsh, 'recolectar', functools.partial(crtsh.recolectar, ahora=AHORA)):
             propia, otra = Path(d) / 'acme-demo.mx', Path(d) / 'acme-demo.com.mx'
             propia.mkdir()
             otra.mkdir()
@@ -442,6 +447,31 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(len(res.avisos), 1)
         self.assertIn('pueden faltar subdominios', res.avisos[0])
         self.assertEqual(crtsh.codigo_salida(res), 2)
+
+    def test_17_las_grabaciones_de_crtsh_no_van_al_repo(self):
+        """Una grabación real, como la de olmardo.com, no se sube con un git add. La del recolector ejemplo sí va.
+        Revisa solo el .gitignore del repo, copiado a un repo vacío, sin las exclusiones propias de cada PC."""
+        reglas = Path(__file__).resolve().parents[1] / '.gitignore'
+        if not reglas.exists() or not shutil.which('git'):
+            self.skipTest('sin .gitignore o sin git, por ejemplo dentro del contenedor')
+        with tempfile.TemporaryDirectory() as d:
+            repo, vacio = Path(d) / 'repo', Path(d) / 'sin_exclusiones'
+            vacio.write_text('', encoding='utf-8')
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            (repo / '.git' / 'info').mkdir(exist_ok=True)
+            (repo / '.git' / 'info' / 'exclude').write_text('', encoding='utf-8')
+            (repo / '.gitignore').write_bytes(reglas.read_bytes())
+
+            def ignorado(ruta):
+                r = subprocess.run(['git', '-c', 'core.excludesFile=' + vacio.as_posix(), 'check-ignore', '-q',
+                                    '--no-index', 'cirdan/recolectores/respuestas_grabadas/' + ruta], cwd=repo)
+                self.assertIn(r.returncode, (0, 1), ruta)  # 128: git no pudo revisarlo
+                return r.returncode == 0
+            for ruta in ('crtsh/olmardo.com/subdominios_olmardo.com.json', 'crtsh/olmardo.com/certspotter_olmardo.com.json',
+                         'crtsh/olmardo.com/.grabacion', 'crtsh/subdominios_olmardo.com.json'):  # el último, formato del 9 oct
+                self.assertTrue(ignorado(ruta), ruta)
+            for ruta in ('crtsh/.gitkeep', 'ejemplo/acme-demo.mx/resultado.json'):
+                self.assertFalse(ignorado(ruta), ruta)
 
 
 class ErroresQueNoSonDeCrtsh(unittest.TestCase):
@@ -612,6 +642,9 @@ class Resumen(unittest.TestCase):
         self.assertIn('  [alta] Certificado vencido en dev.acme-demo.mx', lineas)
         self.assertIn('      tipo: certificado por vencer · antigüedad: 80 días · exposición: pública · sensibilidad: baja',
                       lineas)
+        self.assertIn('6 activos, con su vencimiento en UTC:', lineas)
+        # Una fecha con otro desfase se pasa a UTC antes de imprimirla: el 31 dic a la 01:00 en UTC+2 es el 30 dic.
+        self.assertEqual(crtsh._dia(crtsh._fecha('2026-12-31T01:00:00+02:00')), '30 dic 2026')
         self.assertIn('  api.acme-demo.mx · vence 25 oct 2026', lineas)
         self.assertIn('  tienda.acme-demo.mx · vence 30 nov 2026 · comodín', lineas)
         self.assertFalse([l for l in lineas if '[medium]' in l or '[high]' in l])
@@ -630,7 +663,9 @@ class Resumen(unittest.TestCase):
                 os.utime(f, (ahora, ahora))  # como si se acabara de copiar
             rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d)
             lineas = crtsh.resumen(crtsh.recolectar('acme-demo.mx', rep, AHORA, parecidos=False), rep)
-        self.assertIn('sin red, respuestas grabadas el 15 oct 2026 a las 12:00', lineas[0])
+        self.assertIn('sin red, respuestas grabadas el 15 oct 2026 a las 12:00 (%s)' % crtsh._zona(grabado), lineas[0])
+        self.assertEqual([crtsh._zona(datetime(2026, 10, 15, tzinfo=timezone(timedelta(hours=h)))) for h in (-6, 0, 5.5)],
+                         ['UTC-06:00', 'UTC', 'UTC+05:30'])
         self.assertNotIn('consulta', lineas[0])
 
     def test_2b_lee_el_formato_anterior(self):
@@ -668,7 +703,7 @@ class Resumen(unittest.TestCase):
         res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=True)
         lineas = crtsh.resumen(res)
         self.assertEqual(lineas[-1], 'Sin hallazgos.')
-        self.assertIn('1 activo:', lineas)
+        self.assertIn('1 activo, con su vencimiento en UTC:', lineas)
         # sin buscar parecidos (lo predeterminado) no es lo mismo que 0 parecidos
         res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=False)
         self.assertEqual(crtsh.resumen(res)[-2:], [
