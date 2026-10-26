@@ -27,7 +27,7 @@ services:
     restart: unless-stopped
 
   valkey:
-    image: valkey/valkey:8.0.2
+    image: valkey/valkey:8.1.10
     container_name: cirdan-valkey
     command: ["valkey-server", "--requirepass", "${VALKEY_PASSWORD:?Falta VALKEY_PASSWORD en .env}", "--save", "", "--appendonly", "no"]
     ports:
