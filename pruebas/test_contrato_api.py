@@ -24,8 +24,8 @@ def leer(nombre):
 DOMINIOS, HALLAZGOS, SCORE = leer('dominios.json'), leer('hallazgos.json'), leer('score.json')
 HISTORICO, EXPLICACION, PESOS = leer('historico.json'), leer('explicacion.json'), leer('pesos.json')
 ESTADOS_HALLAZGO = ('open', 'resolved', 'accepted_risk', 'false_positive')  # findings.status
-MOTIVOS_BLOQUEO = ('authorization_missing', 'authorization_expired', 'authorization_revoked',
-                   'txt_not_verified', 'domain_paused', 'domain_removed')
+MOTIVOS_BLOQUEO = ('authorization_missing', 'authorization_not_started', 'authorization_expired',
+                   'authorization_revoked', 'txt_not_verified', 'domain_paused')  # scan_eligibility.reasons
 
 
 def calcular(categorias, criticos):
@@ -180,6 +180,15 @@ class Dominios(unittest.TestCase):
         for h in HALLAZGOS['items']:
             conteo[h['severity']] += h['status'] == 'open'
         self.assertEqual(d['open_findings'], conteo)
+
+    def test_4_motivos_como_en_el_contrato_y_el_orquestador(self):
+        # Los de docs/contrato_api_v1.md, y el orquestador tiene el texto de cada uno
+        fila = next(l for l in (EJEMPLOS.parent / 'contrato_api_v1.md').read_text(encoding='utf-8').splitlines()
+                    if l.startswith('| `scan_eligibility`'))
+        self.assertEqual(set(fila.split('dice por qué:')[1].split('.')[0].split('`')[1::2]), set(MOTIVOS_BLOQUEO))
+        orquestador = (EJEMPLOS.parents[1] / 'cirdan' / 'orquestador' / '__init__.py').read_text(encoding='utf-8')
+        for motivo in MOTIVOS_BLOQUEO:
+            self.assertIn("'%s':" % motivo, orquestador)
 
 
 class Textos(unittest.TestCase):

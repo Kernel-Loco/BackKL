@@ -33,7 +33,7 @@ Todos los comandos se corren desde la raíz del repo.
 2. Copia `.env.example` como `.env`, cambia las tres contraseñas (`POSTGRES_PASSWORD`, `CIRDAN_APP_PASSWORD` y `VALKEY_PASSWORD`) y genera `TOTP_ENCRYPTION_KEY` con el comando que trae el archivo.
 3. Levanta todo: `docker compose up -d --build`. La primera vez crea la base `cirdan` y carga migraciones y semillas (tarda unos segundos). La API queda en http://127.0.0.1:8000.
 4. Comprueba: `curl http://127.0.0.1:8000/health` responde 200 con `"role": "cirdan_app"`, y `docker compose ps` muestra los tres contenedores `healthy`.
-5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (55, contra la base y la API, y 1 se salta sin `EN_VIVO=1`), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py` (20, el orquestador y el explorador de la base dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py pruebas/test_catalogo_reglas.py` (177, sin base ni red).
+5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (55, contra la base y la API, y 1 se salta sin `EN_VIVO=1`), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py` (20, el orquestador y el explorador de la base dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py pruebas/test_catalogo_reglas.py` (178, sin base ni red) y `python -m unittest pruebas/test_dataset_ml.py` (68, el lote del ML de RC-65, también sin base ni red).
 6. Instala el candado de secretos una vez: `pip install pre-commit && pre-commit install`. Desde ahí gitleaks revisa cada commit.
 
 Otros comandos: `docker compose logs -f api` (ver la API), `docker compose down` (apagar, la base se conserva) y `docker compose down -v` (borrar la base para volver a cargarla desde cero en el siguiente `up`). Para revisar todo el historial con gitleaks: `docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 git /repo`.
@@ -221,7 +221,7 @@ python -m unittest -v pruebas/test_catalogo_reglas.py   # 13 pruebas, sin base n
 Lo que devuelve la API v1 (`/api/v1`): dominios, hallazgos, score, histórico, explicación y pesos, con un JSON de ejemplo por respuesta en `docs/api_v1/`. La API v1 ya existe (ver API arriba) y el portal la lee desde el 15 oct 2026. Hoy los JSON de ejemplo los usan las pruebas de este repo, y el portal tiene una copia en sus datos simulados que no se actualiza sola. Los usará el dataset de ML (#33, RC-65). También sirven de plan B en las demos. El detalle está en `docs/contrato_api_v1.md`.
 
 ```bash
-python -m unittest -v pruebas/test_contrato_api.py   # 23 pruebas, sin base ni red
+python -m unittest -v pruebas/test_contrato_api.py   # 24 pruebas, sin base ni red
 ```
 
 ## Contrato de plugin (#13)
