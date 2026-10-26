@@ -258,6 +258,19 @@ class Reglas(unittest.TestCase):
             self.assertEqual(explicacion[campo], valor, '%r: %s de docs/api_v1/explicacion.json no coincide con su '
                                                         'texto de scoring_rule_texts' % (code, campo))
 
+    def test_10_los_textos_de_las_reglas_osint_tienen_revisor(self):
+        # backlog.md fila 30: los textos de las reglas OSINT (#14 a #20) los revisa Ernesto y el resto alguien de otra área
+        revisor = {}
+        for ruta in ARCHIVOS_SQL:
+            for asignaciones, code in UPDATE_TEXTO.findall(ruta.read_text(encoding='utf-8')):
+                m = re.search(r"\breviewed_by\s*=\s*'([^']*)'", asignaciones)
+                if m:
+                    revisor[code] = m.group(1)
+        osint = sorted(f[1] for f in FILAS_DOC if 14 <= int(re.match(r'#(\d+)', f[5]).group(1)) <= 20)
+        self.assertEqual(len(osint), 25, 'docs/codigos_reglas.md ya no tiene 25 reglas de #14 a #20')
+        self.assertEqual([c for c in osint if not revisor.get(c, '').strip()], [],
+                         'reglas OSINT con reviewed_by vacío en las migraciones de db/')
+
 
 if __name__ == '__main__':
     unittest.main()
