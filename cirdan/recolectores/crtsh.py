@@ -269,7 +269,7 @@ def _se_lee(texto):
 
 def _fecha(texto):
     d = datetime.fromisoformat(texto.replace('Z', ''))
-    return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+    return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
 
 
 def registrable(nombre):
@@ -417,7 +417,8 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
                  'sensibilidad': 'media'},
                 _huella('cert_expired', nombre, _serie(reciente))))
         elif 0 <= dias < DIAS_POR_VENCER and dias * 86400 < (vence - _fecha(reciente['not_before'])).total_seconds() / FRACCION_POR_VENCER:
-            titulo = 'El certificado de %s vence en %d días' % (nombre, int(dias))
+            titulo = ('El certificado de %s vence en menos de un día' % nombre if dias < 1 else
+                      'El certificado de %s vence en %s' % (nombre, _cuantos(int(dias), 'día', 'días')))
             hallazgos.append(Hallazgo(
                 'cert_expiring_soon', CODIGOS['cert_expiring_soon'], nombre, titulo,
                 dict(evidencia, title=titulo, dias_para_vencer=int(dias)),
@@ -588,6 +589,12 @@ def _dia(fecha):
     return '%d %s %d' % (d.day, MESES[d.month - 1], d.year)
 
 
+def _zona(fecha):
+    """'UTC' o el desfase de una fecha con zona, como 'UTC-06:00'. Dentro del contenedor de la API la hora local es UTC."""
+    z = fecha.strftime('%z')
+    return 'UTC' if z in ('', '+0000') else 'UTC%s:%s' % (z[:3], z[3:5])
+
+
 def _cuantos(n, singular, plural):
     return '%d %s' % (n, singular if n == 1 else plural)
 
@@ -606,7 +613,8 @@ def resumen(res, cliente=None, maximo_activos=20):
     if cliente and cliente.modo == 'reproducir':
         if leidas:
             grabado = min(f for _, f in leidas).astimezone()
-            cabecera += ' · sin red, respuestas grabadas el %s a las %s' % (_dia(grabado), grabado.strftime('%H:%M'))
+            cabecera += ' · sin red, respuestas grabadas el %s a las %s (%s)' % (
+                _dia(grabado), grabado.strftime('%H:%M'), _zona(grabado))
         else:
             cabecera += ' · sin red'
     else:
@@ -618,7 +626,8 @@ def resumen(res, cliente=None, maximo_activos=20):
         lineas.append('error: %s' % res.error)
 
     if res.activos:
-        lineas.append(_cuantos(len(res.activos), 'activo:', 'activos:'))
+        # La cabecera usa la hora local y las fechas de vencimiento van en UTC, como en los certificados.
+        lineas.append(_cuantos(len(res.activos), 'activo', 'activos') + ', con su vencimiento en UTC:')
         for a in res.activos[:maximo_activos]:
             linea = '  %s · vence %s' % (a.valor, _dia(a.atributos['vence']))
             lineas.append(linea + (' · comodín' if a.atributos.get('comodin') else ''))

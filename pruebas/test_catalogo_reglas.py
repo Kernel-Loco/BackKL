@@ -7,6 +7,7 @@ texto o si un texto no cumple las reglas de redacción. Lo que un recolector emi
 
     python -m unittest -v pruebas/test_catalogo_reglas.py
 """
+import hashlib
 import json
 import re
 import sys
@@ -43,7 +44,10 @@ UPDATE_TEXTO = re.compile(r"UPDATE scoring_rule_texts\s+SET\s+(.*?)\s+WHERE\s+co
                           re.DOTALL)
 CAMPOS_TEXTO = ('title', 'meaning', 'recommendation')
 CAMPO_TEXTO = re.compile(r"\b(title|meaning|recommendation)\s*=\s*'([^']*)'")
-OTRO_CAMPO = re.compile(r"\b(reviewed_by\s*=\s*'[^']*'|updated_at\s*=\s*now\(\))")
+OTRO_CAMPO = re.compile(r"\b(reviewed_by\s*=\s*(?:'[^']*'|NULL)|updated_at\s*=\s*now\(\))")
+REVISOR = re.compile(r"\breviewed_by\s*=\s*(?:'([^']*)'|NULL)")
+# Filas con que la 005 revisa los textos antes de cambiarlos: código, md5 de antes, md5 de después y revisor.
+HUELLA = re.compile(r"^\s*\('([a-z0-9_]+)', '([0-9a-f]{32})', '([0-9a-f]{32})', (?:'([^']*)'|NULL)\),?$", re.MULTILINE)
 FILA_DOC = re.compile(r"^\|\s*(\d{2})\s*\|\s*`([a-z0-9_]+)`\s*\|\s*([a-z_]+)\s*\|\s*([a-z]+)\s*\|\s*([0-9.]+)\s*\|"
                       r"\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*$", re.MULTILINE)
 POR_CATEGORIA_DOC = re.compile(r'^Por categoría: (.*)$', re.MULTILINE)
@@ -257,6 +261,64 @@ class Reglas(unittest.TestCase):
         for campo, valor in (('rule_title', title), ('meaning', meaning), ('recommendation', recommendation)):
             self.assertEqual(explicacion[campo], valor, '%r: %s de docs/api_v1/explicacion.json no coincide con su '
                                                         'texto de scoring_rule_texts' % (code, campo))
+
+    def test_10_los_textos_osint_los_firma_ernesto_y_el_resto_no(self):
+        # backlog.md fila 30: los textos de las reglas OSINT (#14 a #20) los revisa Ernesto y el resto alguien de otra área.
+        # Un UPDATE que cambia un texto dice en reviewed_by quién revisó el nuevo, o NULL si nadie: sin reviewed_by la
+        # fila conservaría la firma del texto anterior
+        revisor, sin_firma = {}, []
+        for ruta in ARCHIVOS_SQL:
+            for asignaciones, code in UPDATE_TEXTO.findall(ruta.read_text(encoding='utf-8')):
+                m = REVISOR.search(asignaciones)
+                if m:
+                    revisor[code] = m.group(1)
+                elif CAMPO_TEXTO.search(asignaciones):
+                    sin_firma.append('%s: %s' % (_relativa(ruta), code))
+        self.assertEqual(sin_firma, [], 'UPDATE que cambian un texto sin decir en reviewed_by quién revisó el nuevo')
+        osint, resto = [], []
+        for fila in FILAS_DOC:
+            numero = re.match(r'#(\d+)', fila[5])
+            self.assertIsNotNone(numero, '%r: su recolector en docs/codigos_reglas.md no empieza con #' % fila[1])
+            (osint if 14 <= int(numero.group(1)) <= 20 else resto).append(fila[1])
+        self.assertEqual(len(osint), 25, 'docs/codigos_reglas.md ya no tiene 25 reglas de #14 a #20')
+        self.assertEqual([c for c in sorted(osint) if revisor.get(c) != 'ErnestoDL'], [],
+                         'reglas OSINT cuyo texto final no firmó ErnestoDL en las migraciones de db/')
+        self.assertEqual([c for c in sorted(resto) if revisor.get(c) == 'ErnestoDL'], [],
+                         'reglas fuera de OSINT firmadas por ErnestoDL: las revisa alguien de otra área')
+
+    def test_11_las_huellas_que_revisa_la_005_coinciden_con_sus_textos(self):
+        # Antes de cambiar nada, la 005 revisa que cada texto sea el de antes o el de después de ella. Si alguien cambia un
+        # texto en un UPDATE y no su huella, la carga desde cero pasa, pero volver a correrla en una base que ya la tiene
+        # falla
+        def huella(textos):
+            # Igual que md5(title || E'\n' || meaning || E'\n' || recommendation) en una base UTF8
+            return hashlib.md5('\n'.join(textos[k] for k in CAMPOS_TEXTO).encode('utf-8')).hexdigest()
+
+        insertados, _ = _filas(BLOQUE_TEXTOS, FILA_TEXTO)
+        textos, con_huellas = {}, 0
+        for ruta in ARCHIVOS_SQL:
+            sql, nombre = ruta.read_text(encoding='utf-8'), _relativa(ruta)
+            for _, code, *campos in (f for f in insertados if f[0] == nombre):
+                textos.setdefault(code, dict(zip(CAMPOS_TEXTO, campos)))
+            antes = {code: huella(t) for code, t in textos.items()}
+            firma = {}
+            for asignaciones, code in UPDATE_TEXTO.findall(sql):
+                if code in textos:
+                    textos[code].update(CAMPO_TEXTO.findall(asignaciones))
+                m = REVISOR.search(asignaciones)
+                firma[code] = m.group(1) if m else None
+            huellas = HUELLA.findall(sql)
+            if not huellas:
+                continue
+            con_huellas += 1
+            self.assertEqual(sorted(h[0] for h in huellas), sorted(firma),
+                             '%s: las filas que revisa no son los códigos de sus UPDATE' % nombre)
+            for code, de_antes, de_despues, revisor in huellas:
+                self.assertEqual((de_antes, de_despues), (antes.get(code), huella(textos[code])),
+                                 '%s: la huella de %r no es la de su texto de antes o de después' % (nombre, code))
+                self.assertEqual(revisor or None, firma[code],
+                                 '%s: el revisor de %r en sus huellas no es el que escribe su UPDATE' % (nombre, code))
+        self.assertGreater(con_huellas, 0, 'ninguna migración tiene huellas: cambió la forma del VALUES de la 005')
 
 
 if __name__ == '__main__':

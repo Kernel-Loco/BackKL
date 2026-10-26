@@ -40,7 +40,8 @@ COMPLEMENTO = {'intentos': 2, 'timeout': 20}  # con crt.sh arriba, como las vari
 SIN_COBERTURA = ['cert_expired', 'lookalike_domain']
 AVISO = ('crt.sh no respondió. Los subdominios y certificados vigentes salen de Cert Spotter (SSLMate), que no da '
          'certificados vencidos ni dominios parecidos')
-INCOMPLETO = 'Cert Spotter no dio todas las páginas o alguna emisión no se pudo leer: pueden faltar subdominios'
+INCOMPLETO = ('Cert Spotter no dio todas las páginas o alguna emisión no se pudo leer: pueden faltar subdominios y '
+              'renovaciones recientes, así que un certificado por vencer puede estar ya renovado')
 SIN_COMPLEMENTO = ('No se completó lo de crt.sh con Cert Spotter: pueden faltar subdominios y certificados vigentes que '
                    'crt.sh no trae')  # va después del error. crt.sh sí respondió y el resultado sigue con lo suyo
 
