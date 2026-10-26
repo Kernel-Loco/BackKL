@@ -147,7 +147,8 @@ class Login(unittest.TestCase):
     def test_11_si_la_bitacora_falla_la_conexion_sigue_abierta(self):
         # 'no-es-ip' no cabe en audit_log.ip_address (inet), así que la escritura del fallo truena después
         # del 401. Eso no debe cerrar la conexión, porque con un correo que no existe sigue abierta.
-        # Solo aplica si la API confía en X-Forwarded-For (FORWARDED_ALLOW_IPS='*', como en docker compose).
+        # Solo aplica si la API confía en X-Forwarded-For: FORWARDED_ALLOW_IPS='*' en el .env, solo para esta prueba.
+        # Por omisión docker compose no confía en nadie de fuera y la prueba se salta.
         contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
                   "AND a.action = 'auth.login_failed';" % JORDAN)
         antes = int(scalar(contar, user='postgres'))
