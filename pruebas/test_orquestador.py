@@ -10,7 +10,9 @@ en vivo los dominios de la demo (acme-demo.mx no es del equipo).
 import contextlib
 import io
 import tempfile
+import time
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -50,6 +52,9 @@ def responde(*valores):
 FALLA = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[],
                         error='crt.sh no respondió')
 BIEN = SimpleNamespace(estado='succeeded', activos=[{}], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[], error='')
+SIN_CUPO = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[],
+                           error='Cert Spotter no respondió a acme-demo.mx después de 1 intento (%s, Retry-After 3600 s)'
+                                 % orquestador.SIN_CUPO)
 
 
 class Orquestador(unittest.TestCase):
@@ -73,7 +78,11 @@ class Orquestador(unittest.TestCase):
     def en_vivo(self, s, resultados, dormir):
         """Corre `ejemplo` en vivo con estos resultados seguidos, sin red ni esperas reales."""
         seguidos = iter(resultados)
-        with mock.patch.object(orquestador, 'ejecutar', lambda *a, **k: next(seguidos)), \
+
+        def siguiente(*a, **k):  # un resultado o una función que hace algo mientras la fuente corre
+            r = next(seguidos)
+            return r() if callable(r) else r
+        with mock.patch.object(orquestador, 'ejecutar', siguiente), \
                 mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
             return orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], conn=self.conn, dormir=dormir)
 
@@ -179,6 +188,53 @@ class Orquestador(unittest.TestCase):
         run = self.corrida(s.scan_id)
         self.assertEqual((run['status'], run['next_retry_at']), ('failed', None))
         self.assertIsNone(self.uno("SELECT 1 FROM audit_log WHERE entity_id = %s AND action = 'scan.finished'", s.scan_id))
+
+    def test_3g_la_espera_marca_vida_en_cada_paso_y_corta_a_mitad(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        esperas = []
+
+        def dormir(segundos):  # lo dan por caído en el primer paso de la espera de 5 minutos
+            esperas.append(segundos)
+            if len(esperas) == 2:
+                self.conn.execute("UPDATE scans SET status = 'failed' WHERE id = %s", (s.scan_id,))
+        resumen = self.en_vivo(s, [FALLA, FALLA, BIEN], dormir)
+        self.assertEqual(len(esperas), 2)  # sin la marca de vida de cada paso dormiría los 5 minutos completos
+        self.assertEqual(resumen['status'], 'failed')
+
+    def test_3h_si_lo_dan_por_caido_mientras_la_fuente_corre_no_se_escribe_encima_de_su_fila(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+
+        def abandonar_y_responder():  # la corrida tardó más de 30 minutos y otra petición lo dio por caído
+            self.conn.execute("UPDATE scans SET updated_at = now() - interval '31 minutes' WHERE id = %s", (s.scan_id,))
+            orquestador.abandonar_vencidos(self.conn, ACME, scan_id=s.scan_id)
+            return BIEN
+        resumen = self.en_vivo(s, [FALLA, abandonar_y_responder], lambda segundos: None)
+        self.assertEqual(resumen['status'], 'failed')
+        run = self.corrida(s.scan_id)
+        self.assertEqual((run['status'], run['error']), ('failed', orquestador.ERROR_ABANDONO))  # no 'succeeded'
+
+    def test_3i_una_fuente_sin_cupo_no_se_reintenta_y_la_fila_suma_sus_intentos(self):
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        esperas = []
+        resumen = self.en_vivo(s, [FALLA, SIN_CUPO], esperas.append)
+        self.assertEqual(sum(esperas), 60)  # solo la espera del primer reintento
+        run = self.corrida(s.scan_id)
+        self.assertEqual((run['status'], run['attempt'], run['next_retry_at']), ('failed', 1, None))
+        fuente = resumen['sources'][0]
+        self.assertEqual(fuente['consultas'], 2)
+        self.assertEqual(fuente['avisos'][0], 'Intento 1: crt.sh no respondió')
+
+    def test_3j_mientras_corre_una_fuente_un_hilo_marca_vida_hasta_el_tope(self):
+        latidos = []
+        with mock.patch.object(orquestador, 'LATIDO', 0.01), \
+                mock.patch.object(orquestador, 'TOPE_CORRIDA', timedelta(seconds=0.05)), \
+                mock.patch.object(orquestador, '_latido', lambda org, scan_id, conn=None: latidos.append(scan_id) or True):
+            with orquestador._latiendo(ACME, 'escaneo', None):
+                time.sleep(0.3)
+            marcados = len(latidos)
+            time.sleep(0.05)
+        self.assertTrue(1 <= marcados <= 5, marcados)  # marca vida, pero no más allá del tope
+        self.assertEqual(len(latidos), marcados)  # al terminar la corrida deja de marcar
 
     # --------------------------------------------------------------------- rechaza
 

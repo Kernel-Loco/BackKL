@@ -57,7 +57,7 @@ from pathlib import Path
 
 from cirdan.recolectores import certspotter
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
-from cirdan.recolectores.contrato import (MARCA, NOMBRE_VALIDO, SIN_GRABACION, Activo, FuenteNoResponde,  # noqa: F401
+from cirdan.recolectores.contrato import (MARCA, NOMBRE_VALIDO, SIN_CUPO, SIN_GRABACION, Activo, FuenteNoResponde,  # noqa: F401
                                           Grabadora, Hallazgo, Resultado, SinGrabacion, nombre_archivo)
 
 FUENTE = 'ct_logs'
@@ -222,7 +222,7 @@ class ClienteCrtsh:
                 ultimo = '%s: %s' % (type(e).__name__, e)
                 if isinstance(e, urllib.error.HTTPError) and e.code in sin_reintento:
                     if e.code == 429:
-                        ultimo = 'llegó a su límite de consultas, Retry-After %s s' % (
+                        ultimo = SIN_CUPO + ', Retry-After %s s' % (
                             (e.headers or {}).get('Retry-After') or '?')
                     break  # otro intento solo gastaría cupo
                 if isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code not in (408, 429):

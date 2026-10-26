@@ -13,10 +13,12 @@ Dos pasos:
 
 Mientras corre, el escaneo marca que sigue vivo en `scans.updated_at`. Si la API se reinicia o se
 corta a mitad, `abandonar_vencidos()` lo da por caído pasado ABANDONO, así no queda en 'running' para
-siempre ni bloquea el siguiente escaneo del dominio.
+siempre ni bloquea el siguiente escaneo del dominio. Un escaneo que ya no está en 'running' no vuelve a
+escribir en sus fuentes.
 
     python -m cirdan.orquestador olmardo.com            (ver __main__.py)
 """
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -29,7 +31,7 @@ from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar
-from cirdan.recolectores.contrato import ejecutar, siguiente_estado
+from cirdan.recolectores.contrato import SIN_CUPO, ejecutar, siguiente_estado
 
 # Por qué no se escanea: los mismos códigos de scan_eligibility.reasons del contrato #21, más los
 # que solo aparecen al pedir el escaneo.
@@ -52,10 +54,13 @@ TXT_DETALLE = {
 }
 FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
 
-# Marca de vida del escaneo. Entre una marca y otra pasa a lo más una corrida de una fuente: crt.sh con sus
-# 3 intentos y las 4 páginas de Cert Spotter con los suyos tardan unos 13 minutos en el peor caso.
-LATIDO = 60                       # segundos entre marcas mientras se espera un reintento
-ABANDONO = timedelta(minutes=30)  # sin marca en ese tiempo, el escaneo se da por caído
+# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 16 minutos solo de HTTP (sus 2 búsquedas y
+# las 4 páginas de Cert Spotter, cada consulta con 3 intentos), y el DNS de los nombres vencidos no tiene tope.
+# Por eso, mientras corre una fuente, un hilo aparte marca vida cada LATIDO, hasta TOPE_CORRIDA: una corrida
+# colgada para siempre deja de marcar y el escaneo se da por caído pasado ABANDONO.
+LATIDO = 60                           # segundos entre marcas
+TOPE_CORRIDA = timedelta(minutes=20)  # una corrida no marca vida más allá de esto
+ABANDONO = timedelta(minutes=30)      # sin marca en ese tiempo, el escaneo se da por caído
 ERROR_ABANDONO = 'El escaneo se cortó: pasaron más de 30 minutos sin marca de vida'
 ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta fuente'
 
@@ -248,6 +253,34 @@ def _latido(org, scan_id, conn=None):
                          (scan_id,)).fetchone() is not None
 
 
+@contextmanager
+def _latiendo(org, scan_id, conn):
+    """Marca vida cada LATIDO en un hilo aparte mientras corre una fuente, hasta TOPE_CORRIDA.
+
+    Con la conexión de una prueba no hace falta: todo va en una transacción y now() no avanza.
+    """
+    if conn is not None:
+        yield
+        return
+    alto = threading.Event()
+
+    def latir():
+        for _ in range(int(TOPE_CORRIDA.total_seconds() // LATIDO)):
+            if alto.wait(LATIDO):
+                return
+            try:
+                if not _latido(org, scan_id):
+                    return  # lo dieron por caído: el hilo principal lo verá al terminar la corrida
+            except Exception:
+                pass  # la base no respondió esta vez: se intenta en la siguiente marca
+    hilo = threading.Thread(target=latir, name='latido-' + str(scan_id), daemon=True)
+    hilo.start()
+    try:
+        yield
+    finally:
+        alto.set()
+
+
 def _esperar(org, scan_id, segundos, conn, dormir):
     """Espera al reintento de una fuente sin perder la marca de vida. False si el escaneo ya no corre."""
     while segundos > 0:
@@ -271,10 +304,14 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     """Ejecuta los recolectores de un escaneo aceptado y deja el estado de cada fuente.
 
     Un recolector que falla no tumba el escaneo. En vivo, su fuente queda en 'retrying' y se vuelve a
-    correr ahí mismo a 1, 5 y 25 minutos (siguiente_estado, #13). Mientras espera, el escaneo marca que
-    sigue vivo y, si alguien lo dio por caído, deja de correr. Al reproducir o grabar no se reintenta: la
-    respuesta sería la misma, o se volvería a vaciar la grabación, así que la fuente queda en 'failed'.
-    Una fuente que no se recupera deja el escaneo 'partial'. También termina 'partial' si una fuente respondió
+    correr ahí mismo a 1, 5 y 25 minutos (siguiente_estado, #13). Mientras corre o espera, el escaneo marca
+    que sigue vivo y, si alguien lo dio por caído, deja de correr. No se reintenta una fuente que llegó a su
+    límite de consultas (SIN_CUPO), porque otro intento solo gastaría cupo. Al reproducir tampoco, porque la
+    respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la
+    fuente queda en 'failed'. Las consultas de la fila suman las de todos sus intentos y los errores de los
+    intentos anteriores quedan en sus avisos.
+    Una fuente que no se recupera deja el escaneo 'partial' si otra respondió, o 'failed' si ninguna respondió.
+    También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
     se muestran como 0 hallazgos. crt.sh nunca busca dominios parecidos desde aquí, porque consulta
     variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
@@ -294,32 +331,43 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     reintenta = modo == 'vivo'
     corridas, activos, hallazgos = [], 0, 0
     for codigo in fuentes:
-        intento = 0
+        intento, gastadas, previos = 0, 0, []
         while True:
             if not _latido(org, scan_id, conn):
                 return _ya_no_corre(org, scan_id, conn, corridas)
-            res = ejecutar(cargar(codigo), fqdn, modo, ahora=ahora, propios=propios)
+            with _latiendo(org, scan_id, conn):
+                res = ejecutar(cargar(codigo), fqdn, modo, ahora=ahora, propios=propios)
             momento = datetime.now(timezone.utc)
-            status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta
-                                              else (res.estado, 0, None))
-            resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': res.consultas,
-                       'avisos': res.avisos[:10], 'sin_cobertura': res.sin_cobertura}
+            sin_cupo = SIN_CUPO in (res.error or '')
+            status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta and not sin_cupo
+                                              else (res.estado, intento, None))
+            gastadas += res.consultas
+            avisos = previos + res.avisos
+            resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
+                       'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura}
+            # La marca de vida y la fila van en una transacción: si lo dieron por caído mientras la fuente corría,
+            # no se escribe encima de la fila que ya se cerró, y nadie lo puede dar por caído en medio.
             with _tx(org, conn) as c:  # una fila por fuente: cada reintento la actualiza
-                c.execute(
-                    'INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status, attempt, next_retry_at, '
-                    'raw_payload, error, finished_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now()) '
-                    'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status, attempt = EXCLUDED.attempt, '
-                    'next_retry_at = EXCLUDED.next_retry_at, raw_payload = EXCLUDED.raw_payload, error = EXCLUDED.error, '
-                    'finished_at = EXCLUDED.finished_at, updated_at = now()',
-                    (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
-                     Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
+                vivo = _latido(org, scan_id, c)
+                if vivo:
+                    c.execute(
+                        'INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status, attempt, next_retry_at, '
+                        'raw_payload, error, finished_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now()) '
+                        'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status, attempt = EXCLUDED.attempt, '
+                        'next_retry_at = EXCLUDED.next_retry_at, raw_payload = EXCLUDED.raw_payload, error = EXCLUDED.error, '
+                        'finished_at = EXCLUDED.finished_at, updated_at = now()',
+                        (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
+                         Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
+            if not vivo:
+                return _ya_no_corre(org, scan_id, conn, corridas)
             if status != 'retrying':
                 break
+            previos.append('Intento %d: %s' % (attempt, (res.error or '')[:300]))
             if not _esperar(org, scan_id, (next_retry_at - momento).total_seconds(), conn, dormir):
                 return _ya_no_corre(org, scan_id, conn, corridas)
             intento = attempt
         corridas.append({'source': codigo, 'status': status, 'error': res.error or None,
-                         'avisos_omitidos': max(0, len(res.avisos) - len(resumen['avisos'])), **resumen})
+                         'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})
         if res.estado == 'succeeded':
             activos += len(res.activos)
             hallazgos += len(res.hallazgos)
@@ -344,7 +392,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
 def marcar_fallido(org, scan_id, error):
     """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando."""
     with transaction(org) as c:
-        if c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
-                     "WHERE id = %s AND status = 'running' RETURNING id",
-                     (Jsonb({'error': str(error)[:300]}), scan_id)).fetchone():
-            _cerrar_corridas(c, [scan_id], str(error)[:300])
+        c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
+                  "WHERE id = %s AND status = 'running'", (Jsonb({'error': str(error)[:300]}), scan_id))
+        # también si ya no estaba en 'running' (lo dieron por caído antes): ninguna fuente se queda esperando
+        _cerrar_corridas(c, [scan_id], str(error)[:300])

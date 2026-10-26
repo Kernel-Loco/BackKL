@@ -34,6 +34,7 @@ SENSIBILIDADES = ('baja', 'media', 'alta')
 MAX_INTENTO = 3                           # scan_source_runs.attempt va de 0 a 3
 ESPERAS_REINTENTO = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=25))
 SIN_GRABACION = 'no hay respuesta grabada para '
+SIN_CUPO = 'llegó a su límite de consultas'  # en el error de una fuente: el orquestador no la reintenta entre corridas
 MARCA = '.grabacion'                      # inicio de la grabación en curso, dentro de la carpeta del dominio
 NOMBRE_VALIDO = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
 CODIGO_VALIDO = re.compile(r'^[a-z][a-z0-9_]{1,62}$')
@@ -321,7 +322,7 @@ def siguiente_estado(estado, intento, ahora):
     """(status, attempt, next_retry_at) de scan_source_runs después de una corrida.
 
     Una corrida fallida se reintenta a 1, 5 y 25 minutos. Después del cuarto intento (attempt = 3)
-    queda en 'failed' y el escaneo termina como 'partial' (#23).
+    queda en 'failed' y el escaneo termina 'partial', o 'failed' si ninguna fuente respondió (#23).
     """
     if estado == 'succeeded':
         return 'succeeded', intento, None
