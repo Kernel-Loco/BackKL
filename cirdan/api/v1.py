@@ -12,7 +12,7 @@ from cirdan import orquestador
 from cirdan.auth.deps import Session, current_session, require_roles
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import transaction
-from cirdan.score import criterio
+from cirdan.score import criterio, motor
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
@@ -233,6 +233,7 @@ def _score_base(row, critical_open):
         'weighted': calc['ponderado'], 'floor': calc['piso'], 'floor_applied': row['score'] > calc['ponderado'],
         'critical_open': critical_open, 'method': row['method'], 'rule_set_version': row['rule_set_version'],
         'reason': row['reason'], 'partial_coverage': row['partial_coverage'], 'computed_at': row['computed_at'],
+        'floor_message': motor.mensaje_piso(calc, critical_open),
     }, weights
 
 
