@@ -8,13 +8,22 @@ Dos pasos:
 1. `solicitar()`: revisa el dominio y la autorización, consulta el TXT, guarda la evidencia en
    `dns_txt_verifications` (check_reason 'pre_scan') y, si todo cumple, crea la fila en `scans`.
 2. `correr()`: ejecuta cada recolector con `contrato.ejecutar()` (#13) y llena `scan_source_runs`
-   con `siguiente_estado()`. Guardar activos y hallazgos en la base es de #23.
+   con `siguiente_estado()`. En vivo reintenta ahí mismo la fuente que falla. Guardar activos y
+   hallazgos en la base es de #23.
+
+Mientras corre, el escaneo marca que sigue vivo en `scans.updated_at`. Si la API se reinicia o se
+corta a mitad, `abandonar_vencidos()` lo da por caído pasado ABANDONO, así no queda en 'running' para
+siempre ni bloquea el siguiente escaneo del dominio. Un escaneo que ya no está en 'running' no vuelve a
+escribir en sus fuentes.
 
     python -m cirdan.orquestador olmardo.com            (ver __main__.py)
 """
+import logging
+import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -24,6 +33,8 @@ from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar
 from cirdan.recolectores.contrato import ejecutar, siguiente_estado
+
+log = logging.getLogger(__name__)
 
 # Por qué no se escanea: los mismos códigos de scan_eligibility.reasons del contrato #21, más los
 # que solo aparecen al pedir el escaneo.
@@ -45,6 +56,16 @@ TXT_DETALLE = {
     'dns_error': 'el DNS no respondió',
 }
 FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
+
+# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 16 minutos solo de HTTP (sus 2 búsquedas y
+# las 4 páginas de Cert Spotter, cada consulta con 3 intentos), y el DNS de los nombres vencidos no tiene tope.
+# Por eso, mientras corre una fuente, un hilo aparte marca vida cada LATIDO, hasta TOPE_CORRIDA: una corrida
+# colgada para siempre deja de marcar y el escaneo se da por caído pasado ABANDONO.
+LATIDO = 60                           # segundos entre marcas
+TOPE_CORRIDA = timedelta(minutes=20)  # una corrida no marca vida más allá de esto
+ABANDONO = timedelta(minutes=30)      # sin marca en ese tiempo, el escaneo se da por caído
+ERROR_ABANDONO = 'El escaneo se cortó: pasaron más de 30 minutos sin marca de vida'
+ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta fuente'
 
 
 def dominios_en_vivo():
@@ -113,6 +134,54 @@ def _motivos_previos(conn, domain):
     return motivos, None
 
 
+def _motivo_del_trigger(conn, authorization_id):
+    """Por qué el trigger de scans rechazó el escaneo, leído de la base y no del texto del error.
+
+    Sigue el orden del trigger: la autorización existe, no está revocada y está vigente; si todo eso
+    cumple, lo que falló es la verificación TXT.
+    """
+    a = conn.execute(
+        'SELECT revoked_at IS NOT NULL AS revocada, valid_from > current_date AS futura, '
+        'valid_until < current_date AS vencida FROM domain_authorizations WHERE id = %s', (authorization_id,)).fetchone()
+    if not a:
+        return 'authorization_missing'
+    if a['revocada']:
+        return 'authorization_revoked'
+    if a['futura']:
+        return 'authorization_not_started'
+    if a['vencida']:
+        return 'authorization_expired'
+    return 'txt_not_verified'
+
+
+def _cerrar_corridas(conn, scan_ids, error):
+    """Las fuentes de un escaneo que ya no corre no tendrán reintento: quedan en 'failed'."""
+    conn.execute(
+        "UPDATE scan_source_runs SET status = 'failed', next_retry_at = NULL, error = coalesce(error, %s), "
+        "updated_at = now() WHERE scan_id = ANY(%s::uuid[]) AND status IN ('pending', 'running', 'retrying')",
+        (error, list(scan_ids)))
+
+
+def abandonar_vencidos(conn, org, domain_id=None, scan_id=None):
+    """Da por caídos los escaneos activos sin marca de vida en ABANDONO y devuelve sus ids.
+
+    Pasa si la API se reinició o se cortó a mitad de un escaneo. Sin esto, el escaneo quedaría en
+    'running' para siempre y el índice único de scans rechazaría cada escaneo nuevo del dominio con
+    scan_in_progress. Corre en la transacción de la organización, así que RLS limita lo que toca.
+    """
+    ids = [r['id'] for r in conn.execute(
+        "UPDATE scans SET status = 'failed', finished_at = now(), updated_at = now(), "
+        "stats = coalesce(stats, '{}'::jsonb) || %s "
+        "WHERE status IN ('queued', 'running') AND updated_at < now() - %s "
+        "AND (%s::uuid IS NULL OR domain_id = %s::uuid) AND (%s::uuid IS NULL OR id = %s::uuid) RETURNING id::text",
+        (Jsonb({'error': ERROR_ABANDONO}), ABANDONO, domain_id, domain_id, scan_id, scan_id)).fetchall()]
+    if ids:
+        _cerrar_corridas(conn, ids, ERROR_ABANDONO)
+        for i in ids:
+            audit(conn, org, 'scan.abandoned', None, None, 'scan', i, {'error': ERROR_ABANDONO})
+    return ids
+
+
 def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None):
     """Revisa autorización y TXT y, si todo cumple, crea el escaneo. Nunca escanea sin los dos.
 
@@ -149,6 +218,7 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
         # que la verificación sea de la hora anterior al escaneo, y clock_timestamp() quedaría después.
         scan_id = None
         if not motivos:
+            abandonar_vencidos(c, org, domain_id=domain['id'])  # uno caído no cuenta como escaneo en curso
             try:
                 with c.transaction():  # punto de guardado: un choque no borra la evidencia del TXT
                     scan_id = c.execute(
@@ -158,7 +228,9 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
             except psycopg.errors.UniqueViolation:
                 motivos.append('scan_in_progress')
             except psycopg.errors.CheckViolation as e:  # segundo candado: el trigger de scans dijo que no
-                motivos.append('authorization_expired' if 'autorización' in str(e) else 'txt_not_verified')
+                if e.diag.constraint_name:
+                    raise  # un CHECK de la tabla, no el trigger: es un error del código
+                motivos.append(_motivo_del_trigger(c, authorization_id))
 
         if motivos:
             detalle = _texto(motivos, txt_resultado)
@@ -177,15 +249,77 @@ def fuentes_activas(conn):
     return [f['code'] for f in filas if f['code'] in REGISTRO and f['code'] != FUENTE_PRUEBAS]
 
 
-def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None):
+def _latido(org, scan_id, conn=None):
+    """Marca que el escaneo sigue vivo. False si ya no está en 'running' (por ejemplo, lo dieron por caído)."""
+    with _tx(org, conn) as c:
+        return c.execute("UPDATE scans SET updated_at = now() WHERE id = %s AND status = 'running' RETURNING id",
+                         (scan_id,)).fetchone() is not None
+
+
+@contextmanager
+def _latiendo(org, scan_id, conn):
+    """Marca vida cada LATIDO en un hilo aparte mientras corre una fuente, hasta TOPE_CORRIDA.
+
+    Con la conexión de una prueba no hace falta: todo va en una transacción y now() no avanza.
+    """
+    if conn is not None:
+        yield
+        return
+    alto = threading.Event()
+
+    def latir():
+        for _ in range(int(TOPE_CORRIDA.total_seconds() // LATIDO)):
+            if alto.wait(LATIDO):
+                return
+            try:
+                if not _latido(org, scan_id):
+                    return  # lo dieron por caído: el hilo principal lo verá al terminar la corrida
+            except Exception as e:  # la base no respondió esta vez: se intenta en la siguiente marca
+                log.warning('No se pudo marcar vida del escaneo %s: %s', scan_id, e)
+    hilo = threading.Thread(target=latir, name='latido-' + str(scan_id), daemon=True)
+    hilo.start()
+    try:
+        yield
+    finally:
+        alto.set()
+
+
+def _esperar(org, scan_id, segundos, conn, dormir):
+    """Espera al reintento de una fuente sin perder la marca de vida. False si el escaneo ya no corre."""
+    while segundos > 0:
+        if not _latido(org, scan_id, conn):
+            return False
+        paso = min(LATIDO, segundos)
+        dormir(paso)
+        segundos -= paso
+    return True
+
+
+def _ya_no_corre(org, scan_id, conn, corridas):
+    """El escaneo dejó de estar en 'running' a mitad: no se toca su estado, solo se cierran sus fuentes."""
+    with _tx(org, conn) as c:
+        _cerrar_corridas(c, [scan_id], ERROR_YA_NO_CORRE)
+        scan = c.execute('SELECT status, stats FROM scans WHERE id = %s', (scan_id,)).fetchone()
+    return {'scan_id': scan_id, 'status': scan['status'], 'stats': scan['stats'] or {}, 'sources': corridas}
+
+
+def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None, dormir=None):
     """Ejecuta los recolectores de un escaneo aceptado y deja el estado de cada fuente.
 
-    Un recolector que falla no tumba el escaneo: su fuente queda en 'retrying' (los reintentos
-    los programa #27) y el escaneo termina 'partial'. También termina 'partial' si una fuente respondió
+    Un recolector que falla no tumba el escaneo. En vivo, su fuente queda en 'retrying' y se vuelve a
+    correr ahí mismo a 1, 5 y 25 minutos (siguiente_estado, #13). Mientras corre o espera, el escaneo marca
+    que sigue vivo y, si alguien lo dio por caído, deja de correr. Al reproducir no se reintenta, porque la
+    respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la
+    fuente queda en 'failed'. Las consultas de la fila suman las de todos sus intentos y los errores de los
+    intentos anteriores quedan en sus avisos.
+    Una fuente que no se recupera deja el escaneo 'partial' si otra respondió, o 'failed' si ninguna respondió.
+    También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
     se muestran como 0 hallazgos. crt.sh nunca busca dominios parecidos desde aquí, porque consulta
     variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
+    `dormir` reemplaza time.sleep (pruebas).
     """
+    dormir = dormir or time.sleep
     fqdn = fqdn.strip().lower().rstrip('.')
     with _tx(org, conn) as c:
         fuentes = fuentes if fuentes is not None else fuentes_activas(c)
@@ -196,20 +330,45 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None)
     if modo == 'vivo' and not en_vivo_permitido(fqdn):
         modo = 'reproducir'  # nunca consultar en vivo un dominio fuera de DOMINIOS_EN_VIVO
 
+    reintenta = modo == 'vivo'
     corridas, activos, hallazgos = [], 0, 0
     for codigo in fuentes:
-        res = ejecutar(cargar(codigo), fqdn, modo, ahora=ahora, propios=propios)
-        status, attempt, next_retry_at = siguiente_estado(res.estado, 0, datetime.now(timezone.utc))
-        resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': res.consultas,
-                   'avisos': res.avisos[:10], 'sin_cobertura': res.sin_cobertura}
-        with _tx(org, conn) as c:
-            c.execute(
-                'INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status, attempt, next_retry_at, '
-                'raw_payload, error, finished_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())',
-                (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
-                 Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
+        intento, gastadas, previos = 0, 0, []
+        while True:
+            if not _latido(org, scan_id, conn):
+                return _ya_no_corre(org, scan_id, conn, corridas)
+            with _latiendo(org, scan_id, conn):
+                res = ejecutar(cargar(codigo), fqdn, modo, ahora=ahora, propios=propios)
+            momento = datetime.now(timezone.utc)
+            status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta
+                                              else (res.estado, 0, None))
+            gastadas += res.consultas
+            avisos = previos + res.avisos
+            resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
+                       'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura}
+            # La marca de vida y la fila van en una transacción: si lo dieron por caído mientras la fuente corría,
+            # no se escribe encima de la fila que ya se cerró, y nadie lo puede dar por caído en medio.
+            with _tx(org, conn) as c:  # una fila por fuente: cada reintento la actualiza
+                vivo = _latido(org, scan_id, c)
+                if vivo:
+                    c.execute(
+                        'INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status, attempt, next_retry_at, '
+                        'raw_payload, error, finished_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now()) '
+                        'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status, attempt = EXCLUDED.attempt, '
+                        'next_retry_at = EXCLUDED.next_retry_at, raw_payload = EXCLUDED.raw_payload, error = EXCLUDED.error, '
+                        'finished_at = EXCLUDED.finished_at, updated_at = now()',
+                        (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
+                         Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
+            if not vivo:
+                return _ya_no_corre(org, scan_id, conn, corridas)
+            if status != 'retrying':
+                break
+            previos.append('Intento %d: %s' % (attempt, (res.error or '')[:300]))
+            if not _esperar(org, scan_id, (next_retry_at - momento).total_seconds(), conn, dormir):
+                return _ya_no_corre(org, scan_id, conn, corridas)
+            intento = attempt
         corridas.append({'source': codigo, 'status': status, 'error': res.error or None,
-                         'avisos_omitidos': max(0, len(res.avisos) - len(resumen['avisos'])), **resumen})
+                         'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})
         if res.estado == 'succeeded':
             activos += len(res.activos)
             hallazgos += len(res.hallazgos)
@@ -221,15 +380,21 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None)
     if sin_cobertura:
         stats['rules_without_coverage'] = sin_cobertura
     with _tx(org, conn) as c:
-        c.execute('UPDATE scans SET status = %s, finished_at = now(), stats = %s, updated_at = now() WHERE id = %s',
-                  (estado, Jsonb(stats), scan_id))
-        c.execute('UPDATE domains SET last_scan_at = now(), updated_at = now() WHERE fqdn = %s', (fqdn,))
-        audit(c, org, 'scan.finished', None, None, 'scan', scan_id, {'fqdn': fqdn, 'status': estado, **stats})
+        cerrado = c.execute("UPDATE scans SET status = %s, finished_at = now(), stats = %s, updated_at = now() "
+                            "WHERE id = %s AND status = 'running' RETURNING id", (estado, Jsonb(stats), scan_id)).fetchone()
+        if cerrado:  # si lo dieron por caído entre la última fuente y aquí, se queda como está
+            c.execute('UPDATE domains SET last_scan_at = now(), updated_at = now() WHERE fqdn = %s', (fqdn,))
+            audit(c, org, 'scan.finished', None, None, 'scan', scan_id, {'fqdn': fqdn, 'status': estado, **stats})
+    if not cerrado:
+        return _ya_no_corre(org, scan_id, conn, corridas)
     return {'scan_id': scan_id, 'status': estado, 'stats': stats, 'sources': corridas}
 
 
 def marcar_fallido(org, scan_id, error):
-    """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre."""
+    """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando."""
+    texto = (str(error) or type(error).__name__)[:300]  # Ctrl+C (KeyboardInterrupt) no trae texto
     with transaction(org) as c:
         c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
-                  "WHERE id = %s AND status = 'running'", (Jsonb({'error': str(error)[:300]}), scan_id))
+                  "WHERE id = %s AND status = 'running'", (Jsonb({'error': texto}), scan_id))
+        # también si ya no estaba en 'running' (lo dieron por caído antes): ninguna fuente se queda esperando
+        _cerrar_corridas(c, [scan_id], texto)

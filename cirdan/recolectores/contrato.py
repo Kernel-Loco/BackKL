@@ -321,7 +321,7 @@ def siguiente_estado(estado, intento, ahora):
     """(status, attempt, next_retry_at) de scan_source_runs después de una corrida.
 
     Una corrida fallida se reintenta a 1, 5 y 25 minutos. Después del cuarto intento (attempt = 3)
-    queda en 'failed' y el escaneo termina como 'partial' (#23).
+    queda en 'failed' y el escaneo termina 'partial', o 'failed' si ninguna fuente respondió (#23).
     """
     if estado == 'succeeded':
         return 'succeeded', intento, None
