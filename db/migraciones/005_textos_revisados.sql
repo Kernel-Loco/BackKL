@@ -2,34 +2,44 @@
 -- Cirdan · db/migraciones/005_textos_revisados.sql (RC-66, #30)
 -- Corrige 23 textos de scoring_rule_texts según la revisión de RC-66 del
 -- 25 oct 2026 y llena reviewed_by de las 25 reglas OSINT (#14 a #20),
--- que revisa Ernesto. Las 5 de #62 a #64 siguen con reviewed_by NULL
--- hasta que las revise alguien de otra área (backlog.md fila 30).
+-- que revisa Ernesto. Las 5 de #62 a #64 siguen sin revisor hasta que
+-- las revise alguien de otra área (backlog.md fila 30), y las 4 que
+-- cambian de texto llevan reviewed_by = NULL.
 -- No cambia la tabla, las reglas, los pesos ni los topes.
 -- Un UPDATE por código con WHERE code = '...', como pide
 -- docs/codigos_reglas.md, así pruebas/test_catalogo_reglas.py lee el
 -- texto que queda al final. Nunca se edita la 003.
 -- Corre en una sola transacción. Se puede correr otra vez sin error y
--- sin cambiar textos, pero vuelve a mover updated_at.
+-- sin cambiar textos, pero vuelve a mover updated_at. Después de una
+-- migración que vuelva a cambiar o firmar estas filas, falla sin
+-- cambiar nada.
 -- En una base que ya existe se aplica a mano (ver db/README.md).
 -- =====================================================================
 
 BEGIN;
 
+-- Nadie más escribe la tabla entre la revisión y los UPDATE. La API,
+-- que solo lee, sigue funcionando.
+LOCK TABLE scoring_rule_texts IN SHARE ROW EXCLUSIVE MODE;
+
 -- Antes de cambiar nada revisa las 29 filas. Sin los textos de la 003,
 -- un UPDATE no cambiaría nada y no daría error. Si un texto no es el de
--- la 003 ni el de esta migración, o una regla OSINT la firmó otra
--- persona, alguien lo cambió después y esta migración no lo pisa.
--- antes y despues son el md5 del título, qué significa y qué hacer,
--- separados por un salto de línea.
+-- la 003 ni el de esta migración, o la fila ya la firmó alguien que no
+-- es quien la firma aquí, alguien la cambió después y esta migración no
+-- la pisa. antes y despues son el md5 del título, qué significa y qué
+-- hacer, separados por un salto de línea, con los bytes de una base UTF8.
 DO $$
 DECLARE
   faltan text;
   distintos text;
 BEGIN
+  IF current_setting('server_encoding') <> 'UTF8' THEN
+    RAISE EXCEPTION 'La 005 compara los textos en UTF8 y esta base usa %.', current_setting('server_encoding');
+  END IF;
   SELECT string_agg(e.code, ', ') FILTER (WHERE t.code IS NULL),
          string_agg(e.code, ', ') FILTER (WHERE t.code IS NOT NULL AND (
            md5(t.title || E'\n' || t.meaning || E'\n' || t.recommendation) NOT IN (e.antes, e.despues)
-           OR t.reviewed_by <> e.revisor))
+           OR (t.reviewed_by IS NOT NULL AND t.reviewed_by IS DISTINCT FROM e.revisor)))
     INTO faltan, distintos
     FROM (VALUES
       ('breach_exposure', 'dc3ebce1cc103e6f701fb216e6c04c53', '6e6be463cb92e99bb13e92c09427eac6', 'ErnestoDL'),
@@ -67,7 +77,7 @@ BEGIN
     RAISE EXCEPTION 'Faltan los textos de la migración 003 para: %. Aplica primero la 003.', faltan;
   END IF;
   IF distintos IS NOT NULL THEN
-    RAISE EXCEPTION 'Estos textos no son los de la 003 ni los de la 005, o los firmó otra persona: %. Revísalos antes de aplicarla.', distintos;
+    RAISE EXCEPTION 'Estos textos no son los de la 003 ni los de la 005, o ya los firmó otra persona: %. Revísalos antes de aplicarla.', distintos;
   END IF;
 END $$;
 
@@ -230,21 +240,25 @@ WHERE code = 'server_version_disclosed';
 
 UPDATE scoring_rule_texts SET
   recommendation = 'Pide a quien administra ese almacenamiento que quite el acceso público si no es a propósito y que revise qué archivos contiene. Si debe ser público, confirma con esa persona que no guarde datos internos ni de clientes.',
+  reviewed_by = NULL,
   updated_at = now()
 WHERE code = 'public_bucket';
 
 UPDATE scoring_rule_texts SET
   recommendation = 'Pide a quien administra el dominio que borre ese subdominio de su configuración si ya no se usa, o que vuelva a crear el espacio de almacenamiento a nombre de la empresa. Pídele también que revise los demás subdominios que apunten a servicios que ya no usas.',
+  reviewed_by = NULL,
   updated_at = now()
 WHERE code = 'subdomain_takeover_risk';
 
 UPDATE scoring_rule_texts SET
   recommendation = 'Pide a quien programa el servicio que quite la documentación de internet o que pida inicio de sesión para verla. Déjala pública solo si el servicio está pensado para usarse desde fuera.',
+  reviewed_by = NULL,
   updated_at = now()
 WHERE code = 'exposed_api_docs';
 
 UPDATE scoring_rule_texts SET
   recommendation = 'Cambia o anula la clave de inmediato en el servicio que la emitió. Después pide a quien programa que reconstruya la imagen sin la clave y que borre las versiones viejas que la contienen.',
+  reviewed_by = NULL,
   updated_at = now()
 WHERE code = 'secret_in_container_image';
 

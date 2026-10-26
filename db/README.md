@@ -105,11 +105,13 @@ MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 pg_dump -U postgres -Fc -f /tmp/cirda
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/005_textos_revisados.sql
 ```
 
-Corre en una sola transacción. Antes de cambiar nada revisa las 29 filas que toca, y falla sin cambiar nada si falta un texto de la 003, si un texto no es el de la 003 ni el de la 005 o si una regla OSINT la firmó otra persona. Se puede correr otra vez sin error y sin cambiar textos, pero vuelve a mover `updated_at`. Esta consulta dice si ya está aplicada: da `25|5` (las 25 reglas OSINT firmadas por ErnestoDL y las 5 de #62 a #64 sin revisar) y antes de la 005 da `0|30`. Ya aplicada, `python -m unittest -v pruebas/test_api_v1.py` pasa:
+Corre en una sola transacción. Antes de cambiar nada revisa las 29 filas que toca, y falla sin cambiar nada si falta un texto de la 003, si un texto no es el de la 003 ni el de la 005 o si una fila ya la firmó alguien que no es quien la firma la 005. Se puede correr otra vez sin error y sin cambiar textos, pero vuelve a mover `updated_at`. Esta consulta dice si ya está aplicada: da `25|5` (las 25 reglas OSINT firmadas por ErnestoDL y las 5 de #62 a #64 sin revisar) y antes de la 005 da `0|30`. Ya aplicada, `python -m unittest -v pruebas/test_api_v1.py` pasa:
 
 ```bash
 docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FILTER (WHERE reviewed_by = 'ErnestoDL'), count(*) FILTER (WHERE reviewed_by IS NULL) FROM scoring_rule_texts"
 ```
+
+Cuando dé `25|5` y la prueba pase, borra el respaldo con `MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 rm /tmp/cirdan_antes_005.dump`. Si después un texto queda mal, se corrige con una migración nueva y no restaurando el respaldo, que regresaría toda la base.
 
 ## Decisiones y desviaciones respecto al DBML
 
