@@ -52,10 +52,12 @@ services:
       VALKEY_URL: redis://:${VALKEY_PASSWORD}@valkey:6379/0
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:?Falta TOTP_ENCRYPTION_KEY en .env}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
-      # De quién se acepta X-Forwarded-For (la IP real para el bloqueo por intentos).
-      # En desarrollo la API solo escucha en 127.0.0.1, así que basta "*"; en el
-      # despliegue (#49) va solo la IP del proxy.
-      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
+      # De quién se acepta X-Forwarded-For, que da la IP del bloqueo por intentos del login.
+      # Por omisión de nadie de fuera del contenedor. El portal (Next) no agrega ese encabezado:
+      # pasa tal cual el que mande el navegador, así que con "*" quien llama elige su IP y se
+      # salta el bloqueo. En el despliegue (#49) va la IP del portal, detrás de un proxy que
+      # agregue la IP real al final del encabezado. "*" solo para una prueba local.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       # Dominios que el orquestador puede consultar en vivo (DNS y fuentes). Los de la demo
       # (acme-demo.mx...) no son del equipo: nunca en vivo. En producción, "*".
       DOMINIOS_EN_VIVO: ${DOMINIOS_EN_VIVO:-olmardo.com}

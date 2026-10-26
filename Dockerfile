@@ -19,6 +19,6 @@ USER cirdan
 EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
-# --proxy-headers: la IP real de quien entra llega en X-Forwarded-For desde el portal (Next).
-# Solo se confía en ese encabezado si viene de FORWARDED_ALLOW_IPS (ver docker-compose.yml).
+# --proxy-headers: X-Forwarded-For solo se toma en cuenta si quien conecta está en FORWARDED_ALLOW_IPS
+# (ver docker-compose.yml). Por omisión nadie de fuera, porque el portal (Next) no lo agrega.
 CMD ["python", "-m", "uvicorn", "cirdan.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
