@@ -11,5 +11,8 @@ __pycache__/
 # Marca de inicio de cada grabación (local)
 cirdan/recolectores/respuestas_grabadas/*/*/.grabacion
 
+# Grabaciones reales de crt.sh y Cert Spotter (local). La imagen de la API sí las copia (README.md)
+cirdan/recolectores/respuestas_grabadas/crtsh/*/
+
 # Carpeta de grabaciones de antes del 11 oct: su contenido se mueve a cirdan/recolectores/respuestas_grabadas/
 /respuestas_grabadas/

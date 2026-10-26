@@ -7,6 +7,8 @@ Necesitan psycopg y dnspython, así que corren dentro del contenedor de la API, 
 Cada prueba corre en una transacción que se deshace al final: la base queda igual. Nunca consultan
 en vivo los dominios de la demo (acme-demo.mx no es del equipo).
 """
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,10 +19,11 @@ from psycopg.rows import dict_row
 
 from cirdan import orquestador
 from cirdan.db import DSN
+from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
-from cirdan.recolectores import crtsh
+from cirdan.recolectores import certspotter, crtsh
 from pruebas.test_certspotter import AHORA, RespaldoSimulado
-from pruebas.test_crtsh import CrtshSimulado
+from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado
 
 ACME = '20000000-0000-4000-8000-000000000001'
 TXT_ACME = 'cirdan-verification=c41d7e2a9b06'   # token de acme-demo.mx en la semilla
@@ -170,6 +173,28 @@ class Orquestador(unittest.TestCase):
     def test_10_un_dominio_de_otra_empresa_no_existe_para_mi(self):
         s = self.solicitar('olmardo.com', responde('cirdan-verification=ab439d2b39a7'))
         self.assertEqual((s.aceptada, s.motivos), (False, ['domain_not_found']))
+
+    # ---------------------------------------------------------------- línea de comandos
+
+    def test_11_la_linea_de_comandos_muestra_el_aviso_de_cert_spotter(self):
+        """Si crt.sh responde y Cert Spotter no, ct_logs queda correcto y sin error: el aviso solo se ve en la
+        terminal. crt.sh y Cert Spotter son simulados, así que nada sale a la red."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        t = RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS}, limite_en=0)  # 429 en la primera página
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
+                                         conn=self.conn)
+        ct_logs = resumen['sources'][0]
+        self.assertEqual((ct_logs['status'], ct_logs['error']), ('succeeded', None))
+        salida = io.StringIO()
+        with mock.patch.object(cli, 'solicitar', lambda *a, **k: s), mock.patch.object(cli, 'correr', lambda *a, **k: resumen), \
+                contextlib.redirect_stdout(salida):
+            self.assertEqual(cli.main(['acme-demo.mx', '--org', 'ACME']), 0)
+        avisos = [l for l in salida.getvalue().splitlines() if l.startswith('    aviso: ')]
+        self.assertEqual(len(avisos), 1, salida.getvalue())
+        self.assertTrue(avisos[0].endswith(certspotter.SIN_COMPLEMENTO), avisos[0])
 
 
 if __name__ == '__main__':

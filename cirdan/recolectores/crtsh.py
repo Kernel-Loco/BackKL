@@ -619,7 +619,8 @@ def resumen(res, cliente=None, maximo_activos=20):
         lineas.append('error: %s' % res.error)
 
     if res.activos:
-        lineas.append(_cuantos(len(res.activos), 'activo:', 'activos:'))
+        # La cabecera usa la hora local y las fechas de vencimiento van en UTC, como en los certificados.
+        lineas.append(_cuantos(len(res.activos), 'activo', 'activos') + ', con su vencimiento en UTC:')
         for a in res.activos[:maximo_activos]:
             linea = '  %s · vence %s' % (a.valor, _dia(a.atributos['vence']))
             lineas.append(linea + (' · comodín' if a.atributos.get('comodin') else ''))

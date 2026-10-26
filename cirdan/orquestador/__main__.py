@@ -47,6 +47,9 @@ def main(argv=None):
             r['source'], ESTADOS.get(r['status'], r['status']), r['activos'], r['hallazgos'],
             ' · sin cobertura: ' + ', '.join(r['sin_cobertura']) if r['sin_cobertura'] else '',
             ' · ' + r['error'] if r['error'] else ''))
+        for aviso in r['avisos']:  # por ejemplo, que Cert Spotter no respondió aunque la fuente quedó correcta
+            if aviso != r['error']:
+                print('    aviso:', aviso)
     print('Resultado:', resumen['status'], '·', resumen['stats'])
     return 0
 

@@ -5,8 +5,10 @@
 import contextlib
 import io
 import json
+import functools
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -362,8 +364,10 @@ class FallasYGrabacion(unittest.TestCase):
                 codigo = crtsh._main(list(argv))
             return codigo, salida.getvalue()
 
+        # El CLI con la fecha de AHORA: con la de hoy, acme-dem0.mx deja de ser reciente el 30 mar 2027 y la prueba falla.
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
+                mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                mock.patch.object(crtsh, 'recolectar', functools.partial(crtsh.recolectar, ahora=AHORA)):
             propia, otra = Path(d) / 'acme-demo.mx', Path(d) / 'acme-demo.com.mx'
             propia.mkdir()
             otra.mkdir()
@@ -442,6 +446,23 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(len(res.avisos), 1)
         self.assertIn('pueden faltar subdominios', res.avisos[0])
         self.assertEqual(crtsh.codigo_salida(res), 2)
+
+    def test_17_las_grabaciones_de_crtsh_no_van_al_repo(self):
+        """Una grabación real, como la de olmardo.com, no se sube con un git add. La del recolector ejemplo sí va."""
+        raiz = Path(__file__).resolve().parents[1]
+        if not (raiz / '.git').exists():
+            self.skipTest('sin el repo de git, por ejemplo dentro del contenedor')
+        grabadas = 'cirdan/recolectores/respuestas_grabadas/'
+
+        def ignorado(ruta):
+            r = subprocess.run(['git', 'check-ignore', '-q', '--no-index', grabadas + ruta], cwd=raiz)
+            self.assertIn(r.returncode, (0, 1), ruta)  # 128: git no pudo revisarlo
+            return r.returncode == 0
+        for ruta in ('crtsh/olmardo.com/subdominios_olmardo.com.json', 'crtsh/olmardo.com/certspotter_olmardo.com.json',
+                     'crtsh/olmardo.com/.grabacion'):
+            self.assertTrue(ignorado(ruta), ruta)
+        for ruta in ('crtsh/.gitkeep', 'ejemplo/acme-demo.mx/resultado.json'):
+            self.assertFalse(ignorado(ruta), ruta)
 
 
 class ErroresQueNoSonDeCrtsh(unittest.TestCase):
@@ -612,6 +633,7 @@ class Resumen(unittest.TestCase):
         self.assertIn('  [alta] Certificado vencido en dev.acme-demo.mx', lineas)
         self.assertIn('      tipo: certificado por vencer · antigüedad: 80 días · exposición: pública · sensibilidad: baja',
                       lineas)
+        self.assertIn('6 activos, con su vencimiento en UTC:', lineas)
         self.assertIn('  api.acme-demo.mx · vence 25 oct 2026', lineas)
         self.assertIn('  tienda.acme-demo.mx · vence 30 nov 2026 · comodín', lineas)
         self.assertFalse([l for l in lineas if '[medium]' in l or '[high]' in l])
@@ -668,7 +690,7 @@ class Resumen(unittest.TestCase):
         res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=True)
         lineas = crtsh.resumen(res)
         self.assertEqual(lineas[-1], 'Sin hallazgos.')
-        self.assertIn('1 activo:', lineas)
+        self.assertIn('1 activo, con su vencimiento en UTC:', lineas)
         # sin buscar parecidos (lo predeterminado) no es lo mismo que 0 parecidos
         res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=False)
         self.assertEqual(crtsh.resumen(res)[-2:], [
