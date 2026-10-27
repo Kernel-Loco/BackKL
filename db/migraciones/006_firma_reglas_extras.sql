@@ -7,8 +7,8 @@
 -- Un UPDATE por código con WHERE code = '...', como pide
 -- docs/codigos_reglas.md. Nunca se edita la 003 ni la 005.
 -- Corre en una sola transacción. Se puede correr otra vez sin error,
--- pero vuelve a mover updated_at. Después de una migración que vuelva a
--- cambiar o firmar estas filas, falla sin cambiar nada. Volver a correr
+-- pero vuelve a mover updated_at. Falla sin cambiar nada si cambió uno
+-- de estos textos o si otra persona firmó la fila. Volver a correr
 -- la 005 después de esta también falla sin cambiar nada, porque estas
 -- filas ya no tienen el revisor que espera la 005.
 -- En una base que ya existe se aplica a mano (ver db/README.md).
