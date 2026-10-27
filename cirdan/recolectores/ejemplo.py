@@ -16,6 +16,8 @@ CARPETA_GRABADAS = RAIZ_GRABADAS / 'ejemplo'
 # Código de regla -> severidad base de su regla (scoring_rules). pruebas/test_catalogo_reglas.py revisa que coincida.
 CODIGOS = {'spf_missing': 'low'}
 
+MAX_CONSULTAS = 0   # no consulta ninguna fuente: no gasta límite diario (#13b)
+
 
 def crear_cliente(modo, dominio):
     return Grabadora(CARPETA_GRABADAS / dominio.strip().lower().rstrip('.'), modo, nueva=(modo == 'grabar'))

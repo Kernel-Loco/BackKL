@@ -11,6 +11,10 @@ Dos pasos:
    con `siguiente_estado()`. En vivo reintenta ahí mismo la fuente que falla. Guardar activos y
    hallazgos en la base es de #23.
 
+Cada fuente tiene un límite diario de consultas de toda la plataforma en `data_sources` (#13b, RC-184).
+Antes de cada corrida que sale a la red, `correr()` reserva el máximo de la corrida y al terminar ajusta a lo
+que de verdad gastó. Sin cupo, la fuente queda en 'failed' sin llamar al recolector.
+
 Mientras corre, el escaneo marca que sigue vivo en `scans.updated_at`. Si la API se reinicia o se
 corta a mitad, `abandonar_vencidos()` lo da por caído pasado ABANDONO, así no queda en 'running' para
 siempre ni bloquea el siguiente escaneo del dominio. Un escaneo que ya no está en 'running' no vuelve a
@@ -32,7 +36,7 @@ from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar
-from cirdan.recolectores.contrato import ejecutar, siguiente_estado
+from cirdan.recolectores.contrato import Resultado, ejecutar, siguiente_estado
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +70,14 @@ TOPE_CORRIDA = timedelta(minutes=20)  # una corrida no marca vida más allá de 
 ABANDONO = timedelta(minutes=30)      # sin marca en ese tiempo, el escaneo se da por caído
 ERROR_ABANDONO = 'El escaneo se cortó: pasaron más de 30 minutos sin marca de vida'
 ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta fuente'
+
+# Límite diario por fuente (#13b, RC-184): vive en data_sources (daily_limit, daily_used, daily_used_on) y solo
+# lo mueven reserve_source_quota() y adjust_source_quota() de la migración 008, con el día en UTC. Se reserva
+# MAX_CONSULTAS del recolector antes de cada corrida, también en cada reintento, porque las consultas reales
+# solo se saben al final: así dos escaneos a la vez, o la API y la línea de comandos, no pasan el límite.
+# Reproducir no sale a la red: no reserva ni ajusta.
+MODOS_CON_CUPO = ('vivo', 'grabar')
+SIN_CUPO = 'Sin cupo diario: %s no tiene cupo para una corrida completa hoy (día UTC).'
 
 
 def dominios_en_vivo():
@@ -295,6 +307,21 @@ def _esperar(org, scan_id, segundos, conn, dormir):
     return True
 
 
+def _reservar(org, codigo, consultas, conn):
+    """Reserva `consultas` del cupo de hoy de la fuente en una transacción corta propia, antes de salir a la red.
+
+    Devuelve el día (UTC) de la reserva, o None si no cabe en el límite: entonces no se reservó nada.
+    """
+    with _tx(org, conn) as c:
+        return c.execute('SELECT public.reserve_source_quota(%s, %s) AS dia', (codigo, consultas)).fetchone()['dia']
+
+
+def _ajustar(org, codigo, dia, delta, conn):
+    """Devuelve lo reservado de más (delta negativo) o suma lo gastado de más. Si ya cambió el día, no hace nada."""
+    with _tx(org, conn) as c:
+        c.execute('SELECT public.adjust_source_quota(%s, %s, %s)', (codigo, dia, delta))
+
+
 def _ya_no_corre(org, scan_id, conn, corridas):
     """El escaneo dejó de estar en 'running' a mitad: no se toca su estado, solo se cierran sus fuentes."""
     with _tx(org, conn) as c:
@@ -312,11 +339,18 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la
     fuente queda en 'failed'. Las consultas de la fila suman las de todos sus intentos y los errores de los
     intentos anteriores quedan en sus avisos.
+    En vivo y al grabar, antes de cada corrida (también de cada reintento) reserva en data_sources el máximo de
+    consultas del recolector (MAX_CONSULTAS) y al terminar ajusta a las que gastó. Si la fuente ya no tiene cupo
+    hoy (día UTC), queda en 'failed' sin llamar al recolector y sin reintento, porque esperar 1, 5 o 25 minutos no
+    devuelve un cupo diario. Si algo lanza entre la reserva y el ajuste, lo reservado se queda: es lo conservador.
+    Al reproducir no reserva ni ajusta: las demos no gastan cupo ni se bloquean.
     Una fuente que no se recupera deja el escaneo 'partial' si otra respondió, o 'failed' si ninguna respondió.
     También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
     se muestran como 0 hallazgos. crt.sh nunca busca dominios parecidos desde aquí, porque consulta
     variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
+    En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
+    ct_logs y subfinder cuenta una vez. Guardarlos y unir sus atributos es de #23.
     `dormir` reemplaza time.sleep (pruebas).
     """
     dormir = dormir or time.sleep
@@ -331,17 +365,29 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         modo = 'reproducir'  # nunca consultar en vivo un dominio fuera de DOMINIOS_EN_VIVO
 
     reintenta = modo == 'vivo'
-    corridas, activos, hallazgos = [], 0, 0
+    con_cupo = modo in MODOS_CON_CUPO
+    corridas, activos, hallazgos = [], set(), 0
     for codigo in fuentes:
         intento, gastadas, previos = 0, 0, []
+        modulo = cargar(codigo)
         while True:
             if not _latido(org, scan_id, conn):
                 return _ya_no_corre(org, scan_id, conn, corridas)
-            with _latiendo(org, scan_id, conn):
-                res = ejecutar(cargar(codigo), fqdn, modo, ahora=ahora, propios=propios)
-            momento = datetime.now(timezone.utc)
-            status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta
-                                              else (res.estado, 0, None))
+            reservadas, dia = 0, None
+            if con_cupo:
+                reservadas = getattr(modulo, 'MAX_CONSULTAS')
+                dia = _reservar(org, codigo, reservadas, conn)
+            if con_cupo and dia is None:  # sin cupo: ni se llama al recolector ni se reintenta
+                res = Resultado(fqdn, codigo, estado='failed', error=SIN_CUPO % codigo, avisos=[SIN_CUPO % codigo])
+                status, attempt, next_retry_at = 'failed', intento, None
+            else:
+                with _latiendo(org, scan_id, conn):
+                    res = ejecutar(modulo, fqdn, modo, ahora=ahora, propios=propios)
+                if dia is not None and res.consultas != reservadas:
+                    _ajustar(org, codigo, dia, res.consultas - reservadas, conn)
+                momento = datetime.now(timezone.utc)
+                status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta
+                                                  else (res.estado, 0, None))
             gastadas += res.consultas
             avisos = previos + res.avisos
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
@@ -370,13 +416,13 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         corridas.append({'source': codigo, 'status': status, 'error': res.error or None,
                          'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})
         if res.estado == 'succeeded':
-            activos += len(res.activos)
+            activos.update((a.tipo, a.valor) for a in res.activos)  # un subdominio que dan dos fuentes cuenta una vez
             hallazgos += len(res.hallazgos)
 
     ok = sum(1 for r in corridas if r['status'] == 'succeeded')
     sin_cobertura = sorted({c for r in corridas if r['status'] == 'succeeded' for c in r['sin_cobertura']})
     estado = 'completed' if ok == len(corridas) and not sin_cobertura else 'failed' if ok == 0 else 'partial'
-    stats = {'assets': activos, 'findings': hallazgos, 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
+    stats = {'assets': len(activos), 'findings': hallazgos, 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
     if sin_cobertura:
         stats['rules_without_coverage'] = sin_cobertura
     with _tx(org, conn) as c:

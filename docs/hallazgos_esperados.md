@@ -8,11 +8,11 @@ Esta es la lista de lo que LowTide debe encontrar en olmardo.com, el dominio de 
 
 **Actualizado el 26 oct 2026** con el certificado de eventos, que salió el 24 oct (comentario del 25 oct en RC-42), y con los códigos que entraron al catálogo de #30 en el PR 43 (25 oct). No se hizo ninguna consulta nueva.
 
-**Actualizado el 27 oct 2026** con el recolector de DNS (#15, RC-48), que ya está en dev. Se probó solo con una zona simulada que copia la de la fila 6. No se hizo ninguna consulta nueva a olmardo.com.
+**Actualizado el 27 oct 2026** con subfinder (RC-184), la fila 16 y su nota, y con el recolector de DNS (#15, RC-48), que ya está en dev. No se corrió subfinder. El DNS se probó con una zona simulada que copia la de la fila 6, y la única consulta nueva a olmardo.com, la grabación del DNS del 27 oct, dio lo mismo: `v=spf1 -all` y NXDOMAIN en `_dmarc`.
 
 ## Cómo leer las tablas
 
-- **Fuente:** el recolector que lo encuentra. La lista va en el orden de las tarjetas: #14, #15, #15b, #16, #17, #18, #19 y #20. Hoy en dev están #14 (crt.sh) y, desde el PR 17 (19 oct), #14b (Cert Spotter) dentro del mismo recolector: como respaldo y, desde RC-184 (25 oct), también en cada corrida, para sumar los certificados que crt.sh no trae. #15 (DNS con SPF y DMARC, RC-48) tenía fecha del 21 oct y ya está en dev. #15b llega el 23 oct, #16 y #17 el 27 oct, #18 y #19 el 6 nov y #20 el 13 nov.
+- **Fuente:** el recolector que lo encuentra. La lista va en el orden de las tarjetas: #14, #15, #15b, #16, #17, #18, #19 y #20. Hoy en dev están #14 (crt.sh) y, desde el PR 17 (19 oct), #14b (Cert Spotter) dentro del mismo recolector: como respaldo y, desde RC-184 (25 oct), también en cada corrida, para sumar los certificados que crt.sh no trae. RC-184 suma subfinder (fuente `subfinder`, también de #14b), un recolector aparte que pide los subdominios a 8 fuentes públicas en modo pasivo y solo da activos. #15 (DNS con SPF y DMARC, RC-48) tenía fecha del 21 oct y ya está en dev. #15b llega el 23 oct, #16 y #17 el 27 oct, #18 y #19 el 6 nov y #20 el 13 nov.
 - **Código:** la regla del catálogo de #30. 'Semilla 001' quiere decir que está en `db/semillas/001_datos_demo.sql` y 'semilla 004', que entró al catálogo con `db/semillas/004_reglas_recolectores.sql` (PR 43, 25 oct). Que la regla exista no quiere decir que su recolector ya esté en dev: eso lo dice 'Depende de'.
 - **Severidad:** la base de la regla. El motor de score (#31) la puede subir.
 - **Se ve desde:** la primera fecha en que la fuente lo puede ver si la siembra se hace a tiempo.
@@ -39,17 +39,19 @@ Esta es la lista de lo que LowTide debe encontrar en olmardo.com, el dominio de 
 | 13 | Correos @olmardo.com, como el de los commits (fila 9). El dominio se registró el 13 oct (14 oct en UTC), así que sus correos no deben estar en brechas | #19 Have I Been Pwned | Ninguno. Sin llave, la fuente queda en `failed` con `sin_llave`. Con llave y sin brechas, queda en `succeeded` con 0 hallazgos | No aplica | No aplica | 6 nov, cuando llegue #19. La llave se compra la semana del 2 nov | Pendiente. #19 no está en dev. El correo contacto@olmardo.com ya existe en el sitio y en los commits, pero no recibe mensajes porque no hay MX | La llave de #19 |
 | 14 | Correo de contacto en el sitio | #20 identidad pasiva | Ninguno si es un buzón @olmardo.com, que queda como activo `email`. `personal_email_exposed` (semilla 004) solo si es un correo gratuito, como uno de gmail.com, ligado a la empresa | Identidad digital | Media, solo en ese caso | Al publicar el sitio. #20 llega el 13 nov | Existe desde el 23 oct: reservas.olmardo.com muestra contacto@olmardo.com, un buzón del dominio, así que no da `personal_email_exposed`. No hay MX, así que no recibe mensajes | #20 |
 | 15 | Enlace del sitio a un perfil público | #20 | Ninguno. El perfil es un activo de identidad. Da `personal_email_exposed` solo si muestra un correo personal | Identidad digital | Media, solo en ese caso | Al publicar el sitio. #20 llega el 13 nov | Existe desde el 23 oct: reservas.olmardo.com enlaza a github.com/olmardo, la página de la organización. No hay persona ficticia | #20 |
+| 16 | Los subdominios de las filas 1, 2 y 5 (reservas, camaras y eventos) en fuentes públicas de subdominios | #14b subfinder | Ninguno. Quedan como activos `subdomain` con `fuente` = subfinder y en `origen` las fuentes que los vieron | No aplica | No aplica | Sin fecha fija: depende de cuándo los guarde cada fuente | Pendiente. No se ha corrido subfinder contra olmardo.com. La semilla 005 deja la fuente apagada (`enabled` = false) hasta que #8 (RC-40) revise los términos de sus 8 fuentes, haya una grabación de subfinder para olmardo.com y el contenedor pueda escribir en `respuestas_grabadas/` | Nada |
 
 Notas por fila:
 
 - **Fila 5:** la regla de #14 pide menos de 30 días y menos de un tercio de vida (53 h). Se emitió el 24 oct a las 21:00, así que sale 'por vencer' desde el 29 oct a las 06:41:56 y vence el 31 oct a las 12:01:55, hora de Monterrey. Así sale en la grabación del jueves 29 a mediodía y en vivo en S12, el viernes 30. Desde el 23 oct eventos tiene un registro A a la VM de reservas (40.65.94.253), para que el certificado se valide por HTTP sin poner un TXT a mano. No da hallazgo: es un subdominio más en la IP de reservas. Ningún otro certificado debe llevar ese nombre, porque uno que vence después tapa el 'por vencer'.
 - **Fila 6:** si el correo @olmardo.com tiene que recibir mensajes, por ejemplo para verificarlo en GitHub, Email Routing de Cloudflare crea los MX y su propio SPF. Ese debe ser el único SPF. Dos registros `v=spf1` cuentan como `spf_missing`.
-- **Fila 6, #15:** para olmardo.com se espera solo `dmarc_missing`, con `NXDOMAIN` como lo observado. Así sale con una zona simulada de olmardo.com (NS de Cloudflare, `v=spf1 -all`, el TXT de verificación y ningún A, MX ni `_dmarc`). No guarda el TXT `cirdan-verification`: de los TXT que no son SPF solo conserva el nombre antes del igual y cuántos hay. Si el DNS no responde al pedir el TXT de la raíz o el de `_dmarc`, esos códigos quedan en `sin_cobertura` y no salen como si faltaran.
+- **Fila 6, #15:** para olmardo.com se espera solo `dmarc_missing`, con `NXDOMAIN` como lo observado. Así sale con una zona simulada de olmardo.com (NS de Cloudflare, `v=spf1 -all`, el TXT de verificación y ningún A, MX ni `_dmarc`) y con la grabación real del 27 oct, reproducida sin red. No guarda el TXT `cirdan-verification`: de los TXT que no son SPF solo conserva el nombre antes del igual y cuántos hay. Si el DNS no responde al pedir el TXT de la raíz o el de `_dmarc`, esos códigos quedan en `sin_cobertura` y no salen como si faltaran.
 - **Fila 7:** #15b no da hallazgo en olmardo.com, porque faltan más de 30 días para que venza el registro. `domain_expiring_soon` se prueba con una respuesta grabada (#13). Si una IP sale como CDN de Cloudflare, el registro quedó con proxy y #17 y #18 la descartan.
 - **Fila 8:** el token sale como crítico esté en la versión actual o solo en el historial. #16 guarda tipo, repo, ruta y huella, nunca el valor.
 - **Filas 10 y 11:** InternetDB solo muestra el puerto cuando Shodan escanea la IP, y eso puede tardar días. Hay que levantar la VM cuanto antes y consultar su IP en InternetDB ese día, como pide #10. Los puertos 80 y 443 no dan hallazgo.
 - **Fila 12:** con una versión al día solo debe salir `server_version_disclosed`. Con una versión sin soporte también saldría `outdated_software` (alta) y quizá `known_vulnerability` (media).
 - **Fila 13:** sin llave, el portal dice 'Sin cobertura de HIBP', nunca 0. Con llave, #19 usa la búsqueda por dominio si olmardo.com está verificado en Have I Been Pwned. Si no, consulta el correo de la fila 9. Si no hay correo que consultar, la fuente queda en `failed` con `sin_cobertura`.
+- **Fila 16:** subfinder no resuelve nombres en DNS, así que no sabe si un nombre todavía existe. Las fuentes guardan lo que vieron antes, y podría devolver cam, sub1 y sub2, cuyos A se borraron el 22 oct (ver 'Pendientes'). No son de la siembra: si salen, son datos viejos de la fuente, que se ven en `origen`, y #84 no los debe contar como subdominios sembrados.
 - **Filas 14 y 15:** #20 lee el perfil una sola vez y sin iniciar sesión. Si la red pide sesión, solo guarda el enlace y deja un aviso. Por la regla del 12 oct no se crea una persona ficticia.
 
 ## Las 4 categorías desde el 30 oct
@@ -109,7 +111,7 @@ La IP es la que da el DNS. Si sale una IP de Cloudflare, el registro quedó con 
 ## Pendientes
 
 - **Vencido visible:** mientras \*.olmardo.com esté vigente, ningún certificado vencido de primer nivel sale como hallazgo. Para enseñar uno hay dos caminos: ponerlo en un nombre de segundo nivel que resuelva, como x.eventos.olmardo.com, o cambiar la regla de #14. Lo deciden #10, #30 y #14.
-- **Registros de prueba borrados:** el 22 oct se borraron los A de cam, sub1 y sub2, que apuntaban a IP de documentación (203.0.113.10 a 203.0.113.12) y no eran de la siembra. La zona queda con camaras, reservas, el SPF y el TXT de verificación.
+- **Registros de prueba borrados:** el 22 oct se borraron los A de cam, sub1 y sub2, que apuntaban a IP de documentación (203.0.113.10 a 203.0.113.12) y no eran de la siembra. La zona queda con camaras, reservas, el SPF y el TXT de verificación. subfinder todavía podría devolverlos (nota de la fila 16).
 
 ## Cómo se revisó
 
@@ -132,3 +134,10 @@ curl -s "https://api.certspotter.com/v1/issuances?domain=olmardo.com&include_sub
 ```
 
 En dns.google, `Status` 3 quiere decir que el nombre no existe. `Status` 0 sin `Answer` quiere decir que el nombre existe pero no tiene registros de ese tipo. El SPF se busca en la respuesta TXT de la raíz. GitHub no pone su TXT de verificación en la raíz. Lo pone en `_gh-<org>-o.olmardo.com`, por eso esa consulta va aparte. Se agregó en la revisión de las 20:13.
+
+El 27 oct a las 11:43 (Monterrey) se grabó con OK el DNS de olmardo.com con el recolector de #15 (6 consultas a 1.1.1.1 y 8.8.8.8) y después se reprodujo sin red. La grabación no se sube al repo.
+
+```bash
+python -m cirdan.recolectores.registros_dns olmardo.com --grabar
+python -m cirdan.recolectores.registros_dns olmardo.com --reproducir
+```

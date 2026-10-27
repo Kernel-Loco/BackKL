@@ -14,9 +14,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_contrato.py
+from pruebas.test_certspotter import RespaldoSimulado, emision  # noqa: E402
 from pruebas.test_crtsh import AHORA, CrtshSimulado  # noqa: E402
 from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
-from cirdan.recolectores import REGISTRO, cargar, contrato, crtsh, ejemplo, registros_dns  # noqa: E402
+from pruebas.test_subfinder import SubfinderSimulado  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, registros_dns, subfinder  # noqa: E402
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
@@ -340,10 +342,15 @@ class Ejecutar(unittest.TestCase):
         self.assertIn('api.acme-demo.mx', [a.valor for a in res.activos])
 
     def test_14_cada_recolector_graba_de_nuevo_y_reproduce_lo_grabado(self):
+        """Sin red ni binarios: crt.sh y Cert Spotter con su transporte simulado, subfinder con un proceso simulado y el DNS con un
+        resolvedor simulado.
+        Un recolector nuevo en REGISTRO necesita aquí su simulación, o correría su fuente real."""
         for fuente in REGISTRO:
             modulo = cargar(fuente)
             with tempfile.TemporaryDirectory() as d, mock.patch.object(modulo, 'CARPETA_GRABADAS', Path(d)), \
                     mock.patch.object(crtsh, '_descargar', CrtshSimulado()), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                    mock.patch.object(subfinder, '_ejecutar', SubfinderSimulado()), \
+                    mock.patch.object(subfinder, '_binario', lambda: '/usr/local/bin/subfinder'), \
                     mock.patch.object(registros_dns, '_consultar', DnsSimulado(zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject']))):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
@@ -361,6 +368,35 @@ class Ejecutar(unittest.TestCase):
         self.assertTrue(contrato.CARPETA_GRABADAS.is_dir())
         for fuente in REGISTRO:
             self.assertEqual(cargar(fuente).CARPETA_GRABADAS.parent, contrato.CARPETA_GRABADAS, fuente)
+
+    def test_15b_cada_recolector_declara_su_maximo_de_consultas(self):
+        """El orquestador reserva MAX_CONSULTAS del límite diario antes de cada corrida (#13b)."""
+        for fuente in REGISTRO:
+            maximo = getattr(cargar(fuente), 'MAX_CONSULTAS', None)
+            self.assertIs(type(maximo), int, fuente)
+            self.assertGreaterEqual(maximo, 0, fuente)
+        self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS),
+                         (18, len(subfinder.FUENTES_SUBFINDER), 0))
+
+    def test_15c_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
+        """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento."""
+        paginas = [[emision(str(9100 + i), ['p%d.acme-demo.mx' % i], '2026-09-20T00:00:00Z', '2026-12-19T00:00:00Z')]
+                   for i in range(certspotter.MAX_PAGINAS + 1)]
+        respaldo, intentos = RespaldoSimulado(paginas=paginas), {}
+
+        def transporte(url, timeout):
+            if crtsh.urllib.parse.urlparse(url).netloc == 'api.certspotter.com':
+                intentos[url] = intentos.get(url, 0) + 1
+                if intentos[url] < crtsh.INTENTOS:
+                    raise urllib.error.HTTPError(url, 503, 'Service Unavailable', None, None)
+            return respaldo(url, timeout)
+        transporte.resolver = respaldo.resolver
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                mock.patch.object(crtsh, '_descargar', transporte), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
+            res = contrato.ejecutar(cargar('ct_logs'), 'acme-demo.mx', modo='vivo', ahora=AHORA)
+        self.assertEqual(res.estado, 'succeeded', res.error)
+        self.assertIn(certspotter.INCOMPLETO, res.avisos)  # se cortó en MAX_PAGINAS
+        self.assertEqual(res.consultas, crtsh.MAX_CONSULTAS)
 
     def test_16_un_escaneo_nunca_busca_dominios_parecidos(self):
         """ejecutar() es el camino del portal y del orquestador: crt.sh solo consulta el dominio autorizado."""
