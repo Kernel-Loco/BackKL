@@ -4,7 +4,8 @@ Todos cumplen el contrato de plugin de cirdan/recolectores/contrato.py (#13)."""
 import importlib
 
 # data_sources.code -> módulo del recolector. 'ejemplo' es solo para pruebas.
-REGISTRO = {'ct_logs': 'cirdan.recolectores.crtsh', 'ejemplo': 'cirdan.recolectores.ejemplo'}
+REGISTRO = {'ct_logs': 'cirdan.recolectores.crtsh', 'dns': 'cirdan.recolectores.registros_dns',
+            'ejemplo': 'cirdan.recolectores.ejemplo'}
 
 
 def cargar(fuente):

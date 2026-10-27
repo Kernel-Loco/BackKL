@@ -15,7 +15,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_contrato.py
 from pruebas.test_crtsh import AHORA, CrtshSimulado  # noqa: E402
-from cirdan.recolectores import REGISTRO, cargar, contrato, crtsh, ejemplo  # noqa: E402
+from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, contrato, crtsh, ejemplo, registros_dns  # noqa: E402
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
@@ -342,7 +343,8 @@ class Ejecutar(unittest.TestCase):
         for fuente in REGISTRO:
             modulo = cargar(fuente)
             with tempfile.TemporaryDirectory() as d, mock.patch.object(modulo, 'CARPETA_GRABADAS', Path(d)), \
-                    mock.patch.object(crtsh, '_descargar', CrtshSimulado()), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
+                    mock.patch.object(crtsh, '_descargar', CrtshSimulado()), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                    mock.patch.object(registros_dns, '_consultar', DnsSimulado(zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject']))):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
                 (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')  # de una grabación anterior
