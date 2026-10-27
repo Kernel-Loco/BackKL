@@ -126,7 +126,8 @@ class Activos(unittest.TestCase):
         res, _ = recolectar(SubfinderSimulado(salida))
         self.assertEqual([a.valor for a in res.activos], ['ok.acme-demo.mx'])
         self.assertEqual(res.avisos, ['subfinder: se descartaron 3 nombres fuera del dominio'])
-        self.assertFalse(any('ajeno' in a or 'otro.com' in a for a in res.avisos))
+        for nombre in ('ajeno', 'otro.com'):  # el aviso cuenta los nombres, no los repite
+            self.assertNotIn(nombre, ' '.join(res.avisos))
         uno, _ = recolectar(SubfinderSimulado([linea('otro.com', 'anubis')]))
         self.assertEqual(uno.avisos, ['subfinder: se descartó 1 nombre fuera del dominio'])
 
