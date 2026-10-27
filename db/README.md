@@ -18,6 +18,7 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `migraciones/003_textos_reglas.sql` | Tabla `scoring_rule_texts` con el título, qué significa y qué hacer de las 30 reglas del juego v1, y la FK de `scoring_rules.code` a esa tabla, para que toda regla tenga texto (RC-66, #30). Catálogo global sin RLS, `cirdan_app` solo lee |
 | `migraciones/004_login_lookup_seguro.sql` | Endurece `login_lookup()`: `search_path` que termina en `pg_temp`, tablas con esquema y solo las 4 columnas que usa el login. Quita TEMPORARY a PUBLIC en la base (RC-58) |
 | `migraciones/005_textos_revisados.sql` | Corrige 23 textos de `scoring_rule_texts` según la revisión de RC-66 del 25 oct 2026 y llena `reviewed_by` de las 25 reglas OSINT (#14 a #20). Las 5 de #62 a #64 siguen en NULL |
+| `migraciones/006_firma_reglas_extras.sql` | Llena `reviewed_by` de las 5 reglas de #62 a #64, que revisó Ernesto (RC-66). No cambia textos. Con ella quedan firmadas las 30 reglas del juego v1 |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -65,6 +66,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/003_textos_reglas.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/004_login_lookup_seguro.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/005_textos_revisados.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/006_firma_reglas_extras.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -112,6 +114,14 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FILTER 
 ```
 
 Cuando dé `25|5` y la prueba pase, borra el respaldo con `MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 rm /tmp/cirdan_antes_005.dump`. Si después un texto queda mal, se corrige con una migración nueva y no restaurando el respaldo, que regresaría toda la base.
+
+La 006 solo llena `reviewed_by` de las 5 reglas de #62 a #64, así que no hace falta reconstruir la API ni cambiar `docs/api_v1/`, que no traen el revisor. Va después de la 005:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/006_firma_reglas_extras.sql
+```
+
+Corre en una sola transacción. Antes de cambiar nada revisa las 5 filas, y falla sin cambiar nada si falta un texto de la 003, si un texto no es el que dejó la 005 o si una fila ya la firmó alguien que no es ErnestoDL. Se puede correr otra vez sin error, pero vuelve a mover `updated_at`. Después de la 006, volver a correr la 005 falla sin cambiar nada, porque esas 5 filas ya no tienen el revisor que espera la 005. La consulta de arriba da `30|0` cuando la 006 ya está aplicada y `25|5` antes.
 
 ## Decisiones y desviaciones respecto al DBML
 
