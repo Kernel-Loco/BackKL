@@ -8,6 +8,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from cirdan import orquestador
 from cirdan.auth.deps import Session, current_session, require_roles
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import transaction
@@ -346,6 +347,8 @@ def domain_assets(fqdn: str, session: Session = Depends(current_session)):
 
 @router.get('/scans', summary='Escaneos de la organización, del más nuevo al más viejo (provisional)')
 def scans(session: Session = Depends(current_session)):
+    with transaction(session.org_id) as conn:
+        orquestador.abandonar_vencidos(conn, session.org_id)  # uno caído no se muestra en curso
     rows = _query(session, '''
         SELECT s.id::text, d.fqdn::text AS domain, s.trigger_type AS trigger, s.status, s.queued_at, s.finished_at, s.stats,
                coalesce((SELECT jsonb_agg(jsonb_build_object('source', ds.code, 'status', r.status, 'attempt', r.attempt,

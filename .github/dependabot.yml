@@ -1,5 +1,6 @@
 # Dependabot revisa cada semana las librerías de Python, las imágenes de Docker
-# y las acciones de GitHub, y abre un PR a dev cuando hay una versión nueva.
+# (Dockerfile y docker-compose.yml) y las acciones de GitHub, y abre un PR a dev
+# cuando hay una versión nueva.
 version: 2
 updates:
   - package-ecosystem: pip
@@ -12,6 +13,18 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+  - package-ecosystem: docker-compose
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    ignore:
+      # Un salto mayor de postgres no abre el volumen de la base y valkey se queda en la 8.
+      # Eso se decide aparte, no con un PR de Dependabot.
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major"]
+      - dependency-name: valkey/valkey
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     target-branch: dev

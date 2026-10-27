@@ -1,6 +1,6 @@
 # Dependencias de la API (FastAPI sobre PostgreSQL). Versiones fijas para que el
 # contenedor y cualquier PC instalen exactamente lo mismo. Las actualiza Dependabot.
-fastapi==0.143.3
+fastapi==0.162.0
 uvicorn==0.54.0
 psycopg[binary]==3.3.6
 argon2-cffi==25.1.0

@@ -21,15 +21,15 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 02 | `cert_expired` | infrastructure | high | 20.00 | #14 RC-47 | Lo emite hoy |
 | 03 | `outdated_software` | infrastructure | high | 25.00 | #18 RC-46 y #17 RC-49 | Planeado |
 | 04 | `exposed_rdp` | infrastructure | high | 25.00 | #17 RC-49 | Planeado |
-| 05 | `dmarc_missing` | configuration | medium | 10.00 | #15 RC-48 | Planeado |
-| 06 | `spf_missing` | configuration | low | 8.00 | #15 RC-48 | Planeado |
+| 05 | `dmarc_missing` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
+| 06 | `spf_missing` | configuration | low | 8.00 | #15 RC-48 | Lo emite hoy |
 | 07 | `lookalike_domain` | digital_identity | medium | 15.00 | #14 RC-47 | Lo emite hoy |
 | 08 | `cert_expiring_soon` | infrastructure | medium | 10.00 | #14 RC-47 y #14b RC-184 | Lo emite hoy |
 | 09 | `domain_expiring_soon` | infrastructure | medium | 10.00 | #15b RC-166 | Planeado |
-| 10 | `spf_allow_all` | configuration | medium | 10.00 | #15 RC-48 | Planeado |
-| 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Planeado |
-| 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Planeado |
-| 13 | `email_in_public_commits` | digital_identity | low | 8.00 | #16 RC-50 | Planeado |
+| 10 | `spf_allow_all` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
+| 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
+| 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Lo emite hoy |
+| 13 | `email_in_public_commits` | digital_identity | low | 8.00 | #16 RC-50 | Lo emite hoy |
 | 14 | `breach_exposure_old` | data_leaks | high | 25.00 | #19 RC-54 | Planeado |
 | 15 | `breach_exposure_no_passwords` | data_leaks | medium | 10.00 | #19 RC-54 | Planeado |
 | 16 | `personal_email_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado |
@@ -63,8 +63,8 @@ Si crt.sh no responde, la fuente `ct_logs` sigue con el respaldo de Cert Spotter
 3. Su fila en esta tabla, y el código con su severidad en `CODIGOS` del recolector que lo emite.
 4. `python -m unittest -v pruebas/test_catalogo_reglas.py` lo revisa. La prueba lee sola todas las migraciones y semillas de `db/` y compara el total con esta tabla. Cuando #31 cree el juego v2, que repite los mismos códigos, la prueba se filtra por juego: revisa que un código no se repita dentro de un mismo juego y compara esta tabla con las reglas del juego v1.
 
-Los textos se escriben para alguien que no es de sistemas: el título es una frase corta sin punto final, y qué significa y qué hacer llevan una o dos frases cada uno, en imperativo con tú. Van sin siglas en mayúsculas, sin punto y coma, sin comillas y sin nombres de clientes. Los revisa alguien de otra área y los de OSINT, Ernesto.
+Los textos se escriben para alguien que no es de sistemas: el título es una frase corta sin punto final, y qué significa y qué hacer llevan una o dos frases cada uno, en imperativo con tú. Van sin siglas en mayúsculas, sin punto y coma, sin comillas y sin nombres de clientes. Los de OSINT los revisa Ernesto y el resto alguien de otra área o Ernesto, que firmó los de #62 a #64 en la 006.
 
 ## Cómo corregir un texto que ya se aplicó
 
-Nunca se edita la migración 003. Una base que ya la tiene no la vuelve a aplicar con el texto nuevo, porque la 003 salta la tabla y los textos que ya existen, y solo una base nueva lo tomaría. El texto se corrige con una migración nueva, `db/migraciones/NNN_descripcion.sql` con el siguiente número libre, que hace `UPDATE scoring_rule_texts` del título, qué significa o qué hacer, un `UPDATE` por código con `WHERE code = 'el_codigo'`. El mismo `UPDATE` dice en `reviewed_by` quién revisó el texto nuevo: Ernesto en los de OSINT y alguien de otra área en el resto. Si nadie de otra área lo ha revisado todavía, lleva `reviewed_by = NULL`, como los de #62 a #64 en la 005, porque sin `reviewed_by` la fila conservaría la firma del texto anterior. La prueba lee esos `UPDATE` en orden y revisa el texto que queda al final y que las reglas OSINT las haya firmado ErnestoDL. En el mismo PR se actualizan `docs/api_v1/pesos.json` y `docs/api_v1/explicacion.json`, que `pruebas/test_api_v1.py` compara con la API.
+Nunca se edita la migración 003. Una base que ya la tiene no la vuelve a aplicar con el texto nuevo, porque la 003 salta la tabla y los textos que ya existen, y solo una base nueva lo tomaría. El texto se corrige con una migración nueva, `db/migraciones/NNN_descripcion.sql` con el siguiente número libre, que hace `UPDATE scoring_rule_texts` del título, qué significa o qué hacer, un `UPDATE` por código con `WHERE code = 'el_codigo'`. El mismo `UPDATE` dice en `reviewed_by` quién revisó el texto nuevo: Ernesto en los de OSINT y alguien de otra área o Ernesto en el resto. Si nadie lo ha revisado todavía, lleva `reviewed_by = NULL`, como los de #62 a #64 en la 005 antes de que los firmara la 006, porque sin `reviewed_by` la fila conservaría la firma del texto anterior. La prueba lee esos `UPDATE` en orden y revisa el texto que queda al final y que las reglas OSINT las haya firmado ErnestoDL. En el mismo PR se actualizan `docs/api_v1/pesos.json` y `docs/api_v1/explicacion.json`, que `pruebas/test_api_v1.py` compara con la API.

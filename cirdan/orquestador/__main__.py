@@ -37,13 +37,15 @@ def main(argv=None):
 
     print('ACEPTADO ·', solicitud.fqdn, '· autorización vigente y TXT verificado')
     print('Escaneo', solicitud.scan_id)
+    if args.modo == 'vivo':
+        print('En vivo, una fuente que falla se reintenta a 1, 5 y 25 minutos: puede tardar más de media hora.')
     try:
         resumen = correr(org, solicitud.scan_id, solicitud.fqdn, modo=args.modo)
-    except Exception as e:
+    except BaseException as e:  # también Ctrl+C durante la espera de un reintento
         marcar_fallido(org, solicitud.scan_id, e)
         raise
     for r in resumen['sources']:
-        print('  %-8s %s · %d activos, %d hallazgos%s%s' % (
+        print('  %-9s %s · %d activos, %d hallazgos%s%s' % (
             r['source'], ESTADOS.get(r['status'], r['status']), r['activos'], r['hallazgos'],
             ' · sin cobertura: ' + ', '.join(r['sin_cobertura']) if r['sin_cobertura'] else '',
             ' · ' + r['error'] if r['error'] else ''))

@@ -138,5 +138,21 @@ class LoginLookup(unittest.TestCase):
         self.assertEqual(fila[:2], ['30000000-0000-4000-8000-000000000003', ACME])
 
 
+# Funciones del límite diario por fuente (migración 008, RC-184): mismo patrón que login_lookup().
+FUNCIONES_CUPO = ("'public.reserve_source_quota(text,integer)'::regprocedure",
+                  "'public.adjust_source_quota(text,date,integer)'::regprocedure")
+
+
+class LimiteDiario(unittest.TestCase):
+
+    def test_12_funciones_del_cupo_con_search_path_fijo_y_sin_public(self):
+        for funcion in FUNCIONES_CUPO:
+            with self.subTest(funcion=funcion):
+                config = scalar("SELECT prosecdef || ',' || array_to_string(proconfig, ';') || ','"
+                                " || has_function_privilege('public', oid, 'EXECUTE') FROM pg_proc WHERE oid = %s;"
+                                % funcion)
+                self.assertEqual(config, 'true,search_path=pg_catalog, public, pg_temp,false')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
