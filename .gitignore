@@ -21,6 +21,9 @@ cirdan/recolectores/respuestas_grabadas/subfinder/*
 # Grabaciones reales del DNS (local, #15). Ya van sin tokens, pero muestran la zona de la empresa
 cirdan/recolectores/respuestas_grabadas/dns/*
 !cirdan/recolectores/respuestas_grabadas/dns/.gitkeep
+# GitHub (#16, RC-50): solo lo ya limpio (perfil, lista de repos, secretos reducidos y correos del dominio)
+cirdan/recolectores/respuestas_grabadas/github/*
+!cirdan/recolectores/respuestas_grabadas/github/.gitkeep
 
 # Carpeta de grabaciones de antes del 11 oct: su contenido se mueve a cirdan/recolectores/respuestas_grabadas/
 /respuestas_grabadas/

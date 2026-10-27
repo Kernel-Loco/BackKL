@@ -65,6 +65,10 @@ services:
       # Dominios que el orquestador puede consultar en vivo (DNS y fuentes). Los de la demo
       # (acme-demo.mx...) no son del equipo: nunca en vivo. En producción, "*".
       DOMINIOS_EN_VIVO: ${DOMINIOS_EN_VIVO:-olmardo.com}
+      # Organización de GitHub que cada empresa declaró controlar, con pares dominio=org separados por
+      # comas (#16, RC-50). Solo se revisan los repos públicos de la declarada. Un dominio sin par, o con
+      # 'ninguna', no consulta GitHub y queda sin cobertura. Hace de campo de la carta hasta la tabla de #64.
+      ORGS_GITHUB_DECLARADAS: ${ORGS_GITHUB_DECLARADAS:-olmardo.com=olmardo}
       # Explorador de la base para la demo (/demo y /db), siempre con sesión (RC-58). Con false
       # esas rutas no existen. Nunca true en producción.
       DEMO_EXPLORER: ${DEMO_EXPLORER:-false}
@@ -77,6 +81,8 @@ services:
         condition: service_healthy
       demo-accounts:
         condition: service_completed_successfully
+    # tini como PID 1: recoge los procesos que deja git cuando el recolector de GitHub lo mata por tiempo (#16).
+    init: true
     restart: unless-stopped
 
   # Corre una vez en cada `up`: con DEMO_ACCOUNTS=true pone contraseña y MFA a las cuentas

@@ -1,0 +1,17 @@
+# Reglas de gitleaks 8.21.2 para el recolector de GitHub (#16, RC-50, cirdan/recolectores/github.py).
+#
+# Son las reglas de omisión de gitleaks más una propia para los tokens falsos de LowTide. La propia hace falta porque
+# ninguna de omisión halla un token CIRDAN_FAKE_: generic-api-key descarta los valores con la palabra 'fake' y el
+# token sembrado en olmardo/sitio-reservas no tiene la forma de ningún proveedor.
+# El recolector siempre pasa este archivo con --config, así que un .gitleaks.toml del repo revisado no se usa.
+
+title = "LowTide: reglas de omisión de gitleaks y tokens falsos CIRDAN_FAKE_"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "cirdan-fake-token"
+description = "Token falso de LowTide (prefijo CIRDAN_FAKE_), de la siembra o de las pruebas"
+regex = '''CIRDAN_FAKE_[A-Za-z0-9_-]{8,}'''
+keywords = ["cirdan_fake_"]
