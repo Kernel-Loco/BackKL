@@ -26,6 +26,7 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
 | `semillas/004_reglas_recolectores.sql` | Reglas 08 a 30 del juego v1, las de los recolectores #14 a #20 y las previstas de #62 a #64, con weight 1.000 y tope por severidad (RC-66, #30). No toca las 7 de la semilla 001 |
 | `semillas/005_subfinder_y_limites.sql` | Fuente `subfinder` (recolector pasivo de subdominios), sembrada apagada, y límite diario de `ct_logs` (200 consultas) y `subfinder` (400, 50 corridas de 8 fuentes), con el porqué de cada número (RC-184, #13b). Necesita la 008 |
+| `semillas/006_github.sql` | Fuente `github` (secretos y correos en los repos públicos de la organización declarada), sembrada encendida, con `keep_raw_payload` = false y límite diario de 400 consultas, 25 corridas de 16 (RC-50, #16). Necesita la 008 |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 24 tablas con filas y RLS, más el resumen de objetos |
@@ -38,8 +39,9 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 - RLS con ENABLE + FORCE en las 18 tablas por cliente. Las políticas comparan `organization_id` (o `id` en `organizations`) con `app_current_org()`, que devuelve `NULLIF(current_setting('app.current_org', true), '')::uuid`. Sin tenant no se ve nada.
 - Triggers: cadena de hashes SHA-256 por organización en `audit_log` (chain_seq, prev_hash, row_hash); bloqueo de UPDATE, DELETE y TRUNCATE en `audit_log`, `dns_txt_verifications`, `domain_scores` y `score_contributions`; `domain_authorizations` inmutable salvo `revoked_at`; `scans` exige autorización vigente y TXT `match` de la última hora; `scan_source_runs` rechaza `raw_payload` si la fuente tiene `keep_raw_payload = false` (HIBP).
 - Datos de Acme Demo (plan Starter), los mismos de las pantallas de Figma, más Beta Corp solo para la prueba de aislamiento. La semilla 002 agrega Grupo Olmardo (plan Business) con el dominio de prueba olmardo.com.
-- Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200 y `subfinder` 400 consultas por día UTC, de toda la plataforma. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una fuente de su lista blanca consultada en una corrida, no una petición HTTP.
+- Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200 y `subfinder` 400 consultas por día UTC, de toda la plataforma. La semilla 006 pone 400 a `github`, donde cada intento a la API de GitHub y cada clon cuentan como consulta. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una fuente de su lista blanca consultada en una corrida, no una petición HTTP.
 - `subfinder` queda sembrada apagada (`enabled = false`), como `censys` en la semilla 001. Se prende con otra semilla cuando #8 (RC-40) revise los términos de sus 8 fuentes, haya una grabación de `subfinder` para olmardo.com y el contenedor pueda escribir en `respuestas_grabadas/` (hoy no, el Dockerfile copia `cirdan/` como root). Así la demo en reproducir de S12 no la muestra fallida.
+- `github` sí queda sembrada encendida (semilla 006): un dominio sin organización declarada en `ORGS_GITHUB_DECLARADAS` no consulta nada, y en reproducir un dominio sin grabación no falla. En los dos casos la fuente queda `succeeded` con sus 2 códigos sin cobertura. La excepción es el cupo: el orquestador reserva las 16 consultas de `github` antes de llamar al recolector, así que si ya no caben en el límite del día la fuente queda `failed` por falta de cupo, aunque el dominio no tenga organización declarada.
 
 ## Cómo cargarla
 
@@ -80,6 +82,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/003_titulos_espanol.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/004_reglas_recolectores.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/005_subfinder_y_limites.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/006_github.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -159,6 +162,15 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limi
 ```
 
 Con las dos da `ct_logs|200|t` y `subfinder|400|f` (sembrada apagada). Que las dos funciones tengan `search_path` fijo y no sean de PUBLIC lo revisan la sección [12] de `prueba_rls.sql` y la prueba 12 de `pruebas/test_aislamiento.py`. El día del contador es UTC, explícito en las funciones, y no el de México que fija `cirdan/db.py`: a las 18:00 de Monterrey empieza otro día de cupo. El día nunca retrocede: una reserva hecha en una transacción que empezó antes de medianoche UTC suma sobre el día nuevo si otra ya lo marcó. Margen aceptado: una corrida que reservó antes de medianoche UTC y ajusta después no toca el día nuevo, así que ese día puede pasar su límite hasta en el `MAX_CONSULTAS` de esa corrida.
+
+Para la fuente `github` (RC-50, #16) basta la semilla 006, que necesita la 008. El orden con la API no importa: la API anterior salta las fuentes sin recolector en `REGISTRO`, y la nueva sin la semilla no corre `github`, porque el escaneo solo toma las fuentes de `data_sources`. Va antes de reconstruir la API para que el primer escaneo ya la incluya:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/006_github.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, enabled, keep_raw_payload, daily_limit FROM data_sources WHERE code = 'github'"
+```
+
+Da `github|t|f|400`. Corre en una sola transacción y se puede correr otra vez sin error: no repite la fila ni pisa una que ya exista. No agrega tablas ni políticas.
 
 ## Decisiones y desviaciones respecto al DBML
 

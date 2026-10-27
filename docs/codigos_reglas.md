@@ -28,8 +28,8 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 09 | `domain_expiring_soon` | infrastructure | medium | 10.00 | #15b RC-166 | Planeado |
 | 10 | `spf_allow_all` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
 | 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
-| 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Planeado |
-| 13 | `email_in_public_commits` | digital_identity | low | 8.00 | #16 RC-50 | Planeado |
+| 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Lo emite hoy |
+| 13 | `email_in_public_commits` | digital_identity | low | 8.00 | #16 RC-50 | Lo emite hoy |
 | 14 | `breach_exposure_old` | data_leaks | high | 25.00 | #19 RC-54 | Planeado |
 | 15 | `breach_exposure_no_passwords` | data_leaks | medium | 10.00 | #19 RC-54 | Planeado |
 | 16 | `personal_email_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado |

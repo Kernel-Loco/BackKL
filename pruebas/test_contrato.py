@@ -4,6 +4,7 @@
 """
 import http.client
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -17,8 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre c
 from pruebas.test_certspotter import RespaldoSimulado, emision  # noqa: E402
 from pruebas.test_crtsh import AHORA, CrtshSimulado  # noqa: E402
 from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
+from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa: E402
 from pruebas.test_subfinder import SubfinderSimulado  # noqa: E402
-from cirdan.recolectores import REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, registros_dns, subfinder  # noqa: E402
+from cirdan.recolectores import (REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, github, registros_dns,  # noqa: E402
+                                 subfinder)
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
@@ -342,8 +345,9 @@ class Ejecutar(unittest.TestCase):
         self.assertIn('api.acme-demo.mx', [a.valor for a in res.activos])
 
     def test_14_cada_recolector_graba_de_nuevo_y_reproduce_lo_grabado(self):
-        """Sin red ni binarios: crt.sh y Cert Spotter con su transporte simulado, subfinder con un proceso simulado y el DNS con un
-        resolvedor simulado.
+        """Sin red ni binarios: crt.sh y Cert Spotter con su transporte simulado, subfinder con un proceso simulado, el DNS con un
+        resolvedor simulado y GitHub con su API, git y gitleaks simulados, con acme-demo.mx declarado como la organización
+        acme-demo (sin declaración GitHub no consulta ni graba nada).
         Un recolector nuevo en REGISTRO necesita aquí su simulación, o correría su fuente real."""
         for fuente in REGISTRO:
             modulo = cargar(fuente)
@@ -351,7 +355,11 @@ class Ejecutar(unittest.TestCase):
                     mock.patch.object(crtsh, '_descargar', CrtshSimulado()), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
                     mock.patch.object(subfinder, '_ejecutar', SubfinderSimulado()), \
                     mock.patch.object(subfinder, '_binario', lambda: '/usr/local/bin/subfinder'), \
-                    mock.patch.object(registros_dns, '_consultar', DnsSimulado(zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject']))):
+                    mock.patch.object(registros_dns, '_consultar', DnsSimulado(zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject']))), \
+                    mock.patch.object(github, '_descargar', ApiSimulada()), \
+                    mock.patch.object(github, '_ejecutar', ProcesosSimulados()), \
+                    mock.patch.object(github, '_binario', BINARIOS.get), \
+                    mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo'}):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
                 (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')  # de una grabación anterior
@@ -375,8 +383,8 @@ class Ejecutar(unittest.TestCase):
             maximo = getattr(cargar(fuente), 'MAX_CONSULTAS', None)
             self.assertIs(type(maximo), int, fuente)
             self.assertGreaterEqual(maximo, 0, fuente)
-        self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS),
-                         (18, len(subfinder.FUENTES_SUBFINDER), 0))
+        self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS),
+                         (18, len(subfinder.FUENTES_SUBFINDER), 16, 0))
 
     def test_15c_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
         """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento."""

@@ -6,7 +6,7 @@ import importlib
 # data_sources.code -> módulo del recolector. 'ejemplo' es solo para pruebas.
 # Cada módulo declara MAX_CONSULTAS: el máximo de consultas de una corrida, lo que reserva el límite diario (#13b).
 REGISTRO = {'ct_logs': 'cirdan.recolectores.crtsh', 'dns': 'cirdan.recolectores.registros_dns',
-            'subfinder': 'cirdan.recolectores.subfinder',
+            'subfinder': 'cirdan.recolectores.subfinder', 'github': 'cirdan.recolectores.github',
             'ejemplo': 'cirdan.recolectores.ejemplo'}
 
 
