@@ -48,6 +48,10 @@ OTRO_CAMPO = re.compile(r"\b(reviewed_by\s*=\s*(?:'[^']*'|NULL)|updated_at\s*=\s
 REVISOR = re.compile(r"\breviewed_by\s*=\s*(?:'([^']*)'|NULL)")
 # Filas con que la 005 revisa los textos antes de cambiarlos: código, md5 de antes, md5 de después y revisor.
 HUELLA = re.compile(r"^\s*\('([a-z0-9_]+)', '([0-9a-f]{32})', '([0-9a-f]{32})', (?:'([^']*)'|NULL)\),?$", re.MULTILINE)
+# Comentario de la columna reviewed_by en las migraciones y su nota en el DBML (la 007 corrige el de la 003).
+COMENTARIO_REVISOR = re.compile(r"COMMENT ON COLUMN scoring_rule_texts\.reviewed_by IS '([^']*)'\s*;")
+NOTA_REVISOR = re.compile(r"^Table scoring_rule_texts\b.*?^\s*reviewed_by\s+text\s+\[note:\s*'([^']*)'\]",
+                          re.DOTALL | re.MULTILINE)
 FILA_DOC = re.compile(r"^\|\s*(\d{2})\s*\|\s*`([a-z0-9_]+)`\s*\|\s*([a-z_]+)\s*\|\s*([a-z]+)\s*\|\s*([0-9.]+)\s*\|"
                       r"\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*$", re.MULTILINE)
 POR_CATEGORIA_DOC = re.compile(r'^Por categoría: (.*)$', re.MULTILINE)
@@ -319,6 +323,17 @@ class Reglas(unittest.TestCase):
                 self.assertEqual(revisor or None, firma[code],
                                  '%s: el revisor de %r en sus huellas no es el que escribe su UPDATE' % (nombre, code))
         self.assertGreater(con_huellas, 0, 'ninguna migración tiene huellas: cambió la forma del VALUES de la 005')
+
+    def test_12_el_comentario_de_reviewed_by_dice_lo_mismo_que_el_dbml(self):
+        # En la base queda el último COMMENT de las migraciones en orden. Debe decir quién firma lo mismo que el DBML y
+        # docs/codigos_reglas.md, sin contar el punto final. Si cambia quién firma, va otra migración con su COMMENT
+        comentarios = [c for ruta in ARCHIVOS_SQL if 'migraciones' in ruta.parts
+                       for c in COMENTARIO_REVISOR.findall(ruta.read_text(encoding='utf-8'))]
+        self.assertTrue(comentarios, 'ninguna migración comenta scoring_rule_texts.reviewed_by')
+        nota = NOTA_REVISOR.search((RAIZ / 'db' / 'cirdan_esquema.dbml').read_text(encoding='utf-8'))
+        self.assertIsNotNone(nota, 'db/cirdan_esquema.dbml no trae la nota de reviewed_by en scoring_rule_texts')
+        self.assertEqual(comentarios[-1].rstrip('.'), nota.group(1).rstrip('.'),
+                         'el último COMMENT de reviewed_by en db/migraciones/ no dice lo mismo que el DBML')
 
 
 if __name__ == '__main__':
