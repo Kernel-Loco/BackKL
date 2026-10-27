@@ -15,5 +15,9 @@ cirdan/recolectores/respuestas_grabadas/*/*/.grabacion
 cirdan/recolectores/respuestas_grabadas/crtsh/*
 !cirdan/recolectores/respuestas_grabadas/crtsh/.gitkeep
 
+# Grabaciones reales de subfinder (local), igual que las de crt.sh
+cirdan/recolectores/respuestas_grabadas/subfinder/*
+!cirdan/recolectores/respuestas_grabadas/subfinder/.gitkeep
+
 # Carpeta de grabaciones de antes del 11 oct: su contenido se mueve a cirdan/recolectores/respuestas_grabadas/
 /respuestas_grabadas/

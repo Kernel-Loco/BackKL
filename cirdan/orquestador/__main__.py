@@ -45,7 +45,7 @@ def main(argv=None):
         marcar_fallido(org, solicitud.scan_id, e)
         raise
     for r in resumen['sources']:
-        print('  %-8s %s · %d activos, %d hallazgos%s%s' % (
+        print('  %-9s %s · %d activos, %d hallazgos%s%s' % (
             r['source'], ESTADOS.get(r['status'], r['status']), r['activos'], r['hallazgos'],
             ' · sin cobertura: ' + ', '.join(r['sin_cobertura']) if r['sin_cobertura'] else '',
             ' · ' + r['error'] if r['error'] else ''))
