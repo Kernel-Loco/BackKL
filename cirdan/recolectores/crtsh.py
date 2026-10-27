@@ -80,6 +80,11 @@ ORIGEN = 'crtsh'             # de dónde salió el certificado, en atributos y e
 # Código de regla -> severidad base. Los tres deben existir en el catálogo de reglas (#30).
 CODIGOS = {'cert_expired': 'high', 'cert_expiring_soon': 'medium', 'lookalike_domain': 'medium'}
 
+# Máximo de consultas HTTP de una corrida sin --con-parecidos, lo que reserva el límite diario (#13b). El peor caso es
+# el respaldo: las dos búsquedas de crt.sh fallan con todos sus INTENTOS (2 x 3) y Cert Spotter da MAX_PAGINAS páginas
+# con todos sus intentos cada una (4 x 3), 18 en total. Con crt.sh arriba el complemento usa 2 intentos y no pasa de 14.
+MAX_CONSULTAS = 2 * INTENTOS + certspotter.MAX_PAGINAS * INTENTOS
+
 # Sufijos de dos niveles más comunes para sacar el dominio registrable sin descargar la lista pública de sufijos.
 SUFIJOS_DOBLES = {'com.mx', 'org.mx', 'net.mx', 'edu.mx', 'gob.mx', 'com.br', 'com.ar', 'com.co', 'com.pe', 'com.es',
                   'co.uk', 'org.uk', 'com.au', 'co.jp'}

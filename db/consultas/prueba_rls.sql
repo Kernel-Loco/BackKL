@@ -3,7 +3,9 @@
 -- Prueba de aislamiento entre clientes (RLS) y de inmutabilidad.
 -- Las secciones [5] a [8] DEBEN fallar: ahí se desactiva ON_ERROR_STOP
 -- para que psql muestre cada ERROR y siga con la siguiente prueba.
--- Las [10] y [11] revisan login_lookup() (migración 004).
+-- Las [10] y [11] revisan login_lookup() (migración 004). La [12] revisa
+-- las funciones del límite diario (migración 008): va al final porque sin la
+-- 008 su cast falla y psql se detiene.
 -- =====================================================================
 \set QUIET on
 \pset footer off
@@ -96,3 +98,13 @@ SELECT current_user AS rol,
 RESET ROLE;
 SELECT rolname, rolsuper FROM pg_roles WHERE rolname = 'cirdan_app';
 ROLLBACK;
+
+\echo '[12] reserve_source_quota() y adjust_source_quota() (migración 008): search_path que termina en pg_temp y sin EXECUTE para PUBLIC'
+SELECT proname AS funcion,
+       prosecdef AS security_definer,
+       array_to_string(proconfig, '; ') AS config,
+       has_function_privilege('public', oid, 'EXECUTE') AS public_ejecuta
+  FROM pg_proc
+ WHERE oid IN ('public.reserve_source_quota(text,integer)'::regprocedure,
+               'public.adjust_source_quota(text,date,integer)'::regprocedure)
+ ORDER BY proname;

@@ -19,3 +19,18 @@ DB-IP
   IP Geolocation by DB-IP (https://db-ip.com), bajo la licencia
   Creative Commons Attribution 4.0 International (CC BY 4.0):
   https://creativecommons.org/licenses/by/4.0/
+
+Software de terceros incluido en la imagen
+------------------------------------------
+
+La imagen de Docker de la API (Dockerfile) trae este programa, que no está en
+el repositorio.
+
+subfinder 2.17.0
+  https://github.com/projectdiscovery/subfinder
+  Licencia MIT:
+  Copyright (c) 2021 ProjectDiscovery, Inc.
+  El texto completo de su licencia va dentro de la imagen, en
+  /usr/share/licenses/subfinder/LICENSE.md.
+  Es el binario del release oficial para linux amd64 o arm64. Incluye sus
+  dependencias de Go, cada una con su propia licencia, que no se listan aquí.

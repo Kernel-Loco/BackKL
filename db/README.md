@@ -20,22 +20,26 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `migraciones/005_textos_revisados.sql` | Corrige 23 textos de `scoring_rule_texts` según la revisión de RC-66 del 25 oct 2026 y llena `reviewed_by` de las 25 reglas OSINT (#14 a #20). Las 5 de #62 a #64 siguen en NULL |
 | `migraciones/006_firma_reglas_extras.sql` | Llena `reviewed_by` de las 5 reglas de #62 a #64, que revisó Ernesto (RC-66). No cambia textos. Con ella quedan firmadas las 30 reglas del juego v1 |
 | `migraciones/007_comentario_revisor.sql` | Corrige el comentario de `scoring_rule_texts.reviewed_by` que puso la 003: el resto de los textos lo revisa alguien de otra área o Ernesto (RC-66). Solo cambia el comentario |
+| `migraciones/008_limite_diario_fuentes.sql` | Límite diario de consultas por fuente (RC-184, #13b): `daily_limit`, `daily_used` y `daily_used_on` en `data_sources` (día UTC) y las funciones `reserve_source_quota()` y `adjust_source_quota()`, SECURITY DEFINER de `postgres`, que son lo único que mueve el contador. `cirdan_app` no tiene UPDATE: lee las columnas y ejecuta las funciones, y con ellas puede mover `daily_used` del día (el ajuste acepta cualquier delta) |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
 | `semillas/004_reglas_recolectores.sql` | Reglas 08 a 30 del juego v1, las de los recolectores #14 a #20 y las previstas de #62 a #64, con weight 1.000 y tope por severidad (RC-66, #30). No toca las 7 de la semilla 001 |
+| `semillas/005_subfinder_y_limites.sql` | Fuente `subfinder` (recolector pasivo de subdominios), sembrada apagada, y límite diario de `ct_logs` (200 consultas) y `subfinder` (400, 50 corridas de 8 fuentes), con el porqué de cada número (RC-184, #13b). Necesita la 008 |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
-| `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable y que `login_lookup()` no lee una vista temporal |
+| `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 24 tablas con filas y RLS, más el resumen de objetos |
 
 ## Qué se creó
 
 - Contenedor `cirdan-pg16` (imagen `postgres:16.14`), puerto `127.0.0.1:5433`, volumen `cirdan-pg16-data`, zona horaria America/Mexico_City.
 - Base `cirdan` con las 24 tablas en los 7 grupos del DBML, 58 FK (compuestas por `organization_id` y, donde importa, `domain_id`, más la de `scoring_rules.code` a `scoring_rule_texts` de la migración 003), 68 índices (únicos, parciales y de consulta), 13 triggers y 18 políticas RLS.
-- Rol de aplicación `cirdan_app`: sin superusuario, sin `BYPASSRLS`, con privilegios mínimos (sin UPDATE/DELETE en `audit_log`, `domain_scores`, `score_contributions` ni `dns_txt_verifications`; en `domain_authorizations` solo puede cambiar `revoked_at`; en `scans` no puede fijar `queued_at`; no puede leer `data_sources.api_key_enc`). Desde la migración 004 tampoco puede crear tablas ni vistas temporales.
+- Rol de aplicación `cirdan_app`: sin superusuario, sin `BYPASSRLS`, con privilegios mínimos (sin UPDATE/DELETE en `audit_log`, `domain_scores`, `score_contributions` ni `dns_txt_verifications`; en `domain_authorizations` solo puede cambiar `revoked_at`; en `scans` no puede fijar `queued_at`; no puede leer `data_sources.api_key_enc` ni hacer UPDATE en `data_sources`: desde la 008 el contador diario solo lo mueven `reserve_source_quota()` y `adjust_source_quota()`, que `cirdan_app` sí puede ejecutar, así que puede mover `daily_used` del día porque el ajuste acepta cualquier delta). Desde la migración 004 tampoco puede crear tablas ni vistas temporales.
 - RLS con ENABLE + FORCE en las 18 tablas por cliente. Las políticas comparan `organization_id` (o `id` en `organizations`) con `app_current_org()`, que devuelve `NULLIF(current_setting('app.current_org', true), '')::uuid`. Sin tenant no se ve nada.
 - Triggers: cadena de hashes SHA-256 por organización en `audit_log` (chain_seq, prev_hash, row_hash); bloqueo de UPDATE, DELETE y TRUNCATE en `audit_log`, `dns_txt_verifications`, `domain_scores` y `score_contributions`; `domain_authorizations` inmutable salvo `revoked_at`; `scans` exige autorización vigente y TXT `match` de la última hora; `scan_source_runs` rechaza `raw_payload` si la fuente tiene `keep_raw_payload = false` (HIBP).
 - Datos de Acme Demo (plan Starter), los mismos de las pantallas de Figma, más Beta Corp solo para la prueba de aislamiento. La semilla 002 agrega Grupo Olmardo (plan Business) con el dominio de prueba olmardo.com.
+- Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200 y `subfinder` 400 consultas por día UTC, de toda la plataforma. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una fuente de su lista blanca consultada en una corrida, no una petición HTTP.
+- `subfinder` queda sembrada apagada (`enabled = false`), como `censys` en la semilla 001. Se prende con otra semilla cuando #8 (RC-40) revise los términos de sus 8 fuentes, haya una grabación de `subfinder` para olmardo.com y el contenedor pueda escribir en `respuestas_grabadas/` (hoy no, el Dockerfile copia `cirdan/` como root). Así la demo en reproducir de S12 no la muestra fallida.
 
 ## Cómo cargarla
 
@@ -69,11 +73,13 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/005_textos_revisados.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/006_firma_reglas_extras.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/007_comentario_revisor.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/008_limite_diario_fuentes.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/003_titulos_espanol.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/004_reglas_recolectores.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/005_subfinder_y_limites.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -139,6 +145,21 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT col_description(
 
 Con la 007 da el comentario que termina en `alguien de otra área o Ernesto). NULL mientras no se revise.` y antes el de la 003. Si alguien vuelve a correr la 003, su comentario regresa sin error y se vuelve a correr la 007. `pruebas/test_catalogo_reglas.py` revisa sin base que el último comentario de las migraciones diga lo mismo que `db/cirdan_esquema.dbml`.
 
+Para el límite diario por fuente (RC-184, #13b) la base va antes de reconstruir la API, como con la 003. Primero se trae el código (`git pull`), después se aplican la 008 y la semilla 005, en ese orden, y al final se reconstruye la API con `docker compose up -d --build api` (antes, `docker compose --dry-run up -d --build api` dice si también se recrearían `cirdan-pg16` o `cirdan-valkey`). El orquestador de esta versión llama a `reserve_source_quota()` en cada fuente en vivo o al grabar, y sin la 008 todo escaneo en vivo o al grabar queda `failed` sin correr ninguna fuente. La API anterior no lee las columnas nuevas ni conoce `subfinder`, así que funciona igual con la 008 y la semilla 005 aplicadas. La semilla 005 necesita la columna `daily_limit` de la 008:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/008_limite_diario_fuentes.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/005_subfinder_y_limites.sql
+```
+
+Cada una corre en una sola transacción y se puede correr otra vez sin error: la 008 no repite columnas y vuelve a crear las funciones con lo mismo, y la semilla 005 no repite la fila de `subfinder` ni pisa un límite de `ct_logs` ya puesto. La 008 no agrega tablas, FK, índices, triggers ni políticas, así que los conteos de arriba no cambian. Para revisarlas:
+
+```bash
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limit, enabled FROM data_sources WHERE daily_limit IS NOT NULL ORDER BY code"
+```
+
+Con las dos da `ct_logs|200|t` y `subfinder|400|f` (sembrada apagada). Que las dos funciones tengan `search_path` fijo y no sean de PUBLIC lo revisan la sección [12] de `prueba_rls.sql` y la prueba 12 de `pruebas/test_aislamiento.py`. El día del contador es UTC, explícito en las funciones, y no el de México que fija `cirdan/db.py`: a las 18:00 de Monterrey empieza otro día de cupo. El día nunca retrocede: una reserva hecha en una transacción que empezó antes de medianoche UTC suma sobre el día nuevo si otra ya lo marcó. Margen aceptado: una corrida que reservó antes de medianoche UTC y ajusta después no toca el día nuevo, así que ese día puede pasar su límite hasta en el `MAX_CONSULTAS` de esa corrida.
+
 ## Decisiones y desviaciones respecto al DBML
 
 Las desviaciones 1, 2 y 3 se pasaron al DBML el 9 oct, así que hoy la base y el DBML ya coinciden en esos tres puntos. Se dejan en la lista para explicar por qué cambió el modelo.
@@ -146,7 +167,7 @@ Las desviaciones 1, 2 y 3 se pasaron al DBML el 9 oct, así que hoy la base y el
 1. **Severidad `critical`.** El DBML solo permite high, medium y low, pero el portal usa Critical. Se agregó `critical` a `findings.severity`, `score_contributions.severity`, `alerts.severity` y `scoring_rules.base_severity`.
 2. **Categorías del score.** Se usan las del portal (Infrastructure, Digital Identity, Configuration y Data Leaks: `infrastructure`, `digital_identity`, `configuration`, `data_leaks`) en lugar de exposed_services, vulnerabilities, configuration y breaches. Pesos del juego v1: 30, 20, 20 y 30 %.
 3. **Sentido del score.** Más alto = más exposición. La alerta salta cuando el score llega al umbral (60) o lo pasa, así que `alerts.event_type` usa `score.above_threshold` en lugar de `score.below_threshold`. `score_contributions.penalty` conserva el nombre, pero son puntos que suben la exposición.
-4. **Roles.** Solo se creó `cirdan_app`; las tablas pertenecen a `postgres`. No se crearon cirdan_owner, cirdan_maint, cirdan_web, cirdan_worker, cirdan_definer, cirdan_dispatcher ni cirdan_retention, ni las funciones api_key_lookup y audit_platform_append. `login_lookup` llegó con la migración 002 (#25): es SECURITY DEFINER de `postgres` y solo `cirdan_app` puede ejecutarla. La migración 004 le fija `search_path = pg_catalog, public, pg_temp`, le pone esquema a sus tablas y la deja devolver solo `user_id`, `organization_id`, `password_hash` y `mfa_enabled`. La excepción de retención del trigger ya compara `current_user = 'cirdan_retention'`.
+4. **Roles.** Solo se creó `cirdan_app`; las tablas pertenecen a `postgres`. No se crearon cirdan_owner, cirdan_maint, cirdan_web, cirdan_worker, cirdan_definer, cirdan_dispatcher ni cirdan_retention, ni las funciones api_key_lookup y audit_platform_append. `login_lookup` llegó con la migración 002 (#25): es SECURITY DEFINER de `postgres` y solo `cirdan_app` puede ejecutarla. La migración 004 le fija `search_path = pg_catalog, public, pg_temp`, le pone esquema a sus tablas y la deja devolver solo `user_id`, `organization_id`, `password_hash` y `mfa_enabled`. La 008 agrega `reserve_source_quota()` y `adjust_source_quota()` con el mismo patrón (dueño `postgres`, `search_path` que termina en `pg_temp`, tablas con esquema y EXECUTE solo para `cirdan_app`), para que la app mueva el contador diario sin UPDATE sobre `data_sources`. La excepción de retención del trigger ya compara `current_user = 'cirdan_retention'`.
 5. **Variable de tenant.** Se usa `app.current_org` con `app_current_org()`, como dice el DBML.
 6. **Trigger de `scans`.** Valida vigencia y antigüedad del TXT contra `queued_at` (que por defecto es `now()`), para poder cargar escaneos históricos de la demo. Solo `postgres` puede fijar `queued_at`: `cirdan_app` tiene GRANT INSERT por columna sin `queued_at`, así que para la app siempre es `now()` y no puede fechar un escaneo en el pasado para usar una autorización vencida.
 7. **Título del hallazgo.** El DBML no tiene columna de título. Va en `findings.evidence->>'title'`. Los nombres de fuente (HIBP API, Shodan, DNS) se traducen en la consulta desde `data_sources.code`.
