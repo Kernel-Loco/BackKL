@@ -8,9 +8,11 @@ Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa 
 |---|---|
 | `cirdan/api/` | API en FastAPI y la página `/demo` (solo con `DEMO_EXPLORER=true`) |
 | `cirdan/auth/` | Inicio de sesión (#25): contraseña con argon2id, MFA con TOTP, sesiones en Valkey y cuentas de demo |
+| `cirdan/ml/` | Dataset semisintético del ML (#33, RC-65): plantillas, características del reto, armado del lote y acuerdo entre etiquetadores. El método está en `docs/dataset_ml.md` |
 | `cirdan/orquestador/` | Orquestador de escaneos (#22): solo escanea con autorización vigente y TXT verificado |
 | `cirdan/recolectores/` | Contrato de plugin (#13), recolectores OSINT pasivos (crt.sh, #14, y uno de ejemplo para pruebas) y sus respuestas grabadas para el respaldo de las demos (hoy solo está la del recolector de ejemplo) |
 | `cirdan/score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
+| `datos/` | Datos del ML. En `datos/ml/rc65/` están el lote, la copia de cada etiquetador, las etiquetas del LLM y el dataset (#33, RC-65) |
 | `db/` | Base PostgreSQL 16: migraciones, semillas y consultas |
 | `docs/` | Documentos del proyecto, con su índice |
 | `pruebas/` | Pruebas automáticas de la base, de la API, del contrato de API v1, del criterio de criticidad, del contrato de plugin y de crt.sh |
