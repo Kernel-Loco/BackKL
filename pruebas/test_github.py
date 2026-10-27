@@ -59,7 +59,7 @@ REPOS = [repo('api', '2026-10-10T10:00:00Z'), repo('sitio', '2026-10-12T10:00:00
          repo('copia', '2026-10-14T10:00:00Z', fork=True)]
 
 
-def secreto(regla='cirdan-fake-token', archivo='config/.env', fecha='2026-09-01T12:00:00Z', **cambios):
+def hallazgo_gitleaks(regla='cirdan-fake-token', archivo='config/.env', fecha='2026-09-01T12:00:00Z', **cambios):
     """Un hallazgo del reporte JSON de gitleaks 8.21.2 con --redact, con todos sus campos."""
     base = {'RuleID': regla, 'Description': 'Token falso de LowTide', 'StartLine': 3, 'EndLine': 3, 'StartColumn': 7,
             'EndColumn': 50, 'Match': 'TOKEN=REDACTED', 'Secret': 'REDACTED', 'File': archivo, 'SymlinkFile': '',
@@ -121,7 +121,7 @@ class ProcesosSimulados:
     da, por (paso, repo), un código de salida o una excepción."""
 
     def __init__(self, reporte=None, log=None, reportes=None, logs=None, fallas=None):
-        self.reporte = [secreto()] if reporte is None else reporte
+        self.reporte = [hallazgo_gitleaks()] if reporte is None else reporte
         self.log = LOG if log is None else log
         self.reportes, self.logs, self.fallas = reportes or {}, logs or {}, fallas or {}
         self.llamadas = []
@@ -222,9 +222,9 @@ class SinFuga(unittest.TestCase):
     def test_1_un_reporte_sin_redactar_descarta_la_corrida_sin_dejarla_failed(self):
         """Sin cobertura y no failed: el orquestador reintentaría y gitleaks volvería a escribir el valor en disco."""
         with self.assertRaises(github.SecretoSinRedactar) as e:
-            github.leer_reporte(json.dumps([secreto(Secret=TOKEN, Match='TOKEN=' + TOKEN)]))
+            github.leer_reporte(json.dumps([hallazgo_gitleaks(Secret=TOKEN, Match='TOKEN=' + TOKEN)]))
         self.assertEqual(str(e.exception), github.SIN_REDACTAR)
-        procesos = ProcesosSimulados(reporte=[secreto(Secret=TOKEN, Match='TOKEN=' + TOKEN)])
+        procesos = ProcesosSimulados(reporte=[hallazgo_gitleaks(Secret=TOKEN, Match='TOKEN=' + TOKEN)])
         res = por_ejecutar(procesos=procesos)
         self.assertEqual((res.estado, res.error, res.activos, res.hallazgos), ('succeeded', '', [], []))
         self.assertEqual((res.sin_cobertura, res.avisos), (CODIGOS, [github.SIN_REDACTAR]))
@@ -233,7 +233,8 @@ class SinFuga(unittest.TestCase):
         self.sin_token(res)
 
     def test_2_un_match_sin_redactar_tambien_descarta(self):
-        for reporte in ([secreto(Match='TOKEN=' + TOKEN)], [secreto(Match=TOKEN[:20])], [secreto(Secret='')]):
+        for reporte in ([hallazgo_gitleaks(Match='TOKEN=' + TOKEN)], [hallazgo_gitleaks(Match=TOKEN[:20])],
+                        [hallazgo_gitleaks(Secret='')]):
             with self.subTest(reporte=reporte[0]['Match'][:6]):
                 res, _ = recolectar(procesos=ProcesosSimulados(reporte=reporte))
                 self.assertEqual((res.estado, res.hallazgos, res.avisos), ('succeeded', [], [github.SIN_REDACTAR]))
@@ -349,8 +350,9 @@ class Secretos(unittest.TestCase):
     """D3 y D5: un hallazgo por repo, ruta y regla, sin valor ni commit."""
 
     def test_1_un_hallazgo_por_repo_ruta_y_regla_con_la_fecha_mas_vieja(self):
-        reporte = [secreto(fecha='2026-09-20T00:00:00Z'), secreto(fecha='2026-09-01T12:00:00Z', Commit='b' * 40),
-                   secreto('generic-api-key', 'app.py', '2026-10-01T00:00:00Z')]
+        reporte = [hallazgo_gitleaks(fecha='2026-09-20T00:00:00Z'),
+                   hallazgo_gitleaks(fecha='2026-09-01T12:00:00Z', Commit='b' * 40),
+                   hallazgo_gitleaks('generic-api-key', 'app.py', '2026-10-01T00:00:00Z')]
         res, _ = recolectar(procesos=ProcesosSimulados(reportes={'sitio': reporte, 'api': []}))
         secretos = [h for h in res.hallazgos if h.codigo == 'secret_in_public_repo']
         self.assertEqual([(h.activo, h.clave) for h in secretos], [
@@ -366,13 +368,14 @@ class Secretos(unittest.TestCase):
         self.assertEqual(h.huella, huella('secret_in_public_repo', 'acme-demo/sitio', 'config/.env', 'cirdan-fake-token'))
 
     def test_2_la_huella_no_depende_del_valor_ni_del_commit(self):
-        uno, _ = recolectar(procesos=ProcesosSimulados(reporte=[secreto(Commit='a' * 40, StartLine=1, Entropy=3.1)]))
-        otro, _ = recolectar(procesos=ProcesosSimulados(reporte=[secreto(Commit='b' * 40, StartLine=9, Entropy=4.9,
-                                                                         Fingerprint='otro')]))
+        uno, _ = recolectar(procesos=ProcesosSimulados(
+            reporte=[hallazgo_gitleaks(Commit='a' * 40, StartLine=1, Entropy=3.1)]))
+        otro, _ = recolectar(procesos=ProcesosSimulados(
+            reporte=[hallazgo_gitleaks(Commit='b' * 40, StartLine=9, Entropy=4.9, Fingerprint='otro')]))
         self.assertEqual([h.huella for h in uno.hallazgos], [h.huella for h in otro.hallazgos])
 
     def test_3_regla_desconocida_y_ruta_con_controles_se_limpian(self):
-        reporte = [secreto('Regla Con Espacios', 'a\nb\x00c' + 'x' * 400)]
+        reporte = [hallazgo_gitleaks('Regla Con Espacios', 'a\nb\x00c' + 'x' * 400)]
         res, _ = recolectar(procesos=ProcesosSimulados(reportes={'sitio': reporte, 'api': []}, log=''))
         (h,) = res.hallazgos
         self.assertEqual(h.evidencia['tipo'], 'desconocida')
@@ -645,7 +648,7 @@ class GrabarYReproducir(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             carpeta = Path(d)
             (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')
-            res, _ = recolectar(procesos=ProcesosSimulados(reporte=[secreto(Secret=TOKEN)]), modo='grabar',
+            res, _ = recolectar(procesos=ProcesosSimulados(reporte=[hallazgo_gitleaks(Secret=TOKEN)]), modo='grabar',
                                 carpeta=carpeta, nueva=True)
             self.assertEqual(res.avisos, [github.SIN_REDACTAR])
             self.assertEqual(sorted(p.name for p in carpeta.iterdir()), ['viejo.json'])
@@ -695,7 +698,7 @@ class Temporales(unittest.TestCase):
 
     def test_1_la_carpeta_se_borra_al_terminar_y_al_abortar(self):
         with tempfile.TemporaryDirectory() as t:
-            for procesos in (ProcesosSimulados(), ProcesosSimulados(reporte=[secreto(Secret=TOKEN)])):
+            for procesos in (ProcesosSimulados(), ProcesosSimulados(reporte=[hallazgo_gitleaks(Secret=TOKEN)])):
                 try:
                     recolectar(procesos=procesos, temporal=t)
                 except FuenteNoResponde:
