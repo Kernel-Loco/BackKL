@@ -231,7 +231,7 @@ Table scoring_rule_texts [note: 'Textos de cada regla para el portal y la API: t
   title text [not null, note: 'Frase corta y simple, sin punto final. CHECK no vacío']
   meaning text [not null, note: 'Qué significa el hallazgo, máximo dos frases. CHECK no vacío']
   recommendation text [not null, note: 'Qué hacer, en imperativo con tú y máximo dos frases. La API lo devuelve con este mismo nombre. CHECK no vacío']
-  reviewed_by text [note: 'Quién revisó el texto (alguien de otra área y, en las reglas OSINT, Ernesto). NULL mientras no se revise']
+  reviewed_by text [note: 'Quién revisó el texto (en las reglas OSINT, Ernesto, y en el resto alguien de otra área o Ernesto). NULL mientras no se revise']
 }
 
 Table domain_scores [note: 'Histórico del score de 0 a 100 por dominio y por categoría. Alimenta la tendencia de 12 meses y la alerta por umbral. Solo inserción, y solo el rol de retención (plan, sin tarjeta todavía) podrá borrar filas de más de 12 meses. Hoy en dev solo hay scores de las semillas: el motor de score llega con #31 (RC-60).'] {
