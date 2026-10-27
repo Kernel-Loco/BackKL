@@ -18,6 +18,9 @@ cirdan/recolectores/respuestas_grabadas/crtsh/*
 # Grabaciones reales de subfinder (local), igual que las de crt.sh
 cirdan/recolectores/respuestas_grabadas/subfinder/*
 !cirdan/recolectores/respuestas_grabadas/subfinder/.gitkeep
+# Grabaciones reales del DNS (local, #15). Ya van sin tokens, pero muestran la zona de la empresa
+cirdan/recolectores/respuestas_grabadas/dns/*
+!cirdan/recolectores/respuestas_grabadas/dns/.gitkeep
 
 # Carpeta de grabaciones de antes del 11 oct: su contenido se mueve a cirdan/recolectores/respuestas_grabadas/
 /respuestas_grabadas/

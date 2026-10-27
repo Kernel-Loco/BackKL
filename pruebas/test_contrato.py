@@ -16,8 +16,9 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_contrato.py
 from pruebas.test_certspotter import RespaldoSimulado, emision  # noqa: E402
 from pruebas.test_crtsh import AHORA, CrtshSimulado  # noqa: E402
+from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
 from pruebas.test_subfinder import SubfinderSimulado  # noqa: E402
-from cirdan.recolectores import REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, subfinder  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, registros_dns, subfinder  # noqa: E402
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
@@ -341,14 +342,16 @@ class Ejecutar(unittest.TestCase):
         self.assertIn('api.acme-demo.mx', [a.valor for a in res.activos])
 
     def test_14_cada_recolector_graba_de_nuevo_y_reproduce_lo_grabado(self):
-        """Sin red ni binarios: crt.sh y Cert Spotter con su transporte simulado y subfinder con un proceso simulado.
+        """Sin red ni binarios: crt.sh y Cert Spotter con su transporte simulado, subfinder con un proceso simulado y el DNS con un
+        resolvedor simulado.
         Un recolector nuevo en REGISTRO necesita aquí su simulación, o correría su fuente real."""
         for fuente in REGISTRO:
             modulo = cargar(fuente)
             with tempfile.TemporaryDirectory() as d, mock.patch.object(modulo, 'CARPETA_GRABADAS', Path(d)), \
                     mock.patch.object(crtsh, '_descargar', CrtshSimulado()), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
                     mock.patch.object(subfinder, '_ejecutar', SubfinderSimulado()), \
-                    mock.patch.object(subfinder, '_binario', lambda: '/usr/local/bin/subfinder'):
+                    mock.patch.object(subfinder, '_binario', lambda: '/usr/local/bin/subfinder'), \
+                    mock.patch.object(registros_dns, '_consultar', DnsSimulado(zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject']))):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
                 (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')  # de una grabación anterior

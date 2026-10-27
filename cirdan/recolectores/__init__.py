@@ -4,8 +4,9 @@ Todos cumplen el contrato de plugin de cirdan/recolectores/contrato.py (#13)."""
 import importlib
 
 # data_sources.code -> módulo del recolector. 'ejemplo' es solo para pruebas.
-# Cada módulo declara MAX_CONSULTAS: el máximo de consultas HTTP de una corrida, lo que reserva el límite diario (#13b).
-REGISTRO = {'ct_logs': 'cirdan.recolectores.crtsh', 'subfinder': 'cirdan.recolectores.subfinder',
+# Cada módulo declara MAX_CONSULTAS: el máximo de consultas de una corrida, lo que reserva el límite diario (#13b).
+REGISTRO = {'ct_logs': 'cirdan.recolectores.crtsh', 'dns': 'cirdan.recolectores.registros_dns',
+            'subfinder': 'cirdan.recolectores.subfinder',
             'ejemplo': 'cirdan.recolectores.ejemplo'}
 
 

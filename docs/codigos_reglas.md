@@ -21,13 +21,13 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 02 | `cert_expired` | infrastructure | high | 20.00 | #14 RC-47 | Lo emite hoy |
 | 03 | `outdated_software` | infrastructure | high | 25.00 | #18 RC-46 y #17 RC-49 | Planeado |
 | 04 | `exposed_rdp` | infrastructure | high | 25.00 | #17 RC-49 | Planeado |
-| 05 | `dmarc_missing` | configuration | medium | 10.00 | #15 RC-48 | Planeado |
-| 06 | `spf_missing` | configuration | low | 8.00 | #15 RC-48 | Planeado |
+| 05 | `dmarc_missing` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
+| 06 | `spf_missing` | configuration | low | 8.00 | #15 RC-48 | Lo emite hoy |
 | 07 | `lookalike_domain` | digital_identity | medium | 15.00 | #14 RC-47 | Lo emite hoy |
 | 08 | `cert_expiring_soon` | infrastructure | medium | 10.00 | #14 RC-47 y #14b RC-184 | Lo emite hoy |
 | 09 | `domain_expiring_soon` | infrastructure | medium | 10.00 | #15b RC-166 | Planeado |
-| 10 | `spf_allow_all` | configuration | medium | 10.00 | #15 RC-48 | Planeado |
-| 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Planeado |
+| 10 | `spf_allow_all` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
+| 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
 | 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Planeado |
 | 13 | `email_in_public_commits` | digital_identity | low | 8.00 | #16 RC-50 | Planeado |
 | 14 | `breach_exposure_old` | data_leaks | high | 25.00 | #19 RC-54 | Planeado |

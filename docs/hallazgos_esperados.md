@@ -8,11 +8,11 @@ Esta es la lista de lo que LowTide debe encontrar en olmardo.com, el dominio de 
 
 **Actualizado el 26 oct 2026** con el certificado de eventos, que salió el 24 oct (comentario del 25 oct en RC-42), y con los códigos que entraron al catálogo de #30 en el PR 43 (25 oct). No se hizo ninguna consulta nueva.
 
-**Actualizado el 27 oct 2026** con subfinder (RC-184), la fila 16 y su nota. No se hizo ninguna consulta nueva ni se corrió subfinder.
+**Actualizado el 27 oct 2026** con subfinder (RC-184), la fila 16 y su nota, y con el recolector de DNS (#15, RC-48), que ya está en dev. No se corrió subfinder. El DNS se probó con una zona simulada que copia la de la fila 6, y la única consulta nueva a olmardo.com, la grabación del DNS del 27 oct, dio lo mismo: `v=spf1 -all` y NXDOMAIN en `_dmarc`.
 
 ## Cómo leer las tablas
 
-- **Fuente:** el recolector que lo encuentra. La lista va en el orden de las tarjetas: #14, #15, #15b, #16, #17, #18, #19 y #20. Hoy en dev están #14 (crt.sh) y, desde el PR 17 (19 oct), #14b (Cert Spotter) dentro del mismo recolector: como respaldo y, desde RC-184 (25 oct), también en cada corrida, para sumar los certificados que crt.sh no trae. RC-184 suma subfinder (fuente `subfinder`, también de #14b), un recolector aparte que pide los subdominios a 8 fuentes públicas en modo pasivo y solo da activos. #15 tenía fecha del 21 oct y no está en dev ni hay PR. #15b llega el 23 oct, #16 y #17 el 27 oct, #18 y #19 el 6 nov y #20 el 13 nov.
+- **Fuente:** el recolector que lo encuentra. La lista va en el orden de las tarjetas: #14, #15, #15b, #16, #17, #18, #19 y #20. Hoy en dev están #14 (crt.sh) y, desde el PR 17 (19 oct), #14b (Cert Spotter) dentro del mismo recolector: como respaldo y, desde RC-184 (25 oct), también en cada corrida, para sumar los certificados que crt.sh no trae. RC-184 suma subfinder (fuente `subfinder`, también de #14b), un recolector aparte que pide los subdominios a 8 fuentes públicas en modo pasivo y solo da activos. #15 (DNS con SPF y DMARC, RC-48) tenía fecha del 21 oct y ya está en dev. #15b llega el 23 oct, #16 y #17 el 27 oct, #18 y #19 el 6 nov y #20 el 13 nov.
 - **Código:** la regla del catálogo de #30. 'Semilla 001' quiere decir que está en `db/semillas/001_datos_demo.sql` y 'semilla 004', que entró al catálogo con `db/semillas/004_reglas_recolectores.sql` (PR 43, 25 oct). Que la regla exista no quiere decir que su recolector ya esté en dev: eso lo dice 'Depende de'.
 - **Severidad:** la base de la regla. El motor de score (#31) la puede subir.
 - **Se ve desde:** la primera fecha en que la fuente lo puede ver si la siembra se hace a tiempo.
@@ -29,7 +29,7 @@ Esta es la lista de lo que LowTide debe encontrar en olmardo.com, el dominio de 
 | 3 | Comodines de Cloudflare para olmardo.com y \*.olmardo.com. Let's Encrypt y SSL.com, vencen el 12 ene 2027. No son de la siembra | #14 y #14b | Ninguno. Queda como activo `domain` con `comodin` = true | No aplica | No aplica | 13 y 14 oct | Existen (Cert Spotter 17771264516 y 17778865245) | Nada |
 | 4 | Efecto de esos comodines: el certificado vencido de un subdominio de primer nivel (reservas, camaras o eventos) no sale como hallazgo | #14 | Ninguno. El nombre queda con `cubierto_por_comodin` = olmardo.com | No aplica | No aplica | 31 oct, cuando vence el de eventos | Existe. Los comodines siguen vigentes hasta el 12 ene 2027 | Decisión del equipo (ver 'Pendientes') |
 | 5 | Certificado de vida corta de eventos.olmardo.com. Perfil shortlived de Let's Encrypt (160 h), sin renovación automática | #14 con #14b | `cert_expiring_soon` (semilla 004) | Infraestructura | Media | Jueves 29 oct a las 06:41:56, hasta que vence el sábado 31 oct a las 18:01:55 UTC | Existe. La VM de reservas lo emitió sola el sábado 24 oct a las 21:00, con validación HTTP (Cert Spotter 17970012218). No se renueva solo y el 25 oct era el único certificado de eventos.olmardo.com en Cert Spotter | Nada |
-| 6 | Un solo SPF en la raíz y ningún `_dmarc` | #15 DNS | `dmarc_missing` (semilla 001) | Configuración | Media | Cuando llegue #15, que no está en dev | Existe. El SPF `v=spf1 -all` está en la raíz desde el 19 oct y `_dmarc` no existe, como se quiere | #15 |
+| 6 | Un solo SPF en la raíz y ningún `_dmarc` | #15 DNS | `dmarc_missing` (semilla 001) | Configuración | Media | Con #15, que ya está en dev | Existe. El SPF `v=spf1 -all` está en la raíz desde el 19 oct y `_dmarc` no existe, como se quiere | Nada |
 | 7 | Registro de olmardo.com, que vence el 14 oct 2027, y las IP a las que resuelven reservas y camaras | #15b RDAP e IP | Ninguno, solo activos. Registrador y vencimiento van en el activo `domain`, y hosting, ASN, país y CDN en los activos `ip`. `domain_expiring_soon` (semilla 004) no sale | No aplica | No aplica | 23 oct, cuando llegue #15b | Existe. El registro existe y reservas y camaras resuelven a sus VM desde el 22 oct a las 22:29 (40.65.94.253 y 20.69.154.199) | #15b |
 | 8 | Organización de GitHub olmardo con un repo público que trae un token falso `CIRDAN_FAKE_` | #16 GitHub | `secret_in_public_repo` (semilla 004), sobre olmardo.com | Fugas | Crítica | Al subir el token. #16 llega el 27 oct | Existe desde el 23 oct: el repo público olmardo/sitio-reservas trae `RESERVAS_API_TOKEN=CIRDAN_FAKE_...` en `config/despliegue.env`, en la versión actual. El README dice que es inventado. La organización no tiene el dominio verificado: no existe `_gh-olmardo-o.olmardo.com` | #16 |
 | 9 | Commits en ese repo con un correo @olmardo.com como autor | #16 | `email_in_public_commits` (semilla 004), sobre el activo `email` | Identidad digital | Baja | Igual que la fila 8 | Existe desde el 23 oct: los 2 commits de olmardo/sitio-reservas tienen como autor 'Grupo Olmardo <contacto@olmardo.com>' | #16 |
@@ -45,6 +45,7 @@ Notas por fila:
 
 - **Fila 5:** la regla de #14 pide menos de 30 días y menos de un tercio de vida (53 h). Se emitió el 24 oct a las 21:00, así que sale 'por vencer' desde el 29 oct a las 06:41:56 y vence el 31 oct a las 12:01:55, hora de Monterrey. Así sale en la grabación del jueves 29 a mediodía y en vivo en S12, el viernes 30. Desde el 23 oct eventos tiene un registro A a la VM de reservas (40.65.94.253), para que el certificado se valide por HTTP sin poner un TXT a mano. No da hallazgo: es un subdominio más en la IP de reservas. Ningún otro certificado debe llevar ese nombre, porque uno que vence después tapa el 'por vencer'.
 - **Fila 6:** si el correo @olmardo.com tiene que recibir mensajes, por ejemplo para verificarlo en GitHub, Email Routing de Cloudflare crea los MX y su propio SPF. Ese debe ser el único SPF. Dos registros `v=spf1` cuentan como `spf_missing`.
+- **Fila 6, #15:** para olmardo.com se espera solo `dmarc_missing`, con `NXDOMAIN` como lo observado. Así sale con una zona simulada de olmardo.com (NS de Cloudflare, `v=spf1 -all`, el TXT de verificación y ningún A, MX ni `_dmarc`) y con la grabación real del 27 oct, reproducida sin red. No guarda el TXT `cirdan-verification`: de los TXT que no son SPF solo conserva el nombre antes del igual y cuántos hay. Si el DNS no responde al pedir el TXT de la raíz o el de `_dmarc`, esos códigos quedan en `sin_cobertura` y no salen como si faltaran.
 - **Fila 7:** #15b no da hallazgo en olmardo.com, porque faltan más de 30 días para que venza el registro. `domain_expiring_soon` se prueba con una respuesta grabada (#13). Si una IP sale como CDN de Cloudflare, el registro quedó con proxy y #17 y #18 la descartan.
 - **Fila 8:** el token sale como crítico esté en la versión actual o solo en el historial. #16 guarda tipo, repo, ruta y huella, nunca el valor.
 - **Filas 10 y 11:** InternetDB solo muestra el puerto cuando Shodan escanea la IP, y eso puede tardar días. Hay que levantar la VM cuanto antes y consultar su IP en InternetDB ese día, como pide #10. Los puertos 80 y 443 no dan hallazgo.
@@ -58,7 +59,7 @@ Notas por fila:
 | Categoría | Hallazgo esperado | Fila | Hoy |
 |---|---|---|---|
 | Infraestructura | `cert_expiring_soon` de eventos (del 29 al 31 oct) y `exposed_service` del 8080 | 5 y 10 | El certificado de eventos existe desde el 24 oct y sale 'por vencer' del 29 al 31 oct. La cámara resuelve y responde en el 8080, pero falta que Shodan la vea |
-| Configuración | `dmarc_missing` | 6 | La condición ya se cumple. Falta #15, que no está en dev |
+| Configuración | `dmarc_missing` | 6 | La condición ya se cumple y #15 ya lo emite |
 | Identidad digital | `email_in_public_commits` | 9 | Sembrado el 23 oct. Falta #16 |
 | Fugas | `secret_in_public_repo` | 8 | Sembrado el 23 oct. Falta #16 |
 
@@ -133,3 +134,10 @@ curl -s "https://api.certspotter.com/v1/issuances?domain=olmardo.com&include_sub
 ```
 
 En dns.google, `Status` 3 quiere decir que el nombre no existe. `Status` 0 sin `Answer` quiere decir que el nombre existe pero no tiene registros de ese tipo. El SPF se busca en la respuesta TXT de la raíz. GitHub no pone su TXT de verificación en la raíz. Lo pone en `_gh-<org>-o.olmardo.com`, por eso esa consulta va aparte. Se agregó en la revisión de las 20:13.
+
+El 27 oct a las 11:43 (Monterrey) se grabó con OK el DNS de olmardo.com con el recolector de #15 (6 consultas a 1.1.1.1 y 8.8.8.8) y después se reprodujo sin red. La grabación no se sube al repo.
+
+```bash
+python -m cirdan.recolectores.registros_dns olmardo.com --grabar
+python -m cirdan.recolectores.registros_dns olmardo.com --reproducir
+```
