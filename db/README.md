@@ -100,7 +100,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/004_reglas_recolectores.sql
 ```
 
-Las dos corren en una sola transacción cada una y se pueden correr otra vez sin error: la 003 no repite la tabla, los textos ni la FK, y la semilla 004 salta las reglas que ya existen.
+Las dos corren en una sola transacción cada una y se pueden correr otra vez sin error: la 003 no repite la tabla, los textos ni la FK, y la semilla 004 salta las reglas que ya existen. La 003 sí vuelve a poner su comentario de `reviewed_by`, así que en una base que ya tiene la 007 se vuelve a correr la 007 después.
 
 La 005 solo cambia textos y `reviewed_by`, y la API los lee de la base en cada petición, así que no hace falta reconstruirla si ya la reconstruiste después de la 003. Desde el `git pull` hasta aplicarla, `pruebas/test_api_v1.py` falla porque `docs/api_v1/pesos.json` y `explicacion.json` ya traen los textos nuevos. Antes de aplicarla, respalda la base. El respaldo queda dentro del contenedor y se pierde si se recrea:
 
@@ -125,7 +125,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 
 Corre en una sola transacción. Antes de cambiar nada revisa las 5 filas, y falla sin cambiar nada si falta un texto de la 003, si un texto no es el que dejó la 005 o si una fila ya la firmó alguien que no es ErnestoDL. Se puede correr otra vez sin error, pero vuelve a mover `updated_at`. Después de la 006, volver a correr la 005 falla sin cambiar nada, porque esas 5 filas ya no tienen el revisor que espera la 005. La consulta de arriba da `30|0` cuando la 006 ya está aplicada y `25|5` antes.
 
-La 007 solo cambia el comentario de la columna `reviewed_by`, así que tampoco hace falta reconstruir la API. Va después de la 003:
+La 007 solo cambia el comentario de la columna `reviewed_by`, así que tampoco hace falta reconstruir la API. Va después de la 006, aunque solo necesita la tabla de la 003:
 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/007_comentario_revisor.sql
@@ -137,7 +137,7 @@ Corre en una sola transacción, se puede correr otra vez sin error y falla sin c
 docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT col_description('scoring_rule_texts'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'scoring_rule_texts'::regclass AND attname = 'reviewed_by'))"
 ```
 
-Con la 007 da el comentario que termina en `alguien de otra área o Ernesto). NULL mientras no se revise.` y antes el de la 003.
+Con la 007 da el comentario que termina en `alguien de otra área o Ernesto). NULL mientras no se revise.` y antes el de la 003. Si alguien vuelve a correr la 003, su comentario regresa sin error y se vuelve a correr la 007. `pruebas/test_catalogo_reglas.py` revisa sin base que el último comentario de las migraciones diga lo mismo que `db/cirdan_esquema.dbml`.
 
 ## Decisiones y desviaciones respecto al DBML
 
