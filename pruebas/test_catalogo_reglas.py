@@ -262,8 +262,9 @@ class Reglas(unittest.TestCase):
             self.assertEqual(explicacion[campo], valor, '%r: %s de docs/api_v1/explicacion.json no coincide con su '
                                                         'texto de scoring_rule_texts' % (code, campo))
 
-    def test_10_los_textos_osint_los_firma_ernesto_y_el_resto_no(self):
-        # backlog.md fila 30: los textos de las reglas OSINT (#14 a #20) los revisa Ernesto y el resto alguien de otra área.
+    def test_10_los_textos_osint_los_firma_ernesto(self):
+        # backlog.md fila 30: los textos de las reglas OSINT (#14 a #20) los revisa Ernesto. Quién firma el resto no se
+        # revisa, y ErnestoDL también puede firmarlo (decisión de Ernesto del 26 oct).
         # Un UPDATE que cambia un texto dice en reviewed_by quién revisó el nuevo, o NULL si nadie: sin reviewed_by la
         # fila conservaría la firma del texto anterior
         revisor, sin_firma = {}, []
@@ -275,16 +276,15 @@ class Reglas(unittest.TestCase):
                 elif CAMPO_TEXTO.search(asignaciones):
                     sin_firma.append('%s: %s' % (_relativa(ruta), code))
         self.assertEqual(sin_firma, [], 'UPDATE que cambian un texto sin decir en reviewed_by quién revisó el nuevo')
-        osint, resto = [], []
+        osint = []
         for fila in FILAS_DOC:
             numero = re.match(r'#(\d+)', fila[5])
             self.assertIsNotNone(numero, '%r: su recolector en docs/codigos_reglas.md no empieza con #' % fila[1])
-            (osint if 14 <= int(numero.group(1)) <= 20 else resto).append(fila[1])
+            if 14 <= int(numero.group(1)) <= 20:
+                osint.append(fila[1])
         self.assertEqual(len(osint), 25, 'docs/codigos_reglas.md ya no tiene 25 reglas de #14 a #20')
         self.assertEqual([c for c in sorted(osint) if revisor.get(c) != 'ErnestoDL'], [],
                          'reglas OSINT cuyo texto final no firmó ErnestoDL en las migraciones de db/')
-        self.assertEqual([c for c in sorted(resto) if revisor.get(c) == 'ErnestoDL'], [],
-                         'reglas fuera de OSINT firmadas por ErnestoDL: las revisa alguien de otra área')
 
     def test_11_las_huellas_que_revisa_la_005_coinciden_con_sus_textos(self):
         # Antes de cambiar nada, la 005 revisa que cada texto sea el de antes o el de después de ella. Si alguien cambia un
