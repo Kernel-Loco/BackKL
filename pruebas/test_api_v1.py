@@ -95,6 +95,28 @@ class ApiV1(unittest.TestCase):
         analista = sesion.login('jordan.tate@acme-demo.mx')
         self.assertEqual(analista.get('/api/v1/domains/txt')[0], 403)
 
+    def test_8_plan_y_simulacion_no_modifican_hallazgos_ni_score(self):
+        score_before = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+        findings_before = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
+        action_plan = self.get(self.acme, '/api/v1/domains/acme-demo.mx/action-plan')
+        self.assertEqual(action_plan['domain'], 'acme-demo.mx')
+        self.assertEqual(action_plan['score_before'], score_before['score'])
+        self.assertTrue(action_plan['actions'])
+
+        selected = [action['id'] for action in action_plan['actions'][:2]]
+        code, simulated = self.acme.post('/api/v1/domains/acme-demo.mx/action-plan/simulate',
+                                         {'action_ids': selected})
+        self.assertEqual(code, 200, simulated)
+        self.assertEqual(simulated['action_ids'], selected)
+        self.assertEqual(simulated['score_before'], score_before['score'])
+        self.assertLessEqual(simulated['score_after'], simulated['score_before'])
+
+        code, error = self.acme.post('/api/v1/domains/acme-demo.mx/action-plan/simulate',
+                                     {'action_ids': ['not-a-plan-action']})
+        self.assertEqual(code, 422, error)
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), score_before)
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings'), findings_before)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
