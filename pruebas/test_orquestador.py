@@ -33,7 +33,7 @@ from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
 from cirdan.recolectores import certspotter, crtsh, ejemplo
-from cirdan.recolectores.contrato import Activo, Resultado
+from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado
 from pruebas.test_certspotter import AHORA, RespaldoSimulado
 from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado
 
@@ -173,6 +173,72 @@ class Orquestador(unittest.TestCase):
                       "(SELECT id FROM scoring_rules WHERE code = 'spf_missing' "
                       "AND rule_set_id = '90000000-0000-4000-8000-000000000001')",
                       s.domain_id)['status'], 'open')
+
+    # --------------------------------------------------------------------- guardar el escaneo (#23)
+
+    def escanear_ejemplo(self):
+        """Un escaneo con la grabación de `ejemplo`: deja abierto su spf_missing. Devuelve la solicitud y el hallazgo."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
+        f = self.uno("SELECT f.id::text, f.status FROM findings f JOIN data_sources d ON d.id = f.source_id "
+                     "WHERE f.domain_id = %s AND d.code = 'ejemplo'", s.domain_id)
+        self.assertEqual(f['status'], 'open')
+        return s, f
+
+    def reescanear(self, resultado):
+        """Otro escaneo de acme-demo.mx en el que `ejemplo` responde con este resultado."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with mock.patch.object(orquestador, 'ejecutar', lambda *a, **k: resultado):
+            return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+
+    def estado(self, finding_id):
+        return self.uno('SELECT status, resolved_at, last_scan_id::text FROM findings WHERE id = %s', finding_id)
+
+    def test_2b_lo_que_la_fuente_ya_no_encuentra_queda_resuelto_y_deja_de_sumar(self):
+        _, f = self.escanear_ejemplo()
+        s, _ = self.reescanear(BIEN)  # `ejemplo` respondió bien y ya no trae el hallazgo
+        estado = self.estado(f['id'])
+        self.assertEqual(estado['status'], 'resolved')
+        self.assertIsNotNone(estado['resolved_at'])
+        self.assertEqual(estado['last_scan_id'], s.scan_id)
+        score = self.uno('SELECT id::text FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertIsNone(self.uno('SELECT 1 FROM score_contributions WHERE score_id = %s AND finding_id = %s',
+                                   score['id'], f['id']))
+
+    def test_2c_un_codigo_sin_cobertura_no_se_da_por_resuelto(self):
+        _, f = self.escanear_ejemplo()
+        self.reescanear(Resultado(**dict(vars(BIEN), sin_cobertura=['spf_missing'])))
+        self.assertEqual(self.estado(f['id'])['status'], 'open')
+
+    def test_2d_una_fuente_que_falla_no_resuelve_nada(self):
+        _, f = self.escanear_ejemplo()
+        self.reescanear(FALLA)
+        self.assertEqual(self.estado(f['id'])['status'], 'open')
+
+    def test_2e_riesgo_aceptado_y_falso_positivo_no_cambian(self):
+        _, f = self.escanear_ejemplo()
+        for decision in ('accepted_risk', 'false_positive'):
+            self.conn.execute('UPDATE findings SET status = %s WHERE id = %s', (decision, f['id']))
+            self.reescanear(BIEN)
+            self.assertEqual(self.estado(f['id'])['status'], decision)
+
+    def test_2f_las_caracteristicas_del_reto_quedan_en_la_evidencia(self):
+        _, f = self.escanear_ejemplo()
+        evidencia = self.uno('SELECT evidence FROM findings WHERE id = %s', f['id'])['evidence']
+        self.assertEqual(set(evidencia['caracteristicas']), {'tipo', 'antiguedad_dias', 'exposicion', 'sensibilidad'})
+
+    def test_2g_un_hallazgo_sin_su_activo_va_en_el_dominio_y_no_tumba_el_escaneo(self):
+        caracteristicas = {'tipo': 'spf_ausente', 'antiguedad_dias': 0, 'exposicion': 'publica', 'sensibilidad': 'baja'}
+        huerfano = Hallazgo('spf_missing', 'medium', 'nadie.acme-demo.mx', 'Sin SPF', {'title': 'Sin SPF'},
+                            caracteristicas, 'ab' * 32)
+        s, resumen = self.reescanear(Resultado(**dict(vars(BIEN), hallazgos=[huerfano])))
+        self.assertEqual(resumen['status'], 'completed')
+        f = self.uno("SELECT a.asset_type, a.value, f.evidence FROM findings f JOIN assets a ON a.id = f.asset_id "
+                     "WHERE f.fingerprint = %s", bytes.fromhex('ab' * 32))
+        self.assertEqual((f['asset_type'], f['value']), ('domain', 'acme-demo.mx'))
+        self.assertEqual(f['evidence']['activo_no_encontrado'], 'nadie.acme-demo.mx')
+        self.assertEqual(f['evidence']['caracteristicas'], caracteristicas)
 
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))

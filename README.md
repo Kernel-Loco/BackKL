@@ -117,7 +117,7 @@ docker compose exec api python -m cirdan.auth.demo codigo jordan.tate@acme-demo.
 | `GET /api/v1/domains/{fqdn}/assets` y `GET /api/v1/scans` | Activos y escaneos (provisionales: aún no están en el contrato) |
 | `GET /api/v1/domains/txt` | Registro TXT de cada dominio (solo Admin) |
 
-Con los datos demo de Acme responden igual que los JSON de `docs/api_v1/` (lo revisa `pruebas/test_api_v1.py`). Mientras #23 no guarde las características del reto en la evidencia, la API las calcula con las mismas reglas del contrato. La semilla `003_titulos_espanol.sql` pone en español los títulos de los hallazgos demo.
+Con los datos demo de Acme responden igual que los JSON de `docs/api_v1/` (lo revisa `pruebas/test_api_v1.py`). Los hallazgos de un escaneo traen guardadas las características del reto en la evidencia (#23). Para los de la semilla, que no las traen, la API las calcula con las mismas reglas del contrato. La semilla `003_titulos_espanol.sql` pone en español los títulos de los hallazgos demo.
 
 `cirdan/api/explorer.py` agrega la página `/demo` y los 2 endpoints que usa, `GET /db/tables` y `GET /db/tables/{table}/rows`. Solo existen con `DEMO_EXPLORER=true` (ver Vista visual de la base). Piden sesión y toman la empresa de la sesión, como el resto de la API. Las tablas solo las ve el rol Admin, como `GET /api/v1/domains/txt`, porque traen usuarios, bitácora y valores TXT. Ninguna ruta acepta ya `X-Organization` (RC-58).
 
@@ -136,7 +136,7 @@ El 14 oct 2026 pasaron las 22 pruebas (8 de la base, 6 de la API y 8 del inicio 
 1. **Revisa el dominio y la autorización:** que el dominio esté verificado y no en pausa, y que haya una carta sin revocar con la fecha de hoy dentro de su vigencia.
 2. **Consulta el TXT en DNS** (1.1.1.1, con `dnspython`) y guarda la evidencia en `dns_txt_verifications` con `check_reason = 'pre_scan'` y su resultado (`match`, `mismatch`, `missing` o `dns_error`).
 3. **Solo con todo en orden crea la fila en `scans`.** El trigger de la base vuelve a exigir carta vigente y TXT `match` de la última hora: es el segundo candado.
-4. **Corre cada recolector** con `contrato.ejecutar()` (#13) y llena `scan_source_runs` con `siguiente_estado()`. En vivo, una fuente que falla queda en `retrying` y se vuelve a correr en el mismo escaneo a 1, 5 y 25 minutos. No se reintenta al reproducir, porque la respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la fuente queda en `failed`. La fila de la fuente suma las consultas de todos sus intentos y guarda en sus avisos los errores de los anteriores. En vivo y al grabar, antes de cada intento reserva el cupo del día de la fuente, y una fuente sin cupo queda en `failed` sin reintento (ver Límite diario por fuente). Si no se recupera, el escaneo termina `partial` si otra fuente respondió, o `failed` si ninguna respondió. También termina `partial` si una fuente respondió pero dejó códigos en `sin_cobertura`, por ejemplo crt.sh con el respaldo de Cert Spotter: esos códigos van en `stats.rules_without_coverage` y no se muestran como 0. crt.sh nunca busca dominios parecidos desde un escaneo (ver Recolector de crt.sh), así que `lookalike_domain` siempre va ahí y un escaneo con crt.sh arriba también termina `partial`. Guardar activos y hallazgos en la base es de #23.
+4. **Corre cada recolector** con `contrato.ejecutar()` (#13) y llena `scan_source_runs` con `siguiente_estado()`. En vivo, una fuente que falla queda en `retrying` y se vuelve a correr en el mismo escaneo a 1, 5 y 25 minutos. No se reintenta al reproducir, porque la respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la fuente queda en `failed`. La fila de la fuente suma las consultas de todos sus intentos y guarda en sus avisos los errores de los anteriores. En vivo y al grabar, antes de cada intento reserva el cupo del día de la fuente, y una fuente sin cupo queda en `failed` sin reintento (ver Límite diario por fuente). Si no se recupera, el escaneo termina `partial` si otra fuente respondió, o `failed` si ninguna respondió. También termina `partial` si una fuente respondió pero dejó códigos en `sin_cobertura`, por ejemplo crt.sh con el respaldo de Cert Spotter: esos códigos van en `stats.rules_without_coverage` y no se muestran como 0. crt.sh nunca busca dominios parecidos desde un escaneo (ver Recolector de crt.sh), así que `lookalike_domain` siempre va ahí y un escaneo con crt.sh arriba también termina `partial`. Los activos y hallazgos de cada fuente que respondió se guardan en `assets` y `findings` sin duplicar (por la huella), con las características del reto en la evidencia. Lo abierto de esa fuente que ya no salió queda `resolved`, salvo los códigos en `sin_cobertura` y lo que el cliente marcó como riesgo aceptado o falso positivo. Un hallazgo cuyo activo no vino en la respuesta se guarda en el dominio con `activo_no_encontrado` en la evidencia, en vez de tumbar el escaneo (#23, RC-55).
 
 Los motivos de rechazo usan los códigos de `scan_eligibility.reasons` del contrato #21: `authorization_missing`, `authorization_expired`, `txt_not_verified`, `domain_paused`, etc., más `scan_in_progress` y `live_scan_not_allowed`. Cada aceptación y cada rechazo quedan en la bitácora (`scan.requested`, `scan.rejected`, `scan.finished` y `scan.abandoned`).
 
@@ -251,7 +251,7 @@ Un TXT es SPF si empieza con `v=spf1` sin distinguir mayúsculas y seguido de un
 
 Una falla del DNS no cuenta como «no hay registro». Un NXDOMAIN de `_dmarc.<dominio>` o una respuesta vacía (NoAnswer) sí lo son y dan `dmarc_missing` o `spf_missing`, pero un tiempo agotado o un SERVFAIL deja un aviso y, si fue el TXT de la raíz o el de `_dmarc`, sus códigos quedan en `sin_cobertura` y el resumen dice `Cobertura parcial`. Si la raíz no existe (NXDOMAIN), no hay activos ni hallazgos: la fuente deja un aviso y los 4 códigos van a `sin_cobertura`. Si fallan las 6 consultas la fuente queda en `failed` para que el orquestador la reintente. `sp=none` y `pct` menor a 100 no generan hallazgo, y un `redirect=` sin `all` solo da un aviso, porque no se sigue.
 
-Los A y AAAA salen como activos `ip` con `host` igual al dominio y con su país, ASN, proveedor y CDN de la base local de DB-IP Lite (ver Geolocalización y ASN de las IP), y los MX y NS que están dentro del dominio como activos `subdomain`. Los de un tercero (Cloudflare, Google) y todo el resto del DNS quedan solo en `atributos['dns']` del activo `domain`. Hasta que #23 guarde activos y hallazgos, no se escribe nada en `assets` ni en `findings`. De los TXT que no son SPF ni DMARC solo se guarda el nombre antes del igual y cuántos hay, nunca el valor: el `cirdan-verification=<token>` del dominio no sale en el resultado, en el resumen ni en las grabaciones.
+Los A y AAAA salen como activos `ip` con `host` igual al dominio y con su país, ASN, proveedor y CDN de la base local de DB-IP Lite (ver Geolocalización y ASN de las IP), y los MX y NS que están dentro del dominio como activos `subdomain`. Los de un tercero (Cloudflare, Google) y todo el resto del DNS quedan solo en `atributos['dns']` del activo `domain`. Desde un escaneo, esos activos y hallazgos se guardan en `assets` y `findings` (ver Orquestador de escaneos). De los TXT que no son SPF ni DMARC solo se guarda el nombre antes del igual y cuántos hay, nunca el valor: el `cirdan-verification=<token>` del dominio no sale en el resultado, en el resumen ni en las grabaciones.
 
 Una consulta en vivo a un dominio solo se corre con carta de autorización vigente y con el OK de la persona, y `--grabar` solo con el dominio de prueba. Las pruebas no consultan nada.
 
@@ -295,7 +295,7 @@ python -m unittest -v pruebas/test_github.py                     # 59 pruebas si
 docker compose run --rm -v "$(pwd -W)/pruebas:/app/pruebas:ro" -v "$(pwd -W)/db:/app/db:ro" -v "$(pwd -W)/docs:/app/docs:ro" api python -m unittest pruebas.test_github.Integracion   # las 2, con git y gitleaks reales sobre un repo local
 ```
 
-Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos. Hasta que #23 (RC-55) guarde activos y hallazgos, nada de esto llega a `assets` ni a `findings`.
+Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos. Desde un escaneo, lo que encuentra se guarda en `assets` y `findings` (ver Orquestador de escaneos).
 
 **Versión.** El `Dockerfile` baja el tar.gz del release de gitleaks 8.21.2 para cada arquitectura (el release llama x64 a amd64) con su sha256 de `gitleaks_8.21.2_checksums.txt`, y deja la licencia en `/usr/share/licenses/gitleaks/LICENSE` (ver `NOTICE`). Es la misma versión del pre-commit. Dependabot no la vigila: para subirla se cambian las dos URL y los dos hash del `Dockerfile`, la versión en `NOTICE` y la de `.pre-commit-config.yaml`.
 
@@ -339,7 +339,7 @@ python -m cirdan.recolectores.shodan olmardo.com --json          # el resultado 
 python -m unittest -v pruebas/test_shodan.py                     # 52 pruebas, sin red ni dnspython
 ```
 
-Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. El aviso fijo de los límites (solo IPv4 y sin llave) sale en toda corrida y no cuenta. Hasta que #23 (RC-55) guarde activos y hallazgos, nada de esto llega a `assets` ni a `findings`.
+Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. El aviso fijo de los límites (solo IPv4 y sin llave) sale en toda corrida y no cuenta. Desde un escaneo, lo que encuentra se guarda en `assets` y `findings` (ver Orquestador de escaneos).
 
 ## Recolector de RDAP (#15b)
 
@@ -373,7 +373,7 @@ python -m cirdan.recolectores.rdap olmardo.com --json          # el resultado co
 python -m unittest -v pruebas/test_rdap.py                     # 36 pruebas, sin red (tampoco al puerto 43)
 ```
 
-Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. Hasta que #23 (RC-55) guarde activos y hallazgos, nada de esto llega a `assets` ni a `findings`.
+Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. Desde un escaneo, lo que encuentra se guarda en `assets` y `findings` (ver Orquestador de escaneos).
 
 ## Geolocalización y ASN de las IP (#15b)
 
