@@ -28,6 +28,7 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `semillas/005_subfinder_y_limites.sql` | Fuente `subfinder` (recolector pasivo de subdominios), sembrada apagada, y límite diario de `ct_logs` (200 consultas) y `subfinder` (400, 50 corridas de 8 fuentes), con el porqué de cada número (RC-184, #13b). Necesita la 008 |
 | `semillas/006_github.sql` | Fuente `github` (secretos y correos en los repos públicos de la organización declarada), sembrada encendida, con `keep_raw_payload` = false y límite diario de 400 consultas, 25 corridas de 16 (RC-50, #16). Necesita la 008 |
 | `semillas/007_shodan.sql` | Límite diario de la fuente `shodan` (servicios y CVE que Shodan InternetDB ya vio en las IP públicas del dominio): 640 consultas, 10 corridas de 64 (RC-49, #17). La fila ya la sembró la 001, encendida, y no se edita. Necesita la 008 |
+| `semillas/008_whois.sql` | Límite diario de la fuente `whois` (registrador, fechas y vencimiento del dominio por RDAP): 60 consultas, 10 corridas de 6 (RC-166, #15b). La fila ya la sembró la 001, encendida, y no se edita. Necesita la migración 008 |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 24 tablas con filas y RLS, más el resumen de objetos |
@@ -182,6 +183,15 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, enabled, k
 ```
 
 Da `shodan|t|t|640`. Corre en una sola transacción y se puede correr otra vez sin error: solo pone el límite si la fila todavía no tiene uno, así no pisa uno puesto a mano. No agrega tablas ni políticas. Las páginas de Cert Spotter que pide `shodan` cuentan en su límite, no en el de `ct_logs`.
+
+Para la fuente `whois` (RC-166, #15b) basta la semilla 008, que necesita la migración 008. Va antes de reconstruir la API, como la 007: la fila `whois` ya está encendida desde la 001, así que una API con #15b sin la semilla 008 la corre en todo escaneo sin límite diario:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/008_whois.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, enabled, keep_raw_payload, daily_limit FROM data_sources WHERE code = 'whois'"
+```
+
+Da `whois|t|t|60`. Corre en una sola transacción y se puede correr otra vez sin error: solo pone el límite si la fila todavía no tiene uno. No agrega tablas ni políticas.
 
 ## Decisiones y desviaciones respecto al DBML
 

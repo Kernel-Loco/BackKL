@@ -21,8 +21,9 @@ from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
 from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa: E402
 from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a  # noqa: E402
 from pruebas.test_subfinder import SubfinderSimulado  # noqa: E402
-from cirdan.recolectores import (REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, github, registros_dns,  # noqa: E402
-                                 shodan, subfinder)
+from pruebas.test_rdap import HttpSimulado as RdapSimulado, respuesta as respuesta_rdap  # noqa: E402
+from cirdan.recolectores import (REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, github, rdap,  # noqa: E402
+                                 registros_dns, shodan, subfinder)
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
@@ -349,7 +350,7 @@ class Ejecutar(unittest.TestCase):
         """Sin red ni binarios: crt.sh y Cert Spotter con su transporte simulado, subfinder con un proceso simulado, el DNS con un
         resolvedor simulado, GitHub con su API, git y gitleaks simulados, con acme-demo.mx declarado como la organización
         acme-demo (sin declaración GitHub no consulta ni graba nada), y Shodan con Cert Spotter e InternetDB simulados y
-        el A de acme-demo.mx en una IP con el 8080 abierto.
+        el A de acme-demo.mx en una IP con el 8080 abierto, y RDAP con el bootstrap y el registro simulados.
         Un recolector nuevo en REGISTRO necesita aquí su simulación, o correría su fuente real."""
         for fuente in REGISTRO:
             modulo = cargar(fuente)
@@ -363,6 +364,7 @@ class Ejecutar(unittest.TestCase):
                     mock.patch.object(github, '_binario', BINARIOS.get), \
                     mock.patch.object(shodan, '_descargar', HttpSimulado(ips={CAMARA: CAMARA_8080})), \
                     mock.patch.object(shodan, '_resolver_a', ResolvedorSimulado({'acme-demo.mx': a(CAMARA)})), \
+                    mock.patch.object(rdap, '_descargar', RdapSimulado(dominios={'acme-demo.mx': respuesta_rdap('acme-demo.mx')})), \
                     mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo'}):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
@@ -388,7 +390,7 @@ class Ejecutar(unittest.TestCase):
             self.assertIs(type(maximo), int, fuente)
             self.assertGreaterEqual(maximo, 0, fuente)
         self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, shodan.MAX_CONSULTAS,
-                          ejemplo.MAX_CONSULTAS), (18, len(subfinder.FUENTES_SUBFINDER), 16, 64, 0))
+                          rdap.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS), (18, len(subfinder.FUENTES_SUBFINDER), 16, 64, 6, 0))
 
     def test_15c_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
         """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento."""
