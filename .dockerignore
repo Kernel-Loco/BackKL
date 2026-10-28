@@ -8,3 +8,8 @@ pruebas
 docs
 db
 *.md
+# De datos/geo solo entran .gitkeep y las dos bases de DB-IP Lite (geoip.py): nada de .gz, City Lite ni otros archivos
+datos/geo/*
+!datos/geo/.gitkeep
+!datos/geo/dbip-asn-lite-*.mmdb
+!datos/geo/dbip-country-lite-*.mmdb

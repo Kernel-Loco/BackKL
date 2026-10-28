@@ -15,14 +15,19 @@ CDN (politica_uso_etico.md, punto 5: de una IP de CDN solo se registra que exist
 que no son multicast, reservadas ni de 192.88.99.0/24 (consultable). No se consultan las de los rangos IPv4 de
 Cloudflare (RANGOS_CLOUDFLARE) ni las que llegan por una cadena CNAME en la que cualquier nombre, intermedio o final,
 termina en un sufijo de SUFIJOS_CDN (CDN y bordes compartidos conocidos). La cadena sale de la misma respuesta del A,
-sin consultas extra (_cadena_cname). Quedan como activo ip con su marca y sin consulta. Si aun así InternetDB trae el
-tag 'cdn', sus datos se descartan con un aviso. Un CDN distinto, sin CNAME a la vista, no se detecta hasta #15b
-(RC-166).
+sin consultas extra (_cadena_cname). Tampoco las de un ASN que es solo de un CDN o un proxy inverso, aunque no haya
+CNAME a la vista (geoip.cdn_por_asn con la base local de DB-IP Lite, #15b, RC-166). Un ASN mixto de nube y CDN
+(Amazon, Microsoft, Google) no cuenta, porque una IP suya puede ser un servidor de la empresa: ahí el CDN sale solo por
+el CNAME. Quedan como activo ip con su marca y sin consulta. Si aun así InternetDB trae el tag 'cdn', sus datos se
+descartan con un aviso. Sin la base de ASN de DB-IP ese filtro no corre: las IP de un CDN sin CNAME conocido se
+consultan igual y el aviso de base faltante lo dice (SIN_CDN_POR_ASN).
 
 Devuelve:
 - un activo ip por IP, con 'hosts' (los nombres que resuelven a ella) e 'internetdb' con puertos, tags, CPE, cuántos
   CVE y los nombres del dominio, o 'sin_datos' con un 404. Solo las IP que InternetDB sí respondió llevan fuente_datos
-  'Shodan InternetDB' (atribución),
+  'Shodan InternetDB' (atribución). Todas llevan su país, ASN y proveedor de DB-IP Lite (geoip.ubicar), con
+  fuente_geo y base_geo, o 'No disponible' sin la base (con un aviso, una vez por corrida y solo si hubo alguna IP
+  ubicable). La ubicación no se graba: al reproducir sale de la base del momento,
 - un activo service por puerto, '<ip>:<puerto>/<protocolo>', con 'parent' e 'ip_address' = su IP (RC-60 los lee),
 - un hallazgo por puerto sobre su activo service, según la familia del puerto:
   - 3389: exposed_rdp (alta).
@@ -96,7 +101,7 @@ from pathlib import Path
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import certspotter
+from cirdan.recolectores import certspotter, geoip
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos, en_alcance_nombre)
@@ -178,7 +183,11 @@ CAMPOS = ('ports', 'tags', 'cpes', 'vulns', 'hostnames')   # los de una respuest
 # Avisos con texto fijo.
 SIN_GRABACION_DOMINIO = 'shodan: no hay grabación de Shodan de este dominio, no se revisó InternetDB'
 LIMITES = ('shodan: solo IPv4 y sin la llave de Shodan (#8): exposed_iot_device, exposed_ot_device y outdated_software '
-           'quedan sin cobertura, y un CDN que no sea Cloudflare ni llegue por un CNAME conocido no se detecta hasta #15b')
+           'quedan sin cobertura, y no se detecta un CDN que no llegue por un CNAME conocido y cuyo ASN no esté en '
+           'geoip.CDN_POR_ASN (las nubes mixtas como Amazon, Microsoft o Google, y otros fuera de la lista), ni ninguno '
+           'sin la base de DB-IP')
+# Lo que shodan agrega al aviso de geoip.aviso_sin_base cuando falta la base de ASN: el filtro de CDN por ASN no corrió.
+SIN_CDN_POR_ASN = 'las IP de un CDN sin un CNAME conocido no se pudieron descartar por ASN y se consultaron igual en InternetDB'
 SIN_IP = 'shodan: ninguna IP pública del dominio fuera de un CDN, no hubo nada que consultar en InternetDB'
 PARCIAL = 'shodan: cobertura parcial'
 NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiempo o una respuesta que no se puede leer), '
@@ -790,14 +799,22 @@ def _revisar(res, cliente, dominio, ahora):
     if fallas_a:
         parcial.append('a')
 
-    # 3. Qué IP se consultan: públicas (consultable) y fuera de un CDN en toda su cadena CNAME
+    # 3. Qué IP se consultan: públicas (consultable), fuera de un CDN en toda su cadena CNAME y fuera de un ASN de CDN.
+    # La ubicación sale de la base local, sin red: las bases se piden una vez por corrida y solo si alguna IP es
+    # ubicable (con solo IP privadas no se busca nada y el aviso de base faltante no diría nada cierto). Sin la base de
+    # ASN el filtro de CDN por ASN queda apagado y esas IP se consultan igual: el mismo aviso lo dice (SIN_CDN_POR_ASN).
     ips = sorted(por_ip, key=ipaddress.ip_address)
+    bases = geoip.bases_por_omision() if any(geoip.ubicable(ip) for ip in ips) else None
+    ubicadas = {ip: geoip.ubicar(ip, bases) for ip in ips}
+    aviso_geo = None if bases is None else geoip.aviso_sin_base(FUENTE, bases, sin_asn=SIN_CDN_POR_ASN)
+    if aviso_geo:
+        res.avisos.append(aviso_geo)
     marcas, consultar = {}, []
     for ip in ips:
         if not consultable(ip):
             marcas[ip] = {'no_publica': True}
             continue
-        cdn = cdn_de(ip, cnames.get(ip, ()))
+        cdn = cdn_de(ip, cnames.get(ip, ())) or geoip.cdn_por_asn(ubicadas[ip]['asn'])
         if cdn:
             marcas[ip] = {'cdn': cdn}
         else:
@@ -846,7 +863,7 @@ def _revisar(res, cliente, dominio, ahora):
     # 5. Activos y hallazgos
     for ip in ips:
         hosts = sorted(por_ip[ip])
-        atributos = {'hosts': hosts, 'fuente': FUENTE, 'origen': ORIGEN}
+        atributos = dict({'hosts': hosts, 'fuente': FUENTE, 'origen': ORIGEN}, **ubicadas[ip])
         atributos.update(marcas.get(ip, {}))
         d = datos.get(ip)
         if ip in marcas:
