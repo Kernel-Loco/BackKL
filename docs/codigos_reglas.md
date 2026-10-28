@@ -20,12 +20,12 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 01 | `breach_exposure` | data_leaks | critical | 40.00 | #19 RC-54 | Planeado |
 | 02 | `cert_expired` | infrastructure | high | 20.00 | #14 RC-47 | Lo emite hoy |
 | 03 | `outdated_software` | infrastructure | high | 25.00 | #18 RC-46 y #17 RC-49 | Planeado |
-| 04 | `exposed_rdp` | infrastructure | high | 25.00 | #17 RC-49 | Planeado |
+| 04 | `exposed_rdp` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
 | 05 | `dmarc_missing` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
 | 06 | `spf_missing` | configuration | low | 8.00 | #15 RC-48 | Lo emite hoy |
 | 07 | `lookalike_domain` | digital_identity | medium | 15.00 | #14 RC-47 | Lo emite hoy |
 | 08 | `cert_expiring_soon` | infrastructure | medium | 10.00 | #14 RC-47 y #14b RC-184 | Lo emite hoy |
-| 09 | `domain_expiring_soon` | infrastructure | medium | 10.00 | #15b RC-166 | Planeado |
+| 09 | `domain_expiring_soon` | infrastructure | medium | 10.00 | #15b RC-166 | Lo emite hoy |
 | 10 | `spf_allow_all` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
 | 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
 | 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Lo emite hoy |
@@ -34,13 +34,13 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 15 | `breach_exposure_no_passwords` | data_leaks | medium | 10.00 | #19 RC-54 | Planeado |
 | 16 | `personal_email_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado |
 | 17 | `email_pattern_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado |
-| 18 | `exposed_remote_admin` | infrastructure | high | 25.00 | #17 RC-49 | Planeado |
-| 19 | `exposed_file_sharing` | infrastructure | high | 25.00 | #17 RC-49 | Planeado |
-| 20 | `exposed_database` | infrastructure | high | 25.00 | #17 RC-49 | Planeado |
+| 18 | `exposed_remote_admin` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
+| 19 | `exposed_file_sharing` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
+| 20 | `exposed_database` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
 | 21 | `exposed_ot_device` | infrastructure | critical | 40.00 | #17 RC-49 | Planeado |
 | 22 | `exposed_iot_device` | infrastructure | high | 25.00 | #17 RC-49 | Planeado |
-| 23 | `exposed_service` | infrastructure | low | 8.00 | #17 RC-49 | Planeado |
-| 24 | `known_vulnerability` | infrastructure | medium | 10.00 | #17 RC-49 y #18 RC-46 | Planeado |
+| 23 | `exposed_service` | infrastructure | low | 8.00 | #17 RC-49 | Lo emite hoy |
+| 24 | `known_vulnerability` | infrastructure | medium | 10.00 | #17 RC-49 y #18 RC-46 | Lo emite hoy |
 | 25 | `server_version_disclosed` | configuration | low | 8.00 | #18 RC-46 | Planeado |
 | 26 | `public_bucket` | data_leaks | high | 25.00 | #62 | Previsto |
 | 27 | `subdomain_takeover_risk` | configuration | high | 25.00 | #62 | Previsto |
@@ -55,6 +55,8 @@ Por categoría: infrastructure 14, digital_identity 4, configuration 6 y data_le
 ## Cobertura parcial
 
 Si crt.sh no responde, la fuente `ct_logs` sigue con el respaldo de Cert Spotter (#14b), que no da certificados vencidos ni dominios parecidos. En esa corrida `cert_expired` y `lookalike_domain` quedan sin cobertura: van en `sin_cobertura` y no se muestran como 0 hallazgos (`SIN_COBERTURA` de `cirdan/recolectores/certspotter.py`). Si crt.sh responde, Cert Spotter suma los certificados vigentes que crt.sh no trae y la cobertura no cambia. `lookalike_domain` además queda sin cobertura en todo escaneo, porque el orquestador nunca prende la búsqueda de dominios parecidos ([`contrato_plugin.md`](contrato_plugin.md)).
+
+La fuente `shodan` (#17) usa Shodan InternetDB, que no pide llave. Sin la llave de Shodan (#8, RC-40) no hay API de host: `exposed_iot_device`, `exposed_ot_device` y `outdated_software` van en `sin_cobertura` en todo escaneo y siguen como Planeado (`SIN_LLAVE` de `cirdan/recolectores/shodan.py`). Si una corrida no revisa todas las IP del dominio (Cert Spotter caído, un 429, los topes de nombres o de IP, una respuesta de InternetDB que no se puede leer o el tope de tiempo), los códigos de `CODIGOS` sin hallazgos también van ahí.
 
 ## Cómo agregar un código
 

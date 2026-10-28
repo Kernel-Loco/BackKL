@@ -24,6 +24,12 @@ cirdan/recolectores/respuestas_grabadas/dns/*
 # GitHub (#16, RC-50): solo lo ya limpio (perfil, lista de repos, secretos reducidos y correos del dominio)
 cirdan/recolectores/respuestas_grabadas/github/*
 !cirdan/recolectores/respuestas_grabadas/github/.gitkeep
+# Shodan InternetDB (#17, RC-49): solo lo ya limpio (páginas de Cert Spotter reducidas, cada A y cada IP de InternetDB)
+cirdan/recolectores/respuestas_grabadas/shodan/*
+!cirdan/recolectores/respuestas_grabadas/shodan/.gitkeep
+# RDAP (#15b, RC-166): solo lo ya limpio (bootstrap reducido y respuesta RDAP filtrada, sin contactos)
+cirdan/recolectores/respuestas_grabadas/whois/*
+!cirdan/recolectores/respuestas_grabadas/whois/.gitkeep
 
 # Carpeta de grabaciones de antes del 11 oct: su contenido se mueve a cirdan/recolectores/respuestas_grabadas/
 /respuestas_grabadas/
