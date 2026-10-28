@@ -11,6 +11,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -606,6 +608,32 @@ class Rdap(unittest.TestCase):
         res = rdap.recolectar(DOMINIO, cliente, ahora=AHORA)
         self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 2, ['domain_expiring_soon']))
         self.assertIn('se acabó el tiempo de la corrida mientras se leía RDAP (rdap.verisign.com)', res.avisos[0])
+
+    def test_24_las_grabaciones_de_whois_no_van_al_repo(self):
+        """Igual que las de dns: un git add no sube el registro de una empresa a un repo público. Revisa solo el .gitignore."""
+        self.assertEqual(rdap.CARPETA_GRABADAS, contrato.CARPETA_GRABADAS / 'whois')
+        self.assertTrue((rdap.CARPETA_GRABADAS / '.gitkeep').exists())
+        reglas = Path(__file__).resolve().parents[1] / '.gitignore'
+        if not reglas.exists() or not shutil.which('git'):
+            self.skipTest('sin .gitignore o sin git, por ejemplo dentro del contenedor')
+        with tempfile.TemporaryDirectory() as d:
+            repo, vacio = Path(d) / 'repo', Path(d) / 'sin_exclusiones'
+            vacio.write_text('', encoding='utf-8')
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            (repo / '.git' / 'info').mkdir(exist_ok=True)
+            (repo / '.git' / 'info' / 'exclude').write_text('', encoding='utf-8')
+            (repo / '.gitignore').write_bytes(reglas.read_bytes())
+
+            def ignorado(ruta):
+                r = subprocess.run(['git', '-c', 'core.excludesFile=' + vacio.as_posix(), 'check-ignore', '-q',
+                                    '--no-index', 'cirdan/recolectores/respuestas_grabadas/' + ruta], cwd=repo)
+                self.assertIn(r.returncode, (0, 1), ruta)  # 128: git no pudo revisarlo
+                return r.returncode == 0
+            for ruta in ('whois/olmardo.com/bootstrap.json', 'whois/olmardo.com/rdap_olmardo.com.json',
+                         'whois/olmardo.com/.grabacion'):
+                self.assertTrue(ignorado(ruta), ruta)
+            for ruta in ('whois/.gitkeep', 'dns/.gitkeep', 'ejemplo/acme-demo.mx/resultado.json'):
+                self.assertFalse(ignorado(ruta), ruta)
 
 
 if __name__ == '__main__':
