@@ -8,8 +8,8 @@ Dos pasos:
 1. `solicitar()`: revisa el dominio y la autorización, consulta el TXT, guarda la evidencia en
    `dns_txt_verifications` (check_reason 'pre_scan') y, si todo cumple, crea la fila en `scans`.
 2. `correr()`: ejecuta cada recolector con `contrato.ejecutar()` (#13) y llena `scan_source_runs`
-   con `siguiente_estado()`. En vivo reintenta ahí mismo la fuente que falla. Guardar activos y
-   hallazgos en la base es de #23.
+   con `siguiente_estado()`. En vivo reintenta ahí mismo la fuente que falla. Guarda activos y
+   hallazgos de cada fuente que respondió (#31 y #23) y da por resuelto lo que esa fuente ya no encontró.
 
 Cada fuente tiene un límite diario de consultas de toda la plataforma en `data_sources` (#13b, RC-184).
 Antes de cada corrida que sale a la red, `correr()` reserva el máximo de la corrida y al terminar ajusta a lo
@@ -314,9 +314,15 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         regla = reglas.get(hallazgo.codigo)
         if not regla:
             raise ValueError('hallazgo sin regla activa: %s' % hallazgo.codigo)
+        evidencia = dict(hallazgo.evidencia)
+        if isinstance(hallazgo.caracteristicas, dict):  # las del reto quedan guardadas para la API y el ML (#23)
+            evidencia['caracteristicas'] = hallazgo.caracteristicas
         asset_id = activos.get(hallazgo.activo)
-        if not asset_id:
-            raise ValueError('hallazgo sin activo persistido: %s' % hallazgo.activo)
+        if not asset_id:  # un activo que la fuente no dio no tumba el escaneo: el hallazgo cuelga del dominio
+            log.warning('%s: hallazgo %s sin su activo %s, va en el dominio', resultado.fuente, hallazgo.codigo,
+                        hallazgo.activo)
+            evidencia['activo_no_encontrado'] = hallazgo.activo
+            asset_id = raiz
         conn.execute(
             'INSERT INTO findings (organization_id, domain_id, asset_id, rule_id, source_id, fingerprint, severity, '
             "status, evidence, detected_at, last_scan_id) VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, now(), %s) "
@@ -327,8 +333,18 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
             'resolved_at = CASE WHEN findings.status = %s THEN NULL ELSE findings.resolved_at END, '
             'last_scan_id = EXCLUDED.last_scan_id, updated_at = now()',
             (org, domain_id, asset_id, regla['id'], source_id, bytes.fromhex(hallazgo.huella), hallazgo.severidad,
-             Jsonb(hallazgo.evidencia), scan_id, 'resolved', 'open', 'resolved'),
+             Jsonb(evidencia), scan_id, 'resolved', 'open', 'resolved'),
         )
+
+    # Lo abierto de esta fuente que ya no salió se arregló (#23). No se tocan los códigos que la fuente no pudo
+    # revisar (sin_cobertura), ni lo que el cliente marcó como riesgo aceptado o falso positivo.
+    conn.execute(
+        "UPDATE findings SET status = 'resolved', resolved_at = now(), last_scan_id = %s, updated_at = now() "
+        "WHERE domain_id = %s AND source_id = %s AND status = 'open' AND fingerprint <> ALL(%s::bytea[]) "
+        'AND rule_id NOT IN (SELECT id FROM scoring_rules WHERE code = ANY(%s::text[]))',
+        (scan_id, domain_id, source_id, [bytes.fromhex(h.huella) for h in resultado.hallazgos],
+         list(resultado.sin_cobertura)),
+    )
 
 
 def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, parcial):
@@ -437,7 +453,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     se muestran como 0 hallazgos. crt.sh nunca busca dominios parecidos desde aquí, porque consulta
     variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
     En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
-    ct_logs y subfinder cuenta una vez. Guardarlos y unir sus atributos es de #23.
+    ct_logs y subfinder cuenta una vez. En assets van una sola vez, con sus atributos unidos.
     `dormir` reemplaza time.sleep (pruebas).
     """
     dormir = dormir or time.sleep

@@ -18,7 +18,8 @@ router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
 
 # ---------------------------------------------------------------- características del reto
-# Mientras #23 no las guarde en la evidencia, se calculan con las mismas reglas del contrato #21.
+# Desde #23 vienen guardadas en la evidencia. Para los hallazgos de la semilla, que no las traen, se calculan
+# con las mismas reglas del contrato #21.
 TIPO = {
     'breach_exposure': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
     'cert_expiring_soon': 'certificado_por_vencer', 'outdated_software': 'software_desactualizado',
