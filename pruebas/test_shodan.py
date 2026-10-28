@@ -25,7 +25,8 @@ from pruebas.test_catalogo_reglas import POR_CODIGO  # noqa: E402
 from pruebas.test_certspotter import emision  # noqa: E402
 from pruebas.test_crtsh import AHORA  # noqa: E402
 from pruebas.test_subfinder import Cronometro  # noqa: E402
-from cirdan.recolectores import REGISTRO, cargar, contrato, shodan  # noqa: E402
+from pruebas.test_geoip import NOMBRES, LectorFalso, bases, registro_asn, registro_pais  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, contrato, geoip, shodan  # noqa: E402
 from cirdan.recolectores.contrato import FuenteNoResponde  # noqa: E402
 
 SEMILLA = Path(__file__).resolve().parents[1] / 'db' / 'semillas' / '007_shodan.sql'
@@ -39,6 +40,17 @@ REAL_CAMARA = (b'{"cpes":["cpe:/a:openbsd:openssh:8.9p1","cpe:/o:canonical:ubunt
 REAL_404 = b'{"detail":"No information available"}'
 # Lo que se espera cuando Shodan vea la VM sembrada: solo el 8080 con la página de la cámara.
 CAMARA_8080 = {'cpes': [], 'hostnames': ['camaras.olmardo.com'], 'ip': CAMARA, 'ports': [8080], 'tags': [], 'vulns': []}
+NO = geoip.NO_DISPONIBLE
+CLAVES_GEO = ('pais', 'asn', 'proveedor', 'fuente_geo', 'base_geo')
+
+
+def setUpModule():
+    """Ninguna prueba depende de que la PC tenga o no la base de DB-IP en datos/geo: bases_por_omision da unas Bases
+    falsas sin lectores y sin problema, así todo sale 'No disponible', sin aviso y sin CDN por ASN. La clase Geo pone
+    las suyas."""
+    parche = mock.patch.object(geoip, 'bases_por_omision', return_value=bases())
+    parche.start()
+    unittest.addModuleCleanup(parche.stop)
 
 
 def internetdb(ip, ports=(), tags=(), cpes=(), vulns=(), hostnames=()):
@@ -893,6 +905,186 @@ class Arreglos(unittest.TestCase):
         with self.assertRaises(shodan.SinTiempo):
             cliente.internetdb(RESERVAS, DOMINIO)
         self.assertEqual(cliente.consultas, shodan.INTENTOS + 1)
+
+
+class Geo(unittest.TestCase):
+    """País, ASN y proveedor de DB-IP Lite en los activos ip, y el CDN por ASN antes de InternetDB (#15b, RC-166). Los
+    lectores son falsos: los registros tienen la forma de DB-IP pero son inventados."""
+
+    FASTLY, AMAZON = '151.101.1.10', '3.33.152.147'
+
+    def con_bases(self, b):
+        """Cambia las Bases de esta prueba y devuelve el mock, para contar cuántas veces se pidieron."""
+        parche = mock.patch.object(geoip, 'bases_por_omision', return_value=b)
+        self.addCleanup(parche.stop)
+        return parche.start()
+
+    def bases_llenas(self):
+        asn = LectorFalso({CAMARA: registro_asn(8075, 'Microsoft Corporation'),
+                           RESERVAS: registro_asn(8075, 'Microsoft Corporation'),
+                           self.FASTLY: registro_asn(54113, 'Fastly, Inc.'),
+                           self.AMAZON: registro_asn(16509, 'Amazon.com, Inc.'),
+                           CLOUDFLARE: registro_asn(13335, 'Cloudflare, Inc.')})
+        pais = LectorFalso({ip: registro_pais('US') for ip in (CAMARA, RESERVAS, self.FASTLY, self.AMAZON, CLOUDFLARE)})
+        return bases(asn, pais)
+
+    def test_44_cada_activo_ip_lleva_pais_asn_y_proveedor(self):
+        pedidas = self.con_bases(self.bases_llenas())
+        http = HttpSimulado(ct_olmardo(), {CAMARA: CAMARA_8080})
+        res = recolectar(http, ResolvedorSimulado(zona_olmardo()))
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        camara = activo(res, CAMARA).atributos
+        self.assertEqual({k: camara[k] for k in CLAVES_GEO}, {'pais': 'US', 'asn': 8075, 'proveedor': 'Microsoft Corporation',
+                                                              'fuente_geo': 'DB-IP Lite', 'base_geo': NOMBRES})
+        self.assertNotIn('cdn', camara)
+        self.assertEqual(camara['internetdb']['puertos'], [8080])
+        # la IP de Cloudflare sale por sus rangos, como antes, y también lleva su ubicación
+        self.assertEqual({k: activo(res, CLOUDFLARE).atributos[k] for k in ('cdn', 'asn', 'internetdb')},
+                         {'cdn': 'cloudflare', 'asn': 13335, 'internetdb': 'no_consultada'})
+        self.assertEqual(activo(res, RESERVAS).atributos['proveedor'], 'Microsoft Corporation')
+        self.assertEqual(pedidas.call_count, 1)   # una vez por corrida, no una por IP
+        self.assertFalse([x for x in res.avisos if 'DB-IP' in x and x != shodan.LIMITES])
+
+    def test_45_una_ip_de_un_asn_de_cdn_sin_cname_no_se_consulta_y_las_de_nube_mixta_si(self):
+        """Fastly (54113) sin CNAME a la vista no llega a InternetDB. Microsoft (8075) y Amazon (16509) son nubes mixtas:
+        sus IP sí se consultan, y su CDN solo sale por el CNAME."""
+        self.con_bases(self.bases_llenas())
+        zona = {DOMINIO: a(CAMARA), 'www.olmardo.com': a(self.FASTLY), 'tienda.olmardo.com': a(self.AMAZON)}
+        http = HttpSimulado(paginas('www.olmardo.com', 'tienda.olmardo.com'),
+                            {CAMARA: CAMARA_8080, self.FASTLY: CAMARA_8080, self.AMAZON: 404})
+        res = recolectar(http, ResolvedorSimulado(zona))
+        self.assertEqual(http.consultadas(), {CAMARA, self.AMAZON})
+        self.assertNotIn(self.FASTLY, http.por_ip)
+        fastly = activo(res, self.FASTLY).atributos
+        self.assertEqual({k: fastly[k] for k in ('cdn', 'internetdb', 'asn', 'proveedor')},
+                         {'cdn': 'fastly', 'internetdb': 'no_consultada', 'asn': 54113, 'proveedor': 'Fastly, Inc.'})
+        self.assertNotIn('fuente_datos', fastly)
+        self.assertNotIn('cdn', activo(res, CAMARA).atributos)
+        self.assertEqual(activo(res, self.AMAZON).atributos['internetdb'], 'sin_datos')
+        self.assertEqual([h.activo for h in res.hallazgos], ['20.69.154.199:8080/tcp'])
+        self.assertEqual(res.consultas, 2 + 3 + 2)   # dos páginas de Cert Spotter, tres A y dos IP: Fastly no gastó
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', list(shodan.SIN_LLAVE)))
+
+    def test_46_sin_base_no_disponible_con_un_solo_aviso_y_sin_ip_ningun_aviso(self):
+        sin_base = bases(nombres=[], problema='maxminddb no está instalado')
+        pedidas = self.con_bases(sin_base)
+        res = recolectar(HttpSimulado(ct_olmardo(), {CAMARA: CAMARA_8080}), ResolvedorSimulado(zona_olmardo()))
+        ips = [a.atributos for a in res.activos if a.tipo == 'ip']
+        self.assertEqual(len(ips), 3)
+        for atributos in ips:
+            self.assertEqual({k: atributos[k] for k in CLAVES_GEO},
+                             {'pais': NO, 'asn': NO, 'proveedor': NO, 'fuente_geo': NO, 'base_geo': NO})
+        aviso = geoip.aviso_sin_base('shodan', sin_base, sin_asn=shodan.SIN_CDN_POR_ASN)
+        self.assertEqual(res.avisos.count(aviso), 1)
+        self.assertTrue(aviso.startswith('shodan: sin la base local de DB-IP Lite (maxminddb no está instalado)'))
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', list(shodan.SIN_LLAVE)))
+        self.assertEqual(shodan.codigo_salida(res), 0)   # no deja la cobertura parcial
+        pedidas.reset_mock()
+        vacio = recolectar(HttpSimulado(), ResolvedorSimulado({}))
+        self.assertFalse([x for x in vacio.avisos if 'DB-IP' in x and x != shodan.LIMITES], vacio.avisos)
+        self.assertEqual(pedidas.call_count, 0)
+
+    def test_47_la_ubicacion_no_se_graba_y_reproducir_da_lo_mismo_salvo_la_ubicacion(self):
+        """Grabado con la base y reproducido con ella da lo mismo. Reproducido sin la base, todo es lo de antes salvo lo
+        nuevo de geoip y el aviso: la ubicación es de la base del momento, no de la grabación."""
+        self.con_bases(self.bases_llenas())
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            vivo = recolectar(HttpSimulado(ct_olmardo(), {CAMARA: CAMARA_8080, RESERVAS: 404}),
+                              ResolvedorSimulado(zona_olmardo()), modo='grabar', carpeta=carpeta, nueva=True)
+            self.assertNotIn(shodan.NO_SE_GRABO, vivo.avisos)
+            for archivo in carpeta.glob('*.json'):
+                texto = archivo.read_text(encoding='utf-8')
+                for clave in ('DB-IP', 'pais', 'proveedor', 'Microsoft'):
+                    self.assertNotIn(clave, texto, archivo.name)
+            con_base = recolectar(HttpSimulado(), ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
+            sin_base = bases(nombres=[], problema='falta dbip-asn-lite-AAAA-MM.mmdb en datos/geo')
+            with mock.patch.object(geoip, 'bases_por_omision', return_value=sin_base):
+                http = HttpSimulado()
+                otra = recolectar(http, ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
+        self.assertEqual(http.urls, [])
+        self.assertEqual((con_base.activos, con_base.hallazgos, con_base.sin_cobertura, con_base.avisos),
+                         (vivo.activos, vivo.hallazgos, vivo.sin_cobertura, vivo.avisos))
+
+        def sin_geo(res):
+            return [(a.tipo, a.valor, {k: v for k, v in a.atributos.items() if k not in CLAVES_GEO}) for a in res.activos]
+        self.assertEqual(sin_geo(otra), sin_geo(vivo))
+        self.assertEqual((otra.hallazgos, otra.sin_cobertura), (vivo.hallazgos, vivo.sin_cobertura))
+        self.assertEqual(sorted(otra.avisos),
+                         sorted(vivo.avisos + [geoip.aviso_sin_base('shodan', sin_base, sin_asn=shodan.SIN_CDN_POR_ASN)]))
+        self.assertEqual((activo(otra, CAMARA).atributos['asn'], activo(vivo, CAMARA).atributos['asn']), (NO, 8075))
+
+    def test_48_el_aviso_de_limites_ya_no_deja_el_cdn_para_15b(self):
+        """geo-G2: LIMITES no dice que solo se escapan los CDN de una nube mixta. También los que no están en
+        CDN_POR_ASN (CDN77, Edgecast u otros) y todos cuando falta la base."""
+        self.assertNotIn('#15b', shodan.LIMITES)
+        for texto in ('CNAME conocido', 'geoip.CDN_POR_ASN', 'nubes mixtas', 'otros fuera de la lista',
+                      'sin la base de DB-IP'):
+            self.assertIn(texto, shodan.LIMITES)
+        self.assertEqual(shodan.MAX_CONSULTAS, 64)   # la ubicación es local: no suma consultas
+
+    def test_49_sin_la_base_de_asn_el_cdn_por_asn_se_consulta_y_el_aviso_lo_dice(self):
+        """geo-G1: sin la base de ASN, Fastly sin CNAME sí llega a InternetDB (la conducta no cambia), y el único aviso
+        de base faltante dice que esas IP no se pudieron descartar. Si falta solo la de países, el filtro sí corre y el
+        aviso no lo menciona."""
+        llenas = self.bases_llenas()
+        zona = {DOMINIO: a(CAMARA), 'www.olmardo.com': a(self.FASTLY)}
+        sin_asn = bases(pais=llenas.pais, nombres=NOMBRES[1:], problema='falta dbip-asn-lite-AAAA-MM.mmdb en datos/geo')
+        self.con_bases(sin_asn)
+        http = HttpSimulado(paginas('www.olmardo.com'), {CAMARA: CAMARA_8080, self.FASTLY: 404})
+        res = recolectar(http, ResolvedorSimulado(zona))
+        self.assertEqual(http.consultadas(), {CAMARA, self.FASTLY})
+        geo = [x for x in res.avisos if 'DB-IP Lite (' in x]
+        self.assertEqual(geo, ['shodan: sin la base local de DB-IP Lite (falta dbip-asn-lite-AAAA-MM.mmdb en datos/geo), '
+                               'el ASN y el proveedor de las IP quedan como No disponible, y ' + shodan.SIN_CDN_POR_ASN])
+        self.assertNotIn('cdn', activo(res, self.FASTLY).atributos)
+        sin_pais = bases(asn=llenas.asn, nombres=NOMBRES[:1], problema='falta dbip-country-lite-AAAA-MM.mmdb en datos/geo')
+        self.con_bases(sin_pais)
+        http = HttpSimulado(paginas('www.olmardo.com'), {CAMARA: CAMARA_8080})
+        res = recolectar(http, ResolvedorSimulado(zona))
+        self.assertEqual(http.consultadas(), {CAMARA})
+        self.assertEqual([x for x in res.avisos if 'DB-IP Lite (' in x],
+                         ['shodan: sin la base local de DB-IP Lite (falta dbip-country-lite-AAAA-MM.mmdb en datos/geo), '
+                          'el país de las IP queda como No disponible'])
+
+    def test_50_con_solo_ip_que_no_se_ubican_no_se_piden_las_bases_ni_hay_aviso(self):
+        """geo-G5: con solo IP privadas no se busca nada en la base, así que tampoco sale el aviso de base faltante. Las
+        IP igual llevan sus atributos de geo con 'No disponible'."""
+        pedidas = self.con_bases(bases(nombres=[], problema='maxminddb no está instalado'))
+        res = recolectar(HttpSimulado(paginas('intranet.olmardo.com')),
+                         ResolvedorSimulado({DOMINIO: a('10.0.0.1'), 'intranet.olmardo.com': a('192.168.1.10')}))
+        self.assertEqual(pedidas.call_count, 0)
+        self.assertFalse([x for x in res.avisos if 'DB-IP Lite (' in x], res.avisos)
+        for ip in ('10.0.0.1', '192.168.1.10'):
+            atributos = activo(res, ip).atributos
+            self.assertEqual({k: atributos[k] for k in CLAVES_GEO}, dict.fromkeys(CLAVES_GEO, NO))
+            self.assertEqual(atributos['no_publica'], True)
+
+    def test_51_reproducir_con_otra_base_deja_sin_grabacion_la_ip_que_era_cdn_por_asn(self):
+        """geo-G3: grabado con una base que marca a Fastly como CDN por ASN, su IP no se consulta ni se graba. Si se
+        reproduce con una base que ya no trae ese ASN, la IP se pide a la grabación, no está y la corrida queda parcial
+        por 'grabacion', con su aviso y sin red. Es lo que dice docs/contrato_plugin.md: la grabación no cambia."""
+        self.con_bases(self.bases_llenas())
+        zona = {DOMINIO: a(CAMARA), 'www.olmardo.com': a(self.FASTLY)}
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            vivo = recolectar(HttpSimulado(paginas('www.olmardo.com'), {CAMARA: CAMARA_8080}), ResolvedorSimulado(zona),
+                              modo='grabar', carpeta=carpeta, nueva=True)
+            self.assertNotIn(shodan.NO_SE_GRABO, vivo.avisos)
+            self.assertEqual(activo(vivo, self.FASTLY).atributos['cdn'], 'fastly')
+            self.assertFalse((carpeta / ('internetdb_%s.json' % self.FASTLY)).exists())
+            otra_base = bases(LectorFalso({CAMARA: registro_asn(8075, 'Microsoft Corporation')}),
+                              LectorFalso({CAMARA: registro_pais('US')}))
+            self.con_bases(otra_base)
+            http = HttpSimulado()
+            otra = recolectar(http, ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
+        self.assertEqual(http.urls, [])
+        self.assertIn('shodan: %sinternetdb:%s' % (contrato.SIN_GRABACION, self.FASTLY), otra.avisos)
+        fastly = activo(otra, self.FASTLY).atributos
+        self.assertEqual((fastly['internetdb'], 'cdn' in fastly), ('sin_respuesta', False))
+        self.assertEqual(otra.hallazgos, vivo.hallazgos)   # lo de la cámara sí estaba grabado
+        self.assertEqual(otra.sin_cobertura, codigos_sin(otra))
+        self.assertEqual((otra.estado, shodan.codigo_salida(otra)), ('succeeded', 2))
 
 
 class Semilla(unittest.TestCase):

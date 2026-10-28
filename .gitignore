@@ -31,5 +31,9 @@ cirdan/recolectores/respuestas_grabadas/shodan/*
 cirdan/recolectores/respuestas_grabadas/whois/*
 !cirdan/recolectores/respuestas_grabadas/whois/.gitkeep
 
+# Bases de DB-IP Lite (#15b, RC-166): pesan unos 17 MB y se bajan a mano cada mes. La imagen de la API sí las copia (Dockerfile)
+datos/geo/*
+!datos/geo/.gitkeep
+
 # Carpeta de grabaciones de antes del 11 oct: su contenido se mueve a cirdan/recolectores/respuestas_grabadas/
 /respuestas_grabadas/
