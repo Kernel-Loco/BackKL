@@ -11,7 +11,7 @@ Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa 
 | `cirdan/ml/` | Dataset semisintético del ML (#33, RC-65): plantillas, características del reto, armado del lote y acuerdo entre etiquetadores. El método está en `docs/dataset_ml.md` |
 | `cirdan/orquestador/` | Orquestador de escaneos (#22): solo escanea con autorización vigente y TXT verificado |
 | `cirdan/recolectores/` | Contrato de plugin (#13), recolectores OSINT pasivos (crt.sh con Cert Spotter, #14 y #14b, subfinder en modo pasivo, #14b, DNS con SPF y DMARC, #15, secretos y correos en GitHub, #16, servicios y CVE con Shodan InternetDB, #17, registrador y vencimiento del dominio con RDAP y WHOIS por el puerto 43 como respaldo, #15b, y uno de ejemplo para pruebas), la ubicación de las IP con la base local de DB-IP Lite (`geoip.py`, #15b, no es un recolector) y sus respuestas grabadas para el respaldo de las demos (hoy solo está la del recolector de ejemplo) |
-| `cirdan/score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
+| `cirdan/score/` | Criterio de criticidad (#29) y cálculo explicable por hallazgo, categoría y dominio (#31) |
 | `datos/` | Datos del ML. En `datos/ml/rc65/` están el lote, la copia de cada etiquetador, las etiquetas del LLM y el dataset (#33, RC-65). En `datos/geo/` van las bases de DB-IP Lite, que se bajan a mano y no se suben al repo (ver Geolocalización y ASN de las IP) |
 | `db/` | Base PostgreSQL 16: migraciones, semillas y consultas |
 | `docs/` | Documentos del proyecto, con su índice |
@@ -35,7 +35,7 @@ Todos los comandos se corren desde la raíz del repo.
 2. Copia `.env.example` como `.env`, cambia las tres contraseñas (`POSTGRES_PASSWORD`, `CIRDAN_APP_PASSWORD` y `VALKEY_PASSWORD`) y genera `TOTP_ENCRYPTION_KEY` con el comando que trae el archivo.
 3. Levanta todo: `docker compose up -d --build`. La primera vez crea la base `cirdan` y carga migraciones y semillas (tarda unos segundos). La API queda en http://127.0.0.1:8000.
 4. Comprueba: `curl http://127.0.0.1:8000/health` responde 200 con `"role": "cirdan_app"`, y `docker compose ps` muestra los tres contenedores `healthy`.
-5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (56, contra la base y la API. Se saltan 2: una sin `EN_VIVO=1`, que también consulta InternetDB, el bootstrap de IANA y el registro RDAP del dominio, y test_11 de test_auth.py sin `FORWARDED_ALLOW_IPS='*'`), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py` (49, el orquestador y el explorador de la base dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py` (448, sin base ni red. Se saltan 2 de test_github.py que piden git y gitleaks, ver Recolector de GitHub) y `python -m unittest pruebas/test_dataset_ml.py` (68, el lote del ML de RC-65, también sin base ni red).
+5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (56, contra la base y la API. Se saltan 2: una sin `EN_VIVO=1`, que también consulta InternetDB, el bootstrap de IANA y el registro RDAP del dominio, y test_11 de test_auth.py sin `FORWARDED_ALLOW_IPS='*'`), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py` (49, el orquestador y el explorador de la base dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_motor_score.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py` (453, sin base ni red. Se saltan 2 de test_github.py que piden git y gitleaks, ver Recolector de GitHub) y `python -m unittest pruebas/test_dataset_ml.py` (68, el lote del ML de RC-65, también sin base ni red).
 6. Instala el candado de secretos una vez: `pip install pre-commit && pre-commit install`. Desde ahí gitleaks revisa cada commit.
 
 Otros comandos: `docker compose logs -f api` (ver la API), `docker compose down` (apagar, la base se conserva) y `docker compose down -v` (borrar la base para volver a cargarla desde cero en el siguiente `up`). Para revisar todo el historial con gitleaks: `docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 git /repo`.
@@ -414,6 +414,12 @@ Más alto = más riesgo. Bandas 0 a 39 bajo, 40 a 59 medio, 60 a 79 alto y 80 a 
 
 ```bash
 python -m unittest -v pruebas/test_criterio.py   # 13 pruebas, sin base de datos
+```
+
+El motor de score de #31 calcula aportes por hallazgo, notas por categoría, ponderado y piso crítico. La fórmula acordada y el texto que explica el piso están en `docs/criterio_criticidad.md`.
+
+```bash
+python -m unittest -v pruebas/test_motor_score.py   # sin base de datos
 ```
 
 ## Catálogo de reglas (#30)

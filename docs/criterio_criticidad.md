@@ -26,6 +26,10 @@ Las bandas están ancladas al ejemplo del reto: un dominio con 68 está en **rie
 3. **Piso:** si el dominio tiene un hallazgo crítico vigente, su score queda al menos en 60, que es la banda alto. Con dos o más, queda al menos en 80, que es la banda crítico.
 4. **Score final:** el mayor entre el ponderado y el piso. Si el piso lo subió, el detalle del score lo dice (#31).
 
+### Aporte de cada hallazgo (#31)
+
+Para el método `rules`, cada severidad equivale a puntos (low = 25, medium = 50, high = 75 y critical = 100). El aporte de un hallazgo vigente a su categoría es `min(max_penalty, puntos_de_severidad × peso_de_regla)`. Se suman los aportes por categoría hasta un máximo de 100; los hallazgos `resolved` y `false_positive` no aportan, mientras `open` y `accepted_risk` sí. El motor conserva severidad, regla, penalización y factores en `score_contributions` para explicar cada cálculo. Si una fuente falla o deja reglas sin cobertura, el score se guarda con `partial_coverage = true`.
+
 ### Por qué hay un piso
 
 El ponderado es un promedio. Un dominio con todas sus categorías limpias y una sola fuga de credenciales crítica podría quedar en bajo, y el promedio escondería lo más grave. El piso evita eso.
