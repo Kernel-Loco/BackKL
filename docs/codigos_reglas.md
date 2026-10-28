@@ -25,7 +25,7 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 06 | `spf_missing` | configuration | low | 8.00 | #15 RC-48 | Lo emite hoy |
 | 07 | `lookalike_domain` | digital_identity | medium | 15.00 | #14 RC-47 | Lo emite hoy |
 | 08 | `cert_expiring_soon` | infrastructure | medium | 10.00 | #14 RC-47 y #14b RC-184 | Lo emite hoy |
-| 09 | `domain_expiring_soon` | infrastructure | medium | 10.00 | #15b RC-166 | Planeado |
+| 09 | `domain_expiring_soon` | infrastructure | medium | 10.00 | #15b RC-166 | Lo emite hoy |
 | 10 | `spf_allow_all` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
 | 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
 | 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Lo emite hoy |
