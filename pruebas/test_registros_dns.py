@@ -21,13 +21,26 @@ from unittest import mock
 
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))  # también corre como python pruebas/test_registros_dns.py
-from cirdan.recolectores import REGISTRO, cargar, contrato, registros_dns  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, contrato, geoip, registros_dns  # noqa: E402
 from cirdan.recolectores.contrato import FuenteNoResponde, SinGrabacion  # noqa: E402
+from pruebas.test_geoip import NOMBRES, LectorFalso, bases, registro_asn, registro_pais  # noqa: E402
 
 AHORA = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 TOKEN = 'CIRDAN_FAKE_9f2c41d07be3a65e'
 VERIFICACION = 'cirdan-verification=' + TOKEN
 REGISTRADOS = set(registros_dns.CODIGOS)
+NO = geoip.NO_DISPONIBLE
+# Lo que lleva un activo ip con las Bases falsas de setUpModule: abrieron, pero no conocen ninguna IP.
+SIN_UBICAR = {'pais': NO, 'asn': NO, 'proveedor': NO, 'fuente_geo': NO, 'base_geo': NO}   # IP que no se buscan
+CLAVES_GEO = ('pais', 'asn', 'proveedor', 'fuente_geo', 'base_geo', 'cdn')
+
+
+def setUpModule():
+    """Ninguna prueba depende de que la PC tenga o no la base de DB-IP en datos/geo: bases_por_omision da unas Bases
+    falsas sin lectores y sin problema, así todo sale 'No disponible' y sin aviso. La clase Geo pone las suyas."""
+    parche = mock.patch.object(geoip, 'bases_por_omision', return_value=bases())
+    parche.start()
+    unittest.addModuleCleanup(parche.stop)
 
 
 def zona_olmardo():
@@ -315,8 +328,9 @@ class ActivosYAtributos(unittest.TestCase):
         ips = [a for a in res.activos if a.tipo == 'ip']
         self.assertEqual([a.valor for a in ips], ['203.0.113.10', '203.0.113.11', '2001:db8::1'])
         self.assertEqual([a.atributos for a in ips], [
-            {'host': 'acme-demo.mx', 'fuente': 'dns', 'origen': 'a'}, {'host': 'acme-demo.mx', 'fuente': 'dns', 'origen': 'a'},
-            {'host': 'acme-demo.mx', 'fuente': 'dns', 'origen': 'aaaa'}])
+            dict({'host': 'acme-demo.mx', 'fuente': 'dns', 'origen': 'a'}, **SIN_UBICAR),
+            dict({'host': 'acme-demo.mx', 'fuente': 'dns', 'origen': 'a'}, **SIN_UBICAR),
+            dict({'host': 'acme-demo.mx', 'fuente': 'dns', 'origen': 'aaaa'}, **SIN_UBICAR)])
         self.assertEqual(res.activos[0].atributos['dns']['a'], ['203.0.113.10', '203.0.113.11'])
 
     def test_2_una_ip_invalida_o_de_otra_familia_se_ignora(self):
@@ -747,6 +761,116 @@ class GrabarYReproducir(unittest.TestCase):
         self.assertEqual((grabado.avisos, grabado.sin_cobertura), ([], []))
         for campo in ('activos', 'hallazgos', 'estado'):
             self.assertEqual(getattr(grabado, campo), getattr(vivo, campo), campo)
+
+
+class Geo(unittest.TestCase):
+    """País, ASN y proveedor de DB-IP Lite en los activos ip (#15b, RC-166), con lectores falsos: los registros tienen
+    la forma de DB-IP pero son inventados."""
+
+    MICROSOFT, CLOUDFLARE, CLOUDFLARE_V6 = '40.65.94.253', '104.21.48.10', '2606:4700:4700::1111'
+
+    def con_bases(self, b):
+        """Cambia las Bases de esta prueba y devuelve el mock, para contar cuántas veces se pidieron."""
+        parche = mock.patch.object(geoip, 'bases_por_omision', return_value=b)
+        self.addCleanup(parche.stop)
+        return parche.start()
+
+    def bases_llenas(self):
+        asn = LectorFalso({self.MICROSOFT: registro_asn(8075, 'Microsoft Corporation'),
+                           self.CLOUDFLARE: registro_asn(13335, 'Cloudflare, Inc.'),
+                           self.CLOUDFLARE_V6: registro_asn(13335, 'Cloudflare, Inc.')})
+        pais = LectorFalso({self.MICROSOFT: registro_pais('US'), self.CLOUDFLARE: registro_pais('US'),
+                            self.CLOUDFLARE_V6: registro_pais('AU')})
+        return bases(asn, pais)
+
+    def zona_con_ip(self):
+        return zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject'], a=[self.MICROSOFT, self.CLOUDFLARE],
+                    aaaa=[self.CLOUDFLARE_V6])
+
+    def test_1_a_y_aaaa_llevan_pais_asn_proveedor_y_el_cdn_por_asn(self):
+        pedidas = self.con_bases(self.bases_llenas())
+        with mock.patch.object(registros_dns, '_consultar', DnsSimulado(self.zona_con_ip())):
+            res = contrato.ejecutar(registros_dns, 'acme-demo.mx', ahora=AHORA)
+        self.assertEqual((res.estado, res.avisos), ('succeeded', []))
+        ips = {a.valor: a.atributos for a in res.activos if a.tipo == 'ip'}
+        self.assertEqual(ips[self.MICROSOFT], {'host': 'acme-demo.mx', 'fuente': 'dns', 'origen': 'a', 'pais': 'US',
+                                               'asn': 8075, 'proveedor': 'Microsoft Corporation',
+                                               'fuente_geo': 'DB-IP Lite', 'base_geo': NOMBRES})
+        self.assertEqual({k: ips[self.CLOUDFLARE][k] for k in ('origen', 'pais', 'asn', 'cdn')},
+                         {'origen': 'a', 'pais': 'US', 'asn': 13335, 'cdn': 'cloudflare'})
+        self.assertEqual({k: ips[self.CLOUDFLARE_V6][k] for k in ('origen', 'pais', 'asn', 'cdn')},
+                         {'origen': 'aaaa', 'pais': 'AU', 'asn': 13335, 'cdn': 'cloudflare'})
+        self.assertEqual(pedidas.call_count, 1)   # una vez por corrida, no una por IP
+        self.assertEqual(contrato.validar(res, codigos=REGISTRADOS), [])
+
+    def test_2_sin_base_todo_sale_no_disponible_con_un_solo_aviso(self):
+        sin_base = bases(nombres=[], problema='maxminddb no está instalado')
+        self.con_bases(sin_base)
+        res = correr(self.zona_con_ip()).res
+        ips = [a.atributos for a in res.activos if a.tipo == 'ip']
+        self.assertEqual(len(ips), 3)
+        for atributos in ips:
+            self.assertEqual({k: atributos[k] for k in ('pais', 'asn', 'proveedor', 'base_geo')}, {
+                'pais': NO, 'asn': NO, 'proveedor': NO, 'base_geo': NO})
+            self.assertEqual(atributos['fuente_geo'], NO)   # datos-H4: DB-IP no dio nada, no se le atribuye
+            self.assertNotIn('cdn', atributos)
+        self.assertEqual(res.avisos, [geoip.aviso_sin_base('dns', sin_base)])
+        self.assertTrue(res.avisos[0].startswith('dns: sin la base local de DB-IP Lite (maxminddb no está instalado)'))
+        self.assertEqual((res.estado, res.sin_cobertura, res.hallazgos), ('succeeded', [], []))
+        self.assertEqual(contrato.validar(res, codigos=REGISTRADOS), [])
+
+    def test_3_sin_ip_no_hay_aviso_ni_se_piden_las_bases(self):
+        pedidas = self.con_bases(bases(nombres=[], problema='maxminddb no está instalado'))
+        res = correr(zona_olmardo(), 'olmardo.com').res
+        self.assertEqual((res.avisos, [a.tipo for a in res.activos]), ([], ['domain']))
+        self.assertEqual(pedidas.call_count, 0)
+
+    def test_4_la_ubicacion_no_se_graba_y_reproducir_da_lo_mismo_salvo_la_ubicacion(self):
+        """Grabado con la base y reproducido con ella da lo mismo. Reproducido sin la base, los activos son los de antes
+        salvo lo nuevo de geoip y sale el aviso: la ubicación es de la base del momento, no de la grabación."""
+        llenas = self.bases_llenas()
+        self.con_bases(llenas)
+        with tempfile.TemporaryDirectory() as d:
+            vivo = grabar(d, self.zona_con_ip())
+            for archivo in Path(d).glob('*.json'):
+                texto = archivo.read_text(encoding='utf-8')
+                for clave in ('DB-IP', 'pais', 'proveedor', 'Microsoft'):
+                    self.assertNotIn(clave, texto, archivo.name)
+            con_base, _ = reproducir(d)
+            sin_base = bases(nombres=[], problema='falta dbip-asn-lite-AAAA-MM.mmdb en datos/geo')
+            with mock.patch.object(geoip, 'bases_por_omision', return_value=sin_base):
+                otra, _ = reproducir(d)
+        for campo in ('activos', 'hallazgos', 'avisos', 'sin_cobertura', 'estado'):
+            self.assertEqual(getattr(con_base, campo), getattr(vivo, campo), campo)
+
+        def sin_geo(res):
+            return [(a.tipo, a.valor, {k: v for k, v in a.atributos.items() if k not in CLAVES_GEO}) for a in res.activos]
+        self.assertEqual(sin_geo(otra), sin_geo(vivo))
+        self.assertEqual((otra.hallazgos, otra.sin_cobertura), (vivo.hallazgos, vivo.sin_cobertura))
+        self.assertEqual(otra.avisos, vivo.avisos + [geoip.aviso_sin_base('dns', sin_base)])
+        self.assertEqual(activo_ip(otra, self.MICROSOFT)['asn'], NO)
+        self.assertEqual(activo_ip(vivo, self.MICROSOFT)['asn'], 8075)
+
+    def test_5_con_solo_ip_que_no_se_ubican_no_se_piden_las_bases_ni_hay_aviso(self):
+        """geo-G5: con solo 10.0.0.1 y una AAAA de documentación no se busca nada en la base, así que no se piden las
+        bases ni sale el aviso de base faltante. Las IP igual llevan sus atributos de geo con 'No disponible'."""
+        pedidas = self.con_bases(bases(nombres=[], problema='maxminddb no está instalado'))
+        res = correr(zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject'], a=['10.0.0.1'], aaaa=['2001:db8::1'])).res
+        self.assertEqual(pedidas.call_count, 0)
+        self.assertEqual(res.avisos, [])
+        ips = [a.atributos for a in res.activos if a.tipo == 'ip']
+        self.assertEqual(len(ips), 2)
+        for atributos in ips:
+            self.assertEqual({k: atributos[k] for k in CLAVES_GEO[:-1]}, SIN_UBICAR)
+            self.assertNotIn('cdn', atributos)
+        # con una IP ubicable entre ellas sí se piden y sale el aviso
+        res = correr(zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject'], a=['10.0.0.1', self.MICROSOFT])).res
+        self.assertEqual(pedidas.call_count, 1)
+        self.assertEqual(len(res.avisos), 1)
+
+
+def activo_ip(res, ip):
+    return next(a.atributos for a in res.activos if a.tipo == 'ip' and a.valor == ip)
 
 
 class Registro(unittest.TestCase):

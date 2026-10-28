@@ -21,8 +21,9 @@ from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
 from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa: E402
 from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a  # noqa: E402
 from pruebas.test_subfinder import SubfinderSimulado  # noqa: E402
+from pruebas.test_geoip import bases as bases_geo  # noqa: E402
 from pruebas.test_rdap import HttpSimulado as RdapSimulado, respuesta as respuesta_rdap  # noqa: E402
-from cirdan.recolectores import (REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, github, rdap,  # noqa: E402
+from cirdan.recolectores import (REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, rdap,  # noqa: E402
                                  registros_dns, shodan, subfinder)
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
@@ -351,7 +352,16 @@ class Ejecutar(unittest.TestCase):
         resolvedor simulado, GitHub con su API, git y gitleaks simulados, con acme-demo.mx declarado como la organización
         acme-demo (sin declaración GitHub no consulta ni graba nada), y Shodan con Cert Spotter e InternetDB simulados y
         el A de acme-demo.mx en una IP con el 8080 abierto, y RDAP con el bootstrap y el registro simulados.
-        Un recolector nuevo en REGISTRO necesita aquí su simulación, o correría su fuente real."""
+        Un recolector nuevo en REGISTRO necesita aquí su simulación, o correría su fuente real.
+        dns y shodan ubican sus IP con unas Bases falsas (geo-G6): la prueba no lee datos/geo ni abre maxminddb, así que
+        da lo mismo en una PC con las bases que sin ellas, y _POR_OMISION queda como estaba."""
+        sin_abrir = []
+        for parche in (mock.patch.object(geoip, 'bases_por_omision', return_value=bases_geo()),
+                       mock.patch.object(geoip, '_POR_OMISION', sin_abrir)):
+            parche.start()
+            self.addCleanup(parche.stop)
+        pedidas = geoip.bases_por_omision
+        pedidas.reset_mock()
         for fuente in REGISTRO:
             modulo = cargar(fuente)
             with tempfile.TemporaryDirectory() as d, mock.patch.object(modulo, 'CARPETA_GRABADAS', Path(d)), \
@@ -376,6 +386,8 @@ class Ejecutar(unittest.TestCase):
                 otra = contrato.ejecutar(modulo, 'acme-demo.mx', modo='reproducir', ahora=AHORA)
                 self.assertEqual(otra.estado, 'succeeded', (fuente, otra.error))
                 self.assertEqual((otra.activos, otra.hallazgos), (res.activos, res.hallazgos), fuente)
+        self.assertGreater(pedidas.call_count, 0)   # dns y shodan sí pidieron las bases, las falsas
+        self.assertEqual(sin_abrir, [])              # y nunca las de datos/geo
 
     def test_15_cada_recolector_graba_dentro_de_la_carpeta_del_contrato(self):
         self.assertEqual(contrato.CARPETA_GRABADAS.parent, Path(contrato.__file__).resolve().parent)
@@ -390,7 +402,7 @@ class Ejecutar(unittest.TestCase):
             self.assertIs(type(maximo), int, fuente)
             self.assertGreaterEqual(maximo, 0, fuente)
         self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, shodan.MAX_CONSULTAS,
-                          rdap.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS), (18, len(subfinder.FUENTES_SUBFINDER), 16, 64, 6, 0))
+                          rdap.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS), (18, len(subfinder.FUENTES_SUBFINDER), 16, 64, 10, 0))
 
     def test_15c_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
         """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento."""

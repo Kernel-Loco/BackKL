@@ -19,6 +19,10 @@ DB-IP
   IP Geolocation by DB-IP (https://db-ip.com), bajo la licencia
   Creative Commons Attribution 4.0 International (CC BY 4.0):
   https://creativecommons.org/licenses/by/4.0/
+  Cirdan usa las bases IP to ASN Lite e IP to Country Lite, en formato MMDB
+  y sin cambios (solo se descomprimen), para el país, el ASN y el proveedor
+  de las IP. Van en datos/geo/, fuera del repositorio y dentro de la imagen
+  de la API. Cada activo ip guarda en base_geo qué mes de cada base se usó.
 
 Software de terceros incluido en la imagen
 ------------------------------------------

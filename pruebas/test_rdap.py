@@ -1,11 +1,13 @@
-"""Pruebas del recolector de RDAP (#15b, RC-166), sin red: el bootstrap de IANA y el registro con un transporte HTTP
-simulado.
+"""Pruebas del recolector de RDAP y su respaldo por WHOIS (#15b, RC-166), sin red: el bootstrap de IANA y el registro
+con un transporte HTTP simulado, y el puerto 43 con una conversación simulada (WhoisSimulado). Ninguna prueba abre un
+socket: el _conversar de verdad solo corre con un módulo socket falso.
 
     python -m unittest -v pruebas/test_rdap.py
 
-Las respuestas tienen la forma de RDAP (RFC 9083) y del bootstrap (RFC 9224), pero son simuladas. Las fechas de
-olmardo.com son las de la semilla 002 y de docs/hallazgos_esperados.md, fila 7. El registrador, los contactos y los
-servidores de .mx y de los TLD zz y yy son inventados: no dicen qué TLD tiene RDAP de verdad.
+Las respuestas tienen la forma de RDAP (RFC 9083), del bootstrap (RFC 9224) y de WHOIS de whois.iana.org, whois.mx y
+Verisign (_plan/rc166/estudio/whois43.md), pero son simuladas. Las fechas de olmardo.com son las de la semilla 002 y de
+docs/hallazgos_esperados.md, fila 7. El registrador, los contactos y los servidores de .mx y de los TLD zz y yy son
+inventados: no dicen qué TLD tiene RDAP de verdad.
 """
 import io
 import json
@@ -15,12 +17,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_rdap.py
@@ -117,15 +122,120 @@ class HttpSimulado:
 
 
 class SinRed:
-    """Un transporte que falla la prueba si alguien lo llama."""
+    """Un transporte (HTTP o puerto 43) que falla la prueba si alguien lo llama."""
 
-    def __call__(self, url, timeout):
-        raise AssertionError('se consultó la red: %s' % url)
+    def __call__(self, destino, *_):
+        raise AssertionError('se consultó la red: %s' % destino)
 
 
-def recolectar(http, modo='vivo', carpeta=None, nueva=False, cronometro=None, dominio=DOMINIO, dormir=None, ahora=AHORA):
+CONVERSAR = rdap._conversar   # el de verdad: la clase Rdap lo cambia por SinRed en cada prueba
+MX = 'acme-demo.com.mx'
+SIN_MX = dict(BOOTSTRAP, services=[s for s in BOOTSTRAP['services'] if s != [['mx'], ['https://rdap.mx.example/']]])
+# Fichas de whois.iana.org de un TLD, con los contactos inventados del administrador del TLD (no se leen).
+IANA_MX = ('% IANA WHOIS server\r\n\r\ndomain:       MX\r\n\r\norganisation: Registro Falso\r\naddress:      Calle Falsa 123'
+           '\r\ncontact:      administrative\r\nname:         Persona Administradora Falsa\r\nphone:        +52.8180000002'
+           '\r\n\r\nnserver:      A.NS.EXAMPLE 1.2.3.4\r\nwhois:        whois.mx\r\n\r\nstatus:       ACTIVE\r\n')
+IANA_COM = IANA_MX.replace('MX\r\n', 'COM\r\n').replace('whois.mx', 'whois.verisign-grs.com')
+IANA_SIN_WHOIS = IANA_MX.replace('MX\r\n', 'ZZ\r\n').replace('whois.mx', '')
+# Datos personales inventados de los contactos de WHOIS: nada de esto puede quedar en la grabación ni en el resultado.
+CONTACTOS = ('Persona Registrante Falsa', 'Persona Administrativa Falsa', 'Persona Administradora Falsa', 'Ciudad Falsa',
+             'Estado Falso', 'Pais Falso', 'Calle Falsa 123', 'CIRDAN_FAKE_correo', '+52.818000000')
+# Respuesta de whois.mx con la forma del estudio (sección 4.1): contactos, NS con IP y avisos con '%'.
+WHOIS_MX = '''Domain Name:       acme-demo.com.mx
+
+Created On:        2019-05-12
+Expiration Date:   2026-11-05
+Last Updated On:   2025-11-01
+Registrar:         Registrador de Prueba MX
+URL:               registrador-mx.example
+
+Registrant:
+   Name:           Persona Registrante Falsa
+   City:           Ciudad Falsa
+   State:          Estado Falso
+   Country:        Pais Falso
+   Email:          CIRDAN_FAKE_correo_registrante
+   Phone:          +52.8180000003
+   Address:        Calle Falsa 123
+
+Administrative Contact:
+   Name:           Persona Administrativa Falsa
+   City:           Ciudad Falsa
+   Email:          CIRDAN_FAKE_correo_admin
+
+Technical Contact:
+   Name:           Persona Administrativa Falsa
+
+Billing Contact:
+   Name:           Persona Administrativa Falsa
+
+Name Servers:
+   DNS:            ns1.acme-demo.com.mx 1.2.3.4
+   DNS:            NS2.ACME-DEMO.COM.MX
+
+DNSSEC DS Records:
+
+
+% NOTICE: The expiration date displayed in this record is the date the
+% registrar's sponsorship of the domain name registration in the registry is
+% currently set to expire.
+'''.replace('\n', '\r\n')
+# Respuesta de Verisign (sección 4.2): 'thin', sin registrante, con la referencia al WHOIS del registrador.
+WHOIS_VERISIGN = '''   Domain Name: OLMARDO.COM
+   Registry Domain ID: 3012345678_DOMAIN_COM-VRSN
+   Registrar WHOIS Server: whois.registrador.example
+   Registrar URL: registrador.example
+   Updated Date: 2026-10-14T00:40:11Z
+   Creation Date: 2026-10-14T00:38:02Z
+   Registry Expiry Date: 2027-10-14T00:38:02Z
+   Registrar: Registrador de Prueba, Inc.
+   Registrar IANA ID: 9999
+   Registrar Abuse Contact Email: CIRDAN_FAKE_correo_abuso
+   Registrar Abuse Contact Phone: +52.8180000004
+   Domain Status: clientDeleteProhibited https://icann.org/epp#clientDeleteProhibited
+   Domain Status: clientTransferProhibited https://icann.org/epp#clientTransferProhibited
+   Name Server: ADA.NS.CLOUDFLARE.COM
+   Name Server: BOB.NS.CLOUDFLARE.COM
+   DNSSEC: unsigned
+>>> Last update of whois database: 2026-10-15T11:58:00Z <<<
+'''.replace('\n', '\r\n')
+
+
+class WhoisSimulado:
+    """Hace las veces de rdap._conversar(host, consulta, timeout). `respuestas` es {(host, consulta): respuesta}: texto
+    (va en UTF-8) o bytes tal cual, una excepción se lanza y una lista da una respuesta por intento (la última se
+    repite). Lo que no está se rechaza como una conexión caída (ConnectionRefusedError), que se reintenta."""
+
+    def __init__(self, respuestas=None):
+        self.respuestas = respuestas or {}
+        self.pedidas, self.plazos = [], []
+
+    def __call__(self, host, consulta, timeout):
+        self.pedidas.append((host, consulta))
+        self.plazos.append(timeout)
+        r = self.respuestas.get((host, consulta), ConnectionRefusedError('conexión rechazada'))
+        if isinstance(r, list):
+            r = r[min(self.pedidas.count((host, consulta)), len(r)) - 1]
+        if isinstance(r, Exception):
+            raise r
+        return r.encode('utf-8') if isinstance(r, str) else r
+
+
+def whois_mx(respuesta_mx=WHOIS_MX, iana=IANA_MX):
+    return WhoisSimulado({(rdap.IANA_WHOIS, 'mx'): iana, ('whois.mx', MX): respuesta_mx})
+
+
+def whois_com(respuesta_com=WHOIS_VERISIGN):
+    return WhoisSimulado({(rdap.IANA_WHOIS, 'com'): IANA_COM,
+                          ('whois.verisign-grs.com', 'domain ' + DOMINIO): respuesta_com})
+
+
+def recolectar(http, modo='vivo', carpeta=None, nueva=False, cronometro=None, dominio=DOMINIO, dormir=None, ahora=AHORA,
+               whois=None):
+    """`whois` es el puerto 43. Por omisión rechaza toda conexión: si RDAP falla, fallan los dos."""
     cliente = rdap.ClienteRdap(modo=modo, carpeta=carpeta or rdap.carpeta_de(dominio), descargar=http, nueva=nueva,
-                               cronometro=cronometro or Cronometro(0), dormir=dormir or (lambda s: None))
+                               cronometro=cronometro or Cronometro(0), dormir=dormir or (lambda s: None),
+                               conversar=WhoisSimulado() if whois is None else whois)
     return rdap.recolectar(dominio, cliente, ahora=ahora)
 
 
@@ -139,7 +249,63 @@ def el_dominio(res):
     return a
 
 
+class Socket:
+    """Un socket falso de Red. Con `red.reloj`, un connect a una dirección de `red.colgadas` gasta todo su timeout,
+    como un servidor que descarta los SYN, y lanza TimeoutError."""
+
+    def __init__(self, red, familia, tipo, protocolo):
+        self.red, self.cerrado, self.plazos, self.enviado = red, False, [], b''
+        red.sockets.append(self)
+
+    def settimeout(self, segundos):
+        self.plazos.append(segundos)
+
+    def connect(self, destino):
+        if destino[0] in self.red.colgadas:
+            self.red.reloj[0] += self.plazos[-1]
+            raise TimeoutError('timed out')
+        if destino[0] in self.red.caidas:
+            raise ConnectionRefusedError('rechazada')
+
+    def sendall(self, datos):
+        self.enviado += datos
+
+    def recv(self, n):
+        return self.red.partes.pop(0)[:n] if self.red.partes else b''
+
+    def close(self):
+        self.cerrado = True
+
+
+class Red:
+    """Un módulo socket falso: getaddrinfo da `ips` (familia 10 si es IPv6, 2 si no) y cada socket lee `partes`.
+    socket() de una familia de `sin_familia` lanza OSError, como AF_INET6 en un kernel sin IPv6."""
+    SOCK_STREAM = 1
+
+    def __init__(self, ips, partes=(), caidas=(), resolver=None, colgadas=(), reloj=None, sin_familia=()):
+        self.ips, self.partes, self.caidas, self.sockets, self.resolver = ips, list(partes), caidas, [], resolver
+        self.colgadas, self.reloj, self.sin_familia = colgadas, reloj, sin_familia
+        self.pedidas = []
+
+    def getaddrinfo(self, host, puerto, type=None):
+        self.pedidas.append((host, puerto, type))
+        if self.resolver:
+            self.resolver()
+        return [(10 if ':' in ip else 2, 1, 6, '', (ip, puerto)) for ip in self.ips]
+
+    def socket(self, familia, tipo, protocolo):
+        if familia in self.sin_familia:
+            raise OSError(97, 'Address family not supported by protocol')
+        return Socket(self, familia, tipo, protocolo)
+
+
 class Rdap(unittest.TestCase):
+
+    def setUp(self):
+        # Ninguna prueba abre un socket: si alguien llega al _conversar del módulo sin cambiarlo, la prueba falla.
+        guardia = mock.patch.object(rdap, '_conversar', SinRed())
+        guardia.start()
+        self.addCleanup(guardia.stop)
 
     def test_1_cumple_el_contrato_y_ejecutar_lo_deja_succeeded(self):
         self.assertEqual(REGISTRO['whois'], 'cirdan.recolectores.rdap')
@@ -155,7 +321,7 @@ class Rdap(unittest.TestCase):
             'registrado': REGISTRADO, 'vence': VENCE, 'ultimo_cambio': CAMBIO,
             'estado_registro': ['client delete prohibited', 'client transfer prohibited'],
             'servidores_nombre': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'dnssec': False})
-        self.assertEqual(res.avisos, [rdap.PENDIENTE])
+        self.assertEqual(res.avisos, [])
         self.assertEqual(rdap.codigo_salida(res), 0)
         json.dumps(res.a_dict())   # el resultado se puede guardar como JSON
         with mock.patch.object(rdap, '_descargar', HttpSimulado()), mock.patch.object(rdap.time, 'sleep', lambda s: None):
@@ -215,13 +381,17 @@ class Rdap(unittest.TestCase):
         }
         for caso, (http, consultas, esperas) in casos.items():
             with self.subTest(caso=caso):
-                dormidas = []
-                res = recolectar(http, dormir=dormidas.append)
+                dormidas, whois = [], WhoisSimulado()   # el puerto 43 tampoco responde
+                res = recolectar(http, dormir=dormidas.append, whois=whois)
                 self.assertEqual(contrato.validar(res, POR_CODIGO), [])
                 self.assertEqual((res.estado, res.hallazgos, res.sin_cobertura), ('succeeded', [], ['domain_expiring_soon']))
                 self.assertEqual(el_dominio(res).atributos, datos_no)
-                self.assertTrue(res.avisos[0].startswith(rdap.SIN_RESPUESTA), res.avisos)
-                self.assertEqual((res.consultas, dormidas), (consultas, esperas))
+                self.assertTrue(res.avisos[0].startswith(rdap.SIN_RESPUESTA + ' (RDAP: '), res.avisos)
+                self.assertIn('. WHOIS: el WHOIS de IANA no respondió después de 2 intentos (ConnectionRefusedError',
+                              res.avisos[0])
+                # Lo de RDAP y después los 2 intentos a whois.iana.org, con su espera de 5 s
+                self.assertEqual(whois.pedidas, [(rdap.IANA_WHOIS, 'com')] * rdap.INTENTOS_WHOIS)
+                self.assertEqual((res.consultas, dormidas), (consultas + 2, esperas + [5]))
                 self.assertEqual(rdap.codigo_salida(res), 2)
         res = recolectar(HttpSimulado(dominios={DOMINIO: 429}))
         self.assertIn('429', res.avisos[0])
@@ -287,11 +457,11 @@ class Rdap(unittest.TestCase):
     def test_8_fechas_rotas_ausentes_o_repetidas(self):
         res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(vence=None)}))
         self.assertEqual((res.sin_cobertura, el_dominio(res).atributos['vence']), (['domain_expiring_soon'], NO))
-        self.assertIn(rdap.SIN_VENCIMIENTO, res.avisos)
+        self.assertIn(rdap.SIN_VENCIMIENTO % 'RDAP', res.avisos)
         self.assertEqual(el_dominio(res).atributos['registrado'], REGISTRADO)
         res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(vence='mañana')}))
         self.assertEqual(res.sin_cobertura, ['domain_expiring_soon'])
-        self.assertIn(rdap.VENCIMIENTO_ROTO, res.avisos)
+        self.assertIn(rdap.VENCIMIENTO_ROTO % 'RDAP', res.avisos)
         self.assertIn('whois: RDAP dio fechas que no se pueden leer (vence) y se ignoraron', res.avisos)
         eventos = [{'eventAction': 'expiration', 'eventDate': '2026-10-20T00:00:00Z'},
                    {'eventAction': 'expiration', 'eventDate': '2027-10-13T18:38:02-06:00'},   # la más reciente, en UTC
@@ -304,7 +474,7 @@ class Rdap(unittest.TestCase):
         t = el_dominio(res).atributos
         self.assertEqual((t['vence'], t['registrado'], t['ultimo_cambio']), (VENCE, '2026-10-14T00:38:02Z', CAMBIO))
         self.assertEqual((res.hallazgos, res.sin_cobertura), ([], []))
-        self.assertEqual(res.avisos, [rdap.PENDIENTE])   # una fecha rota con otra buena del mismo evento no avisa
+        self.assertEqual(res.avisos, [])   # una fecha rota con otra buena del mismo evento no avisa
         datos = respuesta(status=['active', 'ACTIVE', 'con_guion_bajo', 7, 'x' * 80], nameservers=[{'ldhName': 'NS1.'},
                           {'ldhName': 'ns1.olmardo.com.'}, 'roto'], secureDNS={'delegationSigned': 'si'})
         t, _ = rdap.leer_rdap(datos, DOMINIO)
@@ -325,14 +495,19 @@ class Rdap(unittest.TestCase):
         self.assertEqual((otra.estado, otra.activos, otra.hallazgos, otra.sin_cobertura, otra.avisos, otra.consultas),
                          (res.estado, res.activos, res.hallazgos, res.sin_cobertura, res.avisos, 0))
 
-    def test_10_el_404_y_el_tld_sin_rdap_tambien_se_graban(self):
-        for dominio, dominios in ((DOMINIO, {}), ('ejemplo.zz', {})):
+    def test_10_el_404_y_el_tld_sin_rdap_ni_whois_tambien_se_graban(self):
+        sin_whois = WhoisSimulado({(rdap.IANA_WHOIS, 'zz'): IANA_SIN_WHOIS})
+        for dominio, archivos in ((DOMINIO, ['bootstrap.json', 'rdap_olmardo.com.json']),
+                                  ('ejemplo.zz', ['bootstrap.json', 'whois-iana_zz.json'])):
             with self.subTest(dominio=dominio), tempfile.TemporaryDirectory() as d:
                 carpeta = Path(d) / dominio
-                res = recolectar(HttpSimulado(dominios=dominios), modo='grabar', carpeta=carpeta, nueva=True, dominio=dominio)
+                res = recolectar(HttpSimulado(dominios={}), modo='grabar', carpeta=carpeta, nueva=True, dominio=dominio,
+                                 whois=sin_whois)
                 self.assertNotIn(rdap.NO_SE_GRABO, res.avisos)
-                otra = recolectar(SinRed(), modo='reproducir', carpeta=carpeta, dominio=dominio)
+                self.assertEqual(sorted(p.name for p in carpeta.glob('*.json')), archivos)
+                otra = recolectar(SinRed(), modo='reproducir', carpeta=carpeta, dominio=dominio, whois=SinRed())
                 self.assertEqual((otra.activos, otra.sin_cobertura, otra.avisos), (res.activos, res.sin_cobertura, res.avisos))
+        self.assertEqual(sin_whois.pedidas, [(rdap.IANA_WHOIS, 'zz')])   # el 404 de RDAP no pasa a WHOIS
 
     def test_11_una_corrida_con_fallas_no_pisa_la_grabacion(self):
         with tempfile.TemporaryDirectory() as d:
@@ -350,7 +525,7 @@ class Rdap(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             res = recolectar(SinRed(), modo='reproducir', carpeta=Path(d) / DOMINIO)
             self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 0, ['domain_expiring_soon']))
-            self.assertEqual(res.avisos, [rdap.SIN_GRABACION_DOMINIO, rdap.PENDIENTE])
+            self.assertEqual(res.avisos, [rdap.SIN_GRABACION_DOMINIO])
             self.assertEqual(el_dominio(res).atributos['vence'], NO)
             self.assertEqual(rdap.codigo_salida(res), 2)
             # Una grabación rota (editada a mano o de otra versión) es failed, no 'No disponible': no es una falla de RDAP
@@ -421,12 +596,14 @@ class Rdap(unittest.TestCase):
         self.assertEqual((res.consultas, res.sin_cobertura, el_dominio(res).atributos['vence']), (3, [], VENCE))
 
     def test_16_semilla_008_y_maximo_de_consultas(self):
-        self.assertEqual(rdap.MAX_CONSULTAS, 6)
+        # RDAP (bootstrap y dominio) y el respaldo (whois.iana.org y el servidor del TLD), cada uno con sus intentos
+        self.assertEqual(rdap.MAX_CONSULTAS, 2 * rdap.INTENTOS + 2 * rdap.INTENTOS_WHOIS)
+        self.assertEqual(rdap.MAX_CONSULTAS, 10)
         texto = SEMILLA.read_text(encoding='utf-8')
         sin_comentarios = '\n'.join(linea.split('--')[0] for linea in texto.splitlines())
         [limite] = re.findall(r"UPDATE\s+data_sources\s+SET\s+daily_limit\s*=\s*(\d+)\s+WHERE\s+code\s*=\s*'whois'",
                               sin_comentarios)
-        self.assertEqual(int(limite), 10 * rdap.MAX_CONSULTAS)
+        self.assertGreaterEqual(int(limite) // rdap.MAX_CONSULTAS, 6)   # al menos 6 corridas en el peor caso
         self.assertIn("SET client_encoding = 'UTF8';", sin_comentarios)
         self.assertLess(sin_comentarios.index("SET client_encoding = 'UTF8';"), sin_comentarios.index('BEGIN;'))
         self.assertIn('AND daily_limit IS NULL', sin_comentarios)
@@ -475,12 +652,13 @@ class Rdap(unittest.TestCase):
                 self.assertEqual(contrato.validar(res, POR_CODIGO), [])
                 self.assertEqual((res.estado, res.hallazgos, res.sin_cobertura), ('succeeded', [], ['domain_expiring_soon']))
                 self.assertEqual(el_dominio(res).atributos['vence'], NO)
-                self.assertIn(rdap.VENCIMIENTO_IMPOSIBLE, res.avisos)
+                self.assertIn(rdap.VENCIMIENTO_IMPOSIBLE % 'RDAP', res.avisos)
                 self.assertEqual(rdap.codigo_salida(res), 2)
 
     def test_19_una_respuesta_rara_no_deja_la_fuente_en_failed(self):
         def ejecutar(http):
-            with mock.patch.object(rdap, '_descargar', http), mock.patch.object(rdap.time, 'sleep', lambda s: None):
+            with mock.patch.object(rdap, '_descargar', http), mock.patch.object(rdap.time, 'sleep', lambda s: None), \
+                    mock.patch.object(rdap, '_conversar', WhoisSimulado()):   # el puerto 43 tampoco responde
                 return contrato.ejecutar(cargar('whois'), DOMINIO, modo='vivo', ahora=AHORA)
         # eventAction que no es texto: se ignora el evento
         eventos = [{'eventAction': ['expiration'], 'eventDate': '2026-10-20T00:00:00Z'},
@@ -491,14 +669,14 @@ class Rdap(unittest.TestCase):
         # Fechas que se salen del calendario al pasarlas a UTC
         res = ejecutar(HttpSimulado(dominios={DOMINIO: respuesta(vence='9999-12-31T23:59:59-05:00')}))
         self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['domain_expiring_soon']))
-        self.assertIn(rdap.VENCIMIENTO_ROTO, res.avisos)
+        self.assertIn(rdap.VENCIMIENTO_ROTO % 'RDAP', res.avisos)
         res = ejecutar(HttpSimulado(dominios={DOMINIO: respuesta(registrado='0001-01-01T00:00:00+01:00')}))
         self.assertEqual((res.estado, el_dominio(res).atributos['registrado'], el_dominio(res).atributos['vence']),
                          ('succeeded', NO, VENCE))
         self.assertEqual(rdap._iso(datetime(1, 1, 1, 4, tzinfo=timezone.utc)), '0001-01-01T04:00:00Z')
         # Un JSON muy anidado no se reintenta y da No disponible
         res = ejecutar(HttpSimulado(dominios={DOMINIO: b'[' * 200000 + b']' * 200000}))
-        self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 2, ['domain_expiring_soon']))
+        self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 2 + 2, ['domain_expiring_soon']))
         self.assertIn('demasiado anidado', res.avisos[0])
         # Texto del servidor con un carácter nulo o un surrogate: no llega a los avisos
         url = VERISIGN + 'domain/' + DOMINIO
@@ -553,7 +731,7 @@ class Rdap(unittest.TestCase):
             res = recolectar(HttpSimulado(dominios={DOMINIO: datos}), modo='grabar', carpeta=carpeta, nueva=True)
             grabado = (carpeta / 'rdap_olmardo.com.json').read_text(encoding='utf-8')
             otra = recolectar(SinRed(), modo='reproducir', carpeta=carpeta)
-        self.assertEqual(res.avisos[0], rdap.PENDIENTE)   # se grabó
+        self.assertNotIn(rdap.NO_SE_GRABO, res.avisos)   # se grabó
         self.assertNotIn('Persona', grabado)
         self.assertNotIn('registrante@', grabado)
         self.assertLess(len(grabado), 2000)
@@ -592,11 +770,14 @@ class Rdap(unittest.TestCase):
         reloj, dormidas = [1000.0], []
         cliente = rdap.ClienteRdap(descargar=SinRed(), cronometro=lambda: reloj[0], dormir=dormidas.append)
         cliente.empezar()
-        reloj[0] += rdap.TIEMPO_CORRIDA - 3
+        reloj[0] += rdap.TIEMPO_CORRIDA - rdap.RESERVA_WHOIS - 3   # mientras corre RDAP, la reserva no cuenta
         cliente.esperar(15)
         reloj[0] += 10
         cliente.esperar(5)
-        self.assertEqual(dormidas, [3, 0])
+        cliente.reserva = 0                                          # al pasar a WHOIS queda la reserva: 30 - 7 s
+        self.assertEqual(cliente.restante(), rdap.RESERVA_WHOIS - 7)
+        cliente.esperar(5)
+        self.assertEqual(dormidas, [3, 0, 5])
 
         def lenta(url, timeout):
             if url == rdap.URL_BOOTSTRAP:
@@ -630,10 +811,399 @@ class Rdap(unittest.TestCase):
                 self.assertIn(r.returncode, (0, 1), ruta)  # 128: git no pudo revisarlo
                 return r.returncode == 0
             for ruta in ('whois/olmardo.com/bootstrap.json', 'whois/olmardo.com/rdap_olmardo.com.json',
-                         'whois/olmardo.com/.grabacion'):
+                         'whois/olmardo.com/.grabacion', 'whois/acme-demo.com.mx/whois-iana_mx.json',
+                         'whois/acme-demo.com.mx/whois_acme-demo.com.mx.json'):
                 self.assertTrue(ignorado(ruta), ruta)
             for ruta in ('whois/.gitkeep', 'dns/.gitkeep', 'ejemplo/acme-demo.mx/resultado.json'):
                 self.assertFalse(ignorado(ruta), ruta)
+
+
+    # ------------------------------------------------------------ respaldo por WHOIS (puerto 43)
+
+    def test_25_com_mx_sin_rdap_sale_de_whois_mx_sin_contactos(self):
+        http, whois = HttpSimulado(bootstrap=SIN_MX, dominios={}), whois_mx()
+        res = recolectar(http, dominio=MX, whois=whois)
+        self.assertEqual(contrato.validar(res, POR_CODIGO), [])
+        self.assertEqual(http.urls, [rdap.URL_BOOTSTRAP])
+        self.assertEqual(whois.pedidas, [(rdap.IANA_WHOIS, 'mx'), ('whois.mx', MX)])
+        self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', [], 3))
+        self.assertEqual(el_dominio(res).atributos, {
+            'fuente': 'whois', 'fuente_datos': 'WHOIS', 'servidor_whois': 'whois.mx',
+            'registrador': 'Registrador de Prueba MX', 'registrador_iana': NO,
+            'registrado': '2019-05-12T00:00:00Z', 'vence': '2026-11-05T23:59:59Z', 'ultimo_cambio': '2025-11-01T00:00:00Z',
+            'estado_registro': NO, 'servidores_nombre': ['ns1.acme-demo.com.mx', 'ns2.acme-demo.com.mx'], 'dnssec': NO})
+        self.assertEqual(res.avisos, [rdap.CON_WHOIS % ('whois.mx', rdap.SIN_RDAP_TLD)])
+        # domain_expiring_soon desde WHOIS: la evidencia dice de dónde salió el dato. La 'Expiration Date' de whois.mx
+        # es solo fecha y vale hasta el final de ese día (23:59:59Z): de AHORA al 5 nov a esa hora son 21 días
+        [h] = res.hallazgos
+        self.assertEqual((h.codigo, h.titulo), ('domain_expiring_soon', 'El registro de acme-demo.com.mx vence en 21 días'))
+        self.assertEqual(h.evidencia, {
+            'title': h.titulo, 'vence': '2026-11-05T23:59:59Z', 'dias_para_vencer': 21,
+            'registrador': 'Registrador de Prueba MX', 'estado_registro': NO,
+            'fuente_datos': 'WHOIS', 'servidor_whois': 'whois.mx'})
+        self.assertEqual(rdap.codigo_salida(res), 0)
+        resultado = json.dumps(res.a_dict(), ensure_ascii=False)
+        for dato in CONTACTOS:
+            self.assertNotIn(dato, resultado)
+        # Al grabar quedan el bootstrap reducido, el servidor de IANA y la respuesta reducida, y se reproduce sin red
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / MX
+            grabada = recolectar(HttpSimulado(bootstrap=SIN_MX, dominios={}), modo='grabar', carpeta=carpeta, nueva=True,
+                                 dominio=MX, whois=whois_mx())
+            self.assertEqual(sorted(p.name for p in carpeta.glob('*.json')),
+                             ['bootstrap.json', 'whois-iana_mx.json', 'whois_acme-demo.com.mx.json'])
+            leido = {p.name: json.loads(p.read_text(encoding='utf-8'))['datos'] for p in carpeta.glob('*.json')}
+            grabado = ''.join(p.read_text(encoding='utf-8') for p in carpeta.glob('*.json'))
+            otra = recolectar(SinRed(), modo='reproducir', carpeta=carpeta, dominio=MX, whois=SinRed())
+        for dato in CONTACTOS + ('registrador-mx.example', 'NOTICE'):
+            self.assertNotIn(dato, grabado)
+        self.assertEqual(leido['bootstrap.json']['services'], [])
+        self.assertEqual(leido['whois-iana_mx.json'], {'whois': 'whois.mx'})
+        self.assertEqual(leido['whois_acme-demo.com.mx.json'], {
+            'dominio': MX, 'registrado': '2019-05-12T00:00:00Z', 'vence': '2026-11-05T23:59:59Z',
+            'ultimo_cambio': '2025-11-01T00:00:00Z', 'registrador': 'Registrador de Prueba MX',
+            'servidores_nombre': ['ns1.acme-demo.com.mx', 'ns2.acme-demo.com.mx']})
+        self.assertEqual((grabada.activos, grabada.hallazgos, grabada.avisos), (res.activos, res.hallazgos, res.avisos))
+        self.assertEqual((otra.activos, otra.hallazgos, otra.avisos, otra.consultas),
+                         (res.activos, res.hallazgos, res.avisos, 0))
+
+    def test_26_com_con_rdap_caido_sale_de_verisign_y_no_se_graba(self):
+        whois = whois_com()
+        res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois)
+        self.assertEqual(contrato.validar(res, POR_CODIGO), [])
+        # Solo el servidor del registro: 'Registrar WHOIS Server' no se sigue
+        self.assertEqual(whois.pedidas, [(rdap.IANA_WHOIS, 'com'), ('whois.verisign-grs.com', 'domain olmardo.com')])
+        self.assertEqual((res.estado, res.hallazgos, res.sin_cobertura, res.consultas), ('succeeded', [], [], 1 + 3 + 2))
+        self.assertEqual(el_dominio(res).atributos, {
+            'fuente': 'whois', 'fuente_datos': 'WHOIS', 'servidor_whois': 'whois.verisign-grs.com',
+            'registrador': 'Registrador de Prueba, Inc.', 'registrador_iana': '9999',
+            'registrado': REGISTRADO, 'vence': VENCE, 'ultimo_cambio': CAMBIO,
+            'estado_registro': ['client delete prohibited', 'client transfer prohibited'],
+            'servidores_nombre': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'dnssec': False})
+        [aviso] = res.avisos
+        self.assertTrue(aviso.startswith(rdap.CON_WHOIS % ('whois.verisign-grs.com', 'RDAP no respondió (RDAP (')), aviso)
+        self.assertIn('HTTPError', aviso)
+        self.assertEqual(rdap.codigo_salida(res), 0)
+        resultado = json.dumps(res.a_dict(), ensure_ascii=False)
+        for dato in CONTACTOS + ('whois.registrador.example',):
+            self.assertNotIn(dato, resultado)
+        # Al grabar, una falla de RDAP con el respaldo bueno no graba: la grabación anterior queda igual
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            recolectar(HttpSimulado(), modo='grabar', carpeta=carpeta, nueva=True)
+            antes = {p.name: p.read_bytes() for p in carpeta.iterdir()}
+            grabada = recolectar(HttpSimulado(dominios={DOMINIO: 503}), modo='grabar', carpeta=carpeta, nueva=True,
+                                 whois=whois_com())
+            self.assertEqual({p.name: p.read_bytes() for p in carpeta.iterdir()}, antes)
+        self.assertEqual((grabada.avisos[0], grabada.avisos[1:], grabada.activos), (rdap.NO_SE_GRABO, [aviso], res.activos))
+        self.assertEqual(rdap.codigo_salida(grabada), 3)
+        # El 404 de RDAP y una respuesta sin vencimiento no pasan a WHOIS (la guardia de setUp falla si alguien llama)
+        self.assertIn(rdap.NO_ENCONTRADO, recolectar(HttpSimulado(dominios={}), whois=SinRed()).avisos)
+        sin_fecha = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(vence=None)}), whois=SinRed())
+        self.assertEqual(sin_fecha.avisos, [rdap.SIN_VENCIMIENTO % 'RDAP'])
+
+    def test_27_tld_sin_whois_y_dominio_que_whois_no_conoce(self):
+        sin_whois = WhoisSimulado({(rdap.IANA_WHOIS, 'mx'): IANA_SIN_WHOIS.replace('ZZ\r\n', 'MX\r\n')})
+        res = recolectar(HttpSimulado(bootstrap=SIN_MX), dominio=MX, whois=sin_whois)
+        self.assertEqual(contrato.validar(res, POR_CODIGO), [])
+        self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', ['domain_expiring_soon'], 2))
+        self.assertEqual(res.avisos, [rdap.SIN_WHOIS % (MX, rdap.SIN_RDAP_TLD)])
+        self.assertEqual(el_dominio(res).atributos['vence'], NO)
+        self.assertEqual(sin_whois.pedidas, [(rdap.IANA_WHOIS, 'mx')])
+        no_existe = {'Verisign': 'No match for "OLMARDO.COM".\r\n>>> Last update of whois database: 2026-10-15 <<<\r\n',
+                     'whois.mx': 'No_Se_Encontro_El_Objeto/Object_Not_Found\r\n&PARAMETROS VALIDOS\r\n'}
+        for caso, texto in no_existe.items():
+            with self.subTest(caso=caso):
+                res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois_com(texto))
+                self.assertEqual((res.estado, res.sin_cobertura, res.consultas),
+                                 ('succeeded', ['domain_expiring_soon'], 1 + 3 + 2))
+                self.assertEqual(res.avisos[1], rdap.NO_ENCONTRADO_WHOIS)
+                self.assertEqual(el_dominio(res).atributos['registrador'], NO)
+        self.assertEqual(rdap.reducir_whois(no_existe['whois.mx'], MX), {'no_encontrado': True})
+
+    def test_28_respuestas_whois_que_no_se_pueden_leer(self):
+        raras = {
+            'de otro dominio': (WHOIS_VERISIGN.replace('OLMARDO.COM', 'OTRO.COM'), 'WHOIS respondió con otro dominio'),
+            'con dos dominios': (WHOIS_VERISIGN + '   Domain Name: OTRO.COM\r\n', 'WHOIS respondió con otro dominio'),
+            'sin campos': ('Servicio en mantenimiento, intente más tarde\r\n', 'no respondió con el registro de un dominio'),
+            'vacía': ('  \r\n', 'respondió sin texto'),
+        }
+        for caso, (texto, motivo) in raras.items():
+            with self.subTest(caso=caso):
+                whois = whois_com(texto)
+                res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois)
+                self.assertEqual(contrato.validar(res, POR_CODIGO), [])
+                self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['domain_expiring_soon']))
+                self.assertTrue(res.avisos[0].startswith(rdap.SIN_RESPUESTA), res.avisos)
+                self.assertIn(motivo, res.avisos[0])
+                self.assertEqual(len(whois.pedidas), 2)   # no se reintenta: el servidor sí respondió
+                self.assertEqual(el_dominio(res).atributos['registrador'], NO)
+        # Una ficha de IANA rota o con un servidor que no es un nombre de host tampoco se usa
+        for caso, ficha in {'sin ficha': '% This query returned 0 objects.\r\n',
+                            'servidor con IP': IANA_COM.replace('whois.verisign-grs.com', '192.0.2.43'),
+                            'servidor con puerto': IANA_COM.replace('whois.verisign-grs.com', 'whois.example:4343')}.items():
+            with self.subTest(caso=caso):
+                whois = WhoisSimulado({(rdap.IANA_WHOIS, 'com'): ficha})
+                res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois)
+                self.assertTrue(res.avisos[0].startswith(rdap.SIN_RESPUESTA), res.avisos)
+                self.assertEqual(whois.pedidas, [(rdap.IANA_WHOIS, 'com')])
+        # Fallan los dos: un solo aviso con los dos motivos y, al grabar, NO_SE_GRABO
+        res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=WhoisSimulado({(rdap.IANA_WHOIS, 'com'): IANA_COM}))
+        self.assertTrue(res.avisos[0].startswith(rdap.SIN_RESPUESTA + ' (RDAP: RDAP (rdap.verisign.com) no respondió'))
+        self.assertIn('. WHOIS: WHOIS (whois.verisign-grs.com) no respondió después de 2 intentos', res.avisos[0])
+        self.assertEqual((res.consultas, rdap.codigo_salida(res)), (1 + 3 + 1 + 2, 2))
+        with tempfile.TemporaryDirectory() as d:
+            res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), modo='grabar', carpeta=Path(d) / DOMINIO, nueva=True)
+            self.assertEqual(list(Path(d).iterdir()), [])
+        self.assertEqual((res.avisos[0], rdap.codigo_salida(res)), (rdap.NO_SE_GRABO, 3))
+
+    def test_29_lectura_de_whois_campos_codificacion_y_estados(self):
+        # Latin-1 cuando no es UTF-8 válido, y UTF-8 cuando sí
+        texto = WHOIS_MX.replace('Registrador de Prueba MX', 'Compañía Registradora')
+        for cuerpo in (texto.encode('latin-1'), texto.encode('utf-8')):
+            with self.subTest(cuerpo=cuerpo[200:230]):
+                res = recolectar(HttpSimulado(bootstrap=SIN_MX), dominio=MX,
+                                 whois=whois_mx(respuesta_mx=cuerpo))
+                self.assertEqual(el_dominio(res).atributos['registrador'], 'Compañía Registradora')
+        self.assertEqual([rdap._estado_epp(v) for v in ('ok', 'OK', 'clientTransferProhibited https://icann.org/epp#x',
+                                                        'redemptionPeriod', 'pendingDelete', 'serverHold', 'inactive')],
+                         ['active', 'active', 'client transfer prohibited', 'redemption period', 'pending delete',
+                          'server hold', 'inactive'])
+        # Fechas repetidas como en _fechas, una rota que cuenta como rota, y DNSSEC firmado
+        raro = ('Domain Name: OLMARDO.COM\nCreation Date: 2026-10-15T00:00:00Z\nCreation Date: ' + REGISTRADO
+                + '\nRegistry Expiry Date: 2026-10-20T00:00:00Z\nRegistry Expiry Date: ' + VENCE
+                + '\nUpdated Date: ayer\nDNSSEC: signedDelegation\nDomain Status: con_guion_bajo\n'
+                + 'Registrar: \x00\nRegistrar IANA ID: 12a\nName Server: \nName Server: ns1.olmardo.com. 1.2.3.4\n'
+                + 'Registrant Name: Persona Registrante Falsa\nRegistrant Email: CIRDAN_FAKE_correo\n')
+        reducido = rdap.reducir_whois(raro, DOMINIO)
+        self.assertEqual(reducido, {'dominio': DOMINIO, 'registrado': REGISTRADO, 'vence': VENCE, 'ultimo_cambio': None,
+                                    'estado_registro': [], 'servidores_nombre': ['ns1.olmardo.com'], 'dnssec': True})
+        atributos, rotos = rdap.leer_whois(reducido, DOMINIO)
+        self.assertEqual((atributos['ultimo_cambio'], atributos['estado_registro'], atributos['registrador'],
+                          atributos['registrador_iana'], rotos), (NO, NO, NO, NO, ['ultimo_cambio']))
+        res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois_com(raro))
+        self.assertIn('whois: WHOIS dio fechas que no se pueden leer (ultimo_cambio) y se ignoraron', res.avisos)
+        # leer_whois vuelve a filtrar lo grabado: un valor editado a mano no pasa
+        editado = dict(reducido, registrador='x' * 500, estado_registro=['active', 'Con Mayúsculas', 7],
+                       servidores_nombre=['NS1.OLMARDO.COM', 'no es un nombre'], dnssec='si', registrador_iana='9999')
+        atributos, _ = rdap.leer_whois(editado, DOMINIO)
+        self.assertEqual((len(atributos['registrador']), atributos['estado_registro'], atributos['servidores_nombre'],
+                          atributos['dnssec'], atributos['registrador_iana']),
+                         (rdap.MAX_TEXTO, ['active'], ['ns1.olmardo.com'], NO, '9999'))
+        for roto in ({'dominio': 'otro.com'}, ['no es un objeto'], {'no_encontrado': True}):
+            with self.assertRaises(rdap.RespuestaIlegible):
+                rdap.leer_whois(roto, DOMINIO)
+        # Ficha de IANA: solo 'whois:', vacía es None
+        self.assertEqual(rdap.servidor_whois_de(IANA_MX, 'mx'), 'whois.mx')
+        self.assertIsNone(rdap.servidor_whois_de(IANA_SIN_WHOIS, 'zz'))
+        self.assertIsNone(rdap.servidor_whois_de('domain: ZZ\n', 'zz'))
+        with self.assertRaises(rdap.RespuestaIlegible):
+            rdap.servidor_whois_de(IANA_MX, 'com')
+
+    def test_30_reproducir_grabaciones_viejas_o_rotas_del_respaldo(self):
+        with tempfile.TemporaryDirectory() as d:
+            # De antes del respaldo: bootstrap sin servicio y sin whois-iana. Da lo de entonces y no falla
+            vieja = Path(d) / 'vieja' / MX
+            contrato.Grabadora(vieja, 'grabar').guardar('bootstrap', rdap.reducir_bootstrap(SIN_MX, MX))
+            res = recolectar(SinRed(), modo='reproducir', carpeta=vieja, dominio=MX, whois=SinRed())
+            self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', ['domain_expiring_soon'], 0))
+            self.assertEqual(res.avisos, ['whois: el bootstrap de IANA no tiene un servidor RDAP https para el TLD de '
+                                          'acme-demo.com.mx'])
+            self.assertEqual(el_dominio(res).atributos['vence'], NO)
+            # Con whois-iana pero sin la respuesta, o con una rota, es failed: no es una falla de WHOIS
+            rotas = {'sin la respuesta': ({'whois': 'whois.mx'}, None),
+                     'whois-iana roto': ({'whois': '10.0.0.1'}, {'dominio': MX}),
+                     'whois-iana sin la llave': ({}, {'dominio': MX}),
+                     'respuesta de otro dominio': ({'whois': 'whois.mx'}, {'dominio': 'otro.com.mx'}),
+                     'respuesta que no es objeto': ({'whois': 'whois.mx'}, ['no es un objeto'])}
+            for caso, (iana, respuesta_whois) in rotas.items():
+                with self.subTest(caso=caso):
+                    raiz = Path(d) / caso.replace(' ', '_')
+                    grabadora = contrato.Grabadora(raiz / MX, 'grabar')
+                    grabadora.guardar('bootstrap', rdap.reducir_bootstrap(SIN_MX, MX))
+                    grabadora.guardar('whois-iana:mx', iana)
+                    if respuesta_whois is not None:
+                        grabadora.guardar('whois:' + MX, respuesta_whois)
+                    with self.assertRaises(FuenteNoResponde):
+                        recolectar(SinRed(), modo='reproducir', carpeta=raiz / MX, dominio=MX, whois=SinRed())
+                    with mock.patch.object(rdap, 'CARPETA_GRABADAS', raiz):
+                        fallida = contrato.ejecutar(cargar('whois'), MX, modo='reproducir', ahora=AHORA)
+                    self.assertEqual((fallida.estado, fallida.activos), ('failed', []))
+
+    def test_31_la_reserva_deja_tiempo_al_respaldo(self):
+        reloj = [1000.0]
+
+        def lenta(url, timeout):
+            self.assertLessEqual(timeout, rdap.TIEMPO_CORRIDA - rdap.RESERVA_WHOIS)
+            reloj[0] += rdap.TIEMPO_CORRIDA - rdap.RESERVA_WHOIS   # RDAP se come toda su parte
+            raise rdap.SinTiempo('lenta')
+        whois = whois_com()
+        cliente = rdap.ClienteRdap(descargar=lenta, conversar=whois, cronometro=lambda: reloj[0], dormir=lambda s: None)
+        res = rdap.recolectar(DOMINIO, cliente, ahora=AHORA)
+        self.assertEqual((res.consultas, res.sin_cobertura, el_dominio(res).atributos['fuente_datos']), (3, [], 'WHOIS'))
+        self.assertIn('se acabó el tiempo de la corrida mientras se leía el bootstrap de IANA', res.avisos[0])
+        self.assertEqual(whois.plazos, [rdap.TIMEOUT_WHOIS, rdap.TIMEOUT_WHOIS])   # WHOIS tuvo su reserva entera
+        # Si una lectura de RDAP se come toda la corrida, no se abre ninguna conexión al puerto 43
+        reloj[0] = 1000.0
+
+        def eterna(url, timeout):
+            reloj[0] += rdap.TIEMPO_CORRIDA
+            raise rdap.SinTiempo('eterna')
+        cliente = rdap.ClienteRdap(descargar=eterna, conversar=SinRed(), cronometro=lambda: reloj[0], dormir=lambda s: None)
+        res = rdap.recolectar(DOMINIO, cliente, ahora=AHORA)
+        self.assertEqual((res.consultas, res.sin_cobertura), (1, ['domain_expiring_soon']))
+        self.assertIn('WHOIS: se acabó el tiempo de la corrida antes de consultar el WHOIS de IANA', res.avisos[0])
+
+    def test_32_conversar_tiene_plazo_absoluto_tope_y_cierra_el_socket(self):
+        # Normal: manda la consulta con CRLF, junta todo hasta que el servidor cierra y cierra el socket
+        red = Red(['1.2.3.4'], [b'Domain Name: ', b'olmardo.com\r\n'])
+        with mock.patch.object(rdap, 'socket', red):
+            self.assertEqual(CONVERSAR('whois.mx', MX, 10, Cronometro(1)), b'Domain Name: olmardo.com\r\n')
+        [s] = red.sockets
+        self.assertEqual((s.enviado, s.cerrado, red.pedidas), (MX.encode() + b'\r\n', True, [('whois.mx', 43, 1)]))
+        self.assertEqual(s.plazos, [8, 7, 6, 5, 4])   # se recalcula antes de connect, sendall y cada recv
+        # Un servidor que manda de a poco no pasa del plazo absoluto, y el socket se cierra
+        red = Red(['1.2.3.4'], [b'x'] * 100)
+        with mock.patch.object(rdap, 'socket', red), self.assertRaises(rdap.SinTiempo):
+            CONVERSAR('whois.mx', MX, 10, Cronometro(1))
+        self.assertTrue(red.sockets[0].cerrado)
+        # Más de MAX_BYTES_WHOIS: ValueError, y el socket se cierra
+        red = Red(['1.2.3.4'], [b'x' * rdap.BLOQUE] * 3)
+        with mock.patch.object(rdap, 'socket', red), self.assertRaises(ValueError):
+            CONVERSAR('whois.mx', MX, 10, Cronometro(0))
+        self.assertTrue(red.sockets[0].cerrado)
+        # La primera dirección rechaza: la segunda con lo que queda. Nunca más de MAX_DIRECCIONES
+        red = Red(['1.2.3.4', '5.6.7.8', '9.9.9.10'], [b'ok'], caidas={'1.2.3.4'})
+        with mock.patch.object(rdap, 'socket', red):
+            self.assertEqual(CONVERSAR('whois.mx', MX, 10, Cronometro(0)), b'ok')
+        self.assertEqual([s.cerrado for s in red.sockets], [True, True])
+        red = Red(['1.2.3.4', '5.6.7.8', '9.9.9.10'], caidas={'1.2.3.4', '5.6.7.8', '9.9.9.10'})
+        with mock.patch.object(rdap, 'socket', red), self.assertRaises(ConnectionRefusedError):
+            CONVERSAR('whois.mx', MX, 10, Cronometro(0))
+        self.assertEqual(len(red.sockets), rdap.MAX_DIRECCIONES)
+        # Un nombre que resuelve a IP privadas o de la nube no abre ningún socket
+        red = Red(['127.0.0.1', '10.0.0.1', '169.254.169.254', 'fe80::1%eth0'])
+        with mock.patch.object(rdap, 'socket', red), self.assertRaises(rdap.RespuestaIlegible):
+            CONVERSAR('whois.mx', MX, 10, Cronometro(0))
+        self.assertEqual(red.sockets, [])
+        # El plazo también cubre getaddrinfo, que se queda colgado en su hilo
+        suelta = threading.Event()
+        red = Red(['1.2.3.4'], resolver=lambda: suelta.wait(30))
+        try:
+            inicio = time.monotonic()
+            with mock.patch.object(rdap, 'socket', red), self.assertRaises(rdap.SinTiempo):
+                CONVERSAR('whois.mx', MX, 0.2)
+            self.assertLess(time.monotonic() - inicio, 5)
+            self.assertEqual(red.sockets, [])
+        finally:
+            suelta.set()
+
+    def test_33_conversar_reparte_el_plazo_y_salta_la_familia_que_no_hay(self):
+        # La primera dirección descarta los SYN: su connect gasta solo su parte y la segunda se prueba con el resto
+        reloj = [1000.0]
+        red = Red(['2600::1', '1.2.3.4'], [b'ok'], colgadas={'2600::1'}, reloj=reloj)
+        with mock.patch.object(rdap, 'socket', red):
+            self.assertEqual(CONVERSAR('whois.mx', MX, 10, lambda: reloj[0]), b'ok')
+        primera, segunda = red.sockets
+        self.assertEqual((primera.plazos, segunda.plazos[0]), ([5], 5))
+        self.assertEqual([s.cerrado for s in red.sockets], [True, True])
+        # La última recibe todo lo que queda: si la primera rechaza de inmediato, la segunda tiene el plazo entero
+        red = Red(['1.2.3.4', '5.6.7.8', '9.9.9.10'], [b'ok'], caidas={'1.2.3.4'})
+        with mock.patch.object(rdap, 'socket', red):
+            self.assertEqual(CONVERSAR('whois.mx', MX, 10, Cronometro(0)), b'ok')
+        self.assertEqual([s.plazos[0] for s in red.sockets], [5, 10])
+        # Las dos colgadas: TimeoutError (se reintenta) sin pasar del plazo de la conversación
+        reloj = [1000.0]
+        red = Red(['2600::1', '1.2.3.4'], colgadas={'2600::1', '1.2.3.4'}, reloj=reloj)
+        with mock.patch.object(rdap, 'socket', red), self.assertRaises(TimeoutError):
+            CONVERSAR('whois.mx', MX, 10, lambda: reloj[0])
+        self.assertEqual(reloj[0], 1010)
+        # Sin IPv6 en el kernel, socket(AF_INET6) falla: se pasa a la IPv4 y solo se cierra el socket que sí se creó
+        red = Red(['2600::1', '1.2.3.4'], [b'ok'], sin_familia={10})
+        with mock.patch.object(rdap, 'socket', red):
+            self.assertEqual(CONVERSAR('whois.mx', MX, 10, Cronometro(0)), b'ok')
+        [s] = red.sockets
+        self.assertEqual((s.plazos[0], s.cerrado), (10, True))
+        red = Red(['2600::1', '2600::2'], sin_familia={10})
+        with mock.patch.object(rdap, 'socket', red), self.assertRaises(OSError):
+            CONVERSAR('whois.mx', MX, 10, Cronometro(0))
+        self.assertEqual(red.sockets, [])
+
+    def test_34_un_valor_de_contacto_no_se_lee_como_otra_linea(self):
+        # Sin la línea 'Registrar' del registro, lo que venga dentro de un contacto sería el registrador (validos[0])
+        sin_registrador = WHOIS_MX.replace('Registrar:         Registrador de Prueba MX\r\n', '')
+        tras_dominio = 'Domain Name:       acme-demo.com.mx\r\n'
+        casos = {
+            'U+2028 en la organización': (sin_registrador.replace(tras_dominio, tras_dominio + 'Registrant Organization: '
+                                          'Persona Registrante Falsa Registrar: Persona Registrante Falsa, tel '
+                                          '+52.8180000005\r\n')).encode('utf-8'),
+            '\\x85 en la calle, leído como latin-1': (sin_registrador.replace(tras_dominio, tras_dominio
+                                                      + 'Registrant Street: Calle Falsa 123 \x85Registrar: Persona '
+                                                      'Registrante Falsa\r\n')).encode('latin-1'),
+        }
+        for caso, cuerpo in casos.items():
+            with self.subTest(caso=caso):
+                self.assertNotIn('registrador', rdap.reducir_whois(rdap._texto_whois(cuerpo), MX))
+                with tempfile.TemporaryDirectory() as d:
+                    carpeta = Path(d) / MX
+                    res = recolectar(HttpSimulado(bootstrap=SIN_MX, dominios={}), modo='grabar', carpeta=carpeta,
+                                     nueva=True, dominio=MX, whois=whois_mx(respuesta_mx=cuerpo))
+                    grabado = ''.join(p.read_text(encoding='utf-8') for p in carpeta.glob('*.json'))
+                self.assertEqual(el_dominio(res).atributos['registrador'], NO)
+                resultado = json.dumps(res.a_dict(), ensure_ascii=False)
+                for dato in CONTACTOS + ('8180000005',):
+                    self.assertNotIn(dato, resultado)
+                    self.assertNotIn(dato, grabado)
+        # Ningún otro separador de splitlines() parte la línea; el CRLF de RFC 3912 sí, sin dejar el '\r'
+        for separador in ('\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\x85', ' ', ' '):
+            with self.subTest(separador=repr(separador)):
+                texto = ('Domain Name: OLMARDO.COM\r\nRegistrant Organization: Persona Registrante Falsa' + separador
+                         + 'Registrar: Persona Registrante Falsa\r\nName Server: ADA.NS.CLOUDFLARE.COM\r\n')
+                self.assertEqual(rdap.reducir_whois(texto, DOMINIO),
+                                 {'dominio': DOMINIO, 'servidores_nombre': ['ada.ns.cloudflare.com']})
+
+    def test_35_nat64_hacia_una_ipv4_interna_no_es_publica(self):
+        for ip in ('64:ff9b::7f00:1', '64:ff9b::a9fe:a9fe', '64:ff9b::a00:1', '64:ff9b::c0a8:101',
+                   '64:ff9b:1::7f00:1', '2002:7f00:1::1', '::ffff:127.0.0.1'):
+            with self.subTest(ip=ip):
+                self.assertFalse(rdap._publica(ip))
+        # NAT64 hacia una IPv4 pública sigue sirviendo
+        self.assertTrue(rdap._publica('64:ff9b::102:304'))
+        self.assertTrue(rdap._publica('2600::1'))
+        red = Red(['64:ff9b::7f00:1', '64:ff9b::a9fe:a9fe'])
+        with mock.patch.object(rdap, 'socket', red), self.assertRaises(rdap.RespuestaIlegible):
+            CONVERSAR('whois.mx', MX, 10, Cronometro(0))
+        self.assertEqual(red.sockets, [])
+
+    def test_36_un_vencimiento_de_whois_sin_hora_vale_todo_ese_dia(self):
+        # El 5 nov a las 01:00Z (4 nov en Monterrey) el registro de whois.mx ('Expiration Date: 2026-11-05') sigue vigente
+        borde = datetime(2026, 11, 5, 1, 0, tzinfo=timezone.utc)
+        res = recolectar(HttpSimulado(bootstrap=SIN_MX, dominios={}), dominio=MX, whois=whois_mx(), ahora=borde)
+        self.assertEqual(res.avisos, [rdap.CON_WHOIS % ('whois.mx', rdap.SIN_RDAP_TLD)])
+        self.assertEqual(el_dominio(res).atributos['vence'], '2026-11-05T23:59:59Z')
+        [h] = res.hallazgos
+        self.assertEqual((h.codigo, h.titulo), ('domain_expiring_soon',
+                                                'El registro de acme-demo.com.mx vence en menos de un día'))
+        # Se graba ya con la hora y al reproducir da lo mismo
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / MX
+            recolectar(HttpSimulado(bootstrap=SIN_MX, dominios={}), modo='grabar', carpeta=carpeta, nueva=True,
+                       dominio=MX, whois=whois_mx(), ahora=borde)
+            grabada = json.loads((carpeta / 'whois_acme-demo.com.mx.json').read_text(encoding='utf-8'))['datos']
+            otra = recolectar(SinRed(), modo='reproducir', carpeta=carpeta, dominio=MX, whois=SinRed(), ahora=borde)
+        self.assertEqual(grabada['vence'], '2026-11-05T23:59:59Z')
+        self.assertEqual((otra.activos, otra.hallazgos, otra.avisos), (res.activos, res.hallazgos, res.avisos))
+        # Ya el 6 nov venció
+        res = recolectar(HttpSimulado(bootstrap=SIN_MX, dominios={}), dominio=MX, whois=whois_mx(),
+                         ahora=datetime(2026, 11, 6, 0, 0, tzinfo=timezone.utc))
+        self.assertEqual(res.hallazgos, [])
+        self.assertIn('venció el 2026-11-05 (hace menos de un día)', res.avisos[1])
+        # Solo 'vence' y solo sin hora: con hora queda igual, el registro sin hora sigue a las 00:00 y RDAP no cambia
+        reducido = rdap.reducir_whois('Domain Name: OLMARDO.COM\nCreation Date: 2019-05-12\n'
+                                      'Registry Expiry Date: 2026-11-05T00:00:00Z\n', DOMINIO)
+        self.assertEqual((reducido['registrado'], reducido['vence']), ('2019-05-12T00:00:00Z', '2026-11-05T00:00:00Z'))
+        atributos, _ = rdap.leer_rdap(respuesta(vence='2026-11-05'), DOMINIO)
+        self.assertEqual(atributos['vence'], '2026-11-05T00:00:00Z')
 
 
 if __name__ == '__main__':

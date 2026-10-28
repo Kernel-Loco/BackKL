@@ -6,6 +6,10 @@ dominio autorizado y el TXT de _dmarc.<dominio>, y devuelve:
   subdomain por cada MX y NS que está dentro del dominio. Un MX o NS de un tercero, como los de Cloudflare, solo
   queda en los atributos 'dns' del dominio, porque el filtro de alcance lo descartaría. No hay un tipo de activo
   para un registro DNS, así que MX, NS y TXT viven en esos atributos, como en la semilla de acme-demo.mx.
+  Cada activo ip lleva su país, ASN y proveedor de la base local de DB-IP Lite (geoip.ubicar, #15b, RC-166), con
+  fuente_geo y base_geo, y 'cdn' si su ASN es de un CDN o un proxy inverso (geoip.cdn_por_asn). Eso no consulta la
+  red ni se graba: al reproducir sale de la base del momento. Sin la base, esos datos quedan 'No disponible' con un
+  aviso (geoip.aviso_sin_base), una vez por corrida y solo si hubo alguna IP ubicable. La fuente no falla por eso.
 - hallazgos de configuración: spf_missing, spf_allow_all, dmarc_missing y dmarc_policy_none.
 Hasta que #23 (RC-55) guarde activos y hallazgos, nada de esto se escribe en assets ni en findings: activos y
 hallazgos quedan en el Resultado, y scan_source_runs solo guarda sus conteos, avisos y sin_cobertura.
@@ -67,6 +71,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from cirdan.ml import caracteristicas as rubrica
+from cirdan.recolectores import geoip
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, SIN_GRABACION, Activo, FuenteNoResponde, Grabadora,
                                           Hallazgo, Resultado, SinGrabacion, con_reintentos, nombre_archivo)
@@ -384,9 +389,21 @@ def _normalizado(registro):
 
 
 def _activos_ip(dominio, raiz):
-    """Un activo ip por cada A y AAAA de la raíz. `host` es el dominio, para el filtro de alcance."""
-    return [Activo('ip', ip, {'host': dominio, 'fuente': FUENTE, 'origen': tipo.lower()})
-            for tipo in ('A', 'AAAA') for ip in raiz.get(tipo, (None, []))[1]]
+    """(activos, aviso): un activo ip por cada A y AAAA de la raíz, con su ubicación (geoip.ubicar) y 'cdn' si su ASN es
+    de un CDN, y el aviso de base faltante o None. `host` es el dominio, para el filtro de alcance. Las bases se piden
+    una sola vez por corrida, y solo si alguna IP es ubicable: con solo 10.0.0.1 no se buscaría nada y el aviso de base
+    faltante no diría nada cierto. Las demás igual llevan sus atributos de geo, con 'No disponible' (geoip.ubicar no
+    pide las bases para una IP que no es ubicable)."""
+    ips = [(tipo.lower(), ip) for tipo in ('A', 'AAAA') for ip in raiz.get(tipo, (None, []))[1]]
+    bases = geoip.bases_por_omision() if any(geoip.ubicable(ip) for _, ip in ips) else None
+    activos = []
+    for origen, ip in ips:
+        atributos = dict({'host': dominio, 'fuente': FUENTE, 'origen': origen}, **geoip.ubicar(ip, bases))
+        cdn = geoip.cdn_por_asn(atributos['asn'])
+        if cdn:
+            atributos['cdn'] = cdn
+        activos.append(Activo('ip', ip, atributos))
+    return activos, None if bases is None else geoip.aviso_sin_base(FUENTE, bases)
 
 
 def _activos_subdominio(dominio, mx, ns):
@@ -458,7 +475,10 @@ def recolectar(dominio, cliente=None, ahora=None, propios=()):
         dns['spf'], dns['txt_otros'] = txt_raiz[1]['registros'], txt_raiz[1]['otros']
     if txt_dmarc:
         dns['dmarc'] = txt_dmarc[1]['registros']
-    res.activos = [Activo('domain', dominio, {'dns': dns})] + _activos_ip(dominio, raiz) + \
+    activos_ip, aviso_geo = _activos_ip(dominio, raiz)
+    if aviso_geo:
+        res.avisos.append(aviso_geo)
+    res.activos = [Activo('domain', dominio, {'dns': dns})] + activos_ip + \
         _activos_subdominio(dominio, dns.get('mx', []), dns.get('ns', []))
 
     # Contexto de la rúbrica: los MX que reciben correo (el MX nulo '.' no), el único SPF y la política del único DMARC.
