@@ -7,7 +7,7 @@ import importlib
 # Cada módulo declara MAX_CONSULTAS: el máximo de consultas de una corrida, lo que reserva el límite diario (#13b).
 REGISTRO = {'ct_logs': 'cirdan.recolectores.crtsh', 'dns': 'cirdan.recolectores.registros_dns',
             'subfinder': 'cirdan.recolectores.subfinder', 'github': 'cirdan.recolectores.github',
-            'ejemplo': 'cirdan.recolectores.ejemplo'}
+            'shodan': 'cirdan.recolectores.shodan', 'ejemplo': 'cirdan.recolectores.ejemplo'}
 
 
 def cargar(fuente):
