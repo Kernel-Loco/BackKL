@@ -56,12 +56,28 @@ def _metricas(reales, predichas, clases):
 def entrenar(dataset_path=DATASET):
     """Entrena solo con la partición de entrenamiento y mide las dos líneas base en prueba."""
     dataset = pd.read_csv(dataset_path)
+    requeridas = (*CARACTERISTICAS, 'etiqueta', 'clase_reglas', 'particion', 'plantilla')
+    if any(columna not in dataset.columns for columna in requeridas):
+        raise ValueError('faltan columnas de características, etiquetas o partición en el dataset')
+    if dataset['plantilla'].isna().any():
+        raise ValueError('cada fila debe tener una plantilla para separar entrenamiento y prueba')
+    particiones = {'entrenamiento', 'prueba'}
+    if dataset['particion'].isna().any() or not set(dataset['particion']) <= particiones:
+        raise ValueError('partición inválida; solo se permite entrenamiento o prueba')
+    if (dataset.groupby('plantilla')['particion'].nunique() > 1).any():
+        raise ValueError('una plantilla no puede aparecer en entrenamiento y prueba')
+    if dataset['etiqueta'].isna().any() or set(dataset['etiqueta']) != set(CLASES):
+        raise ValueError('etiqueta debe cubrir alta, baja y media')
+    for columna in ('clase_reglas', 'sensibilidad'):
+        if dataset[columna].isna().any() or not set(dataset[columna]) <= set(CLASES):
+            raise ValueError('%s contiene una etiqueta inválida' % columna)
+
     entrenamiento = dataset[dataset['particion'] == 'entrenamiento']
     prueba = dataset[dataset['particion'] == 'prueba']
     if entrenamiento.empty or prueba.empty:
         raise ValueError('el dataset necesita filas de entrenamiento y prueba')
-    if any(columna not in dataset.columns for columna in (*CARACTERISTICAS, 'etiqueta', 'clase_reglas')):
-        raise ValueError('faltan columnas de características o etiquetas en el dataset')
+    if set(entrenamiento['etiqueta']) != set(CLASES) or set(prueba['etiqueta']) != set(CLASES):
+        raise ValueError('cada partición debe contener alta, baja y media')
 
     pipeline = crear_pipeline()
     pipeline.fit(entrenamiento[list(CARACTERISTICAS)], entrenamiento['etiqueta'])
@@ -76,7 +92,10 @@ def entrenar(dataset_path=DATASET):
     metricas = {
         'version': VERSION,
         'algoritmo': 'ExtraTreesClassifier',
+        'dataset': 'datos/ml/rc65/dataset.csv',
+        'origen_etiquetas': 'LLM; sin validación humana',
         'caracteristicas': list(CARACTERISTICAS),
+        'particionamiento': 'por_plantilla',
         'filas_entrenamiento': int(len(entrenamiento)),
         'filas_prueba': int(len(prueba)),
         'lineas_base': {'reglas_macro_f1': f1_reglas, 'sensibilidad_macro_f1': f1_sensibilidad},

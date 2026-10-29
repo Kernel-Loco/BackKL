@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pandas as pd
+
 from cirdan.ml import inferencia, modelo
 from cirdan import orquestador
 from psycopg.types.json import Jsonb
@@ -18,11 +20,39 @@ class ModeloMl(unittest.TestCase):
     def test_entrena_con_split_fijo_y_supera_ambas_lineas_base(self):
         metricas = self.bundle['metrics']
         self.assertEqual((metricas['filas_entrenamiento'], metricas['filas_prueba']), (287, 138))
+        self.assertEqual(metricas['dataset'], 'datos/ml/rc65/dataset.csv')
+        self.assertEqual(metricas['origen_etiquetas'], 'LLM; sin validación humana')
+        self.assertEqual(metricas['particionamiento'], 'por_plantilla')
         self.assertGreater(metricas['modelo']['macro_f1'], metricas['lineas_base']['reglas_macro_f1'])
         self.assertGreater(metricas['modelo']['macro_f1'], metricas['lineas_base']['sensibilidad_macro_f1'])
         self.assertTrue(metricas['integrable'])
         self.assertEqual(set(metricas['modelo']['por_clase']), {'alta', 'media', 'baja'})
         self.assertEqual(len(metricas['modelo']['matriz_confusion']), 3)
+
+    def test_entrenar_rechaza_plantilla_en_train_y_prueba(self):
+        filas = [
+            {'plantilla': 'plantilla-a', 'particion': particion, 'tipo': 'tipo-a', 'antiguedad_dias': 1,
+             'exposicion': 'publica', 'sensibilidad': 'baja', 'etiqueta': 'baja', 'clase_reglas': 'baja'}
+            for particion in ('entrenamiento', 'prueba')
+        ]
+        with tempfile.TemporaryDirectory() as directorio:
+            ruta = Path(directorio) / 'dataset.csv'
+            pd.DataFrame(filas).to_csv(ruta, index=False)
+            with self.assertRaisesRegex(ValueError, 'plantilla'):
+                modelo.entrenar(ruta)
+
+    def test_entrenar_rechaza_etiqueta_fuera_de_las_tres_clases(self):
+        filas = [
+            {'plantilla': 'plantilla-' + particion, 'particion': particion, 'tipo': 'tipo-a',
+             'antiguedad_dias': 1, 'exposicion': 'publica', 'sensibilidad': 'baja',
+             'etiqueta': 'critica', 'clase_reglas': 'baja'}
+            for particion in ('entrenamiento', 'prueba')
+        ]
+        with tempfile.TemporaryDirectory() as directorio:
+            ruta = Path(directorio) / 'dataset.csv'
+            pd.DataFrame(filas).to_csv(ruta, index=False)
+            with self.assertRaisesRegex(ValueError, 'alta, baja y media'):
+                modelo.entrenar(ruta)
 
     def test_artefacto_se_serializa_con_su_version_y_metricas(self):
         with tempfile.TemporaryDirectory() as directorio:
@@ -39,6 +69,7 @@ class ModeloMl(unittest.TestCase):
         bundle = inferencia.cargar_modelo()
         self.assertEqual(bundle['version'], modelo.VERSION)
         self.assertTrue(bundle['metrics']['integrable'])
+        self.assertEqual(bundle['metrics']['particionamiento'], 'por_plantilla')
 
     def test_inferencia_da_severidad_confianza_y_top_tres_shap(self):
         fila = {
