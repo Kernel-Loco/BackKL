@@ -6,13 +6,14 @@ el piso salen del criterio de criticidad (cirdan/score/criterio.py, #29).
 import uuid
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import Response
 
 from cirdan import orquestador
 from cirdan.auth.deps import Session, current_session, require_roles
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import transaction
-from cirdan.score import criterio, motor
+from cirdan.score import criterio, motor, plan as plan_accion
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
@@ -266,6 +267,101 @@ def score_history(fqdn: str, session: Session = Depends(current_session)):
         items.append({**base, 'categories': row['category_scores'],
                       'new_findings': stats.get('new_findings', 0), 'resolved_findings': stats.get('resolved_findings', 0)})
     return {'domain': fqdn, 'items': items, 'total': len(items)}
+
+
+# ---------------------------------------------------------------- plan de acción y simulador (#42, #70)
+
+def _contexto_plan(session, fqdn):
+    domain_id = _domain_id(session, fqdn)
+    with transaction(session.org_id) as conn:
+        score = conn.execute(
+            'SELECT id::text, rule_set_id::text, method, partial_coverage FROM domain_scores '
+            'WHERE domain_id = %s ORDER BY computed_at DESC LIMIT 1', (domain_id,),
+        ).fetchone()
+        if score:
+            rule_set_id, method, parcial = score['rule_set_id'], score['method'], score['partial_coverage']
+        else:
+            active = conn.execute('SELECT id::text FROM scoring_rule_sets WHERE is_active').fetchone()
+            if not active:
+                raise HTTPException(409, 'El dominio aún no tiene un juego de reglas activo')
+            rule_set_id, method, parcial = active['id'], 'rules', False
+
+        rule_set = conn.execute(
+            'SELECT category_weights FROM scoring_rule_sets WHERE id = %s', (rule_set_id,),
+        ).fetchone()
+        reglas = {r['code']: r for r in conn.execute(
+            'SELECT r.id::text, r.code, r.category, r.base_severity, r.weight, r.max_penalty, t.recommendation '
+            'FROM scoring_rules r JOIN scoring_rule_texts t '
+            'ON t.rule_set_id = r.rule_set_id AND t.code = r.code WHERE r.rule_set_id = %s',
+            (rule_set_id,),
+        ).fetchall()}
+        hallazgos = conn.execute(
+            'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status '
+            'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id '
+            'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
+            (domain_id, list(motor.ESTADOS_PUNTUABLES)),
+        ).fetchall()
+        severidades = None
+        if method == 'ml' and score:
+            severidades = {r['finding_id']: r['severity'] for r in conn.execute(
+                'SELECT finding_id::text, severity FROM score_contributions WHERE score_id = %s',
+                (score['id'],),
+            ).fetchall()}
+            faltantes = [h['id'] for h in hallazgos if h['id'] not in severidades]
+            if faltantes:
+                raise HTTPException(409, 'No hay severidad de ML guardada para todos los hallazgos vigentes')
+
+    pesos = {k: float(v) for k, v in rule_set['category_weights'].items()}
+    return domain_id, reglas, pesos, hallazgos, method, severidades, parcial
+
+
+def _plan_data(session, fqdn):
+    _, reglas, pesos, hallazgos, method, severidades, parcial = _contexto_plan(session, fqdn)
+    try:
+        return plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@router.get('/domains/{fqdn}/action-plan', summary='Plan de acción con el impacto estimado por acción')
+def action_plan(fqdn: str, session: Session = Depends(current_session)):
+    return _plan_data(session, fqdn)
+
+
+@router.post('/domains/{fqdn}/action-plan/simulate', summary='Simula una o varias acciones sin guardar cambios')
+def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
+                         session: Session = Depends(current_session)):
+    _, reglas, pesos, hallazgos, method, severidades, parcial = _contexto_plan(session, fqdn)
+    if not action_ids or len(action_ids) > 100 or any(not isinstance(action_id, str) for action_id in action_ids):
+        raise HTTPException(422, 'Selecciona entre 1 y 100 acciones del plan')
+    try:
+        resultado = plan_accion.simular(hallazgos, reglas, pesos, action_ids, severidades)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    resultado['domain'] = fqdn
+    resultado['action_ids'] = action_ids
+    resultado['partial_coverage'] = parcial
+    resultado['method'] = method
+    return resultado
+
+
+@router.get('/domains/{fqdn}/action-plan/export', summary='Descarga el plan de acción en CSV o JSON')
+def export_action_plan(fqdn: str, formato: str = Query(default='json'),
+                       session: Session = Depends(current_session)):
+    if formato not in ('csv', 'json'):
+        raise HTTPException(422, "El formato debe ser 'csv' o 'json'")
+    data = _plan_data(session, fqdn)
+    if formato == 'csv':
+        return Response(
+            content=plan_accion.exportar_csv(data),
+            media_type='text/csv; charset=utf-8',
+            headers={'Content-Disposition': 'attachment; filename="%s-plan.csv"' % fqdn},
+        )
+    return Response(
+        content=plan_accion.exportar_json(data),
+        media_type='application/json; charset=utf-8',
+        headers={'Content-Disposition': 'attachment; filename="%s-plan.json"' % fqdn},
+    )
 
 
 # ---------------------------------------------------------------- explicación

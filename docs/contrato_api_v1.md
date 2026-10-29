@@ -22,6 +22,11 @@ Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo
 | `GET /api/v1/domains/{fqdn}/score/history` | [`historico.json`](api_v1/historico.json) | Todos los scores del dominio, del más viejo al más nuevo |
 | `GET /api/v1/findings/{id}/explanation` | [`explicacion.json`](api_v1/explicacion.json) | Por qué el hallazgo tiene su severidad y cuánto suma al score |
 | `GET /api/v1/scoring/weights` | [`pesos.json`](api_v1/pesos.json) | El juego de reglas activo: pesos, bandas, piso, umbral y reglas |
+| `GET /api/v1/domains/{fqdn}/action-plan` | — | Acciones abiertas agrupadas por regla, con su recomendación y reducción estimada de score (#42) |
+| `POST /api/v1/domains/{fqdn}/action-plan/simulate` | — | Score contrafactual al resolver varias acciones, sin guardar cambios (#70) |
+| `GET /api/v1/domains/{fqdn}/action-plan/export?formato=csv\|json` | — | Descarga el plan; CSV UTF-8 con BOM y escape contra fórmulas |
+
+La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`. `action_ids` usa los ids de acciones devueltos por el plan, en este momento códigos de regla. La respuesta incluye score y banda antes/después, reducción y notas por categoría. Las acciones desconocidas o sin hallazgos abiertos responden 422. La simulación no escribe hallazgos, scores ni bitácora.
 
 ## Dominio (`dominios.json`)
 
