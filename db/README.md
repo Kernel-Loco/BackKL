@@ -21,6 +21,7 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `migraciones/006_firma_reglas_extras.sql` | Llena `reviewed_by` de las 5 reglas de #62 a #64, que revisó Ernesto (RC-66). No cambia textos. Con ella quedan firmadas las 30 reglas del juego v1 |
 | `migraciones/007_comentario_revisor.sql` | Corrige el comentario de `scoring_rule_texts.reviewed_by` que puso la 003: el resto de los textos lo revisa alguien de otra área o Ernesto (RC-66). Solo cambia el comentario |
 | `migraciones/008_limite_diario_fuentes.sql` | Límite diario de consultas por fuente (RC-184, #13b): `daily_limit`, `daily_used` y `daily_used_on` en `data_sources` (día UTC) y las funciones `reserve_source_quota()` y `adjust_source_quota()`, SECURITY DEFINER de `postgres`, que son lo único que mueve el contador. `cirdan_app` no tiene UPDATE: lee las columnas y ejecuta las funciones, y con ellas puede mover `daily_used` del día (el ajuste acepta cualquier delta) |
+| `migraciones/009_version_modelo_score.sql` | Guarda la versión del clasificador ML y el motivo de fallback a reglas en cada snapshot de score (#36) |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -78,6 +79,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/006_firma_reglas_extras.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/007_comentario_revisor.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/008_limite_diario_fuentes.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/009_version_modelo_score.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -192,6 +194,20 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, enabled, k
 ```
 
 Da `whois|t|t|60`. Corre en una sola transacción y se puede correr otra vez sin error: solo pone el límite si la fila todavía no tiene uno. No agrega tablas ni políticas.
+
+Para integrar el clasificador ML (#36), la API necesita las columnas de la migración 009 antes de desplegarse; la migración inicial ya acepta `method = 'ml'`. En una base existente, aplica 009 sin recrearla:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/009_version_modelo_score.sql
+```
+
+La 009 corre en una sola transacción y agrega `model_version` y `model_fallback_reason` a `domain_scores`. Scores históricos de reglas quedan con ambas columnas en `NULL`. Para verificar el esquema:
+
+```bash
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT column_name FROM information_schema.columns WHERE table_name = 'domain_scores' AND column_name IN ('model_version', 'model_fallback_reason') ORDER BY column_name"
+```
+
+Debe devolver ambas columnas. En una base nueva, `cargar_cirdan.sh` aplica 009 junto con las migraciones anteriores.
 
 ## Decisiones y desviaciones respecto al DBML
 

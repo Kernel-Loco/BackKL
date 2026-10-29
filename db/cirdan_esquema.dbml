@@ -247,6 +247,8 @@ Table domain_scores [note: 'Histórico del score de 0 a 100 por dominio y por ca
   category_scores jsonb [not null, note: 'Ej. {\'infrastructure\': 80, \'digital_identity\': 55, \'configuration\': 30, \'data_leaks\': 90}, que con los pesos del juego v1 da score 68 (alto)']
   reason text [not null, note: 'CHECK IN (\'scan\',\'intel_update\',\'rules_change\'). Permite recalcular sin re-escanear']
   method text [not null, note: 'CHECK IN (\'rules\',\'ml\'), DEFAULT \'rules\'. ml cuando el clasificador de la versión A (scikit-learn + SHAP), obligatorio en el reto, está integrado al score']
+  model_version text [note: 'Versión exacta del clasificador que calculó el score; obligatoria cuando method = ml (migración 009, #36)']
+  model_fallback_reason text [note: 'Motivo para usar rules cuando el modelo no cargó o no superó el baseline de reglas (#36)']
   partial_coverage boolean [not null, note: 'Hereda la cobertura parcial del escaneo. El portal la marca']
   computed_at timestamptz [not null, note: 'Índice (organization_id, domain_id, computed_at DESC). Ancla de la retención']
 }

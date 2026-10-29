@@ -9,6 +9,8 @@
   "floor_message": null,
   "critical_open": 1,
   "method": "rules",
+  "model_version": null,
+  "model_fallback_reason": null,
   "rule_set_version": 1,
   "reason": "scan",
   "partial_coverage": false,
