@@ -23,6 +23,8 @@
   "caracteristicas": {"tipo": "correos_en_brecha", "antiguedad_dias": 104, "exposicion": "publica", "sensibilidad": "alta"},
   "summary": "Es crítico porque alguien de fuera puede usar ya esas contraseñas para entrar a cuentas de la empresa, sin pasos extra.",
   "recommendation": "Pide a todo el personal que cambie ya la contraseña y las preguntas de seguridad de las cuentas que abrió con su correo de trabajo y de cualquier cuenta donde repita esa contraseña, sobre todo la de la empresa, y que cierre las sesiones abiertas. Activa la verificación en dos pasos en las cuentas de la empresa y, si quieres saber qué correos aparecen, consulta la búsqueda por dominio de Have I Been Pwned, que te pide verificar el dominio en ese servicio.",
+  "model_prediction": null,
+  "explanation_model_version": null,
   "confidence": null,
   "shap": null
 }

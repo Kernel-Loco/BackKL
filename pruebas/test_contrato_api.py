@@ -150,9 +150,13 @@ class Explicacion(unittest.TestCase):
         regla = next(r for r in PESOS['rules'] if r['code'] == EXPLICACION['rule_code'])
         self.assertEqual(EXPLICACION['max_penalty'], regla['max_penalty'])
 
-    def test_3_shap_solo_con_ml(self):
-        if EXPLICACION['method'] == 'rules':
+    def test_3_shap_cuando_hay_modelo_explicativo(self):
+        if EXPLICACION['explanation_model_version'] is None:
+            self.assertIsNone(EXPLICACION['model_prediction'])
+            self.assertIsNone(EXPLICACION['confidence'])
             self.assertIsNone(EXPLICACION['shap'])
+        else:
+            self.assertEqual(len(EXPLICACION['shap']), 3)
 
     def test_4_textos_de_su_regla(self):
         regla = next(r for r in PESOS['rules'] if r['code'] == EXPLICACION['rule_code'])
