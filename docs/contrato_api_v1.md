@@ -47,7 +47,7 @@ La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`
 | `asset`, `asset_type` | El activo al que pertenece y su tipo (`assets.asset_type`) |
 | `category`, `rule_code` | La categoría del reto y el código de su regla (`scoring_rules`) |
 | `source` | `data_sources.code`: `ct_logs`, `dns`, `whois`, `shodan`, `hibp` o `censys` |
-| `severity`, `base_severity` | La vigente y la de su regla. Son distintas cuando el motor la subió (#29) |
+| `severity`, `base_severity` | La severidad del último score (incluye la predicción ML cuando se usó `method = 'ml'`; si no hay contribución, la guardada en el hallazgo) y la de su regla. Son distintas cuando el motor la subió (#29) o el score usó ML (#36) |
 | `status` | Hoy siempre es `open`, porque el endpoint solo trae abiertos. En la base también existen `resolved`, `accepted_risk` y `false_positive` |
 | `recurrence` | `new` si apareció en el último escaneo, `recurring` si ya venía de antes |
 | `cve_id`, `cvss`, `epss`, `in_kev` | Datos de la CVE cuando el hallazgo tiene una. Si no, `null`, `null`, `null` y `false` |
@@ -63,6 +63,8 @@ La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`
 | `floor_message` | Explicación en español del piso cuando aplica; `null` si el ponderado ya alcanza el mínimo |
 | `critical_open` | Hallazgos que cuentan para el piso: `critical` y `open` o `accepted_risk` |
 | `method` | `rules` o `ml` (#36) |
+| `model_version` | Versión del clasificador; `null` si el score se calculó con reglas |
+| `model_fallback_reason` | Motivo por el que este score usó reglas; `null` cuando se usó ML |
 | `rule_set_version` | Versión del juego de reglas con que se calculó |
 | `reason` | `scan`, `intel_update` o `rules_change` |
 | `partial_coverage` | `true` si alguna fuente falló en ese escaneo o no pudo revisar alguno de sus códigos (`sin_cobertura`) |
@@ -73,7 +75,7 @@ La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`
 
 Viene de `score_contributions`. `penalty` es lo que el hallazgo suma a la nota de su categoría, no al score final, y `factors` lo desglosa, así que la suma de `points` es `penalty`. `max_penalty` es el tope de su regla para cada hallazgo: un hallazgo nunca suma más que eso, pero varios hallazgos de la misma regla suman cada uno su `penalty`. `summary` explica en una frase por qué tiene su severidad, con el criterio de «Qué hace crítico a un hallazgo» de #29. Con `method = 'ml'`, `shap` trae la contribución de cada característica según #35, como `[{"feature": "antiguedad_dias", "value": 104, "contribution": 0.21}]`. Con `rules` es `null`.
 
-Los textos de la regla salen del catálogo `scoring_rule_texts` (#30), uno por código, en lenguaje simple y sin siglas. Siempre llegan los tres, nunca `null`, porque la migración 003 obliga a que toda regla tenga su texto:
+Los textos de la regla salen del catálogo `scoring_rule_texts` (#30), uno por código, en lenguaje simple y sin siglas. Siempre llegan los tres, nunca `null`, porque la migración 003 obliga a que toda regla tenga su texto. `model_version` identifica el clasificador usado; `confidence` y `shap` son `null` con `rules` y, con `ml`, contienen la salida no calibrada de `predict_proba` y los tres aportes de mayor magnitud. La confianza es una señal del modelo, no una probabilidad verificada:
 
 | Campo | Qué es |
 |---|---|

@@ -349,17 +349,51 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
 
 def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, parcial):
     filas = conn.execute(
-        'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status '
+        'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status, f.evidence, '
+        'a.asset_type, a.first_seen_at AS asset_first_seen, f.detected_at, sc.queued_at AS scan_at, '
+        "f.evidence->'caracteristicas' AS caracteristicas "
         'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id '
+        'JOIN assets a ON a.id = f.asset_id LEFT JOIN scans sc ON sc.id = f.last_scan_id '
         'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
         (domain_id, list(motor.ESTADOS_PUNTUABLES)),
     ).fetchall()
-    calculo = motor.calcular(filas, reglas, pesos)
+    metodo, model_version, fallback_reason, predicciones = 'rules', None, 'artefacto_ml_no_disponible', None
+    try:
+        from cirdan.ml import inferencia
+
+        bundle = inferencia.cargar_modelo()
+        if not bundle.get('metrics', {}).get('integrable', False):
+            fallback_reason = 'macro_f1_no_supera_reglas'
+        else:
+            predicciones = inferencia.predecir(bundle, filas)
+            metodo, model_version, fallback_reason = 'ml', bundle['version'], None
+    except FileNotFoundError as error:
+        fallback_reason = 'artefacto_ml_no_disponible'
+        log.warning('El score del escaneo %s usará reglas: %s', scan_id, type(error).__name__)
+    except Exception as error:
+        fallback_reason = 'inferencia_ml_no_disponible'
+        log.warning('El score del escaneo %s usará reglas: %s', scan_id, type(error).__name__)
+
+    hallazgos_score = []
+    for hallazgo in filas:
+        copia = dict(hallazgo)
+        if predicciones is not None:
+            copia['severity'] = predicciones[copia['id']]['severity']
+        hallazgos_score.append(copia)
+    calculo = motor.calcular(hallazgos_score, reglas, pesos)
+    if predicciones is not None:
+        for aporte in calculo['contributions']:
+            prediccion = predicciones.get(aporte['finding_id'])
+            if prediccion:
+                aporte['factors']['confidence'] = prediccion['confidence']
+                aporte['factors']['shap'] = prediccion['shap']
     score_id = conn.execute(
         'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
-        "reason, method, partial_coverage, computed_at) VALUES (%s, %s, %s, %s, %s, %s, 'scan', 'rules', %s, now()) "
+        'reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) '
+        "VALUES (%s, %s, %s, %s, %s, %s, 'scan', %s, %s, %s, %s, now()) "
         'RETURNING id::text',
-        (org, domain_id, scan_id, rule_set_id, calculo['score'], Jsonb(calculo['category_scores']), parcial),
+        (org, domain_id, scan_id, rule_set_id, calculo['score'], Jsonb(calculo['category_scores']), metodo,
+         model_version, fallback_reason, parcial),
     ).fetchone()['id']
     for aporte in calculo['contributions']:
         conn.execute(

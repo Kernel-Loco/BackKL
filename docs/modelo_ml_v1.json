@@ -1,0 +1,64 @@
+{
+  "version": "v1-rc65-1",
+  "algoritmo": "ExtraTreesClassifier",
+  "caracteristicas": [
+    "tipo",
+    "exposicion",
+    "sensibilidad",
+    "antiguedad_dias"
+  ],
+  "filas_entrenamiento": 287,
+  "filas_prueba": 138,
+  "lineas_base": {
+    "reglas_macro_f1": 0.5881336238198984,
+    "sensibilidad_macro_f1": 0.6152860362640661
+  },
+  "modelo": {
+    "por_clase": {
+      "alta": {
+        "precision": 0.574468085106383,
+        "recall": 1.0,
+        "f1": 0.7297297297297297,
+        "soporte": 27
+      },
+      "baja": {
+        "precision": 0.8378378378378378,
+        "recall": 0.7045454545454546,
+        "f1": 0.7654320987654321,
+        "soporte": 44
+      },
+      "media": {
+        "precision": 0.7592592592592593,
+        "recall": 0.6119402985074627,
+        "f1": 0.6776859504132231,
+        "soporte": 67
+      }
+    },
+    "macro_f1": 0.7242825929694616,
+    "matriz_confusion": [
+      [
+        27,
+        0,
+        0
+      ],
+      [
+        0,
+        31,
+        13
+      ],
+      [
+        20,
+        6,
+        41
+      ]
+    ],
+    "orden_matriz": [
+      "alta",
+      "baja",
+      "media"
+    ]
+  },
+  "supera_reglas": true,
+  "supera_sensibilidad": true,
+  "integrable": true
+}
