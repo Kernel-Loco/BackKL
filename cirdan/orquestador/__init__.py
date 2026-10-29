@@ -358,14 +358,21 @@ def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, pa
         (domain_id, list(motor.ESTADOS_PUNTUABLES)),
     ).fetchall()
     metodo, model_version, fallback_reason, predicciones = 'rules', None, 'artefacto_ml_no_disponible', None
+    explicaciones_ml, version_explicacion = None, None
     try:
         from cirdan.ml import inferencia
 
         bundle = inferencia.cargar_modelo()
+        version_explicacion = bundle['version']
         if not bundle.get('metrics', {}).get('integrable', False):
             fallback_reason = 'macro_f1_no_supera_reglas'
+            try:
+                explicaciones_ml = inferencia.predecir(bundle, filas)
+            except Exception as error:
+                log.warning('No se pudo generar SHAP para el escaneo %s: %s', scan_id, type(error).__name__)
         else:
             predicciones = inferencia.predecir(bundle, filas)
+            explicaciones_ml = predicciones
             metodo, model_version, fallback_reason = 'ml', bundle['version'], None
     except FileNotFoundError as error:
         fallback_reason = 'artefacto_ml_no_disponible'
@@ -381,12 +388,14 @@ def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, pa
             copia['severity'] = predicciones[copia['id']]['severity']
         hallazgos_score.append(copia)
     calculo = motor.calcular(hallazgos_score, reglas, pesos)
-    if predicciones is not None:
+    if explicaciones_ml is not None:
         for aporte in calculo['contributions']:
-            prediccion = predicciones.get(aporte['finding_id'])
+            prediccion = explicaciones_ml.get(aporte['finding_id'])
             if prediccion:
+                aporte['factors']['model_prediction'] = prediccion['model_prediction']
                 aporte['factors']['confidence'] = prediccion['confidence']
                 aporte['factors']['shap'] = prediccion['shap']
+                aporte['factors']['explanation_model_version'] = version_explicacion
     score_id = conn.execute(
         'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
         'reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) '

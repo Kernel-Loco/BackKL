@@ -65,7 +65,7 @@ class ApiV1(unittest.TestCase):
         exp = sin_propuestos(self.get(self.acme, '/api/v1/findings/80000000-0000-4000-8000-000000000001/explanation'))
         esperado = ejemplo('explicacion.json')
         for campo in ('title', 'severity', 'penalty', 'max_penalty', 'factors', 'caracteristicas', 'score_id',
-                  'model_version', 'confidence', 'shap',
+                      'model_version', 'model_prediction', 'explanation_model_version', 'confidence', 'shap',
                       'rule_title', 'meaning', 'recommendation'):
             self.assertEqual(exp[campo], esperado[campo], campo)
         pesos = self.get(self.acme, '/api/v1/scoring/weights')

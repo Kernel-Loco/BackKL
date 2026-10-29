@@ -82,6 +82,7 @@ def predecir(bundle, filas):
     for i, fila in enumerate(filas):
         clase = str(predichas[i])
         clase_index = clases.index(clase)
+        prediccion_ml = CLASE_A_SEVERIDAD[clase]
         aportes = [
             {'feature': feature, 'value': caracteristicas[i][feature],
              'contribution': float(valores[i, indices, clase_index].sum())}
@@ -91,6 +92,7 @@ def predecir(bundle, filas):
         severidad = 'critical' if fila['severity'] == 'critical' else CLASE_A_SEVERIDAD[clase]
         resultado[fila['id']] = {
             'severity': severidad,
+            'model_prediction': prediccion_ml,
             'confidence': float(probabilidades[i, clase_index]),
             'shap': aportes[:3],
         }

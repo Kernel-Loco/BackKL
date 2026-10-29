@@ -1,12 +1,15 @@
 {
   "version": "v1-rc65-1",
   "algoritmo": "ExtraTreesClassifier",
+  "dataset": "datos/ml/rc65/dataset.csv",
+  "origen_etiquetas": "LLM; sin validación humana",
   "caracteristicas": [
     "tipo",
     "exposicion",
     "sensibilidad",
     "antiguedad_dias"
   ],
+  "particionamiento": "por_plantilla",
   "filas_entrenamiento": 287,
   "filas_prueba": 138,
   "lineas_base": {

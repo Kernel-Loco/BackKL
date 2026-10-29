@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pandas as pd
+
 from cirdan.ml import inferencia, modelo
 from cirdan import orquestador
 from psycopg.types.json import Jsonb
@@ -18,11 +20,39 @@ class ModeloMl(unittest.TestCase):
     def test_entrena_con_split_fijo_y_supera_ambas_lineas_base(self):
         metricas = self.bundle['metrics']
         self.assertEqual((metricas['filas_entrenamiento'], metricas['filas_prueba']), (287, 138))
+        self.assertEqual(metricas['dataset'], 'datos/ml/rc65/dataset.csv')
+        self.assertEqual(metricas['origen_etiquetas'], 'LLM; sin validación humana')
+        self.assertEqual(metricas['particionamiento'], 'por_plantilla')
         self.assertGreater(metricas['modelo']['macro_f1'], metricas['lineas_base']['reglas_macro_f1'])
         self.assertGreater(metricas['modelo']['macro_f1'], metricas['lineas_base']['sensibilidad_macro_f1'])
         self.assertTrue(metricas['integrable'])
         self.assertEqual(set(metricas['modelo']['por_clase']), {'alta', 'media', 'baja'})
         self.assertEqual(len(metricas['modelo']['matriz_confusion']), 3)
+
+    def test_entrenar_rechaza_plantilla_en_train_y_prueba(self):
+        filas = [
+            {'plantilla': 'plantilla-a', 'particion': particion, 'tipo': 'tipo-a', 'antiguedad_dias': 1,
+             'exposicion': 'publica', 'sensibilidad': 'baja', 'etiqueta': 'baja', 'clase_reglas': 'baja'}
+            for particion in ('entrenamiento', 'prueba')
+        ]
+        with tempfile.TemporaryDirectory() as directorio:
+            ruta = Path(directorio) / 'dataset.csv'
+            pd.DataFrame(filas).to_csv(ruta, index=False)
+            with self.assertRaisesRegex(ValueError, 'plantilla'):
+                modelo.entrenar(ruta)
+
+    def test_entrenar_rechaza_etiqueta_fuera_de_las_tres_clases(self):
+        filas = [
+            {'plantilla': 'plantilla-' + particion, 'particion': particion, 'tipo': 'tipo-a',
+             'antiguedad_dias': 1, 'exposicion': 'publica', 'sensibilidad': 'baja',
+             'etiqueta': 'critica', 'clase_reglas': 'baja'}
+            for particion in ('entrenamiento', 'prueba')
+        ]
+        with tempfile.TemporaryDirectory() as directorio:
+            ruta = Path(directorio) / 'dataset.csv'
+            pd.DataFrame(filas).to_csv(ruta, index=False)
+            with self.assertRaisesRegex(ValueError, 'alta, baja y media'):
+                modelo.entrenar(ruta)
 
     def test_artefacto_se_serializa_con_su_version_y_metricas(self):
         with tempfile.TemporaryDirectory() as directorio:
@@ -39,6 +69,7 @@ class ModeloMl(unittest.TestCase):
         bundle = inferencia.cargar_modelo()
         self.assertEqual(bundle['version'], modelo.VERSION)
         self.assertTrue(bundle['metrics']['integrable'])
+        self.assertEqual(bundle['metrics']['particionamiento'], 'por_plantilla')
 
     def test_inferencia_da_severidad_confianza_y_top_tres_shap(self):
         fila = {
@@ -53,6 +84,7 @@ class ModeloMl(unittest.TestCase):
         }
         prediccion = inferencia.predecir(self.bundle, [fila])['f-ml']
         self.assertIn(prediccion['severity'], ('high', 'medium', 'low'))
+        self.assertIn(prediccion['model_prediction'], ('high', 'medium', 'low'))
         self.assertGreaterEqual(prediccion['confidence'], 0)
         self.assertLessEqual(prediccion['confidence'], 1)
         self.assertEqual(len(prediccion['shap']), 3)
@@ -124,7 +156,7 @@ class IntegracionScoreMl(unittest.TestCase):
         with mock.patch.object(inferencia, 'cargar_modelo', side_effect=fallo) if fallo else \
                 mock.patch.object(inferencia, 'cargar_modelo', return_value=bundle), \
                 mock.patch.object(inferencia, 'predecir', return_value={
-                    'finding-1': {'severity': 'high', 'confidence': .91,
+                    'finding-1': {'severity': 'high', 'model_prediction': 'high', 'confidence': .91,
                                   'shap': [{'feature': 'sensibilidad', 'value': 'media', 'contribution': .2}]},
                 }) as predecir:
             orquestador._guardar_score(conexion, 'org', 'domain', 'scan', 'ruleset', self.REGLAS, self.PESOS, False)
@@ -136,14 +168,19 @@ class IntegracionScoreMl(unittest.TestCase):
         self.assertEqual(score[6:9], ('ml', 'v-test', None))
         aporte = next(params for sql, params in conexion.consultas if 'INSERT INTO score_contributions' in sql)
         factores = aporte[6].obj
+        self.assertEqual(factores['model_prediction'], 'high')
         self.assertEqual(factores['confidence'], .91)
         self.assertEqual(factores['shap'][0]['feature'], 'sensibilidad')
 
-    def test_modelo_no_integrable_usa_reglas_con_motivo(self):
+    def test_modelo_no_integrable_usa_reglas_y_conserva_shap(self):
         conexion, predecir = self.guardar({'version': 'v-test', 'metrics': {'integrable': False}})
         score = next(params for sql, params in conexion.consultas if 'INSERT INTO domain_scores' in sql)
         self.assertEqual(score[6:9], ('rules', None, 'macro_f1_no_supera_reglas'))
-        predecir.assert_not_called()
+        predecir.assert_called_once()
+        aporte = next(params for sql, params in conexion.consultas if 'INSERT INTO score_contributions' in sql)
+        self.assertEqual(aporte[5], 'medium')
+        self.assertEqual(aporte[6].obj['model_prediction'], 'high')
+        self.assertEqual(aporte[6].obj['shap'][0]['feature'], 'sensibilidad')
 
     def test_artefacto_ausente_usa_reglas_con_motivo(self):
         conexion, predecir = self.guardar(None, FileNotFoundError())
