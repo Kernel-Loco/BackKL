@@ -282,7 +282,7 @@ def _contexto_plan(session, fqdn):
     domain_id = _domain_id(session, fqdn)
     with transaction(session.org_id) as conn:
         score = conn.execute(
-            'SELECT id::text, rule_set_id::text, method, partial_coverage FROM domain_scores '
+            'SELECT id::text, rule_set_id::text, score, category_scores, method, partial_coverage FROM domain_scores '
             'WHERE domain_id = %s ORDER BY computed_at DESC LIMIT 1', (domain_id,),
         ).fetchone()
         if score:
@@ -299,7 +299,7 @@ def _contexto_plan(session, fqdn):
         reglas = {r['code']: r for r in conn.execute(
             'SELECT r.id::text, r.code, r.category, r.base_severity, r.weight, r.max_penalty, t.recommendation '
             'FROM scoring_rules r JOIN scoring_rule_texts t '
-            'ON t.rule_set_id = r.rule_set_id AND t.code = r.code WHERE r.rule_set_id = %s',
+            'ON t.code = r.code WHERE r.rule_set_id = %s',
             (rule_set_id,),
         ).fetchall()}
         hallazgos = conn.execute(
@@ -319,13 +319,15 @@ def _contexto_plan(session, fqdn):
                 raise HTTPException(409, 'No hay severidad de ML guardada para todos los hallazgos vigentes')
 
     pesos = {k: float(v) for k, v in rule_set['category_weights'].items()}
-    return domain_id, reglas, pesos, hallazgos, method, severidades, parcial
+    # El 'Actual' del plan es el score guardado, el mismo que muestra /score.
+    guardado = {'score': score['score'], 'category_scores': score['category_scores']} if score else None
+    return domain_id, reglas, pesos, hallazgos, method, severidades, parcial, guardado
 
 
 def _plan_data(session, fqdn):
-    _, reglas, pesos, hallazgos, method, severidades, parcial = _contexto_plan(session, fqdn)
+    _, reglas, pesos, hallazgos, method, severidades, parcial, guardado = _contexto_plan(session, fqdn)
     try:
-        return plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial)
+        return plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial, guardado)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
 
@@ -338,11 +340,11 @@ def action_plan(fqdn: str, session: Session = Depends(current_session)):
 @router.post('/domains/{fqdn}/action-plan/simulate', summary='Simula una o varias acciones sin guardar cambios')
 def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
                          session: Session = Depends(current_session)):
-    _, reglas, pesos, hallazgos, method, severidades, parcial = _contexto_plan(session, fqdn)
+    _, reglas, pesos, hallazgos, method, severidades, parcial, guardado = _contexto_plan(session, fqdn)
     if not action_ids or len(action_ids) > 100 or any(not isinstance(action_id, str) for action_id in action_ids):
         raise HTTPException(422, 'Selecciona entre 1 y 100 acciones del plan')
     try:
-        resultado = plan_accion.simular(hallazgos, reglas, pesos, action_ids, severidades)
+        resultado = plan_accion.simular(hallazgos, reglas, pesos, action_ids, severidades, guardado)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     resultado['domain'] = fqdn

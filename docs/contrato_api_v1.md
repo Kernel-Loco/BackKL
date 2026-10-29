@@ -26,7 +26,7 @@ Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo
 | `POST /api/v1/domains/{fqdn}/action-plan/simulate` | — | Score contrafactual al resolver varias acciones, sin guardar cambios (#70) |
 | `GET /api/v1/domains/{fqdn}/action-plan/export?formato=csv\|json` | — | Descarga el plan; CSV UTF-8 con BOM y escape contra fórmulas |
 
-La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`. `action_ids` usa los ids de acciones devueltos por el plan, en este momento códigos de regla. La respuesta incluye score y banda antes/después, reducción y notas por categoría. Las acciones desconocidas o sin hallazgos abiertos responden 422. La simulación no escribe hallazgos, scores ni bitácora.
+La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`. `action_ids` usa los ids de acciones devueltos por el plan, en este momento códigos de regla. La respuesta incluye score y banda antes/después, reducción y notas por categoría. Las acciones desconocidas o sin hallazgos abiertos responden 422. La simulación no escribe hallazgos, scores ni bitácora. En el plan y en la simulación, el score, la banda y las notas 'antes' son las del último score guardado, las mismas de `/score`. Si el dominio no tiene score guardado, salen del motor. El 'después' se recalcula con el motor (#31) y la reducción es lo que baja el motor al resolver esas acciones, así que nunca es negativa. Si el score guardado no cuadra con los hallazgos de ese momento (un escaneo en curso o caído, o la semilla demo), 'antes' menos la reducción puede no dar 'después'.
 
 ## Dominio (`dominios.json`)
 
