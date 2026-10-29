@@ -417,6 +417,8 @@ def finding_explanation(finding_id: str, session: Session = Depends(current_sess
         'summary': RESUMEN[f['severity']],
         'recommendation': f['recommendation'],
         'confidence': (f['factors'] or {}).get('confidence'),
+        'model_prediction': (f['factors'] or {}).get('model_prediction'),
+        'explanation_model_version': (f['factors'] or {}).get('explanation_model_version'),
         'shap': (f['factors'] or {}).get('shap'),
     }
 

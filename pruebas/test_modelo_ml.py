@@ -53,6 +53,7 @@ class ModeloMl(unittest.TestCase):
         }
         prediccion = inferencia.predecir(self.bundle, [fila])['f-ml']
         self.assertIn(prediccion['severity'], ('high', 'medium', 'low'))
+        self.assertIn(prediccion['model_prediction'], ('high', 'medium', 'low'))
         self.assertGreaterEqual(prediccion['confidence'], 0)
         self.assertLessEqual(prediccion['confidence'], 1)
         self.assertEqual(len(prediccion['shap']), 3)
@@ -124,7 +125,7 @@ class IntegracionScoreMl(unittest.TestCase):
         with mock.patch.object(inferencia, 'cargar_modelo', side_effect=fallo) if fallo else \
                 mock.patch.object(inferencia, 'cargar_modelo', return_value=bundle), \
                 mock.patch.object(inferencia, 'predecir', return_value={
-                    'finding-1': {'severity': 'high', 'confidence': .91,
+                    'finding-1': {'severity': 'high', 'model_prediction': 'high', 'confidence': .91,
                                   'shap': [{'feature': 'sensibilidad', 'value': 'media', 'contribution': .2}]},
                 }) as predecir:
             orquestador._guardar_score(conexion, 'org', 'domain', 'scan', 'ruleset', self.REGLAS, self.PESOS, False)
@@ -136,14 +137,19 @@ class IntegracionScoreMl(unittest.TestCase):
         self.assertEqual(score[6:9], ('ml', 'v-test', None))
         aporte = next(params for sql, params in conexion.consultas if 'INSERT INTO score_contributions' in sql)
         factores = aporte[6].obj
+        self.assertEqual(factores['model_prediction'], 'high')
         self.assertEqual(factores['confidence'], .91)
         self.assertEqual(factores['shap'][0]['feature'], 'sensibilidad')
 
-    def test_modelo_no_integrable_usa_reglas_con_motivo(self):
+    def test_modelo_no_integrable_usa_reglas_y_conserva_shap(self):
         conexion, predecir = self.guardar({'version': 'v-test', 'metrics': {'integrable': False}})
         score = next(params for sql, params in conexion.consultas if 'INSERT INTO domain_scores' in sql)
         self.assertEqual(score[6:9], ('rules', None, 'macro_f1_no_supera_reglas'))
-        predecir.assert_not_called()
+        predecir.assert_called_once()
+        aporte = next(params for sql, params in conexion.consultas if 'INSERT INTO score_contributions' in sql)
+        self.assertEqual(aporte[5], 'medium')
+        self.assertEqual(aporte[6].obj['model_prediction'], 'high')
+        self.assertEqual(aporte[6].obj['shap'][0]['feature'], 'sensibilidad')
 
     def test_artefacto_ausente_usa_reglas_con_motivo(self):
         conexion, predecir = self.guardar(None, FileNotFoundError())
