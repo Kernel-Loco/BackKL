@@ -56,6 +56,36 @@ class PlanAccion(unittest.TestCase):
         self.assertEqual(resultado['score_before'], 60)
         self.assertEqual(resultado['score_after'], 0)
 
+    def test_plan_y_simulacion_toman_el_score_guardado_como_actual(self):
+        guardado = {'score': 85, 'category_scores': {'infrastructure': 80, 'digital_identity': 55,
+                                                     'configuration': 30, 'data_leaks': 90}}
+        resultado = plan.construir_plan('acme-demo.mx', HALLAZGOS, REGLAS, PESOS, guardado=guardado)
+        self.assertEqual((resultado['score_before'], resultado['band_before']), (85, 'critical'))
+        self.assertEqual(resultado['category_scores_before'], guardado['category_scores'])
+        self.assertEqual([(a['id'], a['score_after'], a['score_reduction']) for a in resultado['actions']],
+                         [('secret', 60, 20), ('spf_missing', 80, 0)])
+
+        simulado = plan.simular(HALLAZGOS, REGLAS, PESOS, ['secret', 'spf_missing'], guardado=guardado)
+        self.assertEqual((simulado['score_before'], simulado['band_before']), (85, 'critical'))
+        self.assertEqual(simulado['category_scores_before'], guardado['category_scores'])
+        self.assertEqual((simulado['score_after'], simulado['score_reduction']), (60, 20))
+
+    def test_reduccion_nunca_negativa_con_un_score_guardado_viejo(self):
+        # Un escaneo grabó hallazgos críticos y todavía no guarda su score: el motor ya da 80 y lo guardado es 28.
+        guardado = {'score': 28, 'category_scores': {'infrastructure': 0, 'digital_identity': 0,
+                                                     'configuration': 6.25, 'data_leaks': 0}}
+        resultado = plan.construir_plan('acme-demo.mx', HALLAZGOS, REGLAS, PESOS, guardado=guardado)
+        self.assertEqual(resultado['score_before'], 28)
+        self.assertEqual([(a['id'], a['score_after'], a['score_reduction']) for a in resultado['actions']],
+                         [('secret', 60, 20), ('spf_missing', 80, 0)])
+
+    def test_plan_sin_hallazgos_abiertos_conserva_el_score_guardado(self):
+        guardado = {'score': 54, 'category_scores': {'infrastructure': 60, 'digital_identity': 50,
+                                                     'configuration': 40, 'data_leaks': 60}}
+        resultado = plan.construir_plan('acme-tienda.mx', [], REGLAS, PESOS, guardado=guardado)
+        self.assertEqual((resultado['score_before'], resultado['band_before']), (54, 'medium'))
+        self.assertEqual((resultado['actions'], resultado['total']), ([], 0))
+
     def test_exportaciones_escapan_celdas_con_formula(self):
         data = plan.construir_plan('olmardo.com', HALLAZGOS, REGLAS, PESOS)
         csv = plan.exportar_csv(data)

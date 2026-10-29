@@ -19,8 +19,20 @@ def _hallazgos_con_severidad(hallazgos, severidades):
     return preparados
 
 
-def simular(hallazgos, reglas, pesos_categoria, action_ids, severidades=None):
-    """Devuelve el score contrafactual al resolver las acciones seleccionadas, sin escribir."""
+def _actual(recalculado, guardado):
+    """Score 'Actual': el último guardado, el mismo que muestran /score y /domains. Sin score guardado, el recalculado."""
+    if guardado is None:
+        return recalculado
+    return {'score': guardado['score'], 'banda': criterio.banda(guardado['score']),
+            'category_scores': guardado['category_scores']}
+
+
+def simular(hallazgos, reglas, pesos_categoria, action_ids, severidades=None, guardado=None):
+    """Devuelve el score contrafactual al resolver las acciones seleccionadas, sin escribir.
+
+    El 'después' se recalcula con el motor y la reducción es lo que baja el motor al resolverlas, así que nunca
+    es negativa aunque el score guardado no cuadre con los hallazgos de ahora (escaneo en curso o caído).
+    """
     codigos_abiertos = {h['rule_code'] for h in hallazgos if h['status'] in ESTADOS_PLAN}
     seleccion = set(action_ids)
     if not seleccion:
@@ -36,12 +48,13 @@ def simular(hallazgos, reglas, pesos_categoria, action_ids, severidades=None):
         else hallazgo
         for hallazgo in preparados
     ]
-    antes = motor.calcular(preparados, reglas, pesos_categoria)
+    vigente = motor.calcular(preparados, reglas, pesos_categoria)
+    antes = _actual(vigente, guardado)
     despues = motor.calcular(restantes, reglas, pesos_categoria)
     return {
         'score_before': antes['score'],
         'score_after': despues['score'],
-        'score_reduction': antes['score'] - despues['score'],
+        'score_reduction': vigente['score'] - despues['score'],
         'band_before': antes['banda'],
         'band_after': despues['banda'],
         'category_scores_before': antes['category_scores'],
@@ -52,10 +65,10 @@ def simular(hallazgos, reglas, pesos_categoria, action_ids, severidades=None):
 
 
 def construir_plan(dominio, hallazgos, reglas, pesos_categoria, method='rules', severidades=None,
-                   partial_coverage=False):
+                   partial_coverage=False, guardado=None):
     """Agrupa por regla/recomendación y calcula el impacto individual de cada acción."""
     preparados = _hallazgos_con_severidad(hallazgos, severidades)
-    antes = motor.calcular(preparados, reglas, pesos_categoria)
+    antes = _actual(motor.calcular(preparados, reglas, pesos_categoria), guardado)
     grupos = {}
     for hallazgo in preparados:
         if hallazgo['status'] not in ESTADOS_PLAN:
@@ -75,7 +88,7 @@ def construir_plan(dominio, hallazgos, reglas, pesos_categoria, method='rules', 
 
     acciones = []
     for codigo, grupo in grupos.items():
-        impacto = simular(preparados, reglas, pesos_categoria, [codigo], severidades)
+        impacto = simular(preparados, reglas, pesos_categoria, [codigo], severidades, guardado)
         acciones.append({
             **grupo,
             'finding_count': len(grupo['finding_ids']),

@@ -118,6 +118,26 @@ class ApiV1(unittest.TestCase):
         self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), score_before)
         self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings'), findings_before)
 
+    def test_9_actual_del_plan_igual_al_score_guardado_y_exportaciones(self):
+        for fqdn in ('acme-demo.mx', 'acme-tienda.mx', 'acme-portal.mx'):
+            score = self.get(self.acme, '/api/v1/domains/%s/score' % fqdn)
+            action_plan = self.get(self.acme, '/api/v1/domains/%s/action-plan' % fqdn)
+            self.assertEqual((action_plan['score_before'], action_plan['band_before']), (score['score'], score['band']), fqdn)
+            self.assertEqual(action_plan['category_scores_before'],
+                             {c['category']: c['score'] for c in score['categories']}, fqdn)
+            if fqdn == 'acme-demo.mx':
+                # La semilla guarda 68 a mano y el motor da 60 por el piso de la brecha crítica: solo resolverla baja el score.
+                self.assertEqual([(a['id'], a['score_after'], a['score_reduction']) for a in action_plan['actions']],
+                                 [('breach_exposure', 16, 44), ('dmarc_missing', 60, 0), ('cert_expired', 60, 0),
+                                  ('outdated_software', 60, 0)])
+            else:
+                self.assertEqual(action_plan['actions'], [], fqdn)
+            for formato, tipo in (('csv', 'text/csv'), ('json', 'application/json')):
+                url = '%s/api/v1/domains/%s/action-plan/export?formato=%s' % (sesion.BASE, fqdn, formato)
+                with self.acme.opener.open(url, timeout=10) as r:
+                    self.assertEqual(r.status, 200, url)
+                    self.assertTrue(r.headers['Content-Type'].startswith(tipo), url)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
