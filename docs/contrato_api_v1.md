@@ -1,6 +1,6 @@
 # Contrato de API v1 (#21)
 
-Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo por respuesta en [`api_v1/`](api_v1/). El portal (RC-17a, #40a) ya lee la API v1 real con la sesión (`src/services/queries.ts` en FrontKL). Si la API no está arriba, el portal no lee estos archivos en su lugar. Siguen sirviendo de plan B en las demos. FrontKL tiene una copia en `src/mocks/api/contrato.ts`, que hoy solo usa el alta simulada de dominios (#26). El dataset de ML (#33, RC-65) todavía no los usa. Los ejemplos salen de los datos demo de `db/semillas/001_datos_demo.sql` (Acme Demo), así que la API real debe devolver lo mismo con esa base. `pruebas/test_contrato_api.py` revisa que los ejemplos cumplan el criterio de criticidad (#29) y el contrato de plugin (#13).
+Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo por respuesta en [`api_v1/`](api_v1/). El portal (RC-17a, #40a) ya lee la API v1 real con la sesión (`src/services/queries.ts` en FrontKL). Si la API no está arriba, el portal no lee estos archivos en su lugar. Siguen sirviendo de plan B en las demos. FrontKL tiene una copia en `src/mocks/api/contrato.ts`, que hoy solo usa el alta simulada de dominios (#26). El dataset de ML (#33, RC-65) todavía no los usa. Los ejemplos salen de los datos demo de `db/semillas/001_datos_demo.sql` (Acme Demo) y de la corrección de su score en `db/semillas/009_score_demo_motor.sql`, así que la API real debe devolver lo mismo con esa base. `pruebas/test_contrato_api.py` revisa que los ejemplos cumplan el criterio de criticidad (#29) y el contrato de plugin (#13).
 
 ## Reglas generales
 
@@ -26,7 +26,7 @@ Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo
 | `POST /api/v1/domains/{fqdn}/action-plan/simulate` | — | Score contrafactual al resolver varias acciones, sin guardar cambios (#70) |
 | `GET /api/v1/domains/{fqdn}/action-plan/export?formato=csv\|json` | — | Descarga el plan; CSV UTF-8 con BOM y escape contra fórmulas |
 
-La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`. `action_ids` usa los ids de acciones devueltos por el plan, en este momento códigos de regla. La respuesta incluye score y banda antes/después, reducción y notas por categoría. Las acciones desconocidas o sin hallazgos abiertos responden 422. La simulación no escribe hallazgos, scores ni bitácora. En el plan y en la simulación, el score, la banda y las notas 'antes' son las del último score guardado, las mismas de `/score`. Si el dominio no tiene score guardado, salen del motor. El 'después' se recalcula con el motor (#31) y la reducción es lo que baja el motor al resolver esas acciones, así que nunca es negativa. Si el score guardado no cuadra con los hallazgos de ese momento (un escaneo en curso o caído, o la semilla demo), 'antes' menos la reducción puede no dar 'después'.
+La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`. `action_ids` usa los ids de acciones devueltos por el plan, en este momento códigos de regla. La respuesta incluye score y banda antes/después, reducción y notas por categoría. Las acciones desconocidas o sin hallazgos abiertos responden 422. La simulación no escribe hallazgos, scores ni bitácora. En el plan y en la simulación, el score, la banda y las notas 'antes' son las del último score guardado, las mismas de `/score`. Si el dominio no tiene score guardado, salen del motor. El 'después' se recalcula con el motor (#31) y la reducción es lo que baja el motor al resolver esas acciones, así que nunca es negativa. Si el score guardado no cuadra con los hallazgos de ese momento (un escaneo en curso o caído), 'antes' menos la reducción puede no dar 'después'.
 
 ## Dominio (`dominios.json`)
 
@@ -66,9 +66,10 @@ La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`
 | `model_version` | Versión del clasificador; `null` si el score se calculó con reglas |
 | `model_fallback_reason` | Motivo por el que este score usó reglas; `null` cuando se usó ML |
 | `rule_set_version` | Versión del juego de reglas con que se calculó |
-| `reason` | `scan`, `intel_update` o `rules_change` |
+| `reason` | `scan`, `intel_update`, `rules_change` o `correction`. `correction` corrige un score guardado mal, sin escaneo ni cambio de reglas, como el de acme-demo.mx en `db/semillas/009_score_demo_motor.sql` |
 | `partial_coverage` | `true` si alguna fuente falló en ese escaneo o no pudo revisar alguno de sus códigos (`sin_cobertura`) |
 | `categories` | En `score.json`, una fila por categoría con nota, banda y peso, en el orden del reto. En `historico.json`, un objeto `{categoría: nota}` para graficar |
+| `new_findings`, `resolved_findings` | Solo en el histórico: hallazgos nuevos y resueltos por el escaneo de ese punto. Dan 0 en un recálculo (`reason` distinto de `scan`), que no encuentra ni resuelve hallazgos, y el portal muestra un guion ahí y con `partial_coverage`. Los puntos de `historico.json` no los traen |
 | `alert` | El umbral de la empresa y si este score dispara `score.above_threshold` |
 
 ## Explicación (`explicacion.json`)

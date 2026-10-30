@@ -154,5 +154,29 @@ class LimiteDiario(unittest.TestCase):
                 self.assertEqual(config, 'true,search_path=pg_catalog, public, pg_temp,false')
 
 
+# Corrección del score de Acme (migración 010 y semillas 009 y 010, RC-72): la semilla 010 apaga el
+# trigger de solo inserción dentro de su transacción. Aquí se revisa que quedó encendido.
+class CorreccionScore(unittest.TestCase):
+
+    def test_13_score_sigue_de_solo_insercion_y_acepta_correction(self):
+        self.assertEqual(scalar("SELECT tgenabled FROM pg_trigger WHERE tgname = 'domain_scores_block_ud';"), 'O')
+        ok, _, err = psql("BEGIN; UPDATE domain_scores SET reason = 'scan'"
+                          " WHERE id = 'a0000000-0000-4000-8000-000000000004'; ROLLBACK;", user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('solo inserción', err)
+        self.assertEqual(scalar("SELECT string_agg(conname, ',') FROM pg_constraint WHERE conrelid = 'domain_scores'::regclass"
+                                " AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%reason%';"),
+                         'domain_scores_reason_ck')
+        self.assertEqual(scalar("SELECT string_agg(reason || '|' || coalesce(model_fallback_reason, '-'), ',' ORDER BY id)"
+                                " FROM domain_scores WHERE id IN ('a0000000-0000-4000-8000-000000000004',"
+                                " 'a0000000-0000-4000-8000-000000000005', 'a0000000-0000-4000-8000-000000000006');",
+                                user='postgres'),
+                         'correction|-,correction|-,correction|-')
+        self.assertEqual(scalar("SELECT count(*) FROM domain_scores WHERE id IN ('a0000000-0000-4000-8000-000000000004',"
+                                " 'a0000000-0000-4000-8000-000000000005', 'a0000000-0000-4000-8000-000000000006')"
+                                " AND computed_at = '2026-10-29 20:16:09-06';", user='postgres'),
+                         '3')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

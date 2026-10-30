@@ -55,12 +55,13 @@ El catálogo (#30) asigna con este criterio la severidad base de cada regla. El 
 
 | Caso | Infraestructura, identidad, configuración, fugas | Críticos vigentes | Ponderado | Piso | Score | Banda |
 |---|---|---|---|---|---|---|
-| Demo acme-demo.mx | 80, 55, 30, 90 | 1 | 68 | 60 | 68 | Alto |
-| Demo acme-tienda.mx | 60, 50, 40, 60 | 0 | 54 | 0 | 54 | Medio |
-| Un dominio como acme-portal.mx con una fuga crítica abierta, que sube su nota de fugas a 70 | 40, 30, 20, 70 | 1 | 43 | 60 | 60 | Alto |
+| Demo acme-demo.mx, con sus cuatro hallazgos abiertos | 45, 0, 10, 40 | 1 | 28 | 60 | 60 | Alto |
+| Un dominio sin hallazgos críticos | 60, 50, 40, 60 | 0 | 54 | 0 | 54 | Medio |
+| Un dominio con una fuga crítica y notas altas | 80, 55, 30, 90 | 1 | 68 | 60 | 68 | Alto |
+| Un dominio con una fuga crítica abierta, que sube su nota de fugas a 70 | 40, 30, 20, 70 | 1 | 43 | 60 | 60 | Alto |
 | El mismo con dos hallazgos críticos | 40, 30, 20, 70 | 2 | 43 | 80 | 80 | Crítico |
 
-En el tercer caso la nota de fugas queda en alto, pero el ponderado da 43, que es medio. Sin el piso, el dominio quedaría en medio aunque tiene una fuga crítica abierta.
+En el cuarto caso la nota de fugas queda en alto, pero el ponderado da 43, que es medio. Sin el piso, el dominio quedaría en medio aunque tiene una fuga crítica abierta.
 
 ## Alerta
 

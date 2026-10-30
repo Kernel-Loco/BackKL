@@ -43,20 +43,20 @@ class Piso(unittest.TestCase):
     def test_2_valores(self):
         self.assertEqual([c.piso(n) for n in (0, 1, 2, 5)], [0, 60, 80, 80])
 
-    def test_3_demo_acme_demo_mx_queda_en_68(self):
-        # 80, 55, 30 y 90 con los pesos v1 dan 68, y su fuga crítica abierta pone el piso en 60
+    def test_3_notas_80_55_30_90_quedan_en_68(self):
+        # 80, 55, 30 y 90 con los pesos v1 dan 68, y una fuga crítica abierta pone el piso en 60
         r = c.score_dominio(notas(80, 55, 30, 90), PESOS_V1, criticos=1)
         self.assertEqual(r, {'ponderado': 68, 'piso': 60, 'score': 68, 'banda': 'high', 'piso_aplicado': False})
 
     def test_4_el_promedio_no_esconde_un_critico(self):
-        # como acme-portal.mx con una fuga crítica abierta: la nota de fugas sube a 70 y el ponderado a 43
+        # un dominio con una fuga crítica abierta: la nota de fugas sube a 70 y el ponderado a 43
         r = c.score_dominio(notas(40, 30, 20, 70), PESOS_V1, criticos=1)
         self.assertEqual((r['ponderado'], r['score'], r['banda'], r['piso_aplicado']), (43, 60, 'high', True))
         r = c.score_dominio(notas(40, 30, 20, 70), PESOS_V1, criticos=2)
         self.assertEqual((r['score'], r['banda']), (80, 'critical'))
 
     def test_5_sin_criticos_solo_cuenta_el_ponderado(self):
-        r = c.score_dominio(notas(60, 50, 40, 60), PESOS_V1)  # acme-tienda.mx
+        r = c.score_dominio(notas(60, 50, 40, 60), PESOS_V1)
         self.assertEqual((r['score'], r['banda'], r['piso_aplicado']), (54, 'medium', False))
 
 
