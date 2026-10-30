@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 # API de Cirdan. La base y Valkey corren en sus propios contenedores (docker-compose.yml).
 
+ARG TARGETARCH=amd64
+
 # subfinder 2.17.0 (#14b, RC-184) entra desde los zips del release oficial, en etapas aparte:
 # - El release se compila con CGO_ENABLED=0 (.goreleaser.yml de v2.17.0), así que el binario es estático
 #   y corre en python:3.14-slim (Debian, glibc). La imagen oficial projectdiscovery/subfinder es Alpine
@@ -60,11 +62,13 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # subfinder y gitleaks con sus licencias MIT, que viajan con cada binario (ver NOTICE). Van antes de cirdan/
-# para que un cambio en el código no vuelva a copiarlos.
-COPY --from=subfinder --chmod=0755 /out/subfinder /usr/local/bin/subfinder
+# para que un cambio en el código no vuelva a copiarlos. Con el builder clásico, los permisos se fijan
+# con chmod en un paso RUN porque `COPY --chmod` requiere BuildKit.
+COPY --from=subfinder /out/subfinder /usr/local/bin/subfinder
 COPY --from=subfinder /out/licencia/ /usr/share/licenses/subfinder/
-COPY --from=gitleaks --chmod=0755 /out/gitleaks /usr/local/bin/gitleaks
+COPY --from=gitleaks /out/gitleaks /usr/local/bin/gitleaks
 COPY --from=gitleaks /out/licencia/ /usr/share/licenses/gitleaks/
+RUN chmod 0755 /usr/local/bin/subfinder /usr/local/bin/gitleaks
 
 # Bases de DB-IP Lite para el país y el ASN de las IP (#15b, RC-166), bajadas a mano a datos/geo/ (ver
 # cirdan/recolectores/geoip.py y NOTICE). Van antes de cirdan/ para que un cambio en el código no vuelva a copiar sus
