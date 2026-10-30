@@ -9,7 +9,7 @@
   "rule_title": "Correos de la empresa en una filtración reciente al detectarla, con contraseñas u otros datos de acceso",
   "meaning": "Al menos un correo de la empresa aparece en una filtración de datos que incluía contraseñas, preguntas de seguridad u otros datos para entrar a cuentas y que, cuando se detectó, había ocurrido hacía menos de un año. Quien tenga esos datos puede intentar entrar a las cuentas de esas personas, también a las de la empresa si repiten la contraseña.",
   "score_id": "a0000000-0000-4000-8000-000000000004",
-  "computed_at": "2026-10-28T16:21:57-06:00",
+  "computed_at": "2026-10-29T20:16:09-06:00",
   "method": "rules",
   "model_version": null,
   "penalty": 40.0,

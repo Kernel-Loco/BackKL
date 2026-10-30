@@ -76,7 +76,7 @@ class ApiV1(unittest.TestCase):
     def test_5_historico_activos_y_escaneos(self):
         hist = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')
         self.assertEqual([(p['score'], p['reason'], p['new_findings']) for p in hist['items']],
-                         [(68, 'scan', 3), (60, 'rules_change', 0)])
+                         [(68, 'scan', 3), (60, 'correction', 0)])
         activos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/assets')
         self.assertEqual(activos['total'], 6)
         escaneos = self.get(self.acme, '/api/v1/scans')
