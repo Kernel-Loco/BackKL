@@ -279,7 +279,8 @@ def _latido(org, scan_id, conn=None):
 def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas):
     """Guarda activos y hallazgos de una fuente que respondió. Devuelve dos conjuntos de id de hallazgos: los que
     abrió (insertó o reabrió) y los que dio por resueltos."""
-    conn.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))', (CANDADO_HALLAZGOS, org))
+    # org pasa por uuid para que la llave sea la misma aunque la línea de comandos la reciba en mayúsculas.
+    conn.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s::uuid::text))', (CANDADO_HALLAZGOS, org))
     atributos_raiz = {}
     for activo in resultado.activos:
         if activo.tipo == 'domain' and activo.valor == resultado.dominio:
