@@ -784,6 +784,11 @@ class Contrato(unittest.TestCase):
         texto = github.REGLAS.read_text(encoding='utf-8')
         self.assertIn('useDefault = true', texto)
         self.assertIn('id = "cirdan-fake-token"', texto)
+        self.assertIn('paths = [', texto)
+        self.assertIn('pruebas/', texto)
+        self.assertIn('cirdan/recolectores/respuestas_grabadas/', texto)
+        self.assertIn('regexes = [', texto)
+        self.assertIn('CIRDAN_FAKE_', texto)
         self.assertNotIn('stopwords', texto)
         self.assertNotIn(TOKEN, texto)
 
