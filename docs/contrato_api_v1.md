@@ -51,7 +51,7 @@ La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`
 | `status` | Hoy siempre es `open`, porque el endpoint solo trae abiertos. En la base también existen `resolved`, `accepted_risk` y `false_positive` |
 | `recurrence` | `new` si apareció en el último escaneo, `recurring` si ya venía de antes |
 | `cve_id`, `cvss`, `epss`, `in_kev` | Datos de la CVE cuando el hallazgo tiene una. Si no, `null`, `null`, `null` y `false` |
-| `evidence` | Lo que prueba el hallazgo, sin `title`. Nunca contraseñas, tokens ni datos de brechas más allá del hecho |
+| `evidence` | Lo que prueba el hallazgo, sin `title`, `huella`, `caracteristicas` ni `partes`. Nunca contraseñas, tokens ni datos de brechas más allá del hecho |
 | `caracteristicas` | Las 4 del reto con las mismas claves y valores del [contrato de plugin](contrato_plugin.md#esquema-del-resultado): `tipo`, `antiguedad_dias`, `exposicion` (`directa` o `publica`) y `sensibilidad` (`baja`, `media` o `alta`) |
 
 ## Score (`score.json`) e histórico (`historico.json`)
@@ -67,7 +67,7 @@ La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`
 | `model_fallback_reason` | Motivo por el que este score usó reglas; `null` cuando se usó ML |
 | `rule_set_version` | Versión del juego de reglas con que se calculó |
 | `reason` | `scan`, `intel_update`, `rules_change` o `correction`. `correction` corrige un score guardado mal, sin escaneo ni cambio de reglas, como el de acme-demo.mx en `db/semillas/009_score_demo_motor.sql` |
-| `partial_coverage` | `true` si alguna fuente falló en ese escaneo o no pudo revisar alguno de sus códigos (`sin_cobertura`) |
+| `partial_coverage` | `true` si alguna fuente falló en ese escaneo, no pudo revisar alguno de sus códigos (`sin_cobertura`) o revisó solo una parte de sus repos o IP (`revisados`) |
 | `categories` | En `score.json`, una fila por categoría con nota, banda y peso, en el orden del reto. En `historico.json`, un objeto `{categoría: nota}` para graficar |
 | `new_findings`, `resolved_findings` | Solo en el histórico: hallazgos nuevos y resueltos por el escaneo de ese punto. Dan 0 en un recálculo (`reason` distinto de `scan`), que no encuentra ni resuelve hallazgos, y el portal muestra un guion ahí y con `partial_coverage`. Los puntos de `historico.json` no los traen |
 | `alert` | El umbral de la empresa y si este score dispara `score.above_threshold` |

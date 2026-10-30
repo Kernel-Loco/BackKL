@@ -506,6 +506,7 @@ class Procesos(unittest.TestCase):
             'github: se saltó 1 repo fork', 'github: se saltó 1 repo deshabilitado',
             'github: se saltaron 2 repos de más de 100 MB o sin tamaño'])
         self.assertIn('github: cobertura parcial, se revisaron 2 de 4 repos', res.avisos)
+        self.assertEqual(res.sin_revisar, ['acme-demo/grande', 'acme-demo/sin-tamano'])   # sin el fork ni el apagado
         self.assertEqual(res.sin_cobertura, [])   # los dos códigos trajeron hallazgos: solo queda el aviso
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
 
@@ -540,6 +541,54 @@ class Procesos(unittest.TestCase):
         with self.assertRaises(FuenteNoResponde) as e:
             recolectar(procesos=ProcesosSimulados(fallas={('clone', 'api'): 128, ('log', 'sitio'): 1}))
         self.assertEqual(str(e.exception), 'github: no se pudo revisar ningún repo de acme-demo')
+
+    def test_7b_con_cobertura_parcial_revisados_y_sin_revisar_llevan_los_repos(self):
+        """#23: cada secreto lleva su repo como parte y cada correo todos los repos donde salió. Con la cobertura parcial,
+        revisados lleva los repos que sí se revisaron y, si la lista de repos vino completa, sin_revisar los públicos que
+        no, sin el fork, que una corrida completa tampoco revisa: así el orquestador no cierra el secreto de un repo que
+        no se clonó y sí el de uno que ya no está. Con todo revisado, los dos quedan en None."""
+        reportes = {'api': [hallazgo_gitleaks(archivo='config/.env')], 'sitio': [hallazgo_gitleaks(archivo='web/.env')]}
+        completo, _ = recolectar(procesos=ProcesosSimulados(reportes=reportes))
+        self.assertEqual((completo.revisados, completo.sin_revisar), (None, None))
+        self.assertEqual({h.evidencia['ruta']: h.partes for h in completo.hallazgos if h.codigo == 'secret_in_public_repo'},
+                         {'config/.env': ['acme-demo/api'], 'web/.env': ['acme-demo/sitio']})
+        correos = [h for h in completo.hallazgos if h.codigo == 'email_in_public_commits']
+        self.assertTrue(correos)
+        self.assertEqual({tuple(sorted(h.partes)) for h in correos}, {('acme-demo/api', 'acme-demo/sitio')})
+        fallas = {'clon que se pasa de su tiempo': {('clone', 'api'): subprocess.TimeoutExpired(['git'], 120)},
+                  'gitleaks que falla': {('gitleaks', 'api'): 1}}
+        for caso, falla in fallas.items():
+            with self.subTest(caso=caso):
+                res, _ = recolectar(procesos=ProcesosSimulados(reportes=reportes, fallas=falla))
+                self.assertEqual(res.revisados, ['acme-demo/sitio'])
+                self.assertEqual(res.sin_revisar, ['acme-demo/api'])   # copia es un fork
+                self.assertEqual([h.partes for h in res.hallazgos if h.codigo == 'secret_in_public_repo'],
+                                 [['acme-demo/sitio']])
+                self.assertEqual({tuple(h.partes) for h in res.hallazgos if h.codigo == 'email_in_public_commits'},
+                                 {('acme-demo/sitio',)})
+                self.assertEqual(res.sin_cobertura, [])   # el código trae hallazgos: solo las partes protegen al de api
+                self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        repos = [repo('r%02d' % i, '2026-10-%02dT00:00:00Z' % (i + 1)) for i in range(13)]
+        res, _ = recolectar(ApiSimulada(perfil=dict(PERFIL, public_repos=13), repos=repos), ProcesosSimulados())
+        self.assertEqual(res.revisados, ['acme-demo/r%02d' % i for i in range(12, 2, -1)])   # los 10 del tope
+        self.assertEqual(res.sin_revisar, ['acme-demo/r%02d' % i for i in range(3)])
+        correo = next(h for h in res.hallazgos if h.codigo == 'email_in_public_commits')
+        self.assertEqual(len(correo.evidencia['repos']), github.MAX_REPOS_ACTIVO)
+        self.assertEqual(sorted(correo.partes), sorted(res.revisados))   # las partes no se cortan
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+
+    def test_7c_sin_la_lista_completa_de_repos_sin_revisar_queda_en_none(self):
+        """#23: con más páginas de repos o un nombre que no se puede usar no se sabe cuáles son todos: sin_revisar no
+        dice nada y el orquestador solo cierra lo de los repos revisados. Un fork o un deshabilitado con nombre
+        inválido no importa, porque tampoco se revisaría."""
+        mas = [repo('r%03d' % i, fork=i > 0) for i in range(github.POR_PAGINA)]
+        res, _ = recolectar(ApiSimulada(perfil=dict(PERFIL, public_repos=150), repos=mas), ProcesosSimulados())
+        self.assertEqual((res.revisados, res.sin_revisar), (['acme-demo/r000'], None))
+        for cambios, sin_revisar in (({}, None), ({'fork': True}, ['acme-demo/api']),
+                                     ({'disabled': True}, ['acme-demo/api'])):
+            raro = REPOS + [repo('../fuera', '2026-10-01T10:00:00Z', **cambios)]
+            res, _ = recolectar(ApiSimulada(repos=raro), ProcesosSimulados(fallas={('clone', 'api'): 128}))
+            self.assertEqual((res.revisados, res.sin_revisar), (['acme-demo/sitio'], sin_revisar), cambios)
 
     def test_8_el_tiempo_de_la_corrida_recorta_cada_paso_y_corta_los_repos(self):
         repos = [repo('a', '2026-10-03T00:00:00Z'), repo('b', '2026-10-02T00:00:00Z'), repo('c', '2026-10-01T00:00:00Z')]
@@ -640,8 +689,9 @@ class GrabarYReproducir(unittest.TestCase):
             self.assertEqual(len(list(carpeta.glob('*.json'))), 4)   # perfil, repos y 2 repos revisados
             otra, c = recolectar(sin_api, sin_procesos, modo='reproducir', carpeta=carpeta)
         self.assertEqual((otra.estado, otra.consultas), ('succeeded', 0))
-        self.assertEqual((otra.activos, otra.hallazgos, otra.avisos, otra.sin_cobertura),
-                         (grabado.activos, grabado.hallazgos, grabado.avisos, grabado.sin_cobertura))
+        self.assertEqual((otra.activos, otra.hallazgos, otra.avisos, otra.sin_cobertura, otra.revisados, otra.sin_revisar),
+                         (grabado.activos, grabado.hallazgos, grabado.avisos, grabado.sin_cobertura, grabado.revisados,
+                          grabado.sin_revisar))
         self.assertEqual(len(c.leidas), 4)
 
     def test_2_una_grabacion_fallida_deja_intacta_la_anterior(self):
@@ -670,6 +720,7 @@ class GrabarYReproducir(unittest.TestCase):
             res, _ = recolectar(sin_api, sin_procesos, modo='reproducir', carpeta=carpeta)
         self.assertIn('github: falta la grabación de 1 repo', res.avisos)
         self.assertIn('github: cobertura parcial, se revisaron 1 de 2 repos', res.avisos)
+        self.assertEqual((res.revisados, res.sin_revisar), (['acme-demo/sitio'], ['acme-demo/api']))
 
     def test_5_una_grabacion_cambiada_a_mano_no_mete_otra_cosa(self):
         with tempfile.TemporaryDirectory() as d:

@@ -176,6 +176,53 @@ class Esquema(unittest.TestCase):
         self.assertTrue(any('no puede traer hallazgos' in e for e in contrato.validar(res)))
 
 
+    def test_9b_revisados_sin_revisar_y_partes_son_listas_de_textos(self):
+        """#23: con la cobertura parcial, revisados dice qué partes (repos, IP) se revisaron completas, sin_revisar las
+        que se sabe que existen y no se revisaron, y cada hallazgo lleva sus partes."""
+        self.assertEqual((Resultado('acme-demo.mx').revisados, Resultado('acme-demo.mx').sin_revisar), (None, None))
+        self.assertEqual(hallazgo().partes, [])
+        res = resultado(hallazgo(partes=['acme-demo/api']))
+        for rev, falta in ((None, None), ([], None), (['acme-demo/api'], None), (['acme-demo/api'], []),
+                           (['198.51.100.10', '198.51.100.10/cve'], ['198.51.100.11'])):
+            res.revisados, res.sin_revisar = rev, falta
+            self.assertEqual(contrato.validar(res), [], (rev, falta))
+        malos = {'texto': (('acme-demo/api', None), 'revisados debe ser None o una lista'),
+                 'vacío': (([''], None), 'revisados debe ser None o una lista'),
+                 'no es texto': (([7], None), 'revisados debe ser None o una lista'),
+                 'repetido': ((['a', 'a'], None), 'revisados tiene partes repetidas'),
+                 'sin_revisar raro': ((['a'], 'b'), 'sin_revisar debe ser None o una lista'),
+                 'sin_revisar repetido': ((['a'], ['b', 'b']), 'sin_revisar tiene partes repetidas'),
+                 'sin_revisar sin revisados': ((None, ['b']), 'sin_revisar va solo con revisados'),
+                 'en las dos': ((['a', 'b'], ['b']), 'no puede estar en revisados y en sin_revisar')}
+        for nombre, ((rev, falta), esperado) in malos.items():
+            res.revisados, res.sin_revisar = rev, falta
+            errores = contrato.validar(res)
+            self.assertTrue(any(esperado in e for e in errores), (nombre, errores))
+        for partes in (None, 'acme-demo/api', [''], ['a', 'a']):
+            errores = contrato.validar(resultado(hallazgo(partes=partes)))
+            self.assertTrue(any('partes' in e for e in errores), (partes, errores))
+        res = resultado(hallazgo())   # sin partes no se cerraría nunca con la cobertura parcial
+        self.assertEqual(contrato.validar(res), [])
+        res.revisados = ['acme-demo/api']
+        self.assertTrue(any('con revisados cada hallazgo lleva sus partes' in e for e in contrato.validar(res)))
+
+    def test_9c_omitidos_son_huellas_que_no_estan_en_los_hallazgos(self):
+        """#23: omitidos son las huellas de lo que sigue ahí pero un tope no deja reportar."""
+        self.assertEqual(Resultado('acme-demo.mx').omitidos, [])
+        res = resultado(hallazgo())
+        res.omitidos = ['cd' * 32]
+        self.assertEqual(contrato.validar(res), [])
+        malos = {'no es lista': (None, 'omitidos debe ser una lista de huellas'),
+                 'no es huella': (['xyz'], 'omitidos debe ser una lista de huellas'),
+                 'mayúsculas': (['CD' * 32], 'omitidos debe ser una lista de huellas'),
+                 'repetida': (['cd' * 32] * 2, 'omitidos tiene huellas repetidas'),
+                 'también es hallazgo': ([res.hallazgos[0].huella], 'una huella no puede estar en hallazgos y en omitidos')}
+        for nombre, (omitidos, esperado) in malos.items():
+            res.omitidos = omitidos
+            errores = contrato.validar(res)
+            self.assertTrue(any(esperado in e for e in errores), (nombre, errores))
+
+
 class Alcance(unittest.TestCase):
 
     def test_1_nombres_correos_ip_y_servicios(self):

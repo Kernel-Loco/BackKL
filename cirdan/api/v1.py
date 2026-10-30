@@ -196,7 +196,7 @@ SELECT f.id::text, f.evidence, a.value AS asset, a.asset_type, a.first_seen_at A
 
 
 def _finding(f):
-    evidence = {k: v for k, v in f['evidence'].items() if k not in ('title', 'caracteristicas', 'huella')}
+    evidence = {k: v for k, v in f['evidence'].items() if k not in ('title', 'caracteristicas', 'huella', 'partes')}
     if f['breach_name']:
         evidence.update(breach_name=f['breach_name'], breach_date=f['breach_date'], data_classes=f['data_classes'])
     return {
