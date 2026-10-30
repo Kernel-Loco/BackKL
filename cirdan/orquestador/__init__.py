@@ -271,6 +271,8 @@ def _latido(org, scan_id, conn=None):
 
 
 def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas):
+    """Guarda activos y hallazgos de una fuente que respondió. Devuelve dos conjuntos de id de hallazgos: los que
+    abrió (insertó o reabrió) y los que dio por resueltos."""
     atributos_raiz = {}
     for activo in resultado.activos:
         if activo.tipo == 'domain' and activo.valor == resultado.dominio:
@@ -310,6 +312,12 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         ).fetchone()['id']
         activos[activo.valor] = asset_id
 
+    # El estado de antes dice si el hallazgo es nuevo o se reabre. FOR UPDATE lo deja fijo hasta el commit.
+    huellas = [bytes.fromhex(h.huella) for h in resultado.hallazgos]
+    previos = {bytes(f['fingerprint']): f['status'] for f in conn.execute(
+        'SELECT fingerprint, status FROM findings WHERE organization_id = %s AND fingerprint = ANY(%s::bytea[]) '
+        'ORDER BY fingerprint FOR UPDATE', (org, huellas)).fetchall()}
+    abiertos = set()
     for hallazgo in resultado.hallazgos:
         regla = reglas.get(hallazgo.codigo)
         if not regla:
@@ -323,7 +331,8 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
                         hallazgo.activo)
             evidencia['activo_no_encontrado'] = hallazgo.activo
             asset_id = raiz
-        conn.execute(
+        huella = bytes.fromhex(hallazgo.huella)
+        finding_id = conn.execute(
             'INSERT INTO findings (organization_id, domain_id, asset_id, rule_id, source_id, fingerprint, severity, '
             "status, evidence, detected_at, last_scan_id) VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, now(), %s) "
             'ON CONFLICT (organization_id, fingerprint) DO UPDATE SET '
@@ -331,20 +340,22 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
             'source_id = EXCLUDED.source_id, severity = EXCLUDED.severity, evidence = EXCLUDED.evidence, '
             'status = CASE WHEN findings.status = %s THEN %s ELSE findings.status END, '
             'resolved_at = CASE WHEN findings.status = %s THEN NULL ELSE findings.resolved_at END, '
-            'last_scan_id = EXCLUDED.last_scan_id, updated_at = now()',
-            (org, domain_id, asset_id, regla['id'], source_id, bytes.fromhex(hallazgo.huella), hallazgo.severidad,
+            'last_scan_id = EXCLUDED.last_scan_id, updated_at = now() RETURNING id::text',
+            (org, domain_id, asset_id, regla['id'], source_id, huella, hallazgo.severidad,
              Jsonb(evidencia), scan_id, 'resolved', 'open', 'resolved'),
-        )
+        ).fetchone()['id']
+        if previos.get(huella) in (None, 'resolved'):  # no existía o estaba resuelto: ahora queda abierto
+            abiertos.add(finding_id)
 
     # Lo abierto de esta fuente que ya no salió se arregló (#23). No se tocan los códigos que la fuente no pudo
     # revisar (sin_cobertura), ni lo que el cliente marcó como riesgo aceptado o falso positivo.
-    conn.execute(
+    cerrados = {f['id'] for f in conn.execute(
         "UPDATE findings SET status = 'resolved', resolved_at = now(), last_scan_id = %s, updated_at = now() "
         "WHERE domain_id = %s AND source_id = %s AND status = 'open' AND fingerprint <> ALL(%s::bytea[]) "
-        'AND rule_id NOT IN (SELECT id FROM scoring_rules WHERE code = ANY(%s::text[]))',
-        (scan_id, domain_id, source_id, [bytes.fromhex(h.huella) for h in resultado.hallazgos],
-         list(resultado.sin_cobertura)),
-    )
+        'AND rule_id NOT IN (SELECT id FROM scoring_rules WHERE code = ANY(%s::text[])) RETURNING id::text',
+        (scan_id, domain_id, source_id, huellas, list(resultado.sin_cobertura)),
+    ).fetchall()}
+    return abiertos, cerrados
 
 
 def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, parcial):
@@ -497,6 +508,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
     En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
     ct_logs y subfinder cuenta una vez. En assets van una sola vez, con sus atributos unidos.
+    new_findings cuenta los hallazgos que el escaneo dejó abiertos y antes no lo estaban: los que insertó y los que
+    reabrió porque estaban en 'resolved'. No cuenta los que ya estaban abiertos ni los que el cliente marcó como
+    riesgo aceptado o falso positivo, que no cambian. resolved_findings cuenta los que pasó a 'resolved' porque su
+    fuente respondió y ya no los dio: nunca los de una fuente caída ni los códigos en sin_cobertura. Un hallazgo que
+    una fuente resuelve y otra reabre en el mismo escaneo quedó como estaba y no cuenta en ninguno.
     `dormir` reemplaza time.sleep (pruebas).
     """
     dormir = dormir or time.sleep
@@ -523,6 +539,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     reintenta = modo == 'vivo'
     con_cupo = modo in MODOS_CON_CUPO
     corridas, activos, hallazgos = [], set(), 0
+    nuevos, resueltos = set(), set()  # id de los hallazgos que este escaneo abrió y los que resolvió
     for codigo in fuentes:
         intento, gastadas, previos = 0, 0, []
         modulo = cargar(codigo)
@@ -550,6 +567,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                        'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura}
             # La marca de vida y la fila van en una transacción: si lo dieron por caído mientras la fuente corría,
             # no se escribe encima de la fila que ya se cerró, y nadie lo puede dar por caído en medio.
+            cambios = None
             with _tx(org, conn) as c:  # una fila por fuente: cada reintento la actualiza
                 vivo = _latido(org, scan_id, c)
                 if vivo:
@@ -562,9 +580,15 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                         (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
                          Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
                     if res.estado == 'succeeded':
-                        _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas)
+                        cambios = _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas)
             if not vivo:
                 return _ya_no_corre(org, scan_id, conn, corridas)
+            if cambios:  # lo que una fuente resuelve y otra reabre en este escaneo (o al revés) no cuenta
+                abiertos, cerrados = cambios
+                resueltos |= cerrados - nuevos
+                nuevos -= cerrados
+                nuevos |= abiertos - resueltos
+                resueltos -= abiertos
             if status != 'retrying':
                 break
             previos.append('Intento %d: %s' % (attempt, (res.error or '')[:300]))
@@ -580,7 +604,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     ok = sum(1 for r in corridas if r['status'] == 'succeeded')
     sin_cobertura = sorted({c for r in corridas if r['status'] == 'succeeded' for c in r['sin_cobertura']})
     estado = 'completed' if ok == len(corridas) and not sin_cobertura else 'failed' if ok == 0 else 'partial'
-    stats = {'assets': len(activos), 'findings': hallazgos, 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
+    stats = {'assets': len(activos), 'findings': hallazgos, 'new_findings': len(nuevos),
+             'resolved_findings': len(resueltos), 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
     if sin_cobertura:
         stats['rules_without_coverage'] = sin_cobertura
     with _tx(org, conn) as c:

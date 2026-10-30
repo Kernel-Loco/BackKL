@@ -144,7 +144,8 @@ class Orquestador(unittest.TestCase):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
         self.assertEqual(resumen['status'], 'completed')
-        self.assertEqual(resumen['stats'], {'assets': 2, 'findings': 1, 'sources_ok': 1, 'sources_failed': 0})
+        self.assertEqual(resumen['stats'], {'assets': 2, 'findings': 1, 'new_findings': 1, 'resolved_findings': 0,
+                                            'sources_ok': 1, 'sources_failed': 0})
         run = self.uno('SELECT r.status, r.attempt, r.raw_payload FROM scan_source_runs r WHERE r.scan_id = %s', s.scan_id)
         self.assertEqual((run['status'], run['attempt']), ('succeeded', 0))
         self.assertEqual(run['raw_payload']['hallazgos'], 1)
@@ -239,6 +240,54 @@ class Orquestador(unittest.TestCase):
         self.assertEqual((f['asset_type'], f['value']), ('domain', 'acme-demo.mx'))
         self.assertEqual(f['evidence']['activo_no_encontrado'], 'nadie.acme-demo.mx')
         self.assertEqual(f['evidence']['caracteristicas'], caracteristicas)
+
+    def conteos(self, scan_id):
+        """(new_findings, resolved_findings) como quedaron en scans.stats, de donde los lee el histórico de la API v1."""
+        stats = self.uno('SELECT stats FROM scans WHERE id = %s', scan_id)['stats']
+        return stats['new_findings'], stats['resolved_findings']
+
+    def con_spf(self, finding_id):
+        """Una respuesta de `ejemplo` que vuelve a dar este hallazgo: la misma huella."""
+        huella = self.uno("SELECT encode(fingerprint, 'hex') AS h FROM findings WHERE id = %s", finding_id)['h']
+        spf = Hallazgo('spf_missing', 'medium', 'acme-demo.mx', 'Sin SPF', {'title': 'Sin SPF'},
+                       {'tipo': 'spf_ausente', 'antiguedad_dias': 0, 'exposicion': 'publica', 'sensibilidad': 'baja'},
+                       huella)
+        return Resultado(**dict(vars(BIEN), hallazgos=[spf]))
+
+    def test_2h_stats_cuenta_lo_que_el_escaneo_abre_y_lo_que_resuelve(self):
+        """new_findings son los hallazgos que el escaneo inserta o reabre, y resolved_findings los que resuelve (RC-55)."""
+        s, f = self.escanear_ejemplo()
+        self.assertEqual(self.conteos(s.scan_id), (1, 0))  # spf_missing sale por primera vez
+        s, _ = self.escanear_ejemplo()
+        self.assertEqual(self.conteos(s.scan_id), (0, 0))  # ya estaba abierto
+        s, _ = self.reescanear(BIEN)
+        self.assertEqual(self.conteos(s.scan_id), (0, 1))
+        s, _ = self.reescanear(self.con_spf(f['id']))
+        self.assertEqual(self.conteos(s.scan_id), (1, 0))  # estaba resuelto y se reabre
+        self.assertEqual(self.estado(f['id'])['status'], 'open')
+
+    def test_2i_no_cuentan_la_fuente_caida_sin_cobertura_ni_lo_que_decidio_el_cliente(self):
+        _, f = self.escanear_ejemplo()
+        for resultado in (FALLA, Resultado(**dict(vars(BIEN), sin_cobertura=['spf_missing']))):
+            s, _ = self.reescanear(resultado)
+            self.assertEqual(self.conteos(s.scan_id), (0, 0))
+        for decision in ('accepted_risk', 'false_positive'):
+            self.conn.execute('UPDATE findings SET status = %s WHERE id = %s', (decision, f['id']))
+            for resultado in (BIEN, self.con_spf(f['id'])):  # ni se resuelve ni se reabre
+                s, _ = self.reescanear(resultado)
+                self.assertEqual(self.conteos(s.scan_id), (0, 0))
+            self.assertEqual(self.estado(f['id'])['status'], decision)
+
+    def test_2j_lo_que_una_fuente_resuelve_y_otra_reabre_en_el_mismo_escaneo_no_cuenta(self):
+        _, f = self.escanear_ejemplo()
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        respuestas = iter([BIEN, self.con_spf(f['id'])])  # `ejemplo` ya no lo da y luego `ct_logs` sí
+        with mock.patch.object(orquestador, 'ejecutar', lambda *a, **k: next(respuestas)):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo', 'ct_logs'], modo='reproducir',
+                                         conn=self.conn)
+        self.assertEqual([r['status'] for r in resumen['sources']], ['succeeded', 'succeeded'])
+        self.assertEqual(self.conteos(s.scan_id), (0, 0))  # empezó abierto y terminó abierto
+        self.assertEqual(self.estado(f['id'])['status'], 'open')
 
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))

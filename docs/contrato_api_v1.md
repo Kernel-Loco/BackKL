@@ -69,7 +69,7 @@ La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`
 | `reason` | `scan`, `intel_update`, `rules_change` o `correction`. `correction` corrige un score guardado mal, sin escaneo ni cambio de reglas, como el de acme-demo.mx en `db/semillas/009_score_demo_motor.sql` |
 | `partial_coverage` | `true` si alguna fuente falló en ese escaneo o no pudo revisar alguno de sus códigos (`sin_cobertura`) |
 | `categories` | En `score.json`, una fila por categoría con nota, banda y peso, en el orden del reto. En `historico.json`, un objeto `{categoría: nota}` para graficar |
-| `new_findings`, `resolved_findings` | Solo en el histórico: hallazgos nuevos y resueltos por el escaneo de ese punto. Dan 0 en un recálculo (`reason` distinto de `scan`), que no encuentra ni resuelve hallazgos, y el portal muestra un guion ahí y con `partial_coverage`. Los puntos de `historico.json` no los traen |
+| `new_findings`, `resolved_findings` | Solo en el histórico: hallazgos nuevos y resueltos por el escaneo de ese punto, de `scans.stats`. Nuevos son los que el escaneo insertó y los que reabrió porque estaban resueltos. Resueltos son los que su fuente respondió y ya no dio, nunca los de una fuente caída ni los códigos en `sin_cobertura` (detalle en `docs/contrato_plugin.md`). Un escaneo cerrado antes de que el orquestador los contara (RC-55) no los guardó y da 0. Dan 0 en un recálculo (`reason` distinto de `scan`), que no encuentra ni resuelve hallazgos, y el portal muestra un guion ahí y con `partial_coverage`. Los puntos de `historico.json` no los traen |
 | `alert` | El umbral de la empresa y si este score dispara `score.above_threshold` |
 
 ## Explicación (`explicacion.json`)
