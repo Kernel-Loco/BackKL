@@ -4,7 +4,7 @@
 
 services:
   db:
-    image: postgres:16.14
+    image: postgres:16.15
     container_name: cirdan-pg16  # las pruebas entran con `docker exec cirdan-pg16`
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -27,7 +27,7 @@ services:
     restart: unless-stopped
 
   valkey:
-    image: valkey/valkey:8.0.2
+    image: valkey/valkey:8.1.10
     container_name: cirdan-valkey
     command: ["valkey-server", "--requirepass", "${VALKEY_PASSWORD:?Falta VALKEY_PASSWORD en .env}", "--save", "", "--appendonly", "no"]
     ports:

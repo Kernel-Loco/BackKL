@@ -3,7 +3,7 @@
     python -m unittest -v pruebas/test_api_v1.py      (con `docker compose up -d`)
 
 Con los datos demo de Acme, las respuestas deben coincidir con los JSON de docs/api_v1/. Las únicas
-diferencias aceptadas son los campos «propuestos» del portal (signer_email, confidence) y los
+diferencias aceptadas son los campos «propuestos» del portal (signer_email) y los
 textos que todavía no calcula el motor de score (#31). Los textos de cada regla (#30) sí se comparan.
 """
 import json
@@ -13,7 +13,7 @@ from pathlib import Path
 from pruebas import sesion
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
-PROPUESTOS = {'signer_email', 'confidence'}
+PROPUESTOS = {'signer_email'}
 
 
 def ejemplo(nombre):
@@ -64,7 +64,8 @@ class ApiV1(unittest.TestCase):
     def test_4_explicacion_y_pesos(self):
         exp = sin_propuestos(self.get(self.acme, '/api/v1/findings/80000000-0000-4000-8000-000000000001/explanation'))
         esperado = ejemplo('explicacion.json')
-        for campo in ('title', 'severity', 'penalty', 'max_penalty', 'factors', 'caracteristicas', 'score_id', 'shap',
+        for campo in ('title', 'severity', 'penalty', 'max_penalty', 'factors', 'caracteristicas', 'score_id',
+                      'model_version', 'model_prediction', 'explanation_model_version', 'confidence', 'shap',
                       'rule_title', 'meaning', 'recommendation'):
             self.assertEqual(exp[campo], esperado[campo], campo)
         pesos = self.get(self.acme, '/api/v1/scoring/weights')
@@ -94,6 +95,48 @@ class ApiV1(unittest.TestCase):
         self.assertEqual([(t['fqdn'], t['expected_value']) for t in txt], [('olmardo.com', 'cirdan-verification=ab439d2b39a7')])
         analista = sesion.login('jordan.tate@acme-demo.mx')
         self.assertEqual(analista.get('/api/v1/domains/txt')[0], 403)
+
+    def test_8_plan_y_simulacion_no_modifican_hallazgos_ni_score(self):
+        score_before = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+        findings_before = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
+        action_plan = self.get(self.acme, '/api/v1/domains/acme-demo.mx/action-plan')
+        self.assertEqual(action_plan['domain'], 'acme-demo.mx')
+        self.assertEqual(action_plan['score_before'], score_before['score'])
+        self.assertTrue(action_plan['actions'])
+
+        selected = [action['id'] for action in action_plan['actions'][:2]]
+        code, simulated = self.acme.post('/api/v1/domains/acme-demo.mx/action-plan/simulate',
+                                         {'action_ids': selected})
+        self.assertEqual(code, 200, simulated)
+        self.assertEqual(simulated['action_ids'], selected)
+        self.assertEqual(simulated['score_before'], score_before['score'])
+        self.assertLessEqual(simulated['score_after'], simulated['score_before'])
+
+        code, error = self.acme.post('/api/v1/domains/acme-demo.mx/action-plan/simulate',
+                                     {'action_ids': ['not-a-plan-action']})
+        self.assertEqual(code, 422, error)
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), score_before)
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings'), findings_before)
+
+    def test_9_actual_del_plan_igual_al_score_guardado_y_exportaciones(self):
+        for fqdn in ('acme-demo.mx', 'acme-tienda.mx', 'acme-portal.mx'):
+            score = self.get(self.acme, '/api/v1/domains/%s/score' % fqdn)
+            action_plan = self.get(self.acme, '/api/v1/domains/%s/action-plan' % fqdn)
+            self.assertEqual((action_plan['score_before'], action_plan['band_before']), (score['score'], score['band']), fqdn)
+            self.assertEqual(action_plan['category_scores_before'],
+                             {c['category']: c['score'] for c in score['categories']}, fqdn)
+            if fqdn == 'acme-demo.mx':
+                # La semilla guarda 68 a mano y el motor da 60 por el piso de la brecha crítica: solo resolverla baja el score.
+                self.assertEqual([(a['id'], a['score_after'], a['score_reduction']) for a in action_plan['actions']],
+                                 [('breach_exposure', 16, 44), ('dmarc_missing', 60, 0), ('cert_expired', 60, 0),
+                                  ('outdated_software', 60, 0)])
+            else:
+                self.assertEqual(action_plan['actions'], [], fqdn)
+            for formato, tipo in (('csv', 'text/csv'), ('json', 'application/json')):
+                url = '%s/api/v1/domains/%s/action-plan/export?formato=%s' % (sesion.BASE, fqdn, formato)
+                with self.acme.opener.open(url, timeout=10) as r:
+                    self.assertEqual(r.status, 200, url)
+                    self.assertTrue(r.headers['Content-Type'].startswith(tipo), url)
 
 
 if __name__ == '__main__':

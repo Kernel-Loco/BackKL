@@ -11,8 +11,8 @@ dominio autorizado y el TXT de _dmarc.<dominio>, y devuelve:
   red ni se graba: al reproducir sale de la base del momento. Sin la base, esos datos quedan 'No disponible' con un
   aviso (geoip.aviso_sin_base), una vez por corrida y solo si hubo alguna IP ubicable. La fuente no falla por eso.
 - hallazgos de configuración: spf_missing, spf_allow_all, dmarc_missing y dmarc_policy_none.
-Hasta que #23 (RC-55) guarde activos y hallazgos, nada de esto se escribe en assets ni en findings: activos y
-hallazgos quedan en el Resultado, y scan_source_runs solo guarda sus conteos, avisos y sin_cobertura.
+Desde un escaneo, el orquestador guarda activos y hallazgos en assets y findings (#23). scan_source_runs solo
+guarda sus conteos, avisos y sin_cobertura.
 
 Reglas de SPF, sobre los TXT de la raíz que empiezan con v=spf1 (RFC 7208, 4.5: sin distinguir mayúsculas, sin recortar
 el texto y seguido de un espacio o del fin, así que con un espacio antes o un tabulador después no es SPF):

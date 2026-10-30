@@ -11,7 +11,7 @@ Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa 
 | `cirdan/ml/` | Dataset semisintético del ML (#33, RC-65): plantillas, características del reto, armado del lote y acuerdo entre etiquetadores. El método está en `docs/dataset_ml.md` |
 | `cirdan/orquestador/` | Orquestador de escaneos (#22): solo escanea con autorización vigente y TXT verificado |
 | `cirdan/recolectores/` | Contrato de plugin (#13), recolectores OSINT pasivos (crt.sh con Cert Spotter, #14 y #14b, subfinder en modo pasivo, #14b, DNS con SPF y DMARC, #15, secretos y correos en GitHub, #16, servicios y CVE con Shodan InternetDB, #17, registrador y vencimiento del dominio con RDAP y WHOIS por el puerto 43 como respaldo, #15b, y uno de ejemplo para pruebas), la ubicación de las IP con la base local de DB-IP Lite (`geoip.py`, #15b, no es un recolector) y sus respuestas grabadas para el respaldo de las demos (hoy solo está la del recolector de ejemplo) |
-| `cirdan/score/` | Bandas, piso, ponderado y alerta del criterio de criticidad (#29) |
+| `cirdan/score/` | Criterio de criticidad (#29) y cálculo explicable por hallazgo, categoría y dominio (#31) |
 | `datos/` | Datos del ML. En `datos/ml/rc65/` están el lote, la copia de cada etiquetador, las etiquetas del LLM y el dataset (#33, RC-65). En `datos/geo/` van las bases de DB-IP Lite, que se bajan a mano y no se suben al repo (ver Geolocalización y ASN de las IP) |
 | `db/` | Base PostgreSQL 16: migraciones, semillas y consultas |
 | `docs/` | Documentos del proyecto, con su índice |
@@ -35,12 +35,16 @@ Todos los comandos se corren desde la raíz del repo.
 2. Copia `.env.example` como `.env`, cambia las tres contraseñas (`POSTGRES_PASSWORD`, `CIRDAN_APP_PASSWORD` y `VALKEY_PASSWORD`) y genera `TOTP_ENCRYPTION_KEY` con el comando que trae el archivo.
 3. Levanta todo: `docker compose up -d --build`. La primera vez crea la base `cirdan` y carga migraciones y semillas (tarda unos segundos). La API queda en http://127.0.0.1:8000.
 4. Comprueba: `curl http://127.0.0.1:8000/health` responde 200 con `"role": "cirdan_app"`, y `docker compose ps` muestra los tres contenedores `healthy`.
-5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (56, contra la base y la API. Se saltan 2: una sin `EN_VIVO=1`, que también consulta InternetDB, el bootstrap de IANA y el registro RDAP del dominio, y test_11 de test_auth.py sin `FORWARDED_ALLOW_IPS='*'`), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py` (49, el orquestador y el explorador de la base dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py` (448, sin base ni red. Se saltan 2 de test_github.py que piden git y gitleaks, ver Recolector de GitHub) y `python -m unittest pruebas/test_dataset_ml.py` (68, el lote del ML de RC-65, también sin base ni red).
+5. Corre las pruebas: `python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py` (56, contra la base y la API. Se saltan 2: una sin `EN_VIVO=1`, que también consulta InternetDB, el bootstrap de IANA y el registro RDAP del dominio, y test_11 de test_auth.py sin `FORWARDED_ALLOW_IPS='*'`), `docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py` (49, el orquestador y el explorador de la base dentro del contenedor) y `python -m unittest pruebas/test_criterio.py pruebas/test_motor_score.py pruebas/test_plan_accion.py pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py` (458, sin base ni red. Se saltan 2 de test_github.py que piden git y gitleaks, ver Recolector de GitHub) y `python -m unittest pruebas/test_dataset_ml.py` (68, el lote del ML de RC-65, también sin base ni red).
 6. Instala el candado de secretos una vez: `pip install pre-commit && pre-commit install`. Desde ahí gitleaks revisa cada commit.
 
 Otros comandos: `docker compose logs -f api` (ver la API), `docker compose down` (apagar, la base se conserva) y `docker compose down -v` (borrar la base para volver a cargarla desde cero en el siguiente `up`). Para revisar todo el historial con gitleaks: `docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 git /repo`.
 
 Para trabajar en la API sin reconstruir la imagen: `docker compose stop api`, crea un entorno virtual (`python3 -m venv .venv` y `source .venv/bin/activate`, o `source .venv/Scripts/activate` en Git Bash), `pip install -r requirements.txt` y `python -m uvicorn cirdan.api.main:app --port 8000 --reload`. Fuera de Docker la API lee el `.env` de la raíz.
+
+## CI (#11)
+
+`.github/workflows/pruebas.yml` corre en cada PR a `dev` o `main` (y en cada push a esas ramas). Revisa que las migraciones de `db/migraciones/` se llamen `NNN_descripcion.sql` sin huecos ni repetidas, crea un `.env` con contraseñas al azar (ningún secreto vive en el repo), levanta el compose desde cero, que aplica en orden migraciones y semillas, y corre las pruebas del paso 5 más `pruebas/test_modelo_ml.py` dentro del contenedor (con `datos/ml` montado). No corre las pruebas en vivo (`EN_VIVO=1`): el CI no consulta fuentes externas. Las pruebas de la base suponen la base recién cargada: en una base local que ya escaneó olmardo.com, test_6 de `test_api_v1.py` ve su score y falla, pero en el CI siempre pasa.
 
 ## Base de datos
 
@@ -117,7 +121,7 @@ docker compose exec api python -m cirdan.auth.demo codigo jordan.tate@acme-demo.
 | `GET /api/v1/domains/{fqdn}/assets` y `GET /api/v1/scans` | Activos y escaneos (provisionales: aún no están en el contrato) |
 | `GET /api/v1/domains/txt` | Registro TXT de cada dominio (solo Admin) |
 
-Con los datos demo de Acme responden igual que los JSON de `docs/api_v1/` (lo revisa `pruebas/test_api_v1.py`). Mientras #23 no guarde las características del reto en la evidencia, la API las calcula con las mismas reglas del contrato. La semilla `003_titulos_espanol.sql` pone en español los títulos de los hallazgos demo.
+Con los datos demo de Acme responden igual que los JSON de `docs/api_v1/` (lo revisa `pruebas/test_api_v1.py`). Los hallazgos de un escaneo traen guardadas las características del reto en la evidencia (#23). Para los de la semilla, que no las traen, la API las calcula con las mismas reglas del contrato. La semilla `003_titulos_espanol.sql` pone en español los títulos de los hallazgos demo.
 
 `cirdan/api/explorer.py` agrega la página `/demo` y los 2 endpoints que usa, `GET /db/tables` y `GET /db/tables/{table}/rows`. Solo existen con `DEMO_EXPLORER=true` (ver Vista visual de la base). Piden sesión y toman la empresa de la sesión, como el resto de la API. Las tablas solo las ve el rol Admin, como `GET /api/v1/domains/txt`, porque traen usuarios, bitácora y valores TXT. Ninguna ruta acepta ya `X-Organization` (RC-58).
 
@@ -136,7 +140,7 @@ El 14 oct 2026 pasaron las 22 pruebas (8 de la base, 6 de la API y 8 del inicio 
 1. **Revisa el dominio y la autorización:** que el dominio esté verificado y no en pausa, y que haya una carta sin revocar con la fecha de hoy dentro de su vigencia.
 2. **Consulta el TXT en DNS** (1.1.1.1, con `dnspython`) y guarda la evidencia en `dns_txt_verifications` con `check_reason = 'pre_scan'` y su resultado (`match`, `mismatch`, `missing` o `dns_error`).
 3. **Solo con todo en orden crea la fila en `scans`.** El trigger de la base vuelve a exigir carta vigente y TXT `match` de la última hora: es el segundo candado.
-4. **Corre cada recolector** con `contrato.ejecutar()` (#13) y llena `scan_source_runs` con `siguiente_estado()`. En vivo, una fuente que falla queda en `retrying` y se vuelve a correr en el mismo escaneo a 1, 5 y 25 minutos. No se reintenta al reproducir, porque la respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la fuente queda en `failed`. La fila de la fuente suma las consultas de todos sus intentos y guarda en sus avisos los errores de los anteriores. En vivo y al grabar, antes de cada intento reserva el cupo del día de la fuente, y una fuente sin cupo queda en `failed` sin reintento (ver Límite diario por fuente). Si no se recupera, el escaneo termina `partial` si otra fuente respondió, o `failed` si ninguna respondió. También termina `partial` si una fuente respondió pero dejó códigos en `sin_cobertura`, por ejemplo crt.sh con el respaldo de Cert Spotter: esos códigos van en `stats.rules_without_coverage` y no se muestran como 0. crt.sh nunca busca dominios parecidos desde un escaneo (ver Recolector de crt.sh), así que `lookalike_domain` siempre va ahí y un escaneo con crt.sh arriba también termina `partial`. Guardar activos y hallazgos en la base es de #23.
+4. **Corre cada recolector** con `contrato.ejecutar()` (#13) y llena `scan_source_runs` con `siguiente_estado()`. En vivo, una fuente que falla queda en `retrying` y se vuelve a correr en el mismo escaneo a 1, 5 y 25 minutos. No se reintenta al reproducir, porque la respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la fuente queda en `failed`. La fila de la fuente suma las consultas de todos sus intentos y guarda en sus avisos los errores de los anteriores. En vivo y al grabar, antes de cada intento reserva el cupo del día de la fuente, y una fuente sin cupo queda en `failed` sin reintento (ver Límite diario por fuente). Si no se recupera, el escaneo termina `partial` si otra fuente respondió, o `failed` si ninguna respondió. También termina `partial` si una fuente respondió pero dejó códigos en `sin_cobertura`, por ejemplo crt.sh con el respaldo de Cert Spotter: esos códigos van en `stats.rules_without_coverage` y no se muestran como 0. crt.sh nunca busca dominios parecidos desde un escaneo (ver Recolector de crt.sh), así que `lookalike_domain` siempre va ahí y un escaneo con crt.sh arriba también termina `partial`. Los activos y hallazgos de cada fuente que respondió se guardan en `assets` y `findings` sin duplicar (por la huella), con las características del reto en la evidencia. Lo abierto de esa fuente que ya no salió queda `resolved`, salvo los códigos en `sin_cobertura` y lo que el cliente marcó como riesgo aceptado o falso positivo. Un hallazgo cuyo activo no vino en la respuesta se guarda en el dominio con `activo_no_encontrado` en la evidencia, en vez de tumbar el escaneo (#23, RC-55).
 
 Los motivos de rechazo usan los códigos de `scan_eligibility.reasons` del contrato #21: `authorization_missing`, `authorization_expired`, `txt_not_verified`, `domain_paused`, etc., más `scan_in_progress` y `live_scan_not_allowed`. Cada aceptación y cada rechazo quedan en la bitácora (`scan.requested`, `scan.rejected`, `scan.finished` y `scan.abandoned`).
 
@@ -251,7 +255,7 @@ Un TXT es SPF si empieza con `v=spf1` sin distinguir mayúsculas y seguido de un
 
 Una falla del DNS no cuenta como «no hay registro». Un NXDOMAIN de `_dmarc.<dominio>` o una respuesta vacía (NoAnswer) sí lo son y dan `dmarc_missing` o `spf_missing`, pero un tiempo agotado o un SERVFAIL deja un aviso y, si fue el TXT de la raíz o el de `_dmarc`, sus códigos quedan en `sin_cobertura` y el resumen dice `Cobertura parcial`. Si la raíz no existe (NXDOMAIN), no hay activos ni hallazgos: la fuente deja un aviso y los 4 códigos van a `sin_cobertura`. Si fallan las 6 consultas la fuente queda en `failed` para que el orquestador la reintente. `sp=none` y `pct` menor a 100 no generan hallazgo, y un `redirect=` sin `all` solo da un aviso, porque no se sigue.
 
-Los A y AAAA salen como activos `ip` con `host` igual al dominio y con su país, ASN, proveedor y CDN de la base local de DB-IP Lite (ver Geolocalización y ASN de las IP), y los MX y NS que están dentro del dominio como activos `subdomain`. Los de un tercero (Cloudflare, Google) y todo el resto del DNS quedan solo en `atributos['dns']` del activo `domain`. Hasta que #23 guarde activos y hallazgos, no se escribe nada en `assets` ni en `findings`. De los TXT que no son SPF ni DMARC solo se guarda el nombre antes del igual y cuántos hay, nunca el valor: el `cirdan-verification=<token>` del dominio no sale en el resultado, en el resumen ni en las grabaciones.
+Los A y AAAA salen como activos `ip` con `host` igual al dominio y con su país, ASN, proveedor y CDN de la base local de DB-IP Lite (ver Geolocalización y ASN de las IP), y los MX y NS que están dentro del dominio como activos `subdomain`. Los de un tercero (Cloudflare, Google) y todo el resto del DNS quedan solo en `atributos['dns']` del activo `domain`. Desde un escaneo, esos activos y hallazgos se guardan en `assets` y `findings` (ver Orquestador de escaneos). De los TXT que no son SPF ni DMARC solo se guarda el nombre antes del igual y cuántos hay, nunca el valor: el `cirdan-verification=<token>` del dominio no sale en el resultado, en el resumen ni en las grabaciones.
 
 Una consulta en vivo a un dominio solo se corre con carta de autorización vigente y con el OK de la persona, y `--grabar` solo con el dominio de prueba. Las pruebas no consultan nada.
 
@@ -295,7 +299,7 @@ python -m unittest -v pruebas/test_github.py                     # 59 pruebas si
 docker compose run --rm -v "$(pwd -W)/pruebas:/app/pruebas:ro" -v "$(pwd -W)/db:/app/db:ro" -v "$(pwd -W)/docs:/app/docs:ro" api python -m unittest pruebas.test_github.Integracion   # las 2, con git y gitleaks reales sobre un repo local
 ```
 
-Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos. Hasta que #23 (RC-55) guarde activos y hallazgos, nada de esto llega a `assets` ni a `findings`.
+Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos. Desde un escaneo, lo que encuentra se guarda en `assets` y `findings` (ver Orquestador de escaneos).
 
 **Versión.** El `Dockerfile` baja el tar.gz del release de gitleaks 8.21.2 para cada arquitectura (el release llama x64 a amd64) con su sha256 de `gitleaks_8.21.2_checksums.txt`, y deja la licencia en `/usr/share/licenses/gitleaks/LICENSE` (ver `NOTICE`). Es la misma versión del pre-commit. Dependabot no la vigila: para subirla se cambian las dos URL y los dos hash del `Dockerfile`, la versión en `NOTICE` y la de `.pre-commit-config.yaml`.
 
@@ -339,7 +343,7 @@ python -m cirdan.recolectores.shodan olmardo.com --json          # el resultado 
 python -m unittest -v pruebas/test_shodan.py                     # 52 pruebas, sin red ni dnspython
 ```
 
-Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. El aviso fijo de los límites (solo IPv4 y sin llave) sale en toda corrida y no cuenta. Hasta que #23 (RC-55) guarde activos y hallazgos, nada de esto llega a `assets` ni a `findings`.
+Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. El aviso fijo de los límites (solo IPv4 y sin llave) sale en toda corrida y no cuenta. Desde un escaneo, lo que encuentra se guarda en `assets` y `findings` (ver Orquestador de escaneos).
 
 ## Recolector de RDAP (#15b)
 
@@ -373,7 +377,7 @@ python -m cirdan.recolectores.rdap olmardo.com --json          # el resultado co
 python -m unittest -v pruebas/test_rdap.py                     # 36 pruebas, sin red (tampoco al puerto 43)
 ```
 
-Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. Hasta que #23 (RC-55) guarde activos y hallazgos, nada de esto llega a `assets` ni a `findings`.
+Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. Desde un escaneo, lo que encuentra se guarda en `assets` y `findings` (ver Orquestador de escaneos).
 
 ## Geolocalización y ASN de las IP (#15b)
 
@@ -414,6 +418,12 @@ Más alto = más riesgo. Bandas 0 a 39 bajo, 40 a 59 medio, 60 a 79 alto y 80 a 
 
 ```bash
 python -m unittest -v pruebas/test_criterio.py   # 13 pruebas, sin base de datos
+```
+
+El motor de score de #31 calcula aportes por hallazgo, notas por categoría, ponderado y piso crítico. La fórmula acordada y el texto que explica el piso están en `docs/criterio_criticidad.md`.
+
+```bash
+python -m unittest -v pruebas/test_motor_score.py   # sin base de datos
 ```
 
 ## Catálogo de reglas (#30)

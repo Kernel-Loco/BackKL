@@ -26,6 +26,10 @@ Las bandas están ancladas al ejemplo del reto: un dominio con 68 está en **rie
 3. **Piso:** si el dominio tiene un hallazgo crítico vigente, su score queda al menos en 60, que es la banda alto. Con dos o más, queda al menos en 80, que es la banda crítico.
 4. **Score final:** el mayor entre el ponderado y el piso. Si el piso lo subió, el detalle del score lo dice (#31).
 
+### Aporte de cada hallazgo (#31)
+
+Para el método `rules`, cada severidad equivale a puntos (low = 25, medium = 50, high = 75 y critical = 100). El aporte de un hallazgo vigente a su categoría es `min(max_penalty, puntos_de_severidad × peso_de_regla)`. Se suman los aportes por categoría hasta un máximo de 100; los hallazgos `resolved` y `false_positive` no aportan, mientras `open` y `accepted_risk` sí. El motor conserva severidad, regla, penalización y factores en `score_contributions` para explicar cada cálculo. Si una fuente falla o deja reglas sin cobertura, el score se guarda con `partial_coverage = true`.
+
 ### Por qué hay un piso
 
 El ponderado es un promedio. Un dominio con todas sus categorías limpias y una sola fuga de credenciales crítica podría quedar en bajo, y el promedio escondería lo más grave. El piso evita eso.
@@ -67,6 +71,8 @@ La alerta `score.above_threshold` se crea en cada cálculo en que el score queda
 - La pone su regla del catálogo (#30) con su severidad base: `critical`, `high`, `medium` o `low`.
 - El motor puede subirla por sus factores, por ejemplo un hallazgo con regla `high` que pasa a `critical`, y lo registra en la bitácora como `finding.severity_changed`.
 - Con la versión A del ML (#34 a #36), el clasificador predice alta, media o baja. **Propuesta para #36, que confirma Emilio:** baja corresponde a `low`, media a `medium` y alta a `high`. Alta queda en `critical` cuando el motor por reglas ya dejó el hallazgo en `critical`, por su regla o por sus factores. El modelo nunca baja un hallazgo que el motor por reglas dejó en `critical`. Así lo que cuenta para el piso queda definido también con `method = 'ml'`. Si Emilio lo decide en #34, alta también pasa a `critical` cuando la probabilidad de alta supera un corte, y así el modelo puede marcar críticos que las reglas no ven.
+
+La v1 usa ExtraTrees sobre 425 filas etiquetadas por un LLM, con una partición fija por plantilla de 287 para entrenamiento y 138 para prueba. No hay revisión humana de esas etiquetas: el macro-F1 de 0.724 frente a 0.588 de reglas y 0.615 de sensibilidad es una comparación experimental, no validación clínica/operativa ni garantía de producción. `confidence` es la salida de `predict_proba` y no está calibrada; sirve como señal del modelo, no como probabilidad verificada. El clasificador solo se usa para calcular el score si supera el baseline de reglas. Si no lo supera, el score sigue por reglas y la predicción/SHAP quedan disponibles como explicación; si falta el artefacto o falla la inferencia, el snapshot registra `method = 'rules'` y el motivo, sin explicación ML.
 
 ## Quién usa qué
 

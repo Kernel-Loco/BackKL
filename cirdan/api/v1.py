@@ -6,19 +6,21 @@ el piso salen del criterio de criticidad (cirdan/score/criterio.py, #29).
 import uuid
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import Response
 
 from cirdan import orquestador
 from cirdan.auth.deps import Session, current_session, require_roles
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import transaction
-from cirdan.score import criterio
+from cirdan.score import criterio, motor, plan as plan_accion
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
 
 # ---------------------------------------------------------------- características del reto
-# Mientras #23 no las guarde en la evidencia, se calculan con las mismas reglas del contrato #21.
+# Desde #23 vienen guardadas en la evidencia. Para los hallazgos de la semilla, que no las traen, se calculan
+# con las mismas reglas del contrato #21.
 TIPO = {
     'breach_exposure': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
     'cert_expiring_soon': 'certificado_por_vencer', 'outdated_software': 'software_desactualizado',
@@ -170,7 +172,8 @@ def domains(session: Session = Depends(current_session)):
 
 FINDINGS_SQL = '''
 SELECT f.id::text, f.evidence, a.value AS asset, a.asset_type, a.first_seen_at AS asset_first_seen,
-       r.category, r.code AS rule_code, r.base_severity, s.code AS source, f.severity, f.status,
+    r.category, r.code AS rule_code, r.base_severity, s.code AS source,
+    coalesce(sc_score.severity, f.severity) AS severity, f.status,
        f.cve_id, c.cvss_base_score AS cvss, c.epss_score AS epss, coalesce(c.in_kev, false) AS in_kev,
        f.detected_at, f.last_scan_id::text, sc.queued_at AS scan_at,
        b.breach_name, b.breach_date, b.data_classes,
@@ -183,8 +186,12 @@ SELECT f.id::text, f.evidence, a.value AS asset, a.asset_type, a.first_seen_at A
   LEFT JOIN scans sc   ON sc.id = f.last_scan_id
   LEFT JOIN cves c     ON c.cve_id = f.cve_id
   LEFT JOIN breach_exposures b ON b.finding_id = f.id
+    LEFT JOIN LATERAL (SELECT x.severity FROM domain_scores ds
+                                         JOIN score_contributions x ON x.score_id = ds.id AND x.finding_id = f.id
+                                         WHERE ds.domain_id = f.domain_id ORDER BY ds.computed_at DESC LIMIT 1) sc_score ON true
  WHERE d.fqdn = %s AND f.status = 'open'
- ORDER BY array_position(ARRAY['critical','high','medium','low'], f.severity), f.detected_at DESC, f.id
+ ORDER BY array_position(ARRAY['critical','high','medium','low'], coalesce(sc_score.severity, f.severity)),
+                    f.detected_at DESC, f.id
 '''
 
 
@@ -214,7 +221,8 @@ def domain_findings(fqdn: str, session: Session = Depends(current_session)):
 
 SCORES_SQL = '''
 SELECT ds.id::text AS score_id, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
-       ds.computed_at, rs.version AS rule_set_version, rs.category_weights, sc.stats,
+    ds.model_version, ds.model_fallback_reason, ds.computed_at,
+    rs.version AS rule_set_version, rs.category_weights, sc.stats,
        (SELECT count(*) FROM score_contributions x WHERE x.score_id = ds.id AND x.severity = 'critical') AS critical_at_time
   FROM domain_scores ds
   JOIN domains d ON d.id = ds.domain_id
@@ -233,6 +241,8 @@ def _score_base(row, critical_open):
         'weighted': calc['ponderado'], 'floor': calc['piso'], 'floor_applied': row['score'] > calc['ponderado'],
         'critical_open': critical_open, 'method': row['method'], 'rule_set_version': row['rule_set_version'],
         'reason': row['reason'], 'partial_coverage': row['partial_coverage'], 'computed_at': row['computed_at'],
+        'floor_message': motor.mensaje_piso(calc, critical_open),
+        'model_version': row['model_version'], 'model_fallback_reason': row['model_fallback_reason'],
     }, weights
 
 
@@ -266,13 +276,111 @@ def score_history(fqdn: str, session: Session = Depends(current_session)):
     return {'domain': fqdn, 'items': items, 'total': len(items)}
 
 
+# ---------------------------------------------------------------- plan de acción y simulador (#42, #70)
+
+def _contexto_plan(session, fqdn):
+    domain_id = _domain_id(session, fqdn)
+    with transaction(session.org_id) as conn:
+        score = conn.execute(
+            'SELECT id::text, rule_set_id::text, score, category_scores, method, partial_coverage FROM domain_scores '
+            'WHERE domain_id = %s ORDER BY computed_at DESC LIMIT 1', (domain_id,),
+        ).fetchone()
+        if score:
+            rule_set_id, method, parcial = score['rule_set_id'], score['method'], score['partial_coverage']
+        else:
+            active = conn.execute('SELECT id::text FROM scoring_rule_sets WHERE is_active').fetchone()
+            if not active:
+                raise HTTPException(409, 'El dominio aún no tiene un juego de reglas activo')
+            rule_set_id, method, parcial = active['id'], 'rules', False
+
+        rule_set = conn.execute(
+            'SELECT category_weights FROM scoring_rule_sets WHERE id = %s', (rule_set_id,),
+        ).fetchone()
+        reglas = {r['code']: r for r in conn.execute(
+            'SELECT r.id::text, r.code, r.category, r.base_severity, r.weight, r.max_penalty, t.recommendation '
+            'FROM scoring_rules r JOIN scoring_rule_texts t '
+            'ON t.code = r.code WHERE r.rule_set_id = %s',
+            (rule_set_id,),
+        ).fetchall()}
+        hallazgos = conn.execute(
+            'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status '
+            'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id '
+            'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
+            (domain_id, list(motor.ESTADOS_PUNTUABLES)),
+        ).fetchall()
+        severidades = None
+        if method == 'ml' and score:
+            severidades = {r['finding_id']: r['severity'] for r in conn.execute(
+                'SELECT finding_id::text, severity FROM score_contributions WHERE score_id = %s',
+                (score['id'],),
+            ).fetchall()}
+            faltantes = [h['id'] for h in hallazgos if h['id'] not in severidades]
+            if faltantes:
+                raise HTTPException(409, 'No hay severidad de ML guardada para todos los hallazgos vigentes')
+
+    pesos = {k: float(v) for k, v in rule_set['category_weights'].items()}
+    # El 'Actual' del plan es el score guardado, el mismo que muestra /score.
+    guardado = {'score': score['score'], 'category_scores': score['category_scores']} if score else None
+    return domain_id, reglas, pesos, hallazgos, method, severidades, parcial, guardado
+
+
+def _plan_data(session, fqdn):
+    _, reglas, pesos, hallazgos, method, severidades, parcial, guardado = _contexto_plan(session, fqdn)
+    try:
+        return plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial, guardado)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@router.get('/domains/{fqdn}/action-plan', summary='Plan de acción con el impacto estimado por acción')
+def action_plan(fqdn: str, session: Session = Depends(current_session)):
+    return _plan_data(session, fqdn)
+
+
+@router.post('/domains/{fqdn}/action-plan/simulate', summary='Simula una o varias acciones sin guardar cambios')
+def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
+                         session: Session = Depends(current_session)):
+    _, reglas, pesos, hallazgos, method, severidades, parcial, guardado = _contexto_plan(session, fqdn)
+    if not action_ids or len(action_ids) > 100 or any(not isinstance(action_id, str) for action_id in action_ids):
+        raise HTTPException(422, 'Selecciona entre 1 y 100 acciones del plan')
+    try:
+        resultado = plan_accion.simular(hallazgos, reglas, pesos, action_ids, severidades, guardado)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    resultado['domain'] = fqdn
+    resultado['action_ids'] = action_ids
+    resultado['partial_coverage'] = parcial
+    resultado['method'] = method
+    return resultado
+
+
+@router.get('/domains/{fqdn}/action-plan/export', summary='Descarga el plan de acción en CSV o JSON')
+def export_action_plan(fqdn: str, formato: str = Query(default='json'),
+                       session: Session = Depends(current_session)):
+    if formato not in ('csv', 'json'):
+        raise HTTPException(422, "El formato debe ser 'csv' o 'json'")
+    data = _plan_data(session, fqdn)
+    if formato == 'csv':
+        return Response(
+            content=plan_accion.exportar_csv(data),
+            media_type='text/csv; charset=utf-8',
+            headers={'Content-Disposition': 'attachment; filename="%s-plan.csv"' % fqdn},
+        )
+    return Response(
+        content=plan_accion.exportar_json(data),
+        media_type='application/json; charset=utf-8',
+        headers={'Content-Disposition': 'attachment; filename="%s-plan.json"' % fqdn},
+    )
+
+
 # ---------------------------------------------------------------- explicación
 
 EXPLANATION_SQL = '''
-SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, f.severity, r.base_severity, r.category,
+SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, coalesce(x.severity, f.severity) AS severity,
+       r.base_severity, r.category,
        r.code AS rule_code, r.max_penalty, a.value AS asset, a.asset_type, a.first_seen_at AS asset_first_seen,
        f.detected_at, sc.queued_at AS scan_at, b.breach_date,
-       ds.id::text AS score_id, ds.computed_at, ds.method, x.penalty, x.factors,
+    ds.id::text AS score_id, ds.computed_at, ds.method, ds.model_version, x.penalty, x.factors,
        t.title AS rule_title, t.meaning, t.recommendation
   FROM findings f
   JOIN domains d ON d.id = f.domain_id
@@ -305,11 +413,15 @@ def finding_explanation(finding_id: str, session: Session = Depends(current_sess
         'severity': f['severity'], 'base_severity': f['base_severity'], 'category': f['category'], 'rule_code': f['rule_code'],
         'rule_title': f['rule_title'], 'meaning': f['meaning'],
         'score_id': f['score_id'], 'computed_at': f['computed_at'], 'method': f['method'] or 'rules',
+        'model_version': f['model_version'],
         'penalty': float(f['penalty']) if f['penalty'] is not None else 0.0, 'max_penalty': float(f['max_penalty']),
         'factors': factors, 'caracteristicas': caracteristicas(f),
         'summary': RESUMEN[f['severity']],
         'recommendation': f['recommendation'],
-        'confidence': None, 'shap': None,
+        'confidence': (f['factors'] or {}).get('confidence'),
+        'model_prediction': (f['factors'] or {}).get('model_prediction'),
+        'explanation_model_version': (f['factors'] or {}).get('explanation_model_version'),
+        'shap': (f['factors'] or {}).get('shap'),
     }
 
 

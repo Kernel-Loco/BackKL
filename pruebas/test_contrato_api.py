@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_contrato_api.py
 from cirdan.recolectores import contrato  # noqa: E402
-from cirdan.score import criterio  # noqa: E402
+from cirdan.score import criterio, motor  # noqa: E402
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
 
@@ -68,6 +68,7 @@ class Score(unittest.TestCase):
         r = calcular(notas, SCORE['critical_open'])
         self.assertEqual((SCORE['weighted'], SCORE['floor'], SCORE['score'], SCORE['band'], SCORE['floor_applied']),
                          (r['ponderado'], r['piso'], r['score'], r['banda'], r['piso_aplicado']))
+        self.assertEqual(SCORE['floor_message'], motor.mensaje_piso(r, SCORE['critical_open']))
 
     def test_2_categorias_con_su_peso_y_banda(self):
         self.assertEqual([c['category'] for c in SCORE['categories']], list(criterio.CATEGORIAS))
@@ -90,6 +91,7 @@ class Historico(unittest.TestCase):
             r = calcular(p['categories'], p['critical_open'])
             self.assertEqual((p['weighted'], p['floor'], p['score'], p['band'], p['floor_applied']),
                              (r['ponderado'], r['piso'], r['score'], r['banda'], r['piso_aplicado']), p['computed_at'])
+            self.assertEqual(p['floor_message'], motor.mensaje_piso(r, p['critical_open']), p['computed_at'])
 
     def test_2_del_mas_viejo_al_mas_nuevo_y_termina_en_el_score_actual(self):
         fechas = [p['computed_at'] for p in HISTORICO['items']]
@@ -148,9 +150,13 @@ class Explicacion(unittest.TestCase):
         regla = next(r for r in PESOS['rules'] if r['code'] == EXPLICACION['rule_code'])
         self.assertEqual(EXPLICACION['max_penalty'], regla['max_penalty'])
 
-    def test_3_shap_solo_con_ml(self):
-        if EXPLICACION['method'] == 'rules':
+    def test_3_shap_cuando_hay_modelo_explicativo(self):
+        if EXPLICACION['explanation_model_version'] is None:
+            self.assertIsNone(EXPLICACION['model_prediction'])
+            self.assertIsNone(EXPLICACION['confidence'])
             self.assertIsNone(EXPLICACION['shap'])
+        else:
+            self.assertEqual(len(EXPLICACION['shap']), 3)
 
     def test_4_textos_de_su_regla(self):
         regla = next(r for r in PESOS['rules'] if r['code'] == EXPLICACION['rule_code'])

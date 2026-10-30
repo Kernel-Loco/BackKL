@@ -8,8 +8,8 @@ Dos pasos:
 1. `solicitar()`: revisa el dominio y la autorización, consulta el TXT, guarda la evidencia en
    `dns_txt_verifications` (check_reason 'pre_scan') y, si todo cumple, crea la fila en `scans`.
 2. `correr()`: ejecuta cada recolector con `contrato.ejecutar()` (#13) y llena `scan_source_runs`
-   con `siguiente_estado()`. En vivo reintenta ahí mismo la fuente que falla. Guardar activos y
-   hallazgos en la base es de #23.
+   con `siguiente_estado()`. En vivo reintenta ahí mismo la fuente que falla. Guarda activos y
+   hallazgos de cada fuente que respondió (#31 y #23) y da por resuelto lo que esa fuente ya no encontró.
 
 Cada fuente tiene un límite diario de consultas de toda la plataforma en `data_sources` (#13b, RC-184).
 Antes de cada corrida que sale a la red, `correr()` reserva el máximo de la corrida y al terminar ajusta a lo
@@ -22,6 +22,7 @@ escribir en sus fuentes.
 
     python -m cirdan.orquestador olmardo.com            (ver __main__.py)
 """
+import ipaddress
 import logging
 import threading
 import time
@@ -37,6 +38,7 @@ from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar
 from cirdan.recolectores.contrato import Resultado, ejecutar, siguiente_estado
+from cirdan.score import motor
 
 log = logging.getLogger(__name__)
 
@@ -268,6 +270,150 @@ def _latido(org, scan_id, conn=None):
                          (scan_id,)).fetchone() is not None
 
 
+def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas):
+    atributos_raiz = {}
+    for activo in resultado.activos:
+        if activo.tipo == 'domain' and activo.valor == resultado.dominio:
+            atributos_raiz.update(activo.atributos)
+    raiz = conn.execute(
+        "INSERT INTO assets (organization_id, domain_id, asset_type, value, attributes, first_seen_at, last_seen_at) "
+        "VALUES (%s, %s, 'domain', %s, %s, now(), now()) "
+        "ON CONFLICT (domain_id, asset_type, value) DO UPDATE SET "
+        "attributes = assets.attributes || EXCLUDED.attributes, "
+        "last_seen_at = GREATEST(assets.last_seen_at, EXCLUDED.last_seen_at), updated_at = now() "
+        "RETURNING id::text", (org, domain_id, resultado.dominio, Jsonb(atributos_raiz))).fetchone()['id']
+    activos = {resultado.dominio: raiz}
+
+    for activo in resultado.activos:
+        if activo.tipo == 'domain' and activo.valor == resultado.dominio:
+            continue
+        atributos = activo.atributos
+        parent_id = activos.get(atributos.get('parent'), raiz)
+        ip_value = None
+        if activo.tipo == 'ip':
+            ip_value = str(ipaddress.ip_address(activo.valor))
+        elif isinstance(atributos.get('ip_address'), str):
+            try:
+                ip_value = str(ipaddress.ip_address(atributos['ip_address']))
+            except ValueError:
+                pass
+        asset_id = conn.execute(
+            'INSERT INTO assets (organization_id, domain_id, parent_asset_id, asset_type, value, ip_address, '
+            'attributes, first_seen_at, last_seen_at) VALUES (%s, %s, %s, %s, %s, %s, %s, now(), now()) '
+            'ON CONFLICT (domain_id, asset_type, value) DO UPDATE SET '
+            'parent_asset_id = COALESCE(assets.parent_asset_id, EXCLUDED.parent_asset_id), '
+            'ip_address = COALESCE(assets.ip_address, EXCLUDED.ip_address), '
+            'attributes = assets.attributes || EXCLUDED.attributes, '
+            'last_seen_at = GREATEST(assets.last_seen_at, EXCLUDED.last_seen_at), updated_at = now() '
+            'RETURNING id::text',
+            (org, domain_id, parent_id, activo.tipo, activo.valor, ip_value, Jsonb(atributos)),
+        ).fetchone()['id']
+        activos[activo.valor] = asset_id
+
+    for hallazgo in resultado.hallazgos:
+        regla = reglas.get(hallazgo.codigo)
+        if not regla:
+            raise ValueError('hallazgo sin regla activa: %s' % hallazgo.codigo)
+        evidencia = dict(hallazgo.evidencia)
+        if isinstance(hallazgo.caracteristicas, dict):  # las del reto quedan guardadas para la API y el ML (#23)
+            evidencia['caracteristicas'] = hallazgo.caracteristicas
+        asset_id = activos.get(hallazgo.activo)
+        if not asset_id:  # un activo que la fuente no dio no tumba el escaneo: el hallazgo cuelga del dominio
+            log.warning('%s: hallazgo %s sin su activo %s, va en el dominio', resultado.fuente, hallazgo.codigo,
+                        hallazgo.activo)
+            evidencia['activo_no_encontrado'] = hallazgo.activo
+            asset_id = raiz
+        conn.execute(
+            'INSERT INTO findings (organization_id, domain_id, asset_id, rule_id, source_id, fingerprint, severity, '
+            "status, evidence, detected_at, last_scan_id) VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, now(), %s) "
+            'ON CONFLICT (organization_id, fingerprint) DO UPDATE SET '
+            'domain_id = EXCLUDED.domain_id, asset_id = EXCLUDED.asset_id, rule_id = EXCLUDED.rule_id, '
+            'source_id = EXCLUDED.source_id, severity = EXCLUDED.severity, evidence = EXCLUDED.evidence, '
+            'status = CASE WHEN findings.status = %s THEN %s ELSE findings.status END, '
+            'resolved_at = CASE WHEN findings.status = %s THEN NULL ELSE findings.resolved_at END, '
+            'last_scan_id = EXCLUDED.last_scan_id, updated_at = now()',
+            (org, domain_id, asset_id, regla['id'], source_id, bytes.fromhex(hallazgo.huella), hallazgo.severidad,
+             Jsonb(evidencia), scan_id, 'resolved', 'open', 'resolved'),
+        )
+
+    # Lo abierto de esta fuente que ya no salió se arregló (#23). No se tocan los códigos que la fuente no pudo
+    # revisar (sin_cobertura), ni lo que el cliente marcó como riesgo aceptado o falso positivo.
+    conn.execute(
+        "UPDATE findings SET status = 'resolved', resolved_at = now(), last_scan_id = %s, updated_at = now() "
+        "WHERE domain_id = %s AND source_id = %s AND status = 'open' AND fingerprint <> ALL(%s::bytea[]) "
+        'AND rule_id NOT IN (SELECT id FROM scoring_rules WHERE code = ANY(%s::text[]))',
+        (scan_id, domain_id, source_id, [bytes.fromhex(h.huella) for h in resultado.hallazgos],
+         list(resultado.sin_cobertura)),
+    )
+
+
+def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, parcial):
+    filas = conn.execute(
+        'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status, f.evidence, '
+        'a.asset_type, a.first_seen_at AS asset_first_seen, f.detected_at, sc.queued_at AS scan_at, '
+        "f.evidence->'caracteristicas' AS caracteristicas "
+        'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id '
+        'JOIN assets a ON a.id = f.asset_id LEFT JOIN scans sc ON sc.id = f.last_scan_id '
+        'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
+        (domain_id, list(motor.ESTADOS_PUNTUABLES)),
+    ).fetchall()
+    metodo, model_version, fallback_reason, predicciones = 'rules', None, 'artefacto_ml_no_disponible', None
+    explicaciones_ml, version_explicacion = None, None
+    try:
+        from cirdan.ml import inferencia
+
+        bundle = inferencia.cargar_modelo()
+        version_explicacion = bundle['version']
+        if not bundle.get('metrics', {}).get('integrable', False):
+            fallback_reason = 'macro_f1_no_supera_reglas'
+            try:
+                explicaciones_ml = inferencia.predecir(bundle, filas)
+            except Exception as error:
+                log.warning('No se pudo generar SHAP para el escaneo %s: %s', scan_id, type(error).__name__)
+        else:
+            predicciones = inferencia.predecir(bundle, filas)
+            explicaciones_ml = predicciones
+            metodo, model_version, fallback_reason = 'ml', bundle['version'], None
+    except FileNotFoundError as error:
+        fallback_reason = 'artefacto_ml_no_disponible'
+        log.warning('El score del escaneo %s usará reglas: %s', scan_id, type(error).__name__)
+    except Exception as error:
+        fallback_reason = 'inferencia_ml_no_disponible'
+        log.warning('El score del escaneo %s usará reglas: %s', scan_id, type(error).__name__)
+
+    hallazgos_score = []
+    for hallazgo in filas:
+        copia = dict(hallazgo)
+        if predicciones is not None:
+            copia['severity'] = predicciones[copia['id']]['severity']
+        hallazgos_score.append(copia)
+    calculo = motor.calcular(hallazgos_score, reglas, pesos)
+    if explicaciones_ml is not None:
+        for aporte in calculo['contributions']:
+            prediccion = explicaciones_ml.get(aporte['finding_id'])
+            if prediccion:
+                aporte['factors']['model_prediction'] = prediccion['model_prediction']
+                aporte['factors']['confidence'] = prediccion['confidence']
+                aporte['factors']['shap'] = prediccion['shap']
+                aporte['factors']['explanation_model_version'] = version_explicacion
+    score_id = conn.execute(
+        'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
+        'reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) '
+        "VALUES (%s, %s, %s, %s, %s, %s, 'scan', %s, %s, %s, %s, now()) "
+        'RETURNING id::text',
+        (org, domain_id, scan_id, rule_set_id, calculo['score'], Jsonb(calculo['category_scores']), metodo,
+         model_version, fallback_reason, parcial),
+    ).fetchone()['id']
+    for aporte in calculo['contributions']:
+        conn.execute(
+            'INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, severity, factors) '
+            'VALUES (%s, %s, %s, %s, %s, %s, %s)',
+            (org, score_id, aporte['finding_id'], aporte['rule_id'], aporte['penalty'], aporte['severity'],
+             Jsonb(aporte['factors'])),
+        )
+    return calculo
+
+
 @contextmanager
 def _latiendo(org, scan_id, conn):
     """Marca vida cada LATIDO en un hilo aparte mientras corre una fuente, hasta TOPE_CORRIDA.
@@ -350,7 +496,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     se muestran como 0 hallazgos. crt.sh nunca busca dominios parecidos desde aquí, porque consulta
     variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
     En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
-    ct_logs y subfinder cuenta una vez. Guardarlos y unir sus atributos es de #23.
+    ct_logs y subfinder cuenta una vez. En assets van una sola vez, con sus atributos unidos.
     `dormir` reemplaza time.sleep (pruebas).
     """
     dormir = dormir or time.sleep
@@ -360,6 +506,16 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         catalogo = {f['code']: f for f in c.execute(
             'SELECT id::text, code, keep_raw_payload FROM data_sources WHERE code = ANY(%s)', (fuentes,)).fetchall()}
         propios = [r['fqdn'] for r in c.execute('SELECT fqdn::text FROM domains WHERE fqdn <> %s', (fqdn,)).fetchall()]
+        domain = c.execute('SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
+        if not domain:
+            raise ValueError('dominio no encontrado para el escaneo: %s' % fqdn)
+        rule_set = c.execute('SELECT id::text, category_weights FROM scoring_rule_sets WHERE is_active').fetchone()
+        if not rule_set:
+            raise RuntimeError('no hay un juego de reglas activo')
+        reglas = {r['code']: r for r in c.execute(
+            'SELECT id::text, code, category, base_severity, weight, max_penalty FROM scoring_rules '
+            'WHERE rule_set_id = %s', (rule_set['id'],)).fetchall()}
+        pesos = {k: float(v) for k, v in rule_set['category_weights'].items()}
 
     if modo == 'vivo' and not en_vivo_permitido(fqdn):
         modo = 'reproducir'  # nunca consultar en vivo un dominio fuera de DOMINIOS_EN_VIVO
@@ -382,7 +538,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 status, attempt, next_retry_at = 'failed', intento, None
             else:
                 with _latiendo(org, scan_id, conn):
-                    res = ejecutar(modulo, fqdn, modo, ahora=ahora, propios=propios)
+                    res = ejecutar(modulo, fqdn, modo, ahora=ahora, propios=propios, codigos=reglas)
                 if dia is not None and res.consultas != reservadas:
                     _ajustar(org, codigo, dia, res.consultas - reservadas, conn)
                 momento = datetime.now(timezone.utc)
@@ -405,6 +561,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                         'finished_at = EXCLUDED.finished_at, updated_at = now()',
                         (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
                          Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
+                    if res.estado == 'succeeded':
+                        _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas)
             if not vivo:
                 return _ya_no_corre(org, scan_id, conn, corridas)
             if status != 'retrying':
@@ -430,6 +588,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                             "WHERE id = %s AND status = 'running' RETURNING id", (estado, Jsonb(stats), scan_id)).fetchone()
         if cerrado:  # si lo dieron por caído entre la última fuente y aquí, se queda como está
             c.execute('UPDATE domains SET last_scan_at = now(), updated_at = now() WHERE fqdn = %s', (fqdn,))
+            _guardar_score(c, org, domain['id'], scan_id, rule_set['id'], reglas, pesos, estado != 'completed')
             audit(c, org, 'scan.finished', None, None, 'scan', scan_id, {'fqdn': fqdn, 'status': estado, **stats})
     if not cerrado:
         return _ya_no_corre(org, scan_id, conn, corridas)
