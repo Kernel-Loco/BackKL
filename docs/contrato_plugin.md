@@ -82,6 +82,8 @@ Una fuente que respondió con códigos en `sin_cobertura` o con `revisados` dist
 
 En `scans.stats.assets` el orquestador cuenta los activos distintos (tipo y valor) de las fuentes que respondieron, no la suma por fuente: un subdominio que dan `ct_logs` y `subfinder` cuenta una vez. El resumen de cada fuente sigue diciendo cuántos dio ella. Guardarlos y juntar sus atributos es de #23.
 
+En `scans.stats.new_findings` cuenta los hallazgos que el escaneo dejó abiertos y antes no lo estaban: los que insertó por primera vez y los que reabrió porque estaban en `resolved`. No cuenta los que ya estaban abiertos, aunque vinieran de otro dominio de la empresa con la misma huella, ni los que el cliente marcó como riesgo aceptado o falso positivo, que no cambian. `scans.stats.resolved_findings` cuenta los que el escaneo pasó a `resolved` porque su fuente respondió y ya no los dio, así que nunca los de una fuente caída ni lo que se queda abierto según el párrafo de `sin_cobertura` y `revisados` (`omitidos`, los códigos en `sin_cobertura` de una fuente que revisó todo y, en una corrida parcial, lo que queda sin partes o trae una que no se revisó). Un hallazgo que una fuente resuelve y otra reabre en el mismo escaneo quedó como estaba y no cuenta en ninguno. El histórico de la API v1 los lee de ahí (#23, RC-55).
+
 ## Reintentos
 
 Hay dos niveles:
