@@ -75,7 +75,8 @@ class ApiV1(unittest.TestCase):
 
     def test_5_historico_activos_y_escaneos(self):
         hist = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')
-        self.assertEqual([p['score'] for p in hist['items']][-1], 68)
+        self.assertEqual([(p['score'], p['reason'], p['new_findings']) for p in hist['items']],
+                         [(68, 'scan', 3), (60, 'rules_change', 0)])
         activos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/assets')
         self.assertEqual(activos['total'], 6)
         escaneos = self.get(self.acme, '/api/v1/scans')
@@ -125,8 +126,11 @@ class ApiV1(unittest.TestCase):
             self.assertEqual((action_plan['score_before'], action_plan['band_before']), (score['score'], score['band']), fqdn)
             self.assertEqual(action_plan['category_scores_before'],
                              {c['category']: c['score'] for c in score['categories']}, fqdn)
+            for accion in action_plan['actions']:  # el 'Actual' es el punto de partida de cada estimado
+                self.assertEqual(accion['score_after'] + accion['score_reduction'], action_plan['score_before'],
+                                 (fqdn, accion['id']))
             if fqdn == 'acme-demo.mx':
-                # La semilla guarda 68 a mano y el motor da 60 por el piso de la brecha crítica: solo resolverla baja el score.
+                # El piso de 60 por la brecha crítica deja en 60 todo lo demás: solo resolverla baja el score.
                 self.assertEqual([(a['id'], a['score_after'], a['score_reduction']) for a in action_plan['actions']],
                                  [('breach_exposure', 16, 44), ('dmarc_missing', 60, 0), ('cert_expired', 60, 0),
                                   ('outdated_software', 60, 0)])

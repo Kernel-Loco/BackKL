@@ -31,16 +31,16 @@ class ApiCirdan(unittest.TestCase):
         code, body = self.acme.get('/domains')
         self.assertEqual(code, 200)
         self.assertEqual([(d['domain'], d['score'], d['level']) for d in body[:3]],
-                         [('acme-demo.mx', 68, 'High'), ('acme-tienda.mx', 54, 'Medium'), ('acme-portal.mx', 31, 'Low')])
+                         [('acme-demo.mx', 60, 'High'), ('acme-portal.mx', 0, 'Low'), ('acme-tienda.mx', 0, 'Low')])
         self.assertEqual({d['domain']: d['authorization'] for d in body[3:]},
                          {'partner-example.com': 'Pending TXT', 'old-example.net': 'Expired'})
 
-    def test_3_score_por_categoria_cuadra_con_los_pesos(self):
+    def test_3_score_por_categoria_cuadra_con_los_pesos_y_el_piso(self):
         code, body = self.acme.get('/domains/acme-demo.mx/score')
         self.assertEqual(code, 200)
         weighted = sum(c['score'] * c['weight'] for c in body['categories'])
-        self.assertEqual(round(weighted), body['score'])
-        self.assertEqual(body['score'], 68)
+        self.assertAlmostEqual(weighted, 27.5)
+        self.assertEqual(body['score'], 60)  # la brecha crítica abierta pone el piso en 60
 
     def test_4_hallazgos_ordenados_por_severidad(self):
         code, body = self.acme.get('/domains/acme-demo.mx/findings')

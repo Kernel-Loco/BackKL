@@ -270,7 +270,7 @@ def score_history(fqdn: str, session: Session = Depends(current_session)):
     items = []
     for row in _query(session, SCORES_SQL, (fqdn,)):
         base, _ = _score_base(row, row['critical_at_time'])
-        stats = row['stats'] or {}
+        stats = (row['stats'] or {}) if row['reason'] == 'scan' else {}  # un recálculo no encuentra ni resuelve hallazgos
         items.append({**base, 'categories': row['category_scores'],
                       'new_findings': stats.get('new_findings', 0), 'resolved_findings': stats.get('resolved_findings', 0)})
     return {'domain': fqdn, 'items': items, 'total': len(items)}
