@@ -10,6 +10,18 @@ title = "LowTide: reglas de omisión de gitleaks y tokens falsos CIRDAN_FAKE_"
 [extend]
 useDefault = true
 
+# Las rutas esperadas para el token falso de LowTide están acotadas a pruebas y grabaciones del repo local. En esas
+# carpetas solo se ignora si el valor lleva el prefijo CIRDAN_FAKE_; así un secreto real en la misma ruta sigue dando
+# hallazgo con las reglas de omisión de gitleaks o con la propia, según corresponda.
+[allowlist]
+paths = [
+  '''^pruebas/.*''',
+  '''^cirdan/recolectores/respuestas_grabadas/.*''',
+]
+regexes = [
+  '''CIRDAN_FAKE_''',
+]
+
 [[rules]]
 id = "cirdan-fake-token"
 description = "Token falso de LowTide (prefijo CIRDAN_FAKE_), de la siembra o de las pruebas"
