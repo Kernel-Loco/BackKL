@@ -333,22 +333,22 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
 
     # El estado de antes dice si el hallazgo es nuevo o se reabre. FOR NO KEY UPDATE lo deja fijo hasta el commit, como
     # el upsert, sin chocar con el FOR KEY SHARE de la llave foránea cuando otro escaneo guarda sus score_contributions.
-    huellas = [bytes.fromhex(h.huella) for h in resultado.hallazgos]
-    previos = {bytes(f['fingerprint']): f['status'] for f in conn.execute(
-        'SELECT fingerprint, status FROM findings WHERE organization_id = %s AND fingerprint = ANY(%s::bytea[]) '
-        'ORDER BY fingerprint FOR NO KEY UPDATE', (org, huellas)).fetchall()}
-    abiertos = set()
-
     # Con la cobertura parcial, lo abierto conserva las partes que esta corrida no revisó y que siguen ahí: un correo
     # que esta vez salió solo en el repo A sigue también en el B que no se clonó, y no se cierra mientras B no se revise.
     # Lo guardado antes sin partes que se puedan saber (un correo con 5 repos o más) puede seguir en cualquier parte que
-    # no se revisó: lleva las de sin_revisar o, si no se saben, queda sin partes y espera a una corrida completa (#23)
-    previas = {}
-    if resultado.revisados is not None and resultado.hallazgos:
-        previas = {bytes(f['fingerprint']).hex(): f['partes'] for f in conn.execute(
-            "SELECT fingerprint, {p} AS partes FROM findings WHERE domain_id = %s AND source_id = %s AND status = 'open' "
-            'AND fingerprint = ANY(%s::bytea[])'.format(p=PARTES),
-            (domain_id, source_id, huellas)).fetchall()}
+    # no se revisó: lleva las de sin_revisar o, si no se saben, queda sin partes y espera a una corrida completa. Las
+    # partes se leen por organización, como el upsert, que mueve a este dominio un correo de GitHub guardado en otro
+    # dominio de la misma empresa: su huella no lleva el dominio (#23)
+    huellas = [bytes.fromhex(h.huella) for h in resultado.hallazgos]
+    previos, previas = {}, {}
+    for f in conn.execute(
+            'SELECT fingerprint, status, {p} AS partes FROM findings WHERE organization_id = %s '
+            'AND fingerprint = ANY(%s::bytea[]) ORDER BY fingerprint FOR NO KEY UPDATE'.format(p=PARTES),
+            (org, huellas)).fetchall():
+        previos[bytes(f['fingerprint'])] = f['status']
+        if resultado.revisados is not None and f['status'] == 'open':
+            previas[bytes(f['fingerprint']).hex()] = f['partes']
+    abiertos = set()
 
     for hallazgo in resultado.hallazgos:
         regla = reglas.get(hallazgo.codigo)

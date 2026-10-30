@@ -551,6 +551,8 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.conteos(s.scan_id)[0], 3)
         s, _ = self.reescanear(resultado_github(sitio, revisados=['acme-demo/sitio']), 'github')
         self.assertEqual(self.conteos(s.scan_id), (0, 1))  # cierra viejo y no api, que no se revisó
+        self.assertEqual(self.abiertos('ruta', api, sitio, viejo),
+                         {'config/.env': 'open', 'web/.env': 'open', 'web/viejo.env': 'resolved'})
         s, _ = self.reescanear(resultado_github(sitio), 'github')
         self.assertEqual(self.conteos(s.scan_id), (0, 1))  # la corrida completa cierra api
         ip = '40.65.94.253'
@@ -561,6 +563,24 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.conteos(s.scan_id), (0, 0))  # la omitida sigue abierta
         s, _ = self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2024-0002')]), 'shodan')
         self.assertEqual(self.conteos(s.scan_id), (0, 1))
+
+    def test_2w_un_correo_guardado_en_otro_dominio_de_la_empresa_conserva_sus_partes(self):
+        """La huella de un correo no lleva el dominio, así que el upsert lo trae desde otro dominio de la misma empresa
+        (#23). Si salió en api y sitio y ahora sale solo en sitio, con api sin clonar, conserva api en sus partes y la
+        siguiente corrida parcial no lo cierra ni lo cuenta como resuelto."""
+        en_los_dos, en_sitio = correo('ana', 'api', 'sitio'), correo('ana', 'sitio')
+        self.reescanear(resultado_github(en_los_dos), 'github')
+        tienda = self.uno("SELECT id FROM domains WHERE fqdn = 'acme-tienda.mx'")['id']
+        activo = self.uno("INSERT INTO assets (organization_id, domain_id, asset_type, value, first_seen_at, "
+                          "last_seen_at) VALUES (%s, %s, 'email', %s, now(), now()) RETURNING id",
+                          ACME, tienda, en_los_dos.activo)['id']
+        self.conn.execute('UPDATE findings SET domain_id = %s, asset_id = %s WHERE fingerprint = %s',
+                          (tienda, activo, bytes.fromhex(en_los_dos.huella)))
+        self.reescanear(resultado_github(en_sitio, revisados=['acme-demo/sitio']), 'github')
+        self.assertEqual(self.partes(en_sitio), ['acme-demo/sitio', 'acme-demo/api'])
+        s, _ = self.reescanear(resultado_github(revisados=['acme-demo/sitio']), 'github')
+        self.assertEqual(self.abiertos('title', en_sitio).popitem()[1], 'open')
+        self.assertEqual(self.conteos(s.scan_id)[1], 0)
 
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
