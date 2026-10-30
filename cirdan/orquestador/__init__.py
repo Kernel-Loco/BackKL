@@ -81,6 +81,12 @@ ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta f
 MODOS_CON_CUPO = ('vivo', 'grabar')
 SIN_CUPO = 'Sin cupo diario: %s no tiene cupo para una corrida completa hoy (día UTC).'
 
+# Los hallazgos de una empresa se guardan de una fuente a la vez (RC-55). Dos dominios de la misma empresa pueden dar
+# la misma huella (un repo de GitHub declarado en los dos, el certificado de un subdominio) y escanearse a la vez:
+# así el segundo ve lo que insertó el primero y no lo cuenta otra vez como nuevo. Es la forma de dos llaves de
+# pg_advisory_xact_lock, que no choca con la de una llave del trigger de audit_log.
+CANDADO_HALLAZGOS = 'cirdan.findings'
+
 
 def dominios_en_vivo():
     """Dominios que se pueden consultar en vivo (DNS y fuentes). '*' = todos (producción)."""
@@ -273,6 +279,7 @@ def _latido(org, scan_id, conn=None):
 def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas):
     """Guarda activos y hallazgos de una fuente que respondió. Devuelve dos conjuntos de id de hallazgos: los que
     abrió (insertó o reabrió) y los que dio por resueltos."""
+    conn.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))', (CANDADO_HALLAZGOS, org))
     atributos_raiz = {}
     for activo in resultado.activos:
         if activo.tipo == 'domain' and activo.valor == resultado.dominio:
@@ -312,11 +319,12 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         ).fetchone()['id']
         activos[activo.valor] = asset_id
 
-    # El estado de antes dice si el hallazgo es nuevo o se reabre. FOR UPDATE lo deja fijo hasta el commit.
+    # El estado de antes dice si el hallazgo es nuevo o se reabre. FOR NO KEY UPDATE lo deja fijo hasta el commit, como
+    # el upsert, sin chocar con el FOR KEY SHARE de la llave foránea cuando otro escaneo guarda sus score_contributions.
     huellas = [bytes.fromhex(h.huella) for h in resultado.hallazgos]
     previos = {bytes(f['fingerprint']): f['status'] for f in conn.execute(
         'SELECT fingerprint, status FROM findings WHERE organization_id = %s AND fingerprint = ANY(%s::bytea[]) '
-        'ORDER BY fingerprint FOR UPDATE', (org, huellas)).fetchall()}
+        'ORDER BY fingerprint FOR NO KEY UPDATE', (org, huellas)).fetchall()}
     abiertos = set()
     for hallazgo in resultado.hallazgos:
         regla = reglas.get(hallazgo.codigo)
@@ -512,7 +520,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     reabrió porque estaban en 'resolved'. No cuenta los que ya estaban abiertos ni los que el cliente marcó como
     riesgo aceptado o falso positivo, que no cambian. resolved_findings cuenta los que pasó a 'resolved' porque su
     fuente respondió y ya no los dio: nunca los de una fuente caída ni los códigos en sin_cobertura. Un hallazgo que
-    una fuente resuelve y otra reabre en el mismo escaneo quedó como estaba y no cuenta en ninguno.
+    una fuente resuelve y otra reabre en el mismo escaneo quedó como estaba y no cuenta en ninguno. Los conteos solo
+    se guardan al cerrar: lo que guardaron las fuentes de un escaneo que se cae o lo dan por caído no se cuenta.
     `dormir` reemplaza time.sleep (pruebas).
     """
     dormir = dormir or time.sleep
@@ -583,7 +592,9 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                         cambios = _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas)
             if not vivo:
                 return _ya_no_corre(org, scan_id, conn, corridas)
-            if cambios:  # lo que una fuente resuelve y otra reabre en este escaneo (o al revés) no cuenta
+            if cambios:
+                # Lo que una fuente resuelve y otra reabre en este escaneo (o al revés) no cuenta. Hoy dos fuentes no
+                # dan la misma huella y no pasa, pero el conteo no depende de eso.
                 abiertos, cerrados = cambios
                 resueltos |= cerrados - nuevos
                 nuevos -= cerrados

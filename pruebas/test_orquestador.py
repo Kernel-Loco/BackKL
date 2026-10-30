@@ -38,6 +38,7 @@ from pruebas.test_certspotter import AHORA, RespaldoSimulado
 from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado
 
 ACME = '20000000-0000-4000-8000-000000000001'
+BETA = '20000000-0000-4000-8000-000000000002'
 TXT_ACME = 'cirdan-verification=c41d7e2a9b06'   # token de acme-demo.mx en la semilla
 
 
@@ -279,6 +280,7 @@ class Orquestador(unittest.TestCase):
             self.assertEqual(self.estado(f['id'])['status'], decision)
 
     def test_2j_lo_que_una_fuente_resuelve_y_otra_reabre_en_el_mismo_escaneo_no_cuenta(self):
+        # Hoy dos fuentes no dan la misma huella y esto no pasa. Se simula con `ct_logs` dando la huella de `ejemplo`.
         _, f = self.escanear_ejemplo()
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         respuestas = iter([BIEN, self.con_spf(f['id'])])  # `ejemplo` ya no lo da y luego `ct_logs` sí
@@ -288,6 +290,16 @@ class Orquestador(unittest.TestCase):
         self.assertEqual([r['status'] for r in resumen['sources']], ['succeeded', 'succeeded'])
         self.assertEqual(self.conteos(s.scan_id), (0, 0))  # empezó abierto y terminó abierto
         self.assertEqual(self.estado(f['id'])['status'], 'open')
+
+    def test_2k_guarda_los_hallazgos_con_el_candado_de_su_empresa(self):
+        """Dos escaneos de la misma empresa guardan sus hallazgos de uno en uno, así el segundo no cuenta como nuevo lo
+        que insertó el primero. Otra empresa no espera (RC-55)."""
+        self.escanear_ejemplo()  # el candado sigue tomado hasta que termina la transacción de la prueba
+        otra = psycopg.connect(DSN, autocommit=True)
+        self.addCleanup(otra.close)
+        intentar = 'SELECT pg_try_advisory_xact_lock(hashtext(%s), hashtext(%s))'
+        self.assertFalse(otra.execute(intentar, (orquestador.CANDADO_HALLAZGOS, ACME)).fetchone()[0])
+        self.assertTrue(otra.execute(intentar, (orquestador.CANDADO_HALLAZGOS, BETA)).fetchone()[0])
 
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))

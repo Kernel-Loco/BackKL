@@ -73,7 +73,7 @@ El orquestador llama a `ejecutar(recolector, dominio, modo, ahora, propios, codi
 3. Revisa el resultado con `validar()` contra este esquema y, si se le pasan, contra los códigos del catálogo. También revisa que sea del dominio autorizado y de la fuente del recolector, y que se pueda guardar como JSON. Si no cumple, la fuente queda en `failed` con los primeros incumplimientos en el error.
 4. Aplica el filtro de alcance.
 
-Una fuente que respondió con códigos en `sin_cobertura` queda `succeeded` en `scan_source_runs`, pero el escaneo termina `partial` y esos códigos van en `scans.stats.rules_without_coverage`. Así el portal marca la cobertura parcial y un escaneo así no cierra hallazgos (#23).
+Una fuente que respondió con códigos en `sin_cobertura` queda `succeeded` en `scan_source_runs`, pero el escaneo termina `partial` y esos códigos van en `scans.stats.rules_without_coverage`. Así el portal marca la cobertura parcial y un escaneo así no cierra los hallazgos de esos códigos (#23).
 
 En `scans.stats.assets` el orquestador cuenta los activos distintos (tipo y valor) de las fuentes que respondieron, no la suma por fuente: un subdominio que dan `ct_logs` y `subfinder` cuenta una vez. El resumen de cada fuente sigue diciendo cuántos dio ella. Guardarlos y juntar sus atributos es de #23.
 
