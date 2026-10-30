@@ -9,8 +9,9 @@
 -- versión anterior.
 --
 -- domain_scores es de solo inserción, así que el trigger domain_scores_block_ud
--- se apaga solo dentro de esta transacción y solo para estas tres filas, con
--- los valores viejos exactos en el WHERE. Corre como postgres, dueño de la
+-- se apaga para toda la tabla, pero solo dentro de esta transacción, y el
+-- UPDATE solo toca estas tres filas, con los valores viejos exactos en el
+-- WHERE. Corre como postgres, dueño de la
 -- tabla. El score, las notas y los aportes no cambian. Cada fila corregida
 -- deja en audit_log lo que decía antes y lo que dice ahora. Es la desviación
 -- 16 de db/README.md.

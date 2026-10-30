@@ -73,9 +73,11 @@ El orquestador llama a `ejecutar(recolector, dominio, modo, ahora, propios, codi
 3. Revisa el resultado con `validar()` contra este esquema y, si se le pasan, contra los códigos del catálogo. También revisa que sea del dominio autorizado y de la fuente del recolector, y que se pueda guardar como JSON. Si no cumple, la fuente queda en `failed` con los primeros incumplimientos en el error.
 4. Aplica el filtro de alcance.
 
-Una fuente que respondió con códigos en `sin_cobertura` queda `succeeded` en `scan_source_runs`, pero el escaneo termina `partial` y esos códigos van en `scans.stats.rules_without_coverage`. Así el portal marca la cobertura parcial y un escaneo así no cierra hallazgos (#23).
+Una fuente que respondió con códigos en `sin_cobertura` queda `succeeded` en `scan_source_runs`, pero el escaneo termina `partial` y esos códigos van en `scans.stats.rules_without_coverage`. Así el portal marca la cobertura parcial y un escaneo así no cierra los hallazgos de esos códigos (#23).
 
 En `scans.stats.assets` el orquestador cuenta los activos distintos (tipo y valor) de las fuentes que respondieron, no la suma por fuente: un subdominio que dan `ct_logs` y `subfinder` cuenta una vez. El resumen de cada fuente sigue diciendo cuántos dio ella. Guardarlos y juntar sus atributos es de #23.
+
+En `scans.stats.new_findings` cuenta los hallazgos que el escaneo dejó abiertos y antes no lo estaban: los que insertó por primera vez y los que reabrió porque estaban en `resolved`. No cuenta los que ya estaban abiertos, aunque vinieran de otro dominio de la empresa con la misma huella, ni los que el cliente marcó como riesgo aceptado o falso positivo, que no cambian. `scans.stats.resolved_findings` cuenta los que el escaneo pasó a `resolved` porque su fuente respondió y ya no los dio, así que nunca los de una fuente caída ni los códigos en `sin_cobertura`. Un hallazgo que una fuente resuelve y otra reabre en el mismo escaneo quedó como estaba y no cuenta en ninguno. El histórico de la API v1 los lee de ahí (#23, RC-55).
 
 ## Reintentos
 
