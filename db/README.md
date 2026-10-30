@@ -22,6 +22,7 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `migraciones/007_comentario_revisor.sql` | Corrige el comentario de `scoring_rule_texts.reviewed_by` que puso la 003: el resto de los textos lo revisa alguien de otra área o Ernesto (RC-66). Solo cambia el comentario |
 | `migraciones/008_limite_diario_fuentes.sql` | Límite diario de consultas por fuente (RC-184, #13b): `daily_limit`, `daily_used` y `daily_used_on` en `data_sources` (día UTC) y las funciones `reserve_source_quota()` y `adjust_source_quota()`, SECURITY DEFINER de `postgres`, que son lo único que mueve el contador. `cirdan_app` no tiene UPDATE: lee las columnas y ejecuta las funciones, y con ellas puede mover `daily_used` del día (el ajuste acepta cualquier delta) |
 | `migraciones/009_version_modelo_score.sql` | Guarda la versión del clasificador ML y el motivo de fallback a reglas en cada snapshot de score (#36) |
+| `migraciones/010_motivo_correccion_score.sql` | Agrega `correction` a los motivos de `domain_scores.reason`, para una fila que corrige un score guardado mal sin escaneo ni cambio de reglas (RC-72) |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -30,7 +31,8 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `semillas/006_github.sql` | Fuente `github` (secretos y correos en los repos públicos de la organización declarada), sembrada encendida, con `keep_raw_payload` = false y límite diario de 400 consultas, 25 corridas de 16 (RC-50, #16). Necesita la 008 |
 | `semillas/007_shodan.sql` | Límite diario de la fuente `shodan` (servicios y CVE que Shodan InternetDB ya vio en las IP públicas del dominio): 640 consultas, 10 corridas de 64 (RC-49, #17). La fila ya la sembró la 001, encendida, y no se edita. Necesita la 008 |
 | `semillas/008_whois.sql` | Límite diario de la fuente `whois` (registrador, fechas y vencimiento del dominio por RDAP): 60 consultas, 10 corridas de 6 (RC-166, #15b). La fila ya la sembró la 001, encendida, y no se edita. Necesita la migración 008 |
-| `semillas/009_score_demo_motor.sql` | Recálculo con el motor de score (#31) de los tres dominios de Acme, que la 001 guardó a mano (68, 54 y 31) y no salían de sus hallazgos: acme-demo.mx queda en 60 y acme-tienda.mx y acme-portal.mx en 0 (RC-72). Agrega filas con `reason = rules_change`, así que el score anterior queda en el histórico |
+| `semillas/009_score_demo_motor.sql` | Corrige con el motor de score (#31) el score de los tres dominios de Acme, que la 001 guardó a mano (68, 54 y 31) y no salía de sus hallazgos: acme-demo.mx queda en 60 y acme-tienda.mx y acme-portal.mx en 0 (RC-72). Agrega filas con `reason = correction`, así que el score anterior queda en el histórico. Necesita la migración 010 |
+| `semillas/010_corrige_procedencia_009.sql` | Corrige las tres filas que cargó la primera versión de la 009, con `rules_change`, un motivo de fallback a reglas y una hora que no eran ciertos, y deja el antes y el después en `audit_log` (RC-72, desviación 16). En una base nueva no hace nada. Necesita la migración 010 |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 24 tablas con filas y RLS, más el resumen de objetos |
@@ -81,6 +83,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/007_comentario_revisor.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/008_limite_diario_fuentes.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/009_version_modelo_score.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/010_motivo_correccion_score.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -89,7 +92,9 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/005_subfinder_y_limites.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/006_github.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/007_shodan.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/008_whois.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/009_score_demo_motor.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/010_corrige_procedencia_009.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -211,14 +216,16 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT column_name FROM
 
 Debe devolver ambas columnas. En una base nueva, `cargar_cirdan.sh` aplica 009 junto con las migraciones anteriores.
 
-Para que el score guardado de los dominios de Acme sea el que dan sus hallazgos (RC-72) basta la semilla 009. No cambia tablas ni la API, así que el orden con la API no importa. Agrega el recálculo con el motor, con `reason = rules_change`, porque `domain_scores` y `score_contributions` no aceptan UPDATE:
+Para que el score guardado de los dominios de Acme sea el que dan sus hallazgos (RC-72) van la migración 010 y las semillas 009 y 010. No cambian la API, así que el orden con la API no importa. La 010 agrega `correction` a los motivos de `domain_scores.reason`. La 009 agrega el score que da el motor con `reason = correction`, porque `domain_scores` y `score_contributions` no aceptan UPDATE. La semilla 010 corrige las filas de la primera versión de la 009, que decían `rules_change`, `artefacto_ml_no_disponible` y una hora del 28 oct que no eran ciertos. Apaga el trigger de solo inserción dentro de su transacción y solo para esas tres filas, deja en `audit_log` una fila `score.corrected` por cada una con lo que decía antes y falla si alguna queda sin corregir (desviación 16):
 
 ```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/010_motivo_correccion_score.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/009_score_demo_motor.sql
-docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT d.fqdn, s.score, s.reason FROM domain_scores s JOIN domains d ON d.id = s.domain_id WHERE d.fqdn LIKE 'acme-%' ORDER BY d.fqdn, s.computed_at"
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/010_corrige_procedencia_009.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT d.fqdn, s.score, s.reason, s.model_fallback_reason FROM domain_scores s JOIN domains d ON d.id = s.domain_id WHERE d.fqdn LIKE 'acme-%' ORDER BY d.fqdn, s.computed_at"
 ```
 
-Da seis filas: el score de septiembre de cada dominio con `scan` y después el nuevo con `rules_change`, que es 60 para acme-demo.mx y 0 para acme-portal.mx y acme-tienda.mx. Corre en una sola transacción y se puede correr otra vez sin error: no repite filas.
+Da seis filas: el score de septiembre de cada dominio con `scan` y después el corregido con `correction` y sin motivo de fallback, que es 60 para acme-demo.mx y 0 para acme-portal.mx y acme-tienda.mx. Cada archivo corre en una sola transacción y se puede correr otra vez sin error: la 009 no repite filas y la semilla 010 ya no encuentra nada que corregir.
 
 ## Decisiones y desviaciones respecto al DBML
 
@@ -239,3 +246,4 @@ Las desviaciones 1, 2 y 3 se pasaron al DBML el 9 oct, así que hoy la base y el
 13. **Sin filas en `api_keys` ni `cves`.** El plan Starter no incluye API, y ningún hallazgo de la demo apunta a un CVE.
 14. **Fuera de la base, como dice el DBML.** check_plan_limits (FastAPI), el cifrado AES-GCM y la verificación diaria de la cadena. Hoy solo existe el cifrado del secreto TOTP (`cirdan/auth/totp.py`). check_plan_limits y la verificación diaria son plan, igual que los roles y las funciones del punto 4. El DBML es el diseño objetivo, y sus notas marcan qué existe hoy en dev y qué tarjeta trae lo que falta.
 15. **Juego v1 completado después de activarse.** El DBML dice que un juego es inmutable una vez activado y que cambiar un peso crea un juego nuevo. Aun así, v1 se completó con las 30 reglas de #14 a #20 y de #62 a #64 antes de #31 (RC-60), porque todavía ningún score se calcula con un juego. La semilla 004 agrega las 23 reglas nuevas con weight 1.000 y no cambia las 7 de la semilla 001 ni `category_weights`. Desde #31, cualquier cambio de reglas o pesos crea v2 (RC-66, #30).
+16. **Una corrección con el trigger apagado.** `domain_scores` es de solo inserción para todos, también para `postgres`. La semilla 010 (RC-72) es la única excepción: apaga `domain_scores_block_ud` dentro de su transacción para corregir `reason`, `model_fallback_reason` y `computed_at` de los tres scores de Acme que cargó la primera versión de la semilla 009, con los valores viejos exactos en el WHERE. No cambia el score, las notas ni los aportes, deja en `audit_log` una fila `score.corrected` por cada score con el antes y el después, vuelve a encender el trigger antes del COMMIT y falla si alguna fila queda sin corregir. La prueba 13 de `pruebas/test_aislamiento.py` revisa que el trigger siga encendido. Un score mal guardado de aquí en adelante se corrige con una fila nueva con `reason = correction`, sin apagar el trigger.
