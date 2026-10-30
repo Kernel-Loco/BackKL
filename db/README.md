@@ -30,6 +30,7 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `semillas/006_github.sql` | Fuente `github` (secretos y correos en los repos públicos de la organización declarada), sembrada encendida, con `keep_raw_payload` = false y límite diario de 400 consultas, 25 corridas de 16 (RC-50, #16). Necesita la 008 |
 | `semillas/007_shodan.sql` | Límite diario de la fuente `shodan` (servicios y CVE que Shodan InternetDB ya vio en las IP públicas del dominio): 640 consultas, 10 corridas de 64 (RC-49, #17). La fila ya la sembró la 001, encendida, y no se edita. Necesita la 008 |
 | `semillas/008_whois.sql` | Límite diario de la fuente `whois` (registrador, fechas y vencimiento del dominio por RDAP): 60 consultas, 10 corridas de 6 (RC-166, #15b). La fila ya la sembró la 001, encendida, y no se edita. Necesita la migración 008 |
+| `semillas/009_score_demo_motor.sql` | Recálculo con el motor de score (#31) de los tres dominios de Acme, que la 001 guardó a mano (68, 54 y 31) y no salían de sus hallazgos: acme-demo.mx queda en 60 y acme-tienda.mx y acme-portal.mx en 0 (RC-72). Agrega filas con `reason = rules_change`, así que el score anterior queda en el histórico |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 24 tablas con filas y RLS, más el resumen de objetos |
@@ -88,6 +89,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/005_subfinder_y_limites.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/006_github.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/007_shodan.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/009_score_demo_motor.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -208,6 +210,15 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT column_name FROM
 ```
 
 Debe devolver ambas columnas. En una base nueva, `cargar_cirdan.sh` aplica 009 junto con las migraciones anteriores.
+
+Para que el score guardado de los dominios de Acme sea el que dan sus hallazgos (RC-72) basta la semilla 009. No cambia tablas ni la API, así que el orden con la API no importa. Agrega el recálculo con el motor, con `reason = rules_change`, porque `domain_scores` y `score_contributions` no aceptan UPDATE:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/009_score_demo_motor.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT d.fqdn, s.score, s.reason FROM domain_scores s JOIN domains d ON d.id = s.domain_id WHERE d.fqdn LIKE 'acme-%' ORDER BY d.fqdn, s.computed_at"
+```
+
+Da seis filas: el score de septiembre de cada dominio con `scan` y después el nuevo con `rules_change`, que es 60 para acme-demo.mx y 0 para acme-portal.mx y acme-tienda.mx. Corre en una sola transacción y se puede correr otra vez sin error: no repite filas.
 
 ## Decisiones y desviaciones respecto al DBML
 

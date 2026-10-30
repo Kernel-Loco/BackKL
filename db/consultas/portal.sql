@@ -35,7 +35,7 @@ SELECT d.fqdn AS "Domain",
                       WHERE v.domain_id = d.id ORDER BY v.checked_at DESC LIMIT 1) t ON true
   LEFT JOIN LATERAL (SELECT ds.score FROM domain_scores ds
                       WHERE ds.domain_id = d.id ORDER BY ds.computed_at DESC LIMIT 1) s ON true
- ORDER BY s.score DESC NULLS LAST, d.status = 'pending_verification' DESC;
+ ORDER BY s.score DESC NULLS LAST, d.status = 'pending_verification' DESC, d.fqdn;
 
 \echo '== (a) KPIs del dashboard =='
 WITH dom AS (
@@ -83,7 +83,7 @@ WITH s AS (
    ORDER BY ds.computed_at DESC LIMIT 1),
 c AS (
   SELECT k.ord, k.label,
-         (s.category_scores->>k.key)::int      AS score,
+         (s.category_scores->>k.key)::numeric  AS score,
          (s.category_weights->>k.key)::numeric AS weight
     FROM s CROSS JOIN (VALUES (1, 'infrastructure',   'Infrastructure'),
                               (2, 'digital_identity', 'Digital Identity'),
@@ -116,7 +116,7 @@ SELECT "Rule", "Points" FROM (
          CASE WHEN r.points > 0 THEN '+' || r.points ELSE r.points::text END AS "Points"
     FROM score_contributions sc
     JOIN findings f ON f.id = sc.finding_id
-   CROSS JOIN LATERAL jsonb_to_recordset(sc.factors->'rules') AS r(label text, points int)
+   CROSS JOIN LATERAL jsonb_to_recordset(sc.factors->'rules') AS r(label text, points numeric)
    WHERE f.evidence->>'title' = '12 corporate emails found in public data breaches'
   UNION ALL
   SELECT 2, 0, 'Total (score_contributions.penalty)', '+' || sc.penalty
