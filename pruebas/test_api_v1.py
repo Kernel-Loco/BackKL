@@ -3,7 +3,7 @@
     python -m unittest -v pruebas/test_api_v1.py      (con `docker compose up -d`)
 
 Con los datos demo de Acme, las respuestas deben coincidir con los JSON de docs/api_v1/. Las únicas
-diferencias aceptadas son los campos «propuestos» del portal (signer_email, confidence) y los
+diferencias aceptadas son los campos «propuestos» del portal (signer_email) y los
 textos que todavía no calcula el motor de score (#31). Los textos de cada regla (#30) sí se comparan.
 """
 import json
@@ -13,7 +13,7 @@ from pathlib import Path
 from pruebas import sesion
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
-PROPUESTOS = {'signer_email', 'confidence'}
+PROPUESTOS = {'signer_email'}
 
 
 def ejemplo(nombre):
