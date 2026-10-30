@@ -42,6 +42,10 @@ Otros comandos: `docker compose logs -f api` (ver la API), `docker compose down`
 
 Para trabajar en la API sin reconstruir la imagen: `docker compose stop api`, crea un entorno virtual (`python3 -m venv .venv` y `source .venv/bin/activate`, o `source .venv/Scripts/activate` en Git Bash), `pip install -r requirements.txt` y `python -m uvicorn cirdan.api.main:app --port 8000 --reload`. Fuera de Docker la API lee el `.env` de la raíz.
 
+## CI (#11)
+
+`.github/workflows/pruebas.yml` corre en cada PR a `dev` o `main` (y en cada push a esas ramas). Revisa que las migraciones de `db/migraciones/` se llamen `NNN_descripcion.sql` sin huecos ni repetidas, crea un `.env` con contraseñas al azar (ningún secreto vive en el repo), levanta el compose desde cero, que aplica en orden migraciones y semillas, y corre las pruebas del paso 5 más `pruebas/test_modelo_ml.py` dentro del contenedor (con `datos/ml` montado). No corre las pruebas en vivo (`EN_VIVO=1`): el CI no consulta fuentes externas. Las pruebas de la base suponen la base recién cargada: en una base local que ya escaneó olmardo.com, test_6 de `test_api_v1.py` ve su score y falla, pero en el CI siempre pasa.
+
 ## Base de datos
 
 24 tablas (18 con Row-Level Security por cliente y 6 catálogos compartidos), datos de Acme Demo y Beta Corp, el dominio de prueba olmardo.com de Grupo Olmardo, y el rol `cirdan_app` sin privilegios de más. Qué se creó, cómo cargarla y las decisiones respecto al DBML están en [`db/README.md`](db/README.md).

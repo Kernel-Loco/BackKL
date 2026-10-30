@@ -1,0 +1,94 @@
+# CI mínimo (#11, RC-43): en cada PR a dev o main levanta el compose desde cero, que aplica en orden
+# las migraciones db/migraciones/NNN_descripcion.sql y las semillas, y corre las pruebas del README (paso 5).
+# El .env se crea en cada corrida con contraseñas al azar: ningún secreto vive en el repo.
+# Las pruebas en vivo (EN_VIVO=1) no corren aquí: el CI no consulta fuentes externas.
+name: Pruebas
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pruebas-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Migraciones numeradas sin huecos ni repetidas
+        run: |
+          esperado=1
+          for f in db/migraciones/*.sql; do
+            nombre=$(basename "$f")
+            if ! echo "$nombre" | grep -Eq '^[0-9]{3}_[a-z0-9_]+\.sql$'; then
+              echo "::error file=$f::La migración debe llamarse NNN_descripcion.sql"; exit 1
+            fi
+            numero=$((10#${nombre%%_*}))
+            if [ "$numero" -ne "$esperado" ]; then
+              echo "::error file=$f::Se esperaba la migración $(printf %03d "$esperado")"; exit 1
+            fi
+            esperado=$((esperado + 1))
+          done
+          echo "$((esperado - 1)) migraciones en orden"
+
+      - name: .env de prueba con contraseñas al azar
+        run: |
+          cp .env.example .env
+          al_azar() { python -c "import secrets; print(secrets.token_urlsafe(24))"; }
+          for var in POSTGRES_PASSWORD CIRDAN_APP_PASSWORD VALKEY_PASSWORD; do
+            sed -i "s|^$var=.*|$var=$(al_azar)|" .env
+          done
+          llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+          sed -i "s|^TOTP_ENCRYPTION_KEY=.*|TOTP_ENCRYPTION_KEY=$llave|" .env
+
+      - name: Levantar base, Valkey y API (carga migraciones y semillas)
+        run: |
+          docker compose up -d --build
+          for _ in $(seq 60); do
+            curl -fs http://127.0.0.1:8000/health && echo && exit 0
+            sleep 2
+          done
+          echo "::error::La API no respondió /health en 2 minutos"; exit 1
+
+      - name: Las migraciones y semillas cargaron sin errores
+        run: |
+          docker compose logs db | grep -q 'cirdan: base lista'
+
+      - name: Pruebas de la base y la API
+        run: >-
+          python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py
+          pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py
+
+      - name: Pruebas del orquestador, el explorador y el modelo ML (dentro del contenedor)
+        run: >-
+          docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" -v "$PWD/datos/ml:/app/datos/ml:ro" api python -m unittest
+          pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py
+
+      - name: Pruebas sin base ni red
+        run: >-
+          python -m unittest pruebas/test_criterio.py pruebas/test_motor_score.py pruebas/test_plan_accion.py
+          pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py
+          pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py
+          pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py
+          pruebas/test_dataset_ml.py
+
+      - name: Logs si algo falló
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
+      - name: Apagar y borrar la base de prueba
+        if: always()
+        run: docker compose down -v
