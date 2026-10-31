@@ -338,8 +338,9 @@ class Shodan(unittest.TestCase):
             http = HttpSimulado()
             otra = recolectar(http, ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
         self.assertEqual(http.urls, [])
-        self.assertEqual((otra.activos, otra.hallazgos, otra.sin_cobertura, otra.avisos),
-                         (res.activos, res.hallazgos, res.sin_cobertura, res.avisos))
+        self.assertEqual((otra.activos, otra.hallazgos, otra.sin_cobertura, otra.avisos, otra.revisados, otra.sin_revisar,
+                          otra.omitidos),
+                         (res.activos, res.hallazgos, res.sin_cobertura, res.avisos, res.revisados, res.sin_revisar, res.omitidos))
         self.assertEqual(activo(otra, RESERVAS).atributos['internetdb'], 'sin_datos')
 
     def test_14_el_peor_caso_gasta_justo_max_consultas(self):
@@ -821,10 +822,12 @@ class Arreglos(unittest.TestCase):
                           'shodan: se consultaron 10 de 11 IP', 'shodan: %s trae 30 CVE' % CAMARA):
                 self.assertTrue(any(x.startswith(aviso) for x in res.avisos), aviso)
             self.assertEqual(shodan.codigo_salida(res), 2)
+            self.assertEqual(len(res.omitidos), 5)   # las 5 CVE que MAX_CVE dejó fuera
             self.assertTrue(list(carpeta.glob('internetdb_*.json')))
             otra = recolectar(HttpSimulado(), ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
-        self.assertEqual((otra.activos, otra.hallazgos, otra.sin_cobertura, otra.avisos),
-                         (res.activos, res.hallazgos, res.sin_cobertura, res.avisos))
+        self.assertEqual((otra.activos, otra.hallazgos, otra.sin_cobertura, otra.avisos, otra.revisados, otra.sin_revisar,
+                          otra.omitidos),
+                         (res.activos, res.hallazgos, res.sin_cobertura, res.avisos, res.revisados, res.sin_revisar, res.omitidos))
 
     def test_42_sin_grabar_el_cli_sale_con_3_y_el_aviso_entra_en_los_10_del_orquestador(self):
         """re-contrato-2 y re-contrato-3: python -m cirdan.recolectores.shodan --grabar sale con 3 si no escribió, y
@@ -905,6 +908,72 @@ class Arreglos(unittest.TestCase):
         with self.assertRaises(shodan.SinTiempo):
             cliente.internetdb(RESERVAS, DOMINIO)
         self.assertEqual(cliente.consultas, shodan.INTENTOS + 1)
+
+
+    def test_43b_con_cobertura_parcial_revisados_lleva_las_partes_revisadas_completas(self):
+        """#23: cada puerto lleva su IP como parte y cada CVE su IP con '/cve'. Con la cobertura parcial, revisados
+        lleva las partes que InternetDB respondió sin campos rotos (también un 404) y las que una corrida completa
+        tampoco consulta (CDN). No van la IP que no respondió, los puertos de una IP con 'ports' roto ni las cortadas
+        por MAX_IPS. Si se conocen todos los nombres, sin_revisar lleva las demás partes de sus IP. Con todo revisado,
+        los dos quedan en None."""
+        rota, sin_datos = '20.69.155.1', '20.69.155.2'
+        zona = {DOMINIO: a(CLOUDFLARE), 'camaras.olmardo.com': a(CAMARA), 'reservas.olmardo.com': a(RESERVAS),
+                'eventos.olmardo.com': a(rota), 'www.olmardo.com': a(sin_datos)}
+        nombres = paginas('camaras.olmardo.com', 'eventos.olmardo.com', 'reservas.olmardo.com', 'www.olmardo.com')
+        con_rdp = internetdb(CAMARA, ports=[3389], vulns=['CVE-2024-0001'])
+        completo = recolectar(HttpSimulado(nombres, {CAMARA: con_rdp, RESERVAS: internetdb(RESERVAS, ports=[3389])}),
+                              ResolvedorSimulado({k: v for k, v in zona.items() if v != a(rota)}))
+        self.assertEqual((completo.revisados, completo.sin_revisar), (None, None))
+        self.assertEqual({(h.codigo, tuple(h.partes)) for h in completo.hallazgos},
+                         {('exposed_rdp', (CAMARA,)), ('known_vulnerability', (CAMARA + '/cve',)),
+                          ('exposed_rdp', (RESERVAS,))})
+        http = HttpSimulado(nombres, {CAMARA: con_rdp, RESERVAS: 503, rota: {'ports': 'muchos'}})
+        res = recolectar(http, ResolvedorSimulado(zona))
+        self.assertTrue(any(x.startswith(shodan.PARCIAL) for x in res.avisos), res.avisos)
+        self.assertCountEqual(res.revisados, [CAMARA, CAMARA + '/cve', rota + '/cve', sin_datos, sin_datos + '/cve',
+                                              CLOUDFLARE, CLOUDFLARE + '/cve'])
+        self.assertCountEqual(res.sin_revisar, [RESERVAS, RESERVAS + '/cve', rota])
+        self.assertEqual({(h.codigo, tuple(h.partes)) for h in res.hallazgos},
+                         {('exposed_rdp', (CAMARA,)), ('known_vulnerability', (CAMARA + '/cve',))})
+        self.assertNotIn('exposed_rdp', res.sin_cobertura)   # el código trae hallazgos: solo las partes protegen a RESERVAS
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        muchas = ['20.69.157.%d' % i for i in range(1, shodan.MAX_IPS + 2)]
+        res = recolectar(HttpSimulado(ips={muchas[0]: internetdb(muchas[0], ports=[3389])}),
+                         ResolvedorSimulado({DOMINIO: a(*muchas)}))
+        self.assertEqual(res.revisados, [p for ip in muchas[:shodan.MAX_IPS] for p in (ip, ip + '/cve')])
+        self.assertEqual(res.sin_revisar, [muchas[-1], muchas[-1] + '/cve'])   # la última quedó fuera por MAX_IPS
+        res = recolectar(HttpSimulado([503] * shodan.INTENTOS_CT, {CAMARA: internetdb(CAMARA, ports=[3389])}),
+                         ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+        # sin Cert Spotter no se saben todas las IP del dominio: solo se cierra lo de las revisadas
+        self.assertEqual((res.revisados, res.sin_revisar), ([CAMARA, CAMARA + '/cve'], None))
+
+    def test_43c_el_tope_de_cve_y_los_campos_que_no_deciden_hallazgos(self):
+        """#23: una IP con más de MAX_CVE CVE reporta las más recientes y pone la huella de las demás en omitidos,
+        que siguen ahí: el orquestador no cierra las que se reportaron antes y la corrida no queda parcial. 'cpes' o
+        'hostnames' rotos no quitan nada de revisados: no deciden ningún hallazgo. 'vulns' roto solo quita las CVE y
+        'tags' roto quita las dos partes."""
+        vulns = ['CVE-2024-%04d' % i for i in range(1, shodan.MAX_CVE + 2)]
+        res = recolectar(HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=[3389], vulns=vulns)}),
+                         ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+        self.assertEqual((res.revisados, res.sin_revisar), (None, None))
+        datos = {'tags': [], 'hostnames_ajenos': 0, 'cpes': []}
+        vieja = shodan.hallazgo_cve(DOMINIO, CAMARA, 'CVE-2024-0001', [DOMINIO], datos, AHORA).huella
+        self.assertEqual(res.omitidos, [vieja])   # la más vieja quedó fuera del tope
+        self.assertNotIn(vieja, [h.huella for h in res.hallazgos])
+        self.assertEqual(res.sin_cobertura, list(shodan.SIN_LLAVE))
+        self.assertFalse(any(x.startswith(shodan.PARCIAL) for x in res.avisos), res.avisos)
+        self.assertEqual(shodan.codigo_salida(res), 0)
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        rotos = {'cpes': ({'cpes': 'x'}, [CAMARA, CAMARA + '/cve']),
+                 'hostnames': ({'hostnames': 'x'}, [CAMARA, CAMARA + '/cve']),
+                 'vulns': ({'vulns': ['nada']}, [CAMARA]), 'tags': ({'tags': 'x'}, []),
+                 'ports': ({'ports': 'x'}, [CAMARA + '/cve'])}
+        for campo, (cambio, esperado) in rotos.items():
+            with self.subTest(campo=campo):
+                res = recolectar(HttpSimulado(ips={CAMARA: dict(internetdb(CAMARA, ports=[3389]), **cambio)}),
+                                 ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+                self.assertEqual(res.revisados, esperado)
+                self.assertEqual(res.sin_revisar, [p for p in (CAMARA, CAMARA + '/cve') if p not in esperado])
 
 
 class Geo(unittest.TestCase):
@@ -1003,13 +1072,16 @@ class Geo(unittest.TestCase):
                 http = HttpSimulado()
                 otra = recolectar(http, ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
         self.assertEqual(http.urls, [])
-        self.assertEqual((con_base.activos, con_base.hallazgos, con_base.sin_cobertura, con_base.avisos),
-                         (vivo.activos, vivo.hallazgos, vivo.sin_cobertura, vivo.avisos))
+        self.assertEqual((con_base.activos, con_base.hallazgos, con_base.sin_cobertura, con_base.avisos,
+                          con_base.revisados, con_base.sin_revisar, con_base.omitidos),
+                         (vivo.activos, vivo.hallazgos, vivo.sin_cobertura, vivo.avisos, vivo.revisados, vivo.sin_revisar,
+                          vivo.omitidos))
 
         def sin_geo(res):
             return [(a.tipo, a.valor, {k: v for k, v in a.atributos.items() if k not in CLAVES_GEO}) for a in res.activos]
         self.assertEqual(sin_geo(otra), sin_geo(vivo))
-        self.assertEqual((otra.hallazgos, otra.sin_cobertura), (vivo.hallazgos, vivo.sin_cobertura))
+        self.assertEqual((otra.hallazgos, otra.sin_cobertura, otra.revisados, otra.sin_revisar, otra.omitidos),
+                         (vivo.hallazgos, vivo.sin_cobertura, vivo.revisados, vivo.sin_revisar, vivo.omitidos))
         self.assertEqual(sorted(otra.avisos),
                          sorted(vivo.avisos + [geoip.aviso_sin_base('shodan', sin_base, sin_asn=shodan.SIN_CDN_POR_ASN)]))
         self.assertEqual((activo(otra, CAMARA).atributos['asn'], activo(vivo, CAMARA).atributos['asn']), (NO, 8075))

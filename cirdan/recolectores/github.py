@@ -43,9 +43,13 @@ Sin secretos ni datos personales de más:
 Límites de una corrida: MAX_REPOS repos, MAX_KB_REPO por repo, MAX_DISCO de disco, TIMEOUT_CLON s por clon,
 TIMEOUT_GITLEAKS s por gitleaks, TIMEOUT_LOG s por git log y TIEMPO_CORRIDA s en total, también para la API. Un repo
 que no se revisó por un límite o una falla deja un aviso de cobertura parcial. Si así un código quedó sin hallazgos,
-va a sin_cobertura. Si ya trae hallazgos no puede ir ahí (validar() lo rechaza y la fuente quedaría failed) y solo
-queda el aviso. Si no se pudo revisar ningún repo, la fuente no respondió. Sin git o gitleaks instalados tampoco
-responde, y se sabe antes de consultar la API.
+va a sin_cobertura. Si ya trae hallazgos no puede ir ahí (validar() lo rechaza y la fuente quedaría failed): queda el
+aviso y revisados lleva los repos que sí se revisaron ('org/repo'). Cada secreto lleva su repo como parte y cada
+correo los repos donde salió, así el orquestador no cierra el secreto de un repo que no se clonó. Si no hubo más
+páginas de repos y todos los que se revisarían tienen nombre válido, sin_revisar lleva los públicos que no se
+revisaron, sin forks ni deshabilitados, que una corrida completa tampoco revisa. Así se cierra lo de un repo que ya
+no está, como uno borrado o que se hizo privado (#23). Si no se pudo revisar ningún repo,
+la fuente no respondió. Sin git o gitleaks instalados tampoco responde, y se sabe antes de consultar la API.
 
 Cuota de GitHub sin token: 60 consultas por hora por IP. Un 403 o 429 no se reintenta en la corrida ni la deja failed,
 porque el orquestador la reintentaría a 1, 5 y 25 minutos reservando MAX_CONSULTAS cada vez: queda succeeded con sus 2
@@ -747,19 +751,20 @@ def hallazgo_secreto(dominio, repo, secreto, ahora):
                  'primera_vez': secreto['primera_vez']}
     return Hallazgo(codigo, CODIGOS[codigo], dominio, titulo, evidencia,
                     _caracteristicas(codigo, 'domain', evidencia, ahora, 'alta'), huella,
-                    clave='%s:%s:%s' % (repo, secreto['ruta'], secreto['regla']))
+                    clave='%s:%s:%s' % (repo, secreto['ruta'], secreto['regla']), partes=[repo])
 
 
-def hallazgo_correo(correo, datos, ahora):
+def hallazgo_correo(correo, datos, ahora, partes=None):
     """email_in_public_commits sobre el activo email. La sensibilidad sale de la rúbrica (media: el correo). El título
-    no lleva el correo, que ya es el activo: el título puede salir de la plataforma (politica_uso_etico.md)."""
+    no lleva el correo, que ya es el activo: el título puede salir de la plataforma (politica_uso_etico.md). `partes`
+    son todos los repos donde salió, sin el corte de MAX_REPOS_ACTIVO que tiene datos['repos'] (#23)."""
     codigo = 'email_in_public_commits'
     titulo = 'Correo de la empresa en los cambios publicados en GitHub'
     evidencia = {'title': titulo, 'repos': datos['repos'], 'commits': datos['commits'],
                  'primera_vez': datos['primera_vez']}
     return Hallazgo(codigo, CODIGOS[codigo], correo, titulo, evidencia,
                     _caracteristicas(codigo, 'email', evidencia, ahora, rubrica.sensibilidad(codigo, evidencia, ahora)),
-                    _huella(codigo, correo))
+                    _huella(codigo, correo), partes=list(datos['repos'] if partes is None else partes))
 
 
 def _cuantos(n, singular, plural):
@@ -855,7 +860,7 @@ def _revisar(res, cliente, org, dominio, ahora):
     for correo in sorted(correos):
         datos = dict(correos[correo], repos=correos[correo]['repos'][:MAX_REPOS_ACTIVO])
         res.activos.append(Activo('email', correo, {'fuente': FUENTE, **datos}))
-        res.hallazgos.append(hallazgo_correo(correo, datos, ahora))
+        res.hallazgos.append(hallazgo_correo(correo, datos, ahora, partes=correos[correo]['repos']))
 
     for motivo, n in saltados.items():
         if n:
@@ -882,6 +887,12 @@ def _revisar(res, cliente, org, dominio, ahora):
             len(revisados), ('%d o más' % total) if mas_paginas else total))
         con_hallazgos = {h.codigo for h in res.hallazgos}
         res.sin_cobertura = [c for c in CODIGOS if c not in con_hallazgos]
+        res.revisados = ['%s/%s' % (login, nombre) for nombre in revisados_nombres]
+        # sin forks ni deshabilitados, que una corrida completa tampoco revisa: lo que salió de ellos se cierra igual
+        revisables = [r for r in repos if not r['privado'] and not r['fork'] and not r['deshabilitado']]
+        if not mas_paginas and all(r['nombre'] for r in revisables):  # se conocen todos los que se revisarían
+            res.sin_revisar = [x for x in dict.fromkeys('%s/%s' % (login, r['nombre']) for r in revisables)
+                               if x not in res.revisados]
     cliente.terminar()
     return res
 

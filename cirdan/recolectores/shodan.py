@@ -55,9 +55,15 @@ quien tuvo la IP antes), el protocolo es tcp salvo PUERTOS_UDP, y el activo serv
 Cobertura. Si algo quedó sin revisar (Cert Spotter caído o con 429, nombres o IP cortados por MAX_NOMBRES o MAX_IPS, un
 A fallido, una IP sin respuesta, una respuesta 200 de InternetDB sin 'ports' o con campos que no se pueden leer, el 429
 de InternetDB o el tope de tiempo), los códigos de CODIGOS sin hallazgos también van a sin_cobertura. Uno con
-hallazgos no puede ir ahí (validar() lo rechaza) y solo queda el aviso. Si no queda ninguna IP que consultar y todo
-respondió, la fuente queda succeeded con 0 hallazgos y un aviso. Si Cert Spotter y todos los A fallaron, o todas las IP
-fallaron por la red, FuenteNoResponde, para que el orquestador la reintente.
+hallazgos no puede ir ahí (validar() lo rechaza) y solo queda el aviso. Para eso cada puerto lleva su IP como parte y
+cada CVE su IP con PARTE_CVE, y revisados lleva las partes que sí quedaron revisadas completas: las de las IP que
+InternetDB respondió sin los campos rotos que las deciden (_partes_revisadas), más las privadas y las de un CDN, que
+una corrida completa tampoco consulta. Si se conocen todas las IP del dominio (sin páginas, nombres ni A de menos),
+sin_revisar lleva las demás partes de esas IP. Así el orquestador no cierra lo de una IP sin respuesta o cortada por
+un tope, y sí lo de una IP que ya no es del dominio (#23). Las CVE que MAX_CVE deja fuera van en omitidos con su
+huella: siguen ahí y el orquestador no cierra las que se reportaron antes. Si no
+queda ninguna IP que consultar y todo respondió, la fuente queda succeeded con 0 hallazgos y un aviso. Si Cert Spotter
+y todos los A fallaron, o todas las IP fallaron por la red, FuenteNoResponde, para que el orquestador la reintente.
 Reintentos: 3 intentos por A y por IP (esperas de 5 y 15 s, nunca más largas que lo que le queda a la corrida) y 2 por
 página de Cert Spotter. El lifetime del A es min(TIMEOUT_DNS, lo que queda). Cada petición HTTP tiene un plazo
 absoluto, min(TIMEOUT_HTTP o TIMEOUT_CT, lo que queda), que cubre toda la lectura del cuerpo (_descargar lee por bloques
@@ -190,6 +196,7 @@ LIMITES = ('shodan: solo IPv4 y sin la llave de Shodan (#8): exposed_iot_device,
 SIN_CDN_POR_ASN = 'las IP de un CDN sin un CNAME conocido no se pudieron descartar por ASN y se consultaron igual en InternetDB'
 SIN_IP = 'shodan: ninguna IP pública del dominio fuera de un CDN, no hubo nada que consultar en InternetDB'
 PARCIAL = 'shodan: cobertura parcial'
+PARTE_CVE = '/cve'   # las CVE de una IP son otra parte que sus puertos: 'vulns' roto no frena el cierre de sus puertos
 NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiempo o una respuesta que no se puede leer), '
                'no se grabó y se conserva la grabación anterior')
 NOTA_SIN_FECHA = ('InternetDB no dice cuándo vio este dato: puede ser viejo o de quien tuvo la IP antes que el dominio')
@@ -700,7 +707,8 @@ def hallazgo_puerto(codigo, dominio, servicio, ip, puerto, hosts, datos, ahora):
     if puerto in PUERTOS_INDUSTRIALES:
         evidencia['puerto_industrial'] = True
     return Hallazgo(codigo, CODIGOS[codigo], servicio, titulo, evidencia,
-                    rubrica.calcular(codigo, 'service', evidencia, ahora), _huella(codigo, dominio, servicio))
+                    rubrica.calcular(codigo, 'service', evidencia, ahora), _huella(codigo, dominio, servicio),
+                    partes=[ip])
 
 
 def hallazgo_cve(dominio, ip, cve, hosts, datos, ahora):
@@ -709,7 +717,7 @@ def hallazgo_cve(dominio, ip, cve, hosts, datos, ahora):
     titulo = TITULO_CVE % (cve, _donde(hosts))
     evidencia = dict(_evidencia(titulo, ip, hosts, datos), cve=cve, cpes=datos['cpes'], deducida_por_version=True)
     return Hallazgo(codigo, CODIGOS[codigo], ip, titulo, evidencia, rubrica.calcular(codigo, 'ip', evidencia, ahora),
-                    _huella(codigo, dominio, ip, cve), clave=cve)
+                    _huella(codigo, dominio, ip, cve), clave=cve, partes=[ip + PARTE_CVE])
 
 
 def _sin_cobertura(res, aviso):
@@ -748,6 +756,23 @@ def _nombres(dominio, certs):
             if n and n != dominio and en_alcance_nombre(n, dominio):
                 nombres.add(n)
     return [dominio] + sorted(nombres)
+
+
+def _partes_revisadas(ip, marca, d):
+    """Las partes de una IP que quedaron revisadas completas (#23): la IP (sus puertos) y ip/cve (sus CVE). Las privadas
+    y las de un CDN, que una corrida completa tampoco consulta, cuentan completas, igual que un 404 o el tag cdn de
+    InternetDB. Un campo roto deja a medias lo que decide: ports la IP, vulns sus CVE y tags las dos (honeypot)."""
+    if marca is not None:
+        return [] if marca.get('internetdb') else [ip, ip + PARTE_CVE]
+    if d is None:
+        return []
+    if d.get('sin_datos') or d.get('cdn'):
+        return [ip, ip + PARTE_CVE]
+    rotos = set(d['rotos'])
+    if 'tags' in rotos:
+        return []
+    return ([ip] if 'ports' not in rotos else []) + (
+        [ip + PARTE_CVE] if 'vulns' not in rotos else [])
 
 
 def _revisar(res, cliente, dominio, ahora):
@@ -798,6 +823,7 @@ def _revisar(res, cliente, dominio, ahora):
         raise FuenteNoResponde('shodan: no respondieron Cert Spotter ni el DNS de %s' % dominio)
     if fallas_a:
         parcial.append('a')
+    todas_las_ip = not parcial   # sin nombres cortados ni A fallidos se conocen todas las IP del dominio
 
     # 3. Qué IP se consultan: públicas (consultable), fuera de un CDN en toda su cadena CNAME y fuera de un ASN de CDN.
     # La ubicación sale de la base local, sin red: las bases se piden una vez por corrida y solo si alguna IP es
@@ -905,8 +931,10 @@ def _revisar(res, cliente, dominio, ahora):
             codigo = codigo_de_puerto(puerto)
             if codigo:
                 res.hallazgos.append(hallazgo_puerto(codigo, dominio, servicio, ip, puerto, hosts, d, ahora))
-        # d['vulns'] va de la más reciente a la más vieja: se reportan las MAX_CVE más recientes
+        # d['vulns'] va de la más reciente a la más vieja: se reportan las MAX_CVE más recientes. Las omitidas siguen
+        # ahí: van en omitidos, para que el orquestador no cierre las que se reportaron antes (#23)
         res.hallazgos += [hallazgo_cve(dominio, ip, cve, hosts, d, ahora) for cve in d['vulns'][:MAX_CVE]]
+        res.omitidos += [_huella('known_vulnerability', dominio, ip, cve) for cve in d['vulns'][MAX_CVE:]]
         if len(d['vulns']) > MAX_CVE:
             res.avisos.append('shodan: %s trae %d CVE, se reportan las %d más recientes y se omitieron %d'
                               % (ip, len(d['vulns']), MAX_CVE, len(d['vulns']) - MAX_CVE))
@@ -919,6 +947,9 @@ def _revisar(res, cliente, dominio, ahora):
         res.sin_cobertura = [c for c in CODIGOS if c not in con_hallazgos] + list(SIN_LLAVE)
         res.avisos.append('%s, se revisaron %d de %d IP del dominio en InternetDB'
                           % (PARCIAL, len(datos), len(consultar) + sum(1 for m in marcas.values() if m.get('internetdb'))))
+        res.revisados = [parte for ip in ips for parte in _partes_revisadas(ip, marcas.get(ip), datos.get(ip))]
+        if todas_las_ip:
+            res.sin_revisar = [parte for ip in ips for parte in (ip, ip + PARTE_CVE) if parte not in res.revisados]
     # Una corrida con fallas no pisa una grabación completa (como github.py con SIN_CUOTA). El aviso va primero, para
     # que entre en los 10 que guarda el orquestador
     if cliente.modo == 'grabar' and cliente.degradada(parcial):
@@ -963,7 +994,8 @@ def codigo_salida(res):
         return 1
     if NO_SE_GRABO in res.avisos:
         return 3
-    parcial = set(res.sin_cobertura) - set(SIN_LLAVE) or any(a.startswith(PARCIAL) for a in res.avisos)
+    parcial = (res.revisados is not None or set(res.sin_cobertura) - set(SIN_LLAVE)
+               or any(a.startswith(PARCIAL) for a in res.avisos))
     return 2 if parcial else 0
 
 
