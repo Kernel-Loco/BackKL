@@ -4,6 +4,10 @@
 # ninguna de omisión halla un token CIRDAN_FAKE_: generic-api-key descarta los valores con la palabra 'fake' y el
 # token sembrado en olmardo/sitio-reservas no tiene la forma de ningún proveedor.
 # El recolector siempre pasa este archivo con --config, así que un .gitleaks.toml del repo revisado no se usa.
+# No lleva [allowlist] propia: aquí se aplicaría a los repos de los clientes, y en 8.21.2 sus paths y regexes se unen
+# con 'OR'. Con paths de pruebas/ se saltaría todo lo de esa carpeta, y con la regex CIRDAN_FAKE_ la regla propia ya no
+# hallaría nada (PR 81). La de las reglas de omisión sí se hereda: salta, entre otras, node_modules/ y gitleaks.toml.
+# Las excepciones del gitleaks de BackKL, si hacen falta, van en un .gitleaks.toml en su raíz.
 
 title = "LowTide: reglas de omisión de gitleaks y tokens falsos CIRDAN_FAKE_"
 

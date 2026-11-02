@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 import urllib.error
 import urllib.parse
@@ -832,11 +834,32 @@ class Contrato(unittest.TestCase):
         self.assertEqual(sorted({h.codigo for h in res.hallazgos}), sorted(CODIGOS))
 
     def test_3_las_reglas_de_gitleaks_traen_las_de_omision_y_la_propia(self):
-        texto = github.REGLAS.read_text(encoding='utf-8')
+        texto = github.REGLAS.read_text(encoding='utf-8-sig')  # gitleaks acepta el BOM
         self.assertIn('useDefault = true', texto)
         self.assertIn('id = "cirdan-fake-token"', texto)
         self.assertNotIn('stopwords', texto)
         self.assertNotIn(TOKEN, texto)
+        # Solo estas claves: gitleaks lee la config con viper, que no distingue mayúsculas, así que [AllowList] también
+        # sería una allowlist, y sus paths y regexes se unen con 'OR' (PR 81)
+        reglas = tomllib.loads(texto)
+        self.assertEqual(sorted(reglas), ['extend', 'rules', 'title'])
+        self.assertEqual(reglas['extend'], {'useDefault': True})  # sin path a otra config
+        for regla in reglas['rules']:
+            self.assertLessEqual(set(regla), {'id', 'description', 'regex', 'keywords'}, regla['id'])
+
+    def test_4_la_imagen_pide_buildkit_y_no_fija_targetarch(self):
+        """El builder clásico ignora ADD --checksum: la primera etapa lo detiene con --chmod antes de bajar nada, y
+        BuildKit la salta porque ninguna otra la usa. Un ARG TARGETARCH con valor le ganaría a la plataforma que pone
+        BuildKit (PR 79)."""
+        # Como Docker: primero se quitan los comentarios y las líneas vacías, y después se juntan las que terminan en \
+        lineas = [l for l in (RAIZ / 'Dockerfile').read_text(encoding='utf-8-sig').splitlines()
+                  if l.strip() and not l.lstrip().startswith('#')]
+        instrucciones = [l.strip() for l in re.sub(r'\\[ \t]*\n', ' ', '\n'.join(lineas)).splitlines()]
+        self.assertEqual(instrucciones[:2], ['FROM scratch AS pide-buildkit', 'COPY --chmod=0644 requirements.txt /'])
+        self.assertEqual([l for l in instrucciones if 'pide-buildkit' in l], ['FROM scratch AS pide-buildkit'])
+        for linea in instrucciones:
+            if re.match(r'(?i)ARG\s', linea):
+                self.assertFalse([a for a in linea.split()[1:] if a.startswith('TARGETARCH=')], linea)
 
 
 class LineaDeComandos(unittest.TestCase):
@@ -883,17 +906,20 @@ class Semilla(unittest.TestCase):
         self.assertIn("SET client_encoding = 'UTF8';", SEMILLA.read_text(encoding='utf-8'))
 
 
-@unittest.skipUnless(os.name == 'posix' and shutil.which('git') and shutil.which('gitleaks'),
+@unittest.skipUnless(os.environ.get('INTEGRACION_GITHUB') == '1'
+                     or (os.name == 'posix' and shutil.which('git') and shutil.which('gitleaks')),
                      'pide git y gitleaks: corre dentro del contenedor')
 class Integracion(unittest.TestCase):
     """git y gitleaks 8.21.2 reales sobre un repo local, sin red. Dentro del contenedor, desde la raíz de BackKL, con
     db/ y docs/ montados porque este archivo importa test_catalogo_reglas, que los lee:
         docker compose run --rm -v "$(pwd -W)/pruebas:/app/pruebas:ro" -v "$(pwd -W)/db:/app/db:ro" \\
             -v "$(pwd -W)/docs:/app/docs:ro" api python -m unittest pruebas.test_github.Integracion
+    Con INTEGRACION_GITHUB=1, como en el CI, falla en vez de saltarse si no hay git o gitleaks.
     """
 
-    def armar(self, d):
-        """Un clon bare de un repo con un token que solo queda en el historial y otro en la versión actual."""
+    def armar(self, d, extra=()):
+        """Un clon bare de un repo con un token que solo queda en el historial y otro en la versión actual. Cada ruta
+        de `extra` lleva TOKEN en un último commit."""
         fuente, casa = os.path.join(d, 'fuente'), os.path.join(d, 'casa')
         os.mkdir(fuente)
         os.mkdir(casa)
@@ -914,6 +940,12 @@ class Integracion(unittest.TestCase):
         Path(fuente, 'config', '.env').write_text('OTRO=%s\n' % OTRO_TOKEN, encoding='utf-8')
         git('add', '-f', 'config/.env')
         git('commit', '-q', '-m', 'tres')
+        for ruta in extra:
+            os.makedirs(os.path.join(fuente, os.path.dirname(ruta)), exist_ok=True)
+            Path(fuente, ruta).write_text('TOKEN=%s\n' % TOKEN, encoding='utf-8')
+            git('add', '-f', ruta)
+        if extra:
+            git('commit', '-q', '-m', 'cuatro')
         destino = os.path.join(casa, 'repo.git')
         git('clone', '--bare', '--quiet', fuente, destino, cwd=d)
         return destino, casa
@@ -938,6 +970,19 @@ class Integracion(unittest.TestCase):
                            cwd=casa, env=github._entorno(casa), check=True, stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.assertEqual(json.loads(Path(reporte).read_text(encoding='utf-8')), [])
+
+    def test_3_tambien_lo_halla_en_pruebas_y_en_respuestas_grabadas_de_un_cliente(self):
+        """Una [allowlist] con esas rutas y la regex CIRDAN_FAKE_ apagaba los cuatro: gitleaks une las dos con 'OR'
+        (PR 81)."""
+        extra = ('pruebas/conf.py', 'cirdan/recolectores/respuestas_grabadas/github/sitio.json')
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, extra)
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        self.assertEqual([(s['ruta'], s['regla']) for s in datos['secretos']],
+                         [(ruta, 'cirdan-fake-token') for ruta in sorted(extra + ('config/.env', 'viejo.txt'))])
+        texto = json.dumps(datos)
+        self.assertNotIn(TOKEN, texto)
+        self.assertNotIn(OTRO_TOKEN, texto)
 
 
 if __name__ == '__main__':
