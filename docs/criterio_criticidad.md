@@ -28,7 +28,7 @@ Las bandas están ancladas al ejemplo del reto: un dominio con 68 está en **rie
 
 ### Aporte de cada hallazgo (#31)
 
-Para el método `rules`, cada severidad equivale a puntos (low = 25, medium = 50, high = 75 y critical = 100). El aporte de un hallazgo vigente a su categoría es `min(max_penalty, puntos_de_severidad × peso_de_regla)`. Se suman los aportes por categoría hasta un máximo de 100; los hallazgos `resolved` y `false_positive` no aportan, mientras `open` y `accepted_risk` sí. El motor conserva severidad, regla, penalización y factores en `score_contributions` para explicar cada cálculo. Si una fuente falla o deja reglas sin cobertura, el score se guarda con `partial_coverage = true`.
+Para el método `rules`, cada severidad equivale a puntos (low = 25, medium = 50, high = 75 y critical = 100). El aporte de un hallazgo vigente a su categoría es `min(max_penalty, puntos_de_severidad × peso_de_regla)`. Se suman los aportes por categoría hasta un máximo de 100; los hallazgos `resolved` y `false_positive` no aportan, mientras `open` y `accepted_risk` sí. El motor conserva severidad, regla, penalización y factores en `score_contributions` para explicar cada cálculo. Si una fuente falla, deja reglas sin cobertura o revisa solo una parte de sus repos o IP, el score se guarda con `partial_coverage = true`.
 
 ### Por qué hay un piso
 

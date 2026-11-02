@@ -32,7 +32,7 @@ from cirdan.config import config
 from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
-from cirdan.recolectores import certspotter, crtsh, ejemplo
+from cirdan.recolectores import certspotter, crtsh, ejemplo, github, shodan
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado
 from pruebas.test_certspotter import AHORA, RespaldoSimulado
 from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado
@@ -63,6 +63,49 @@ FALLA = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, 
                         error='crt.sh no respondió')
 BIEN = Resultado('acme-demo.mx', 'ejemplo', activos=[Activo('domain', 'acme-demo.mx'),
                                                      Activo('subdomain', 'www.acme-demo.mx')], consultas=1)
+
+# Hallazgos armados con las funciones de cada recolector. Las pruebas de test_github.py y test_shodan.py, que no
+# entran al contenedor (leen docs/ y db/), revisan que una corrida parcial dé estas partes y estos revisados.
+def resultado_github(*hallazgos, revisados=None, sin_revisar=None):
+    """Como github.recolectar: con la cobertura parcial, los códigos sin hallazgos van a sin_cobertura."""
+    activos = [Activo('domain', 'acme-demo.mx')] + [Activo('email', h.activo) for h in hallazgos
+                                                    if h.codigo == 'email_in_public_commits']
+    sin_cobertura = [] if revisados is None else [c for c in github.CODIGOS if c not in {h.codigo for h in hallazgos}]
+    return Resultado('acme-demo.mx', 'github', activos=activos, hallazgos=list(hallazgos), sin_cobertura=sin_cobertura,
+                     revisados=revisados, sin_revisar=sin_revisar)
+
+
+def secreto(repo, ruta):
+    return github.hallazgo_secreto('acme-demo.mx', 'acme-demo/' + repo, {'ruta': ruta, 'regla': 'cirdan-fake-token',
+                                                                         'primera_vez': '2026-09-01T12:00:00Z'}, AHORA)
+
+
+def correo(usuario, *repos):
+    datos = {'repos': ['acme-demo/' + r for r in repos], 'commits': 1, 'primera_vez': '2026-09-01T12:00:00Z'}
+    return github.hallazgo_correo(usuario + '@acme-demo.mx', datos, AHORA)
+
+
+def resultado_shodan(*puertos, revisados=None, sin_revisar=None, cves=(), omitidos=()):
+    """Un resultado de Shodan con un hallazgo por (ip, puerto), sobre su activo service, y uno por (ip, CVE). omitidos son
+    (ip, CVE) que el tope MAX_CVE dejó fuera. Como shodan.recolectar, SIN_LLAVE va siempre a sin_cobertura y, con la
+    cobertura parcial, también los códigos sin hallazgos."""
+    hosts, datos = ['acme-demo.mx'], {'tags': [], 'hostnames_ajenos': 0, 'cpes': []}
+    res = Resultado('acme-demo.mx', 'shodan', revisados=revisados, sin_revisar=sin_revisar,
+                    omitidos=[shodan.hallazgo_cve('acme-demo.mx', ip, cve, hosts, datos, AHORA).huella
+                              for ip, cve in omitidos])
+    for ip in sorted({ip for ip, _ in puertos} | {ip for ip, _ in cves}):
+        res.activos.append(Activo('ip', ip, {'hosts': hosts}))
+    res.hallazgos += [shodan.hallazgo_cve('acme-demo.mx', ip, cve, hosts, datos, AHORA) for ip, cve in cves]
+    for ip, puerto in puertos:
+        servicio = '%s:%d/tcp' % (ip, puerto)
+        res.activos.append(Activo('service', servicio, {'hosts': hosts, 'parent': ip, 'ip_address': ip}))
+        res.hallazgos.append(shodan.hallazgo_puerto(shodan.codigo_de_puerto(puerto), 'acme-demo.mx', servicio, ip,
+                                                    puerto, hosts, datos, AHORA))
+    con_hallazgos = {h.codigo for h in res.hallazgos}
+    res.sin_cobertura = [] if revisados is None else [c for c in shodan.CODIGOS if c not in con_hallazgos]
+    res.sin_cobertura += list(shodan.SIN_LLAVE)
+    return res
+
 
 # El día del límite diario, como lo calculan reserve_source_quota() y adjust_source_quota() (migración 008)
 HOY_UTC = "(now() AT TIME ZONE 'UTC')::date"
@@ -187,11 +230,11 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(f['status'], 'open')
         return s, f
 
-    def reescanear(self, resultado):
-        """Otro escaneo de acme-demo.mx en el que `ejemplo` responde con este resultado."""
+    def reescanear(self, resultado, fuente='ejemplo'):
+        """Otro escaneo de acme-demo.mx en el que `fuente` responde con este resultado."""
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         with mock.patch.object(orquestador, 'ejecutar', lambda *a, **k: resultado):
-            return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+            return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=[fuente], modo='reproducir',
                                          conn=self.conn)
 
     def estado(self, finding_id):
@@ -300,6 +343,244 @@ class Orquestador(unittest.TestCase):
         intentar = 'SELECT pg_try_advisory_xact_lock(hashtext(%s), hashtext(%s))'
         self.assertFalse(otra.execute(intentar, (orquestador.CANDADO_HALLAZGOS, ACME)).fetchone()[0])
         self.assertTrue(otra.execute(intentar, (orquestador.CANDADO_HALLAZGOS, BETA)).fetchone()[0])
+
+    def abiertos(self, campo, *hallazgos):
+        """{valor de evidence[campo]: estado} de esos hallazgos. Solo los de la prueba: la base puede traer otros."""
+        filas = self.conn.execute('SELECT evidence->>%s AS valor, status FROM findings WHERE fingerprint = ANY(%s)',
+                                  (campo, [bytes.fromhex(h.huella) for h in hallazgos])).fetchall()
+        return {f['valor']: f['status'] for f in filas}
+
+    def sin_partes(self, *hallazgos):
+        """Como lo guardado antes de evidence.partes."""
+        self.conn.execute("UPDATE findings SET evidence = evidence - 'partes' WHERE fingerprint = ANY(%s)",
+                          ([bytes.fromhex(h.huella) for h in hallazgos],))
+
+    def partes(self, hallazgo):
+        return self.uno("SELECT evidence->'partes' AS p FROM findings WHERE fingerprint = %s",
+                        bytes.fromhex(hallazgo.huella))['p']
+
+    def test_2l_un_repo_que_no_se_pudo_clonar_no_cierra_sus_secretos(self):
+        """GitHub revisó sitio pero no clonó api (#23): el secreto de api sigue abierto aunque su código traiga otros
+        hallazgos, y el escaneo queda parcial. Lo que ya no sale de sitio, que sí se revisó, se cierra, y también el
+        correo que solo salió en sitio, aunque su código quedó en sin_cobertura: con revisados deciden las partes. El
+        correo que también salió en api sigue abierto."""
+        api, sitio, viejo = secreto('api', 'config/.env'), secreto('sitio', 'web/.env'), secreto('sitio', 'web/viejo.env')
+        de_sitio, de_los_dos = correo('ana', 'sitio'), correo('luis', 'api', 'sitio')
+        _, resumen = self.reescanear(resultado_github(api, sitio, viejo, de_sitio, de_los_dos), 'github')
+        self.assertEqual(resumen['status'], 'completed')
+        self.assertEqual(self.uno("SELECT evidence->'partes' AS p FROM findings WHERE fingerprint = %s",
+                                  bytes.fromhex(api.huella))['p'], ['acme-demo/api'])
+        s, resumen = self.reescanear(resultado_github(sitio, revisados=['acme-demo/sitio']), 'github')
+        self.assertEqual(self.abiertos('ruta', api, sitio, viejo),
+                         {'config/.env': 'open', 'web/.env': 'open', 'web/viejo.env': 'resolved'})
+        self.assertEqual([self.abiertos('title', h).popitem()[1] for h in (de_sitio, de_los_dos)], ['resolved', 'open'])
+        self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['github']))
+        self.assertEqual(resumen['stats']['rules_without_coverage'], ['email_in_public_commits'])   # sin hallazgos
+        self.assertTrue(resumen['sources'][0]['cobertura_parcial'])
+        self.assertTrue(self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s',
+                                 s.scan_id)['partial_coverage'])
+        s, resumen = self.reescanear(resultado_github(sitio), 'github')  # una corrida completa sí lo cierra
+        self.assertEqual(self.abiertos('ruta', api, sitio, viejo),
+                         {'config/.env': 'resolved', 'web/.env': 'open', 'web/viejo.env': 'resolved'})
+        self.assertEqual(resumen['status'], 'completed')
+        self.assertNotIn('sources_partial', resumen['stats'])
+
+    def test_2m_con_todos_los_repos_conocidos_se_cierra_lo_de_un_repo_que_ya_no_esta(self):
+        """Con sin_revisar GitHub sabe cuáles son todos sus repos (#23): lo de un repo borrado o que se hizo privado se
+        cierra aunque la corrida sea parcial, y lo de api, que existe y no se revisó, sigue abierto. Sin ningún hallazgo
+        los dos códigos van a sin_cobertura y deciden las partes: el último secreto de sitio también se cierra."""
+        api, borrado, sitio = secreto('api', 'config/.env'), secreto('borrado', 'a.env'), secreto('sitio', 'web/.env')
+        de_borrado, de_api = correo('ana', 'borrado', 'sitio'), correo('luis', 'api', 'borrado')
+        self.reescanear(resultado_github(api, borrado, sitio, de_borrado, de_api), 'github')
+        s, resumen = self.reescanear(resultado_github(sitio, revisados=['acme-demo/sitio'],
+                                                      sin_revisar=['acme-demo/api']), 'github')
+        self.assertEqual(self.abiertos('ruta', api, borrado, sitio),
+                         {'config/.env': 'open', 'a.env': 'resolved', 'web/.env': 'open'})
+        self.assertEqual([self.abiertos('title', h).popitem()[1] for h in (de_borrado, de_api)], ['resolved', 'open'])
+        self.assertEqual(resumen['status'], 'partial')
+        self.reescanear(resultado_github(revisados=['acme-demo/sitio'], sin_revisar=['acme-demo/api']), 'github')
+        self.assertEqual(self.abiertos('ruta', api, borrado, sitio),
+                         {'config/.env': 'open', 'a.env': 'resolved', 'web/.env': 'resolved'})
+        self.assertEqual(self.abiertos('title', de_api).popitem()[1], 'open')
+
+    def test_2n_una_ip_sin_respuesta_de_internetdb_no_cierra_sus_puertos(self):
+        """Shodan revisó ip_b pero ip_a no respondió (#23): los hallazgos de ip_a siguen abiertos aunque su código
+        traiga otros, y el escaneo queda parcial. Lo que ya no sale de ip_b, que sí se revisó, se cierra. Con
+        sin_revisar se cierra lo de ip_c, que ya no resuelve, y siguen las CVE de ip_b, que esta vez no se revisaron
+        completas (por ejemplo, con 'vulns' roto)."""
+        ip_a, ip_b, ip_c = '20.69.154.199', '40.65.94.253', '40.65.94.254'
+        cve_b = ('CVE-2024-0001', 'CVE-2024-0002')
+        antes = resultado_shodan((ip_a, 3389), (ip_b, 3389), (ip_b, 8081), (ip_b, 9000), (ip_c, 3389),
+                                 cves=[(ip_b, c) for c in cve_b])
+        self.reescanear(antes, 'shodan')
+        rdp, servicios, cves = ([h for h in antes.hallazgos if h.codigo == c]
+                                for c in ('exposed_rdp', 'exposed_service', 'known_vulnerability'))
+        s, resumen = self.reescanear(resultado_shodan((ip_b, 3389), (ip_b, 8081), revisados=[ip_b]), 'shodan')
+        self.assertEqual(self.abiertos('ip', *rdp), {ip_a: 'open', ip_b: 'open', ip_c: 'open'})
+        self.assertEqual(self.abiertos('puerto', *servicios), {'8081': 'open', '9000': 'resolved'})
+        self.assertEqual(self.abiertos('cve', *cves), dict.fromkeys(cve_b, 'open'))
+        self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['shodan']))
+        self.reescanear(resultado_shodan((ip_b, 3389), (ip_b, 8081), revisados=[ip_b],
+                                         sin_revisar=[ip_a, ip_a + '/cve', ip_b + '/cve'], cves=[(ip_b, cve_b[0])]),
+                        'shodan')
+        self.assertEqual(self.abiertos('ip', *rdp), {ip_a: 'open', ip_b: 'open', ip_c: 'resolved'})
+        self.assertEqual(self.abiertos('cve', *cves), dict.fromkeys(cve_b, 'open'))
+
+    def test_2o_lo_guardado_sin_partes_las_saca_de_su_evidencia(self):
+        """Lo guardado antes de evidence.partes (#23): el secreto las saca de 'repo', el puerto de 'ip', la CVE de 'ip'
+        con '/cve' y el correo de 'repos', este solo si no se cortó en MAX_REPOS_ACTIVO. Lo de otra fuente que no
+        trae partes no se cierra con la cobertura parcial."""
+        self.assertIn('< %d ' % github.MAX_REPOS_ACTIVO, orquestador.PARTES)
+        api, borrado = secreto('api', 'config/.env'), secreto('borrado', 'a.env')
+        cinco = ['r%d' % i for i in range(github.MAX_REPOS_ACTIVO)]
+        de_borrado, cortado = correo('ana', 'borrado'), correo('luis', *cinco)
+        self.reescanear(resultado_github(api, borrado, de_borrado, cortado), 'github')
+        self.sin_partes(api, borrado, de_borrado, cortado)
+        self.reescanear(resultado_github(revisados=[], sin_revisar=['acme-demo/api', 'acme-demo/r5']), 'github')
+        self.assertEqual(self.abiertos('ruta', api, borrado), {'config/.env': 'open', 'a.env': 'resolved'})
+        self.assertEqual([self.abiertos('title', h).popitem()[1] for h in (de_borrado, cortado)], ['resolved', 'open'])
+        ip_a, ip_b = '20.69.154.199', '40.65.94.253'
+        antes = resultado_shodan((ip_a, 3389), (ip_b, 3389), cves=[(ip_a, 'CVE-2024-0001')])
+        self.reescanear(antes, 'shodan')
+        self.sin_partes(*antes.hallazgos)
+        self.reescanear(resultado_shodan(revisados=[ip_a], sin_revisar=[ip_a + '/cve', ip_b, ip_b + '/cve']), 'shodan')
+        self.assertEqual(self.abiertos('ip', *antes.hallazgos[1:]), {ip_a: 'resolved', ip_b: 'open'})
+        self.assertEqual(self.abiertos('cve', antes.hallazgos[0]), {'CVE-2024-0001': 'open'})
+        _, f = self.escanear_ejemplo()
+        for revisados in ([], ['otro']):
+            s, resumen = self.reescanear(Resultado(**dict(vars(BIEN), revisados=revisados)))
+            self.assertEqual(self.estado(f['id'])['status'], 'open')
+            self.assertEqual(resumen['status'], 'partial')
+
+    def test_2p_la_api_no_muestra_las_partes_y_si_el_origen_de_crtsh(self):
+        """evidence.partes es para el orquestador (#23). El origen de un certificado (crtsh o certspotter) sí sale."""
+        from cirdan.api import v1
+        evidencia = {'title': 'Certificado por vencer', 'origen': 'certspotter', 'partes': ['acme-demo/api'],
+                     'huella': 'ab' * 32, 'caracteristicas': {'tipo': 'x'}}
+        fila = dict.fromkeys(('id', 'breach_name', 'rule_code', 'asset', 'asset_type', 'category', 'source', 'severity',
+                              'base_severity', 'status', 'recurrence', 'cve_id', 'cvss', 'epss', 'in_kev', 'detected_at',
+                              'last_scan_id'), None)
+        self.assertEqual(v1._finding(dict(fila, evidence=evidencia))['evidence'], {'origen': 'certspotter'})
+
+    def test_2q_con_la_cobertura_parcial_lo_abierto_conserva_las_partes_que_no_se_revisaron(self):
+        """Un correo que salió en api y sitio sale después solo en sitio, con api sin clonar (#23): sus partes siguen
+        con api, así que no se cierra si en la siguiente corrida parcial ya no sale de sitio. Cuando api se revisa, sale
+        de sus partes, y una corrida completa sin el correo lo cierra."""
+        en_los_dos, en_sitio = correo('luis', 'api', 'sitio'), correo('luis', 'sitio')
+        self.assertEqual(en_los_dos.huella, en_sitio.huella)
+        self.reescanear(resultado_github(en_los_dos), 'github')
+        self.reescanear(resultado_github(en_sitio, revisados=['acme-demo/sitio']), 'github')
+        self.assertEqual(self.partes(en_sitio), ['acme-demo/sitio', 'acme-demo/api'])
+        for sin_revisar in (None, ['acme-demo/api']):
+            self.reescanear(resultado_github(revisados=['acme-demo/sitio'], sin_revisar=sin_revisar), 'github')
+            self.assertEqual(self.abiertos('title', en_sitio).popitem()[1], 'open', sin_revisar)
+        self.reescanear(resultado_github(en_sitio, revisados=['acme-demo/api', 'acme-demo/sitio']), 'github')
+        self.assertEqual(self.partes(en_sitio), ['acme-demo/sitio'])   # api se revisó y el correo ya no salió ahí
+        self.reescanear(resultado_github(), 'github')
+        self.assertEqual(self.abiertos('title', en_sitio).popitem()[1], 'resolved')
+
+    def test_2r_una_cve_que_el_tope_dejo_fuera_sigue_abierta(self):
+        """Las CVE que MAX_CVE deja fuera van en omitidos (#23): la que se reportó antes y ahora quedó fuera sigue
+        abierta, el escaneo no queda a medias por eso y una omitida que nunca se reportó no se guarda. Si ya no sale
+        ni en omitidos, se cierra."""
+        ip = '40.65.94.253'
+        antes = resultado_shodan(cves=[(ip, 'CVE-2024-0001'), (ip, 'CVE-2024-0002')])
+        nunca = resultado_shodan(cves=[(ip, 'CVE-2024-0003')]).hallazgos[0]
+        self.reescanear(antes, 'shodan')
+        _, resumen = self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2024-0002')],
+                                                      omitidos=[(ip, 'CVE-2024-0001'), (ip, 'CVE-2024-0003')]), 'shodan')
+        self.assertEqual(self.abiertos('cve', *antes.hallazgos, nunca), {'CVE-2024-0001': 'open', 'CVE-2024-0002': 'open'})
+        self.assertNotIn('sources_partial', resumen['stats'])
+        self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2024-0002')], omitidos=[(ip, 'CVE-2024-0001')],
+                                         revisados=[ip, ip + '/cve']), 'shodan')   # su IP/cve se revisó: no basta
+        self.assertEqual(self.abiertos('cve', *antes.hallazgos), {'CVE-2024-0001': 'open', 'CVE-2024-0002': 'open'})
+        self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2024-0002')]), 'shodan')
+        self.assertEqual(self.abiertos('cve', *antes.hallazgos), {'CVE-2024-0001': 'resolved', 'CVE-2024-0002': 'open'})
+
+    def test_2s_lo_guardado_sin_partes_que_vuelve_a_salir_en_una_corrida_parcial(self):
+        """Un correo guardado antes de evidence.partes que vuelve a salir en una corrida parcial sin sin_revisar (#23):
+        con 'repos' entero conserva el repo que no se revisó, y con 'repos' cortado en MAX_REPOS_ACTIVO queda sin partes
+        y espera a una corrida completa, aunque las siguientes den sin_revisar (test_2u: si la corrida en que vuelve a
+        salir da sin_revisar, lleva esas partes)."""
+        cinco = ['r%d' % i for i in range(github.MAX_REPOS_ACTIVO)]
+        dos, cortado = correo('rosa', 'api', 'sitio'), correo('pepe', *cinco)
+        self.reescanear(resultado_github(dos, cortado), 'github')
+        self.sin_partes(dos, cortado)
+        revisados = ['acme-demo/r0', 'acme-demo/sitio']
+        self.reescanear(resultado_github(correo('rosa', 'sitio'), correo('pepe', 'r0'), revisados=revisados), 'github')
+        self.assertEqual([self.partes(h) for h in (dos, cortado)], [['acme-demo/sitio', 'acme-demo/api'], []])
+        for sin_revisar in (None, ['acme-demo/api', 'acme-demo/r5']):
+            self.reescanear(resultado_github(revisados=revisados, sin_revisar=sin_revisar), 'github')
+            self.assertEqual([self.abiertos('title', h).popitem()[1] for h in (dos, cortado)], ['open'] * 2, sin_revisar)
+        self.reescanear(resultado_github(), 'github')
+        self.assertEqual([self.abiertos('title', h).popitem()[1] for h in (dos, cortado)], ['resolved'] * 2)
+
+    def test_2t_una_parte_previa_que_ya_no_existe_no_se_conserva(self):
+        """Con sin_revisar, una parte previa que no se revisó y no está ahí ya no existe, como un repo borrado (#23): no
+        se conserva, y la siguiente corrida parcial sin sin_revisar ya puede cerrar el correo."""
+        self.reescanear(resultado_github(correo('ines', 'api', 'borrado')), 'github')
+        en_api = correo('ines', 'api')
+        self.reescanear(resultado_github(en_api, revisados=['acme-demo/api'], sin_revisar=['acme-demo/sitio']), 'github')
+        self.assertEqual(self.partes(en_api), ['acme-demo/api'])
+        self.reescanear(resultado_github(revisados=['acme-demo/api']), 'github')
+        self.assertEqual(self.abiertos('title', en_api).popitem()[1], 'resolved')
+
+    def test_2u_lo_guardado_sin_partes_con_todos_los_repos_conocidos_lleva_los_no_revisados(self):
+        """Un correo guardado antes de evidence.partes con 'repos' cortado vuelve a salir en una corrida parcial que da
+        sin_revisar (#23): sus partes son los repos donde salió más los no revisados, así que se cierra cuando esos se
+        revisan, sin esperar a una corrida completa, que con más de MAX_REPOS repos nunca llega."""
+        cortado = correo('teo', *['r%d' % i for i in range(github.MAX_REPOS_ACTIVO)])
+        self.reescanear(resultado_github(cortado), 'github')
+        self.sin_partes(cortado)
+        for i in range(2):   # la segunda vez parte de las [] que deja una corrida sin sin_revisar
+            sin_revisar = ['acme-demo/r1'] if i else None
+            self.reescanear(resultado_github(correo('teo', 'r0'), revisados=['acme-demo/r0'], sin_revisar=sin_revisar),
+                            'github')
+            self.assertEqual(self.partes(cortado), ['acme-demo/r0', 'acme-demo/r1'] if i else [])
+        self.reescanear(resultado_github(revisados=['acme-demo/r0'], sin_revisar=['acme-demo/r1']), 'github')
+        self.assertEqual(self.abiertos('title', cortado).popitem()[1], 'open')
+        self.reescanear(resultado_github(revisados=['acme-demo/r0', 'acme-demo/r1']), 'github')
+        self.assertEqual(self.abiertos('title', cortado).popitem()[1], 'resolved')
+
+    def test_2v_resolved_findings_no_cuenta_lo_que_la_cobertura_parcial_deja_abierto(self):
+        """resolved_findings cuenta lo que el escaneo cerró de verdad (RC-55, #23): no el secreto de un repo que no se
+        revisó ni una CVE que el tope dejó fuera. El primer escaneo de cada fuente puede cerrar lo de la semilla, así
+        que ahí solo se miran los nuevos."""
+        api, sitio, viejo = secreto('api', 'config/.env'), secreto('sitio', 'web/.env'), secreto('sitio', 'web/viejo.env')
+        s, _ = self.reescanear(resultado_github(api, sitio, viejo), 'github')
+        self.assertEqual(self.conteos(s.scan_id)[0], 3)
+        s, _ = self.reescanear(resultado_github(sitio, revisados=['acme-demo/sitio']), 'github')
+        self.assertEqual(self.conteos(s.scan_id), (0, 1))  # cierra viejo y no api, que no se revisó
+        self.assertEqual(self.abiertos('ruta', api, sitio, viejo),
+                         {'config/.env': 'open', 'web/.env': 'open', 'web/viejo.env': 'resolved'})
+        s, _ = self.reescanear(resultado_github(sitio), 'github')
+        self.assertEqual(self.conteos(s.scan_id), (0, 1))  # la corrida completa cierra api
+        ip = '40.65.94.253'
+        s, _ = self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2024-0001'), (ip, 'CVE-2024-0002')]), 'shodan')
+        self.assertEqual(self.conteos(s.scan_id)[0], 2)
+        s, _ = self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2024-0002')], omitidos=[(ip, 'CVE-2024-0001')]),
+                               'shodan')
+        self.assertEqual(self.conteos(s.scan_id), (0, 0))  # la omitida sigue abierta
+        s, _ = self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2024-0002')]), 'shodan')
+        self.assertEqual(self.conteos(s.scan_id), (0, 1))
+
+    def test_2w_un_correo_guardado_en_otro_dominio_de_la_empresa_conserva_sus_partes(self):
+        """La huella de un correo no lleva el dominio, así que el upsert lo trae desde otro dominio de la misma empresa
+        (#23). Si salió en api y sitio y ahora sale solo en sitio, con api sin clonar, conserva api en sus partes y la
+        siguiente corrida parcial no lo cierra ni lo cuenta como resuelto."""
+        en_los_dos, en_sitio = correo('ana', 'api', 'sitio'), correo('ana', 'sitio')
+        self.reescanear(resultado_github(en_los_dos), 'github')
+        tienda = self.uno("SELECT id FROM domains WHERE fqdn = 'acme-tienda.mx'")['id']
+        activo = self.uno("INSERT INTO assets (organization_id, domain_id, asset_type, value, first_seen_at, "
+                          "last_seen_at) VALUES (%s, %s, 'email', %s, now(), now()) RETURNING id",
+                          ACME, tienda, en_los_dos.activo)['id']
+        self.conn.execute('UPDATE findings SET domain_id = %s, asset_id = %s WHERE fingerprint = %s',
+                          (tienda, activo, bytes.fromhex(en_los_dos.huella)))
+        self.reescanear(resultado_github(en_sitio, revisados=['acme-demo/sitio']), 'github')
+        self.assertEqual(self.partes(en_sitio), ['acme-demo/sitio', 'acme-demo/api'])
+        s, _ = self.reescanear(resultado_github(revisados=['acme-demo/sitio']), 'github')
+        self.assertEqual(self.abiertos('title', en_sitio).popitem()[1], 'open')
+        self.assertEqual(self.conteos(s.scan_id)[1], 0)
 
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
