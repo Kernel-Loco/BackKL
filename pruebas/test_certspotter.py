@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_certspotter.py
-from pruebas.test_crtsh import AHORA, SUBDOMINIOS, cert  # noqa: E402
+from pruebas.test_crtsh import AHORA, SUBDOMINIOS, CrtshSimulado, cert  # noqa: E402
 from cirdan.recolectores import cargar, certspotter, contrato, crtsh  # noqa: E402
 
 LE = {'friendly_name': "Let's Encrypt", 'pubkey_sha256': 'b' * 64, 'name': "C=US, O=Let's Encrypt, CN=R11"}
@@ -342,6 +342,64 @@ class Respaldo(unittest.TestCase):
         crtsh.recolectar('acme-demo.mx', crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None), AHORA)
         self.assertEqual(len([x for x in t.timeouts if x[0] == 'api.certspotter.com']), crtsh.INTENTOS)
 
+    def test_10_si_pueden_faltar_certificados_la_corrida_es_parcial_y_cada_uno_lleva_su_parte(self):
+        """RC-55: cada hallazgo de vigencia lleva como parte su nombre con el vencimiento de su certificado. Si pueden
+        faltar certificados (Cert Spotter sin todas sus páginas o sin responder, o crt.sh solo con la búsqueda por
+        nombre), revisados lleva las partes de todos los que llegaron y sin_revisar queda en None: el orquestador no
+        cierra un certificado que esta corrida no vio. Con el respaldo no van los ya vencidos, porque cert_expired queda
+        sin cobertura. Si llegó todo, revisados queda en None."""
+        api, dev = 'api.acme-demo.mx@2026-10-25T12:00:00+00:00', 'dev.acme-demo.mx@2026-08-26T00:00:00+00:00'
+        www = 'www.acme-demo.mx@2026-12-19T00:00:00+00:00'
+        sin_comodin = EMISIONES[:3]   # sin el comodín 9004, que cubriría al vencido de dev
+        completo, _ = recolectar(RespaldoSimulado(paginas=[sin_comodin], crtsh={'%.acme-demo.mx': SUBDOMINIOS}))
+        self.assertEqual((completo.revisados, completo.sin_revisar), (None, None))
+        self.assertEqual({(h.codigo, tuple(h.partes)) for h in completo.hallazgos},
+                         {('cert_expiring_soon', (api,)), ('cert_expired', (dev,))})
+        vencido = emision('9005', ['viejo.acme-demo.mx'], '2026-06-01T00:00:00Z', '2026-09-01T00:00:00Z')
+        # pruebas-2: con crt.sh caído y Cert Spotter con todas sus páginas el respaldo es completo
+        respaldo, _ = recolectar(RespaldoSimulado(paginas=[sin_comodin + [vencido], []]))
+        self.assertEqual((respaldo.estado, respaldo.revisados, respaldo.sin_revisar), ('succeeded', None, None))
+        self.assertEqual({(h.codigo, tuple(h.partes)) for h in respaldo.hallazgos}, {('cert_expiring_soon', (api,))})
+        casos = {
+            'respaldo sin todas las páginas': RespaldoSimulado(paginas=[sin_comodin + [vencido], []], limite_en=1),
+            'complemento sin todas las páginas': RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS},
+                                                                  paginas=[sin_comodin, []], limite_en=1),
+            'complemento caído': RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS}, limite_en=0),
+            'búsqueda por nombre': CrtshSimulado(fallas=crtsh.INTENTOS, respuestas={'acme-demo.mx': SUBDOMINIOS}),
+        }
+        for caso, t in casos.items():
+            with self.subTest(caso=caso):
+                res, _ = recolectar(t)
+                self.assertEqual(res.estado, 'succeeded')
+                self.assertIsNone(res.sin_revisar)
+                self.assertIn(api, res.revisados)
+                self.assertEqual(dev in res.revisados, caso != 'respaldo sin todas las páginas')
+                # crtsh-2: sin el complemento no se sabe qué está revocado, y www tiene dos vigencias
+                self.assertEqual(www in res.revisados, caso != 'complemento caído', res.revisados)
+                self.assertNotIn('viejo.acme-demo.mx@2026-09-01T00:00:00+00:00', res.revisados)
+                self.assertNotIn('otra.com@2026-11-30T00:00:00+00:00', res.revisados)   # fuera del dominio
+                self.assertEqual(res.revisados, sorted(res.revisados))
+                self.assertTrue(all(len(h.partes) == 1 for h in res.hallazgos))
+                self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        # crtsh-2: con un *.acme-demo.mx vigente en crt.sh y el complemento caído, un comodín revocado no cubriría al
+        # vencido de dev, así que dev no va en revisados. api no ha vencido y el comodín no cambia su hallazgo, así que sí
+        # va, y www no por sus dos vigencias. Con el complemento completo van los tres.
+        comodin = cert(9, ['*.acme-demo.mx'], '2026-10-01T00:00:00', '2027-01-01T00:00:00')
+        caido, _ = recolectar(RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS + [comodin]}, limite_en=0))
+        self.assertFalse({dev, www} & set(caido.revisados), caido.revisados)
+        self.assertIn(api, caido.revisados)
+        self.assertEqual(contrato.validar(caido, codigos=set(crtsh.CODIGOS)), [])
+        por_nombre, _ = recolectar(CrtshSimulado(fallas=crtsh.INTENTOS, respuestas={'acme-demo.mx': SUBDOMINIOS + [comodin]}))
+        self.assertTrue({api, dev, www} <= set(por_nombre.revisados), por_nombre.revisados)
+        # Un dominio parecido (solo en la terminal) lleva su dominio como parte, que revisados no trae
+        res, _ = recolectar(CrtshSimulado(fallas=crtsh.INTENTOS, respuestas={
+            'acme-demo.mx': SUBDOMINIOS, 'acme-dem0.mx': [cert(30, ['acme-dem0.mx'], '2026-10-01T00:00:00',
+                                                               '2026-12-30T00:00:00')]}), parecidos=True)
+        parecido = next(h for h in res.hallazgos if h.codigo == 'lookalike_domain')
+        self.assertEqual(parecido.partes, ['acme-dem0.mx'])
+        self.assertNotIn('acme-dem0.mx', res.revisados)
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+
 
 class GrabarYReproducir(unittest.TestCase):
 
@@ -481,11 +539,16 @@ class GrabarYReproducir(unittest.TestCase):
             recolectar(RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS}, limite_en=0), d, 'grabar', nueva=True)
             grabado, cliente = recolectar(sin_red, d, 'reproducir')
             self.assertEqual(grabado.avisos, [contrato.SIN_GRABACION + 'certspotter:acme-demo.mx'])
+            # pruebas-1 (RC-55): sin la página de Cert Spotter pueden faltar certificados, así que la corrida es parcial
+            self.assertIsNone(grabado.sin_revisar)
+            self.assertIsInstance(grabado.revisados, list)
+            self.assertIn('api.acme-demo.mx@2026-10-25T12:00:00+00:00', grabado.revisados)
             self.assertIn('Falta 1 respuesta grabada: certspotter:acme-demo.mx. Se completa con --grabar --completar.',
                           crtsh.resumen(grabado, cliente))
             t = RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS})
             completo, _ = recolectar(t, d, 'grabar', completar=True, desde=contrato.Grabadora.inicio(d))
         self.assertEqual((t.de('crt.sh'), len(t.de('api.certspotter.com')), completo.avisos), ([], 2, []))
+        self.assertEqual((completo.revisados, completo.sin_revisar), (None, None))
 
     def test_6_por_ejecutar_del_contrato(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)):

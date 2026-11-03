@@ -449,7 +449,7 @@ class Ejecutar(unittest.TestCase):
             self.assertIs(type(maximo), int, fuente)
             self.assertGreaterEqual(maximo, 0, fuente)
         self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, shodan.MAX_CONSULTAS,
-                          rdap.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS), (18, len(subfinder.FUENTES_SUBFINDER), 16, 64, 10, 0))
+                          rdap.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS), (18, len(subfinder.FUENTES_SUBFINDER), 16, 184, 10, 0))
 
     def test_15c_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
         """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento."""

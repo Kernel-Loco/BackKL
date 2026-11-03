@@ -278,18 +278,23 @@ def _latido(org, scan_id, conn=None):
 
 # Las partes de un hallazgo guardado, como arreglo jsonb (#23). Lo guardado antes de evidence.partes las tiene en otra
 # llave: el secreto de GitHub su repo en 'repo', el puerto de Shodan su IP en 'ip' (la CVE, con '/cve'), y el correo
-# sus repos en 'repos', que sirven solo si no se cortaron en MAX_REPOS_ACTIVO (5) de github.py.
+# sus repos en 'repos', que sirven solo si no se cortaron en MAX_REPOS_ACTIVO (5) de github.py. La vigencia de un
+# certificado de ct_logs la arma con 'host' y 'vence', como _parte de crtsh.py (RC-55).
 PARTES = ('''COALESCE(evidence->'partes', '''
           '''CASE WHEN jsonb_typeof(evidence->'repo') = 'string' THEN jsonb_build_array(evidence->'repo') END, '''
           '''CASE WHEN jsonb_typeof(evidence->'ip') = 'string' THEN '''
           '''jsonb_build_array(evidence->>'ip' || CASE WHEN evidence ? 'cve' THEN '/cve' ELSE '' END) END, '''
           '''CASE WHEN jsonb_typeof(evidence->'repos') = 'array' THEN CASE WHEN jsonb_array_length(evidence->'repos') '''
-          '''< 5 THEN evidence->'repos' END END, '[]'::jsonb)''')
+          '''< 5 THEN evidence->'repos' END END, '''
+          '''CASE WHEN evidence->>'origen' IN ('crtsh', 'certspotter') AND jsonb_typeof(evidence->'host') = 'string' '''
+          '''AND jsonb_typeof(evidence->'vence') = 'string' '''
+          '''THEN jsonb_build_array((evidence->>'host') || '@' || (evidence->>'vence')) END, '[]'::jsonb)''')
 
 
-def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas):
+def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas, ahora=None):
     """Guarda activos y hallazgos de una fuente que respondió. Devuelve dos conjuntos de id de hallazgos: los que
-    abrió (insertó o reabrió) y los que dio por resueltos."""
+    abrió (insertó o reabrió) y los que dio por resueltos. `ahora` es la hora del escaneo (la de correr), y sin ella
+    la de este momento."""
     # org pasa por uuid para que la llave sea la misma aunque la línea de comandos la reciba en mayúsculas.
     conn.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s::uuid::text))', (CANDADO_HALLAZGOS, org))
     atributos_raiz = {}
@@ -393,19 +398,30 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
     # las partes, porque una parte revisada se revisó para todos los códigos: solo se cierra lo que trae partes y todas
     # se revisaron. Si además dio sin_revisar, se cierra lo que trae partes y ninguna está ahí: así se cierra lo de un
     # repo borrado o de una IP que ya no resuelve. Lo que no trae partes espera a una corrida completa.
+    # Un certificado por vencer cuyo vencimiento ya pasó se cierra en toda corrida de su fuente que respondió, aunque no
+    # lo haya visto: ya no está por vencer, y si la fuente siempre queda parcial (crt.sh solo con la búsqueda por nombre,
+    # o más certificados de los que caben en las páginas de Cert Spotter) nunca llegaría la corrida completa que lo
+    # cierra (RC-55). 'vence' es un isoformat en UTC
+    # (crtsh._fecha): se compara como texto con la hora del escaneo en el mismo formato, así una fecha rota no lo cierra
+    # ni tumba la transacción.
     cerrados = {f['id'] for f in conn.execute(
         "UPDATE findings SET status = 'resolved', resolved_at = now(), last_scan_id = %(scan)s, updated_at = now() "
         "WHERE domain_id = %(dominio)s AND source_id = %(fuente)s AND status = 'open' "
         'AND fingerprint <> ALL(%(huellas)s::bytea[]) '
-        'AND (%(revisados)s::text[] IS NOT NULL '
+        'AND (((%(revisados)s::text[] IS NOT NULL '
         'OR rule_id NOT IN (SELECT id FROM scoring_rules WHERE code = ANY(%(sin_cobertura)s::text[]))) '
         'AND (%(revisados)s::text[] IS NULL OR (jsonb_array_length({p}) > 0 AND CASE '
         'WHEN %(sin_revisar)s::text[] IS NULL THEN {p} <@ to_jsonb(%(revisados)s::text[]) '
-        'ELSE NOT ({p} ?| %(sin_revisar)s::text[]) END)) RETURNING id::text'.format(p=PARTES),
+        'ELSE NOT ({p} ?| %(sin_revisar)s::text[]) END))) '
+        "OR (rule_id IN (SELECT id FROM scoring_rules WHERE code = 'cert_expiring_soon') "
+        "AND jsonb_typeof(evidence->'vence') = 'string' "
+        "AND evidence->>'vence' ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}(\\.\\d{{1,6}})?\\+00:00$' "
+        "AND (evidence->>'vence') COLLATE \"C\" < %(ahora)s)) RETURNING id::text".format(p=PARTES),
         {'scan': scan_id, 'dominio': domain_id, 'fuente': source_id,
          'huellas': huellas + [bytes.fromhex(h) for h in resultado.omitidos],
          'sin_cobertura': list(resultado.sin_cobertura), 'revisados': resultado.revisados,
-         'sin_revisar': resultado.sin_revisar},
+         'sin_revisar': resultado.sin_revisar,
+         'ahora': (ahora or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()},
     ).fetchall()}
     return abiertos, cerrados
 
@@ -637,7 +653,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                         (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
                          Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
                     if res.estado == 'succeeded':
-                        cambios = _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas)
+                        cambios = _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas,
+                                                     ahora)
             if not vivo:
                 return _ya_no_corre(org, scan_id, conn, corridas)
             if cambios:
