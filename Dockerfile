@@ -1,6 +1,15 @@
 # syntax=docker/dockerfile:1
 # API de Cirdan. La base y Valkey corren en sus propios contenedores (docker-compose.yml).
 
+# La imagen pide BuildKit: Docker Desktop, o Docker Engine con el plugin buildx. El builder clásico (DOCKER_BUILDKIT=0,
+# o Docker sin buildx) ignora ADD --checksum sin avisar, así que bajaría subfinder y gitleaks sin revisar su sha256, y
+# tampoco define TARGETARCH. Ese builder corre todas las etapas en orden y se detiene aquí, antes de bajar nada, con el
+# aviso de Docker de que --chmod pide BuildKit. BuildKit salta esta etapa porque ninguna otra la usa. No agregues
+# ARG TARGETARCH con valor por omisión: le gana a la plataforma que pone BuildKit, y en una Mac con Apple Silicon la
+# imagen arm64 llevaría los binarios amd64 (PR 79 y 81).
+FROM scratch AS pide-buildkit
+COPY --chmod=0644 requirements.txt /
+
 # subfinder 2.17.0 (#14b, RC-184) entra desde los zips del release oficial, en etapas aparte:
 # - El release se compila con CGO_ENABLED=0 (.goreleaser.yml de v2.17.0), así que el binario es estático
 #   y corre en python:3.14-slim (Debian, glibc). La imagen oficial projectdiscovery/subfinder es Alpine
