@@ -1,0 +1,304 @@
+{
+ "etiquetas": [
+  {
+   "id": "h7fb48ut",
+   "etiqueta": "baja",
+   "nota": "DMARC p=reject ya frena la suplantación; solo falta SPF como buena práctica."
+  },
+  {
+   "id": "ht8st3y2",
+   "etiqueta": "media",
+   "nota": "Versión con soporte, pero con un CVE (CVSS 5.3) en una app web; sin KEV y EPSS bajo."
+  },
+  {
+   "id": "h78aqp77",
+   "etiqueta": "media",
+   "nota": "RDP abierto, pero visto por última vez hace 262 días; si sigue abierto, sube a alta."
+  },
+  {
+   "id": "hqdrsanz",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "hxe4c2x8",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hz4s8dty",
+   "etiqueta": "media",
+   "nota": "Certificado vencido en servidor de correo: facilita interceptación, pero no da acceso."
+  },
+  {
+   "id": "hjaq666n",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "h9nqwnc7",
+   "etiqueta": "media",
+   "nota": "Vencido en página de login: facilita interceptación o phishing, sin dar acceso."
+  },
+  {
+   "id": "h28cpy4g",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hbbuzrdk",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hdh542c3",
+   "etiqueta": "baja",
+   "nota": "Librería sin soporte, pero sitio informativo sin login ni formularios y sin CVE."
+  },
+  {
+   "id": "h7ax5ytd",
+   "etiqueta": "baja",
+   "nota": "DMARC p=reject y sin MX: impacto menor."
+  },
+  {
+   "id": "h4zuu5mg",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hhmj99p9",
+   "etiqueta": "media",
+   "nota": "Solo correos y nombres: facilita phishing, no da acceso."
+  },
+  {
+   "id": "hzwffygm",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "hxevztgx",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hccrsz3m",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "hpt28hsf",
+   "etiqueta": "alta",
+   "nota": "Contraseñas expuestas: sirven si se reusan o siguen vigentes."
+  },
+  {
+   "id": "hdc38r7r",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "huj99qpp",
+   "etiqueta": "media",
+   "nota": "Sin SPF ni DMARC y con MX: la suplantación no está bloqueada."
+  },
+  {
+   "id": "havtp8pb",
+   "etiqueta": "media",
+   "nota": "Certificado vencido en servidor de correo: facilita interceptación, sin dar acceso."
+  },
+  {
+   "id": "hjm2tw5j",
+   "etiqueta": "alta",
+   "nota": "Contraseñas y nombres de usuario expuestos."
+  },
+  {
+   "id": "heyskhcw",
+   "etiqueta": "media",
+   "nota": "SPF con -all limita el envío, pero sin DMARC la suplantación no se bloquea."
+  },
+  {
+   "id": "hrfjkq3p",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "htes9dnr",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hzv9gtbv",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hzcj8hrk",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hw4tdjvy",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "ha7eqk2t",
+   "etiqueta": "media",
+   "nota": "Sin SPF ni DMARC y con MX: suplantación posible."
+  },
+  {
+   "id": "h2d2zvwg",
+   "etiqueta": "baja",
+   "nota": "DMARC p=reject frena la suplantación; sin MX."
+  },
+  {
+   "id": "hpsny58g",
+   "etiqueta": "baja",
+   "nota": "DMARC p=reject frena la suplantación; sin MX."
+  },
+  {
+   "id": "hk8a7zf7",
+   "etiqueta": "baja",
+   "nota": "Aún no vence; si vence, pasa a media."
+  },
+  {
+   "id": "hzdvrt3j",
+   "etiqueta": "baja",
+   "nota": "Librería sin soporte en sitio informativo, sin CVE."
+  },
+  {
+   "id": "hmw7gn4r",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "h958haxt",
+   "etiqueta": "alta",
+   "nota": "Contraseñas expuestas, además de correos y nombres."
+  },
+  {
+   "id": "h4yc3sfr",
+   "etiqueta": "media",
+   "nota": "Vencido en página de login: facilita interceptación o phishing, sin dar acceso."
+  },
+  {
+   "id": "hvt6zgzj",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hrqbnung",
+   "etiqueta": "baja",
+   "nota": "DMARC p=reject frena la suplantación."
+  },
+  {
+   "id": "hmamf84t",
+   "etiqueta": "media",
+   "nota": "Nombre con 'cuenta': riesgo de phishing, pero sin uso activo confirmado."
+  },
+  {
+   "id": "hrzaz96v",
+   "etiqueta": "media",
+   "nota": "RDP visto por última vez hace 290 días; si sigue abierto, sube a alta."
+  },
+  {
+   "id": "h99npj6d",
+   "etiqueta": "media",
+   "nota": "Sin DMARC; SPF con -all limita el envío, pero la suplantación no se bloquea."
+  },
+  {
+   "id": "hz9kh9uv",
+   "etiqueta": "alta",
+   "nota": "Contraseñas expuestas, además de correos y nombres."
+  },
+  {
+   "id": "he5aerqb",
+   "etiqueta": "baja",
+   "nota": "Sin MX y SPF -all: no envía ni recibe correo, impacto menor."
+  },
+  {
+   "id": "heq5ax57",
+   "etiqueta": "media",
+   "nota": "Sin DMARC con MX y SPF de envío: suplantación no bloqueada."
+  },
+  {
+   "id": "h37z7wnu",
+   "etiqueta": "media",
+   "nota": "Nombre con 'pagos': riesgo de fraude, pero sin uso activo confirmado."
+  },
+  {
+   "id": "h2edbv64",
+   "etiqueta": "baja",
+   "nota": "DMARC p=reject frena la suplantación."
+  },
+  {
+   "id": "h7sx8dkt",
+   "etiqueta": "baja",
+   "nota": "Aún no vence; si vence, pasa a media."
+  },
+  {
+   "id": "hjmhg6w4",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hzatwqv2",
+   "etiqueta": "media",
+   "nota": "Versión con soporte, pero con un CVE (CVSS 5.9) en una app web; sin KEV y EPSS bajo."
+  },
+  {
+   "id": "hngwaeek",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hdes4662",
+   "etiqueta": "media",
+   "nota": "Vencido en página de login: facilita interceptación o phishing, sin dar acceso."
+  },
+  {
+   "id": "h42nacwf",
+   "etiqueta": "alta",
+   "nota": "Contraseñas expuestas."
+  },
+  {
+   "id": "hk9m7kq7",
+   "etiqueta": "baja",
+   "nota": "Librería sin soporte en sitio informativo, sin CVE."
+  },
+  {
+   "id": "hy83gfjz",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "h2vnxr7z",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "h2typptv",
+   "etiqueta": "alta",
+   "nota": "Contraseñas expuestas, además de correos y teléfonos."
+  },
+  {
+   "id": "hqs5gn3g",
+   "etiqueta": "alta",
+   "nota": "Es un equipo de pruebas, pero el RDP se vio abierto hace 3 días."
+  },
+  {
+   "id": "hdjpad99",
+   "etiqueta": "media",
+   "nota": "Sin DMARC con MX: suplantación no bloqueada."
+  },
+  {
+   "id": "h73vea7g",
+   "etiqueta": "baja",
+   "nota": "Sin MX y SPF -all: no envía ni recibe correo."
+  },
+  {
+   "id": "hbzxdkcw",
+   "etiqueta": "alta",
+   "nota": "Contraseñas expuestas."
+  }
+ ]
+}

@@ -1,0 +1,24 @@
+Vas a etiquetar hallazgos de seguridad, uno por uno, según qué tan graves son.
+
+Reglas estrictas:
+- Usa solo la herramienta Read, y solo para leer este archivo: <carpeta>\<archivo> (léelo completo; si es largo, por partes con offset y limit).
+- No uses ninguna otra herramienta. No abras ningún otro archivo ni carpeta, no busques en repositorios ni en la web. Los dominios y las IP son inventados.
+- Decide cada hallazgo por separado, solo con su texto y con el criterio de abajo. No supongas una regla o severidad que no esté en el texto.
+
+Son hallazgos inventados de empresas ficticias (dominios .example). Todos salen de un escaneo del 20 oct 2026.
+
+Qué hacer
+1. Lee cada hallazgo y decide qué tan grave es: alta, media o baja.
+2. Decide solo con lo que dice el hallazgo: título, tipo de activo, activo, fuente, evidencia y, cuando hay, CVE, CVSS, EPSS y KEV.
+3. Si dudaste en alguno, escribe en nota por qué. Es opcional; si no dudaste, deja nota vacía.
+
+Criterio
+Severidad | Criterio
+Crítica | Alguien de fuera lo puede aprovechar ya, sin pasos extra, y obtiene acceso a cuentas, sistemas o datos
+Alta | Exposición seria que necesita otro paso o una condición para aprovecharse
+Media | Facilita un ataque, como la suplantación, pero no da acceso por sí sola
+Baja | Falta una buena práctica y el impacto es menor
+Para etiquetar, crítica y alta cuentan como alta, media como media y baja como baja.
+
+El archivo tiene <N> hallazgos. Etiqueta todos, uno por id, sin saltarte ninguno.
+Devuelve para cada uno: id (tal cual), etiqueta (alta, media o baja) y nota (vacía si no dudaste; si dudaste, una frase corta con por qué).
