@@ -460,7 +460,11 @@ class Orquestador(unittest.TestCase):
                      'huella': 'ab' * 32, 'caracteristicas': {'tipo': 'x'}}
         fila = dict.fromkeys(('id', 'breach_name', 'rule_code', 'asset', 'asset_type', 'category', 'source', 'severity',
                               'base_severity', 'status', 'recurrence', 'cve_id', 'cvss', 'epss', 'in_kev', 'detected_at',
-                              'last_scan_id'), None)
+                              'last_scan_id', 'attack_version', 'attack_technique_id', 'attack_technique_name',
+                              'attack_source_url', 'attack_unmapped_reason', 'iso_version', 'iso_control_id',
+                              'iso_control_name', 'iso_source_url', 'cis_version', 'cis_safeguard_id',
+                              'cis_safeguard_name', 'cis_source_url'), None)
+        fila['attack_version'] = 'Enterprise v19'
         self.assertEqual(v1._finding(dict(fila, evidence=evidencia))['evidence'], {'origen': 'certspotter'})
 
     def test_2q_con_la_cobertura_parcial_lo_abierto_conserva_las_partes_que_no_se_revisaron(self):
