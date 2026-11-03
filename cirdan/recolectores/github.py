@@ -26,7 +26,8 @@ Qué consulta, y nada más:
 - Lo demás es local, sobre el clon: gitleaks git con --redact, que salta los archivos de más de MAX_MB_ARCHIVO MB y no
   respeta los comentarios gitleaks:allow del repo (--ignore-gitleaks-allow), y git log para los correos. Si gitleaks
   halló algo, otro git log busca las marcas de los entornos de Python que el repo trae instalados (MARCAS_ENTORNO) y
-  se descarta lo que esté en sus paquetes (fuera_de_entornos).
+  se descarta lo que esté en sus paquetes (fuera_de_entornos). Si esa búsqueda falla, quedan todos los secretos y un
+  aviso.
 
 Sin secretos ni datos personales de más:
 - gitleaks corre con --redact y su reporte se lee por lista blanca: RuleID, File y Date. Nunca Secret, Match, Author,
@@ -44,7 +45,8 @@ Sin secretos ni datos personales de más:
   borrarla, se queda, así que cada corrida en vivo o al grabar empieza borrando las que tengan más de una hora.
 
 Límites de una corrida: MAX_REPOS repos, MAX_KB_REPO por repo, MAX_DISCO de disco, TIMEOUT_CLON s por clon,
-TIMEOUT_GITLEAKS s por gitleaks, TIMEOUT_LOG s por git log y TIEMPO_CORRIDA s en total, también para la API. Un repo
+TIMEOUT_GITLEAKS s por gitleaks, TIMEOUT_LOG s por git log, TIMEOUT_ENTORNOS s por la búsqueda de entornos de Python
+y TIEMPO_CORRIDA s en total, también para la API. Un repo
 que no se revisó por un límite o una falla deja un aviso de cobertura parcial. Si así un código quedó sin hallazgos,
 va a sin_cobertura. Si ya trae hallazgos no puede ir ahí (validar() lo rechaza y la fuente quedaría failed): queda el
 aviso y revisados lleva los repos que sí se revisaron ('org/repo'). Cada secreto lleva su repo como parte y cada
@@ -120,6 +122,7 @@ MAX_KB_REPO = 100 * 1024         # 100 MB, en KB como 'size' de la API
 TIMEOUT_CLON = 120               # segundos por clon
 TIMEOUT_GITLEAKS = 120           # segundos por gitleaks
 TIMEOUT_LOG = 60                 # segundos por git log
+TIMEOUT_ENTORNOS = 30            # segundos por el git log que busca entornos de Python
 TIEMPO_CORRIDA = 360             # segundos de toda la corrida: ningún paso empieza ni sigue después
 MIN_RESTANTE = 5                 # con menos segundos que esto ya no se empieza otro repo
 # Peor caso de una corrida para el límite diario (#13b): perfil y página de repos con sus 3 intentos y un clon por repo.
@@ -140,7 +143,8 @@ OPCIONES_GIT = ('-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', 
                 '-c', 'transfer.fsckObjects=true', '-c', 'credential.helper=')
 FORMATO_LOG = '--format=%ae%x00%ce%x00%ct'      # correo del autor, de quien subió el commit y fecha (epoch)
 MARCAS_ENTORNO = ('pyvenv.cfg', 'conda-meta/history')   # las crean venv, virtualenv, uv y PyPy, y conda
-CARPETAS_ENTORNO = ('lib', 'lib64', 'library', 'pkgs', 'site-packages')   # lo que instala un entorno, en minúsculas
+CONDA = 'conda-meta/history'
+VERSION_PYTHON = re.compile(r'(python|pypy)[23](\.\d{1,2})+t?', re.IGNORECASE)   # python3.12, python3.13t, pypy3.10
 
 ORG_VALIDA = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}')        # sin '-' inicial, '/' ni '.'
 REPO_VALIDO = re.compile(r'[A-Za-z0-9._][A-Za-z0-9._-]{0,99}')   # sin '-' inicial ni '/'. '..' se rechaza aparte
@@ -158,6 +162,8 @@ RENOMBRADA = 'github: la organización declarada cambió de nombre en GitHub, ha
 SIN_CUOTA = 'github: GitHub no dio permiso o se acabó su cuota por hora (403 o 429), no se revisó GitHub'
 SIN_GRABACION_DOMINIO = 'github: no hay grabación de GitHub de este dominio, no se revisó GitHub'
 SIN_REDACTAR = 'github: gitleaks entregó un hallazgo sin redactar y se descartó la corrida'
+SIN_ENTORNOS = ('github: no se pudieron buscar los entornos de Python de %s, así que sus secretos salen sin '
+                'descartar los de paquetes instalados')   # %s es org/repo, ya validado
 SALTADOS = {'fork': 'fork', 'deshabilitado': 'deshabilitado', 'grande': 'de más de 100 MB o sin tamaño',
             'nombre_invalido': 'con nombre inválido', 'sobra': 'más allá de los %d más recientes' % MAX_REPOS}
 PARCIALES = ('grande', 'nombre_invalido', 'sobra')   # saltados que sí son cobertura parcial
@@ -354,28 +360,50 @@ def leer_reporte(texto):
 
 
 def leer_entornos(texto):
-    """Carpetas de los entornos de Python del repo, de la salida de git log -z --name-only con las rutas de
+    """{carpeta: marcas} de los entornos de Python del repo, de la salida de git log -z --name-only con las rutas de
     MARCAS_ENTORNO. '' es la raíz del repo."""
-    raices = set()
+    entornos = {}
     for nombre in texto.split('\0'):
         nombre = _texto(nombre.strip('\n'))
         for marca in MARCAS_ENTORNO:
             if nombre == marca or nombre.endswith('/' + marca):
-                raices.add(nombre[:-len(marca)].rstrip('/'))
-    return raices
+                entornos.setdefault(nombre[:-len(marca)].rstrip('/'), set()).add(marca)
+    return entornos
 
 
-def fuera_de_entornos(secretos, raices):
-    """Los secretos que no están en los paquetes de un entorno de `raices` (CARPETAS_ENTORNO justo debajo de su
-    carpeta). Ahí solo hay código de terceros, con llaves y certificados de prueba que darían hallazgos críticos
-    falsos, y su forma cambia con cada Python: lib/python3.13t/ sin GIL, lib/pypy3.10/ en PyPy o Lib/ con la
-    biblioteca estándar en conda para Windows. Lo demás del entorno se revisa, como bin/activate, Scripts/ o
-    etc/conda/activate.d/, donde sí se ponen claves, y también una carpeta sin marca, como una .env/lib/ del
-    cliente."""
+def _paquete(partes, marcas):
+    """Si la ruta `partes`, dentro de la carpeta de un entorno con `marcas`, es de lo que instaló: site-packages, en
+    la carpeta, en lib/ (Lib/ en Windows) o en lib/<python>/, y con conda también la biblioteca estándar (lib/<python>/
+    o Lib/) y pkgs/. Lo que esté en una carpeta etc/ se revisa siempre, como lib/R/etc/Renviron.site de conda."""
+    carpetas = partes[:-1]
+    bajas = [c.lower() for c in carpetas]
+    if 'etc' in bajas:
+        return False
+    if bajas[:1] == ['site-packages']:
+        return True
+    if bajas[:1] in (['lib'], ['lib64']):
+        if bajas[1:2] == ['site-packages']:
+            return True
+        if len(carpetas) > 1 and VERSION_PYTHON.fullmatch(carpetas[1]) and (bajas[2:3] == ['site-packages']
+                                                                            or CONDA in marcas):
+            return True
+    return CONDA in marcas and carpetas[:1] in (['Lib'], ['pkgs'])
+
+
+def fuera_de_entornos(secretos, entornos):
+    """Los secretos que no están en los paquetes de un entorno de `entornos` (_paquete). Ahí solo hay código de
+    terceros, con llaves y certificados de prueba que darían hallazgos críticos falsos, y su forma cambia con cada
+    Python: lib/python3.13t/ sin GIL, lib/pypy3.10/ en PyPy o Lib/ con la biblioteca estándar en conda para Windows.
+    Lo demás del entorno se revisa, como bin/activate, Scripts/, pkgs/ o lib/ fuera de Python en un venv, o
+    etc/conda/activate.d/, donde sí se ponen claves, y también una carpeta sin marca, como una .env/lib/ del cliente.
+    Una marca en la raíz del repo solo descarta esas mismas carpetas de la raíz."""
     def instalado(ruta):
         partes = ruta.split('/')
-        return any(partes[i].lower() in CARPETAS_ENTORNO and '/'.join(partes[:i]) in raices
-                   for i in range(len(partes) - 1))
+        for i in range(len(partes) - 1):
+            marcas = entornos.get('/'.join(partes[:i]))
+            if marcas and _paquete(partes[i:], marcas):
+                return True
+        return False
     return [s for s in secretos if not instalado(s['ruta'])]
 
 
@@ -428,9 +456,13 @@ def revision_valida(datos, dominio):
 
     def conteo(n):
         return n if type(n) is int and n >= 0 else 0
-    return {'secretos': [{'regla': regla, 'ruta': ruta, 'primera_vez': f} for (ruta, regla), f in sorted(secretos.items())],
-            'correos': [correos[c] for c in sorted(correos)],
-            'ajenos': conteo(datos.get('ajenos')), 'invalidos': conteo(datos.get('invalidos'))}
+    revision = {'secretos': [{'regla': regla, 'ruta': ruta, 'primera_vez': f}
+                             for (ruta, regla), f in sorted(secretos.items())],
+                'correos': [correos[c] for c in sorted(correos)],
+                'ajenos': conteo(datos.get('ajenos')), 'invalidos': conteo(datos.get('invalidos'))}
+    if datos.get('sin_entornos') is True:
+        revision['sin_entornos'] = True
+    return revision
 
 
 # ---------------------------------------------------------------- procesos y HTTP
@@ -738,8 +770,12 @@ class ClienteGitHub:
                 secretos = leer_reporte(f.read())
         except (OSError, ValueError, RecursionError):
             raise FallaRepo('github: no se pudo leer el reporte de gitleaks de %s/%s' % (org, repo)) from None
+        sin_entornos = False
         if secretos:
-            secretos = fuera_de_entornos(secretos, self._entornos(git, destino, casa, org, repo))
+            try:
+                secretos = fuera_de_entornos(secretos, self._entornos(git, destino, casa, org, repo))
+            except FallaRepo:   # mejor un crítico falso de un paquete que perder un secreto: quedan todos, con aviso
+                sin_entornos = True
         log = os.path.join(casa, 'log.txt')
         self._correr([git, *OPCIONES_GIT, '-C', destino, 'log', '--all', FORMATO_LOG], casa, TIMEOUT_LOG,
                      'leer los commits de', org, repo, salida=log)
@@ -751,14 +787,18 @@ class ClienteGitHub:
         if demasiado:
             raise FallaRepo('github: los commits de %s/%s pasan de %d MB' % (org, repo, MAX_LOG // 2 ** 20))
         correos, ajenos, invalidos = leer_correos(texto, dominio)
-        return {'secretos': secretos, 'correos': correos, 'ajenos': ajenos, 'invalidos': invalidos}
+        datos = {'secretos': secretos, 'correos': correos, 'ajenos': ajenos, 'invalidos': invalidos}
+        if sin_entornos:
+            datos['sin_entornos'] = True
+        return datos
 
     def _entornos(self, git, destino, casa, org, repo):
-        """Las carpetas de los entornos de Python que el repo trae o trajo en su historial (leer_entornos)."""
+        """Las carpetas de los entornos de Python que el repo trae o trajo en su historial (leer_entornos). Con
+        --full-history, git log no salta la rama ya fusionada que agregó un entorno y lo volvió a quitar."""
         salida = os.path.join(casa, 'entornos.txt')
-        self._correr([git, *OPCIONES_GIT, '-C', destino, 'log', '--all', '--no-renames', '--format=', '--name-only',
-                      '-z', '--', *(':(glob)**/' + marca for marca in MARCAS_ENTORNO)], casa, TIMEOUT_LOG,
-                     'buscar entornos de Python en', org, repo, salida=salida)
+        self._correr([git, *OPCIONES_GIT, '-C', destino, 'log', '--all', '--full-history', '--no-renames', '--format=',
+                      '--name-only', '-z', '--', *(':(glob)**/' + marca for marca in MARCAS_ENTORNO)], casa,
+                     TIMEOUT_ENTORNOS, 'buscar entornos de Python en', org, repo, salida=salida)
         try:
             if os.path.getsize(salida) > MAX_LOG:
                 raise ValueError('salida demasiado grande')
@@ -895,10 +935,12 @@ def _revisar(res, cliente, org, dominio, ahora):
         'blog_del_dominio': perfil['blog_del_dominio'], 'correo_del_dominio': perfil['correo_del_dominio'],
         'repos_revisados': revisados_nombres, 'repos_saltados': {k: v for k, v in saltados.items() if v}}}))
 
-    correos, ajenos, invalidos = {}, 0, 0
+    correos, ajenos, invalidos, sin_entornos = {}, 0, 0, []
     for nombre, datos in revisados:
         repo = '%s/%s' % (login, nombre)
         res.hallazgos += [hallazgo_secreto(res.dominio, repo, s, ahora) for s in datos['secretos']]
+        if datos.get('sin_entornos'):
+            sin_entornos.append(repo)
         ajenos += datos['ajenos']
         invalidos += datos['invalidos']
         for c in datos['correos']:
@@ -916,6 +958,7 @@ def _revisar(res, cliente, org, dominio, ahora):
             res.avisos.append('github: se %s %s %s' % ('saltó' if n == 1 else 'saltaron', _cuantos(n, 'repo', 'repos'),
                                                      SALTADOS[motivo]))
     res.avisos += fallas
+    res.avisos += [SIN_ENTORNOS % repo for repo in sin_entornos]
     if sin_grabacion:
         res.avisos.append('github: falta la grabación de %s' % _cuantos(sin_grabacion, 'repo', 'repos'))
     if sin_tiempo:
