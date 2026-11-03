@@ -5,8 +5,10 @@ Salen de la evidencia del hallazgo con una sola rúbrica, la de sensibilidad(). 
 calcular() va en otra tarjeta, antes de #36. Mientras tanto el modelo ve en producción valores distintos a los del lote.
 
 calcular() ya acepta lo que crt.sh pone hoy en la evidencia: vence en cert_expired y primer_certificado en
-lookalike_domain. crt.sh no pone not_before en cert_expiring_soon, y ningún recolector pone primera_vez. Sin esas
-fechas la antigüedad cuenta desde detected_at o asset_first_seen, como v1.py:67-74, si quien llama las pasa.
+lookalike_domain, y lo que pone rdap.py: por_vencer_desde en domain_expiring_soon. crt.sh no pone not_before en
+cert_expiring_soon, y ningún recolector pone primera_vez. Sin esas fechas la antigüedad cuenta desde detected_at o
+asset_first_seen, como v1.py:67-74, si quien llama las pasa. Los códigos de shodan.py no traen fecha: InternetDB no
+la da.
 
 Rúbrica de sensibilidad, según lo que expone el hallazgo:
 - alta: credenciales, acceso remoto a un sistema o datos personales.
@@ -31,6 +33,7 @@ DESDE = {
     'cert_expired': ('not_after', 'vence'),          # el vencimiento (v1.py:71-72). crt.sh lo pone en vence
     'cert_expiring_soon': ('not_before',),           # la emisión (crtsh.py:397)
     'lookalike_domain': ('primer_certificado',),     # el primer certificado del parecido (crtsh.py:434)
+    'domain_expiring_soon': ('por_vencer_desde',),   # el vencimiento menos 30 días (rdap.hallazgo_vencimiento)
 }
 
 # Clases de datos de HIBP que cuentan como credenciales o datos personales. Correos, nombres y usuarios no.

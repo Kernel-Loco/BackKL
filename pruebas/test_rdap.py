@@ -1,6 +1,7 @@
 """Pruebas del recolector de RDAP y su respaldo por WHOIS (#15b, RC-166), sin red: el bootstrap de IANA y el registro
-con un transporte HTTP simulado, y el puerto 43 con una conversación simulada (WhoisSimulado). Ninguna prueba abre un
-socket: el _conversar de verdad solo corre con un módulo socket falso.
+con un transporte HTTP simulado, y el puerto 43 con una conversación simulada (WhoisSimulado). Ninguna prueba sale a
+la red: el _conversar de verdad y el connect del transporte HTTPS solo corren con un módulo socket falso, y el TLS del
+transporte (clase Transporte) con socket.socketpair() y un certificado hecho en la prueba, sin dirección de red.
 
     python -m unittest -v pruebas/test_rdap.py
 
@@ -14,6 +15,8 @@ import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -24,6 +27,7 @@ import urllib.error
 import urllib.request
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPMessage
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -33,7 +37,7 @@ from pruebas.test_catalogo_reglas import POR_CODIGO  # noqa: E402
 from pruebas.test_crtsh import AHORA  # noqa: E402
 from pruebas.test_shodan import error_http  # noqa: E402
 from pruebas.test_subfinder import Cronometro  # noqa: E402
-from cirdan.recolectores import REGISTRO, cargar, contrato, rdap  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, contrato, rdap, transporte  # noqa: E402
 from cirdan.recolectores.contrato import FuenteNoResponde  # noqa: E402
 
 SEMILLA = Path(__file__).resolve().parents[1] / 'db' / 'semillas' / '008_whois.sql'
@@ -336,10 +340,12 @@ class Rdap(unittest.TestCase):
                          ('domain_expiring_soon', 'medium', DOMINIO, 'El registro de olmardo.com vence en 12 días'))
         self.assertEqual(h.evidencia, {
             'title': h.titulo, 'vence': '2026-10-27T15:00:00Z', 'dias_para_vencer': 12,
+            'por_vencer_desde': '2026-09-27T15:00:00Z',
             'registrador': 'Registrador de Prueba, Inc.',
             'estado_registro': ['client delete prohibited', 'client transfer prohibited'],
             'fuente_datos': 'RDAP', 'servidor_rdap': VERISIGN})
-        self.assertEqual(h.caracteristicas, {'tipo': 'domain_expiring_soon', 'antiguedad_dias': 0,
+        # La antigüedad cuenta desde que el vencimiento entró a los 30 días (27 sep), no desde el escaneo (RC-166, 13)
+        self.assertEqual(h.caracteristicas, {'tipo': 'domain_expiring_soon', 'antiguedad_dias': 18,
                                              'exposicion': 'publica', 'sensibilidad': 'media'})
         self.assertEqual(res.sin_cobertura, [])
         casos = {timedelta(days=30): None, timedelta(days=30, seconds=-1): 'vence en 29 días',
@@ -546,14 +552,25 @@ class Rdap(unittest.TestCase):
                         fallida = contrato.ejecutar(cargar('whois'), DOMINIO, modo='reproducir', ahora=AHORA)
                     self.assertEqual((fallida.estado, fallida.activos), ('failed', []))
 
-    def test_13_la_redireccion_fuera_de_https_se_corta(self):
+    def test_13_ninguna_redireccion_se_sigue(self):
+        """RC-166, 6: una redirección, a http o a https, no se sigue: cada consulta llega solo al servidor que se pidió
+        y cuenta una vez en el cupo. En rdap no se puede leer y entra el respaldo por WHOIS."""
         req = urllib.request.Request(VERISIGN + 'domain/olmardo.com')
-        manejador = rdap._SoloHttps()
-        with self.assertRaises(rdap.RespuestaIlegible):
-            manejador.redirect_request(req, io.BytesIO(), 302, 'Found', {}, 'http://rdap.verisign.com/x')
-        nueva = manejador.redirect_request(req, io.BytesIO(), 302, 'Found', {}, 'https://rdap.verisign.com/com/v2/x')
-        self.assertEqual(nueva.full_url, 'https://rdap.verisign.com/com/v2/x')
-        self.assertIn(rdap._SoloHttps, [type(h) for h in rdap._ABRIR.__self__.handlers])
+        manejador = transporte._SinRedirecciones()
+        for destino in ('http://rdap.verisign.com/x', 'https://rdap.verisign.com/com/v2/x', 'https://10.0.0.1/x'):
+            with self.subTest(destino=destino), self.assertRaises(transporte.Redirigida) as e:
+                manejador.redirect_request(req, io.BytesIO(), 302, 'Found', {}, destino)
+            self.assertEqual((e.exception.codigo, e.exception.host), (302, 'rdap.verisign.com'))
+
+        def redirige(req, plazo, cronometro):
+            raise transporte.Redirigida(301, 'rdap.verisign.com')
+        with mock.patch.object(transporte, 'abrir', redirige), self.assertRaises(rdap.RespuestaIlegible) as e:
+            rdap._descargar(VERISIGN + 'domain/olmardo.com', 15)
+        self.assertEqual(str(e.exception), 'whois: rdap.verisign.com redirigió (301) y no se siguen redirecciones')
+        with mock.patch.object(transporte, 'abrir', redirige):
+            res = recolectar(rdap._descargar, whois=whois_com())
+        self.assertEqual((res.consultas, el_dominio(res).atributos['fuente_datos']), (3, 'WHOIS'))   # sin reintento
+        self.assertIn('redirigió (301)', res.avisos[0])
 
     def test_14_descargar_tiene_plazo_absoluto_tope_y_cabeceras(self):
         class Respuesta:
@@ -572,19 +589,22 @@ class Rdap(unittest.TestCase):
         pedidas = []
 
         def abrir(partes):
-            def f(req, timeout):
-                pedidas.append((req, timeout))
+            def f(req, plazo, cronometro):
+                pedidas.append((req, plazo))
                 return Respuesta(partes)
             return f
-        with mock.patch.object(rdap, '_ABRIR', abrir([b'{"a":', b'1}'])):
+        with mock.patch.object(transporte, 'abrir', abrir([b'{"a":', b'1}'])):
             self.assertEqual(rdap._descargar(rdap.URL_BOOTSTRAP, 15, Cronometro(1)), b'{"a":1}')
-        req, timeout = pedidas[0]
-        self.assertEqual((req.get_header('User-agent'), timeout), (rdap.AGENTE, 15))
+        req, plazo = pedidas[0]
+        self.assertEqual((req.get_header('User-agent'), plazo), (rdap.AGENTE, 1015.0))   # el plazo es un instante
         self.assertIn('application/rdap+json', req.get_header('Accept'))
-        with mock.patch.object(rdap, '_ABRIR', abrir([b'{', b'"a"', b':1}'])), self.assertRaises(rdap.SinTiempo):
+        with mock.patch.object(transporte, 'abrir', abrir([b'{', b'"a"', b':1}'])), self.assertRaises(rdap.SinTiempo):
             rdap._descargar(rdap.URL_BOOTSTRAP, 10, Cronometro(6))
-        with mock.patch.object(rdap, '_ABRIR', abrir([b'x' * rdap.BLOQUE] * 17)), self.assertRaises(ValueError):
+        with mock.patch.object(transporte, 'abrir', abrir([b'x' * transporte.BLOQUE] * 17)), \
+                self.assertRaises(ValueError):
             rdap._descargar(rdap.URL_BOOTSTRAP, 10, Cronometro(0))
+        with mock.patch.object(transporte, 'abrir', SinRed()), self.assertRaises(ValueError):
+            rdap._descargar('http://rdap.verisign.com/com/v1/domain/olmardo.com', 10)   # solo https
 
     def test_15_el_tope_de_tiempo_corta_la_corrida(self):
         res = recolectar(HttpSimulado(), cronometro=Cronometro(200))
@@ -767,17 +787,22 @@ class Rdap(unittest.TestCase):
         self.assertEqual((res.avisos[0], rdap.codigo_salida(res), len(res.hallazgos)), (rdap.NO_SE_GRABO, 3, 1))
 
     def test_23_esperar_no_pasa_del_tiempo_que_queda_y_una_lectura_que_lo_acaba(self):
+        """RC-166, 14: si después de la espera no quedaría MIN_INTENTO más HOLGURA para otro intento, no duerme y
+        devuelve False."""
         reloj, dormidas = [1000.0], []
         cliente = rdap.ClienteRdap(descargar=SinRed(), cronometro=lambda: reloj[0], dormir=dormidas.append)
         cliente.empezar()
         reloj[0] += rdap.TIEMPO_CORRIDA - rdap.RESERVA_WHOIS - 3   # mientras corre RDAP, la reserva no cuenta
-        cliente.esperar(15)
+        self.assertIs(cliente.esperar(15), False)
+        self.assertIs(cliente.esperar(2), False)                     # quedaría 1, menos que MIN_INTENTO más HOLGURA
+        self.assertIs(cliente.esperar(1.95), False)
+        self.assertIs(cliente.esperar(1.5), True)                    # quedan 3: 1.5 de espera y 1.5 para el intento
         reloj[0] += 10
-        cliente.esperar(5)
+        self.assertIs(cliente.esperar(0), False)
         cliente.reserva = 0                                          # al pasar a WHOIS queda la reserva: 30 - 7 s
         self.assertEqual(cliente.restante(), rdap.RESERVA_WHOIS - 7)
-        cliente.esperar(5)
-        self.assertEqual(dormidas, [3, 0, 5])
+        self.assertIs(cliente.esperar(5), True)
+        self.assertEqual(dormidas, [1.5, 5])
 
         def lenta(url, timeout):
             if url == rdap.URL_BOOTSTRAP:
@@ -839,6 +864,7 @@ class Rdap(unittest.TestCase):
         self.assertEqual((h.codigo, h.titulo), ('domain_expiring_soon', 'El registro de acme-demo.com.mx vence en 21 días'))
         self.assertEqual(h.evidencia, {
             'title': h.titulo, 'vence': '2026-11-05T23:59:59Z', 'dias_para_vencer': 21,
+            'por_vencer_desde': '2026-10-06T23:59:59Z',
             'registrador': 'Registrador de Prueba MX', 'estado_registro': NO,
             'fuente_datos': 'WHOIS', 'servidor_whois': 'whois.mx'})
         self.assertEqual(rdap.codigo_salida(res), 0)
@@ -1204,6 +1230,382 @@ class Rdap(unittest.TestCase):
         self.assertEqual((reducido['registrado'], reducido['vence']), ('2019-05-12T00:00:00Z', '2026-11-05T00:00:00Z'))
         atributos, _ = rdap.leer_rdap(respuesta(vence='2026-11-05'), DOMINIO)
         self.assertEqual(atributos['vence'], '2026-11-05T00:00:00Z')
+
+    def test_37_un_5xx_con_retry_after_espera_lo_que_pide(self):
+        """RC-166, 15: el Retry-After de un 5xx o un 408 alarga la espera antes del siguiente intento, hasta MAX_ESPERA.
+        Uno más corto que ESPERAS o que no se puede leer no la cambia. Uno de más de MAX_ESPERA no se espera ni se
+        reintenta, aunque la corrida tenga tiempo: el registro sale de WHOIS con el aviso de lo que pidió."""
+        url = VERISIGN + 'domain/' + DOMINIO
+        for codigo, valor, espera in ((503, '12', 12), (408, '12', 12), (503, '15', 15), (502, '2', 5),
+                                      (503, 'mañana', 5), (503, '-3', 5), (500, None, 5)):
+            with self.subTest(codigo=codigo, valor=valor):
+                dormidas = []
+                http = HttpSimulado(dominios={DOMINIO: [error_http(url, codigo, valor), respuesta()]})
+                res = recolectar(http, dormir=dormidas.append)
+                self.assertEqual((dormidas, res.consultas, el_dominio(res).atributos['vence']), ([espera], 3, VENCE))
+        for valor in ('16', '40', '3600'):
+            with self.subTest(valor=valor):
+                dormidas = []
+                http = HttpSimulado(dominios={DOMINIO: [error_http(url, 503, valor), respuesta()]})
+                res = recolectar(http, dormir=dormidas.append, whois=whois_com())
+                self.assertEqual((dormidas, res.consultas, el_dominio(res).atributos['fuente_datos']),
+                                 ([], 4, 'WHOIS'))
+                self.assertIn('RDAP (rdap.verisign.com) respondió 503 y pide esperar %s s, más de los 15 s que se '
+                              'esperan para otro intento' % valor, res.avisos[0])
+
+    def test_38_retry_after_en_segundos_o_con_fecha(self):
+        ahora = datetime(2026, 10, 21, 7, 27, 0, tzinfo=timezone.utc)
+        casos = [({'Retry-After': '120'}, 120), ({'Retry-After': ' 7 '}, 7), ({'Retry-After': '0'}, 0),
+                 ({'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT', 'Date': 'Wed, 21 Oct 2026 07:27:30 GMT'}, 30),
+                 ({'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT'}, 60),                 # sin Date, desde `ahora`
+                 ({'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT', 'Date': 'roto'}, 60),
+                 ({'Retry-After': 'Wed, 21 Oct 2026 07:20:00 GMT'}, 0),                  # ya pasó
+                 ({'Retry-After': 'mañana'}, None), ({'Retry-After': ''}, None), ({'Retry-After': '-5'}, None),
+                 ({'Retry-After': '1.5'}, None), ({'Retry-After': '9' * 12}, None), ({}, None), (None, None)]
+        for cabeceras, segundos in casos:
+            with self.subTest(cabeceras=cabeceras):
+                self.assertEqual(transporte.retry_after(cabeceras, ahora), segundos)
+        mensaje = HTTPMessage()   # las cabeceras de un HTTPError de verdad
+        self.assertIsNone(transporte.retry_after(mensaje))
+        mensaje['Retry-After'] = '9'
+        self.assertEqual(transporte.retry_after(mensaje), 9)
+
+    def test_39_sin_tiempo_para_otro_intento_sale_el_error_real(self):
+        """RC-166, 14: con_reintentos no hace el intento si dormir devuelve False y sale con el último error y los
+        intentos que sí hizo. En rdap ya no sale 'se acabó el tiempo' tapando el error, ni un intento de 1 o 2 s."""
+        llamadas = []
+
+        def consulta():
+            llamadas.append(1)
+            raise OSError('502 pasajero')
+        consulta.__name__ = 'la consulta'
+        segunda = iter([True, False])   # la primera espera sí cabe y la segunda no
+        for dormir, intentos, cola in ((lambda s: False, 1, ', sin tiempo para otro'), (lambda s: None, 3, ''),
+                                       (lambda s: next(segunda), 2, ', sin tiempo para otro')):
+            with self.subTest(intentos=intentos):
+                llamadas.clear()
+                with self.assertRaises(FuenteNoResponde) as e:
+                    contrato.con_reintentos(consulta, dormir=dormir)
+                self.assertEqual(len(llamadas), intentos)
+                self.assertEqual(str(e.exception), 'la consulta después de %d %s%s (OSError: 502 pasajero)'
+                                 % (intentos, 'intento' if intentos == 1 else 'intentos', cola))
+        # En la corrida: el registro falla cuando a RDAP le quedan 4 s, menos que la espera de 5 más MIN_INTENTO
+        reloj = [1000.0]
+
+        def lenta(url, timeout):
+            if url == rdap.URL_BOOTSTRAP:
+                return json.dumps(BOOTSTRAP).encode()
+            reloj[0] = 1000.0 + rdap.TIEMPO_CORRIDA - rdap.RESERVA_WHOIS - 4
+            raise ConnectionResetError('conexión cortada')
+        dormidas = []
+        cliente = rdap.ClienteRdap(descargar=lenta, cronometro=lambda: reloj[0], dormir=dormidas.append,
+                                   conversar=whois_com())
+        res = rdap.recolectar(DOMINIO, cliente, ahora=AHORA)
+        self.assertEqual((dormidas, res.consultas, el_dominio(res).atributos['fuente_datos']), ([], 4, 'WHOIS'))
+        self.assertIn('después de 1 intento, sin tiempo para otro (ConnectionResetError: conexión cortada)',
+                      res.avisos[0])
+        self.assertNotIn('se acabó el tiempo', res.avisos[0])
+
+    def test_40_pending_restore_redemption_o_pending_delete_dejan_un_aviso(self):
+        """RC-166, 10: con pending restore, redemption period o pending delete el registrador ya borró el dominio,
+        aunque el registro publique un vencimiento lejano (en un gTLD lo renueva solo). Queda un solo aviso, con el
+        estado que más dice, salga o no el hallazgo. Sin hallazgo, domain_expiring_soon queda sin cobertura: el
+        orquestador no cierra el de una corrida anterior por una fecha que ya no vale."""
+        def en_baja(estado, fuente='RDAP'):
+            return rdap.EN_BAJA % (fuente, DOMINIO, estado, rdap.ESTADOS_DE_BAJA[estado])
+        res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=['redemption period', 'inactive'])}))
+        self.assertEqual((res.hallazgos, res.avisos, res.sin_cobertura),
+                         ([], [en_baja('redemption period')], ['domain_expiring_soon']))
+        self.assertIn('el registrador ya lo borró y se libera si nadie lo restaura', en_baja('redemption period'))
+        res = recolectar(con_vencimiento(timedelta(days=12), status=['pending delete', 'redemption period']))
+        self.assertEqual([h.codigo for h in res.hallazgos], ['domain_expiring_soon'])
+        self.assertEqual((res.avisos, res.sin_cobertura), ([en_baja('redemption period')], []))
+        for estados, estado in ((['pending restore', 'redemption period'], 'pending restore'),
+                                (['pending delete', 'client hold'], 'pending delete')):
+            with self.subTest(estados=estados):
+                res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=estados)}))
+                self.assertEqual((res.avisos, res.sin_cobertura), ([en_baja(estado)], ['domain_expiring_soon']))
+        self.assertIn('se pidió restaurarlo', en_baja('pending restore'))
+        # Lo mismo cuando el registro sale de WHOIS, con el estado de EPP
+        texto = WHOIS_VERISIGN.replace('clientDeleteProhibited https://icann.org/epp#clientDeleteProhibited',
+                                       'pendingDelete https://icann.org/epp#pendingDelete')
+        res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois_com(texto))
+        self.assertEqual((res.avisos[1:], res.sin_cobertura),
+                         ([en_baja('pending delete', 'WHOIS')], ['domain_expiring_soon']))
+        # Los demás estados no dejan aviso ni quitan la cobertura
+        res = recolectar(HttpSimulado())
+        self.assertEqual((res.avisos, res.sin_cobertura), ([], []))
+
+    def test_41_un_sueno_que_se_pasa_no_deja_empezar_otro_intento(self):
+        """RC-166, 14: time.sleep puede pasarse. esperar() lo vuelve a revisar después de dormir: si ya no queda
+        MIN_INTENTO más HOLGURA, devuelve False y sale el error real, no el SinTiempo de un intento que no cabe."""
+        reloj, dormidas = [1000.0], []
+
+        def dormir(s):   # cada sueño se pasa 0.2 s
+            dormidas.append(s)
+            reloj[0] += s + 0.2
+        cliente = rdap.ClienteRdap(descargar=SinRed(), cronometro=lambda: reloj[0], dormir=dormir)
+        cliente.empezar()
+        reloj[0] += rdap.TIEMPO_CORRIDA - rdap.RESERVA_WHOIS - 6.2
+        self.assertIs(cliente.esperar(5), False)   # antes de dormir quedaban 1.2 s y después 1.0
+        self.assertEqual(dormidas, [5])
+
+        # En la corrida: el registro falla con 6.2 s para RDAP, la espera de 5 s se pasa y no hay segundo intento
+        def lenta(url, timeout):
+            if url == rdap.URL_BOOTSTRAP:
+                return json.dumps(BOOTSTRAP).encode()
+            reloj[0] = max(reloj[0], 1000.0 + rdap.TIEMPO_CORRIDA - rdap.RESERVA_WHOIS - 6.2)
+            raise ConnectionResetError('conexión cortada')
+        reloj[0] = 1000.0
+        dormidas.clear()
+        cliente = rdap.ClienteRdap(descargar=lenta, cronometro=lambda: reloj[0], dormir=dormir, conversar=whois_com())
+        res = rdap.recolectar(DOMINIO, cliente, ahora=AHORA)
+        self.assertEqual((dormidas, res.consultas, el_dominio(res).atributos['fuente_datos']), ([5], 4, 'WHOIS'))
+        self.assertIn('después de 1 intento, sin tiempo para otro (ConnectionResetError: conexión cortada)',
+                      res.avisos[0])
+        self.assertNotIn('se acabó el tiempo', res.avisos[0])
+
+    def test_42_un_estado_en_la_forma_de_epp_se_lee_como_el_de_rdap(self):
+        """RC-166, 10: un servidor RDAP que no sigue RFC 8056 puede mandar 'pendingDelete' en vez de 'pending delete'.
+        _estado_rdap lo pasa a la forma de RDAP al leer y al grabar, así ESTADOS_DE_BAJA lo encuentra."""
+        for valor, estado in (('pendingDelete', 'pending delete'), ('redemptionPeriod', 'redemption period'),
+                              ('clientTransferProhibited', 'client transfer prohibited'), ('ok', 'active'),
+                              ('OK', 'active'), (' client hold ', 'client hold'), ('inactive', 'inactive')):
+            with self.subTest(valor=valor):
+                self.assertEqual(rdap._estado_rdap(valor), estado)
+        datos = respuesta(status=['pendingDelete', 'clientTransferProhibited'])
+        estados = ['client transfer prohibited', 'pending delete']
+        self.assertEqual(rdap.reducir_rdap(datos)['status'], estados)
+        for leida in (datos, rdap.reducir_rdap(datos)):
+            self.assertEqual(rdap.leer_rdap(leida, DOMINIO)[0]['estado_registro'], estados)
+        res = recolectar(HttpSimulado(dominios={DOMINIO: datos}))
+        self.assertEqual((res.avisos, res.sin_cobertura),
+                         ([rdap.EN_BAJA % ('RDAP', DOMINIO, 'pending delete', rdap.ESTADOS_DE_BAJA['pending delete'])],
+                          ['domain_expiring_soon']))
+
+
+class Extremo(socket.socket):
+    """Un extremo de socket.socketpair() (AF_UNIX, sin red) que hace de socket TCP: http.client le pide TCP_NODELAY."""
+
+    def setsockopt(self, *_):
+        pass
+
+
+def certificado(carpeta, nombre):
+    """Un certificado autofirmado de `nombre` y su llave, hechos en la prueba: (ruta del certificado, ruta de la
+    llave)."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+    llave = ec.generate_private_key(ec.SECP256R1())
+    sujeto = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, nombre)])
+    ahora = datetime.now(timezone.utc)
+    publica = llave.public_key()
+    cert = (x509.CertificateBuilder().subject_name(sujeto).issuer_name(sujeto).public_key(publica)
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(ahora - timedelta(minutes=5)).not_valid_after(ahora + timedelta(hours=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(nombre)]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(digital_signature=True, key_cert_sign=True, crl_sign=True,
+                                         content_commitment=False, key_encipherment=False, data_encipherment=False,
+                                         key_agreement=False, encipher_only=False, decipher_only=False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(publica), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(publica), critical=False)
+            .sign(llave, hashes.SHA256()))
+    ruta_cert, ruta_llave = Path(carpeta) / 'cert.pem', Path(carpeta) / 'llave.pem'
+    ruta_cert.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    ruta_llave.write_bytes(llave.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                               serialization.NoEncryption()))
+    return str(ruta_cert), str(ruta_llave)
+
+
+class ServidorTls:
+    """Un servidor HTTPS de una sola conexión sobre socket.socketpair(): lee una petición y responde `respuesta` de una
+    vez, o de a un byte cada `paso` segundos. Con `sin_tls` nunca hace el handshake: espera a cerrar(), hasta 5 s."""
+
+    def __init__(self, contexto, respuesta, paso=0, sin_tls=False):
+        a, b = socket.socketpair()
+        self.cliente, self.pedidos, self.listo = Extremo(fileno=a.detach()), [], threading.Event()
+        self.hilo = threading.Thread(target=self._atender, args=(contexto, b, respuesta, paso, sin_tls), daemon=True)
+        self.hilo.start()
+
+    def _atender(self, contexto, extremo, respuesta, paso, sin_tls):
+        extremo.settimeout(10)
+        try:
+            if sin_tls:
+                extremo.recv(65536)
+                self.listo.wait(5)
+                return
+            with contexto.wrap_socket(extremo, server_side=True) as tls:
+                pedido = b''
+                while b'\r\n\r\n' not in pedido:
+                    parte = tls.recv(4096)
+                    if not parte:
+                        return
+                    pedido += parte
+                self.pedidos.append(pedido)
+                for i in range(0, len(respuesta), 1 if paso else len(respuesta)):
+                    tls.sendall(respuesta[i:i + 1] if paso else respuesta)
+                    time.sleep(paso)
+        except OSError:
+            pass
+        finally:
+            extremo.close()
+
+    def cerrar(self):
+        self.listo.set()
+        self.cliente.close()
+        self.hilo.join(10)
+
+
+HOST_TLS = 'rdap.prueba.example'
+
+
+class Transporte(unittest.TestCase):
+    """transporte.py (RC-166, 6 y 7) sin red: el connect con el módulo socket falso de Red y el TLS de verdad con
+    socket.socketpair() y un certificado hecho aquí. Los plazos de las pruebas de TLS son de reloj real y cortos."""
+
+    def setUp(self):
+        carpeta = tempfile.TemporaryDirectory()
+        self.addCleanup(carpeta.cleanup)
+        cert, llave = certificado(carpeta.name, HOST_TLS)
+        self.servidor_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.servidor_ctx.load_cert_chain(cert, llave)
+        self.cliente_ctx = ssl.create_default_context(cafile=cert)   # como transporte._contexto, con esta CA
+        self.cliente_ctx.sslsocket_class = transporte._SocketTls
+
+    def descargar(self, servidor, plazo, tope=rdap.MAX_BYTES):
+        def conectar(conexion, direccion, *_):
+            self.assertEqual(direccion, (HOST_TLS, 443))
+            servidor.cliente.settimeout(conexion.queda())   # como _conectar antes del handshake
+            return servidor.cliente
+        req = urllib.request.Request('https://%s/domain/olmardo.com' % HOST_TLS, headers={'User-Agent': rdap.AGENTE})
+        with mock.patch.object(transporte, '_contexto', lambda: self.cliente_ctx), \
+                mock.patch.object(transporte._Conexion, '_conectar', conectar):
+            return transporte.descargar(req, plazo, tope)
+
+    def test_1_el_contexto_revisa_el_certificado_y_usa_el_socket_con_plazo(self):
+        contexto = transporte._contexto()
+        self.assertEqual((contexto.verify_mode, contexto.check_hostname, contexto.sslsocket_class),
+                         (ssl.CERT_REQUIRED, True, transporte._SocketTls))
+        with self.assertRaises(ValueError):
+            transporte.descargar(urllib.request.Request('http://%s/' % HOST_TLS), time.monotonic() + 5, 10)
+
+    def test_2_una_respuesta_completa_y_una_redireccion_que_no_se_sigue(self):
+        servidor = ServidorTls(self.servidor_ctx, b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'
+                                                  b'Content-Length: 7\r\nConnection: close\r\n\r\n{"a":1}')
+        try:
+            self.assertEqual(self.descargar(servidor, time.monotonic() + 5), b'{"a":1}')
+        finally:
+            servidor.cerrar()
+        [pedido] = servidor.pedidos
+        self.assertTrue(pedido.startswith(b'GET /domain/olmardo.com HTTP/1.1\r\n'), pedido)
+        self.assertIn(b'Host: ' + HOST_TLS.encode(), pedido)
+        servidor = ServidorTls(self.servidor_ctx, b'HTTP/1.1 302 Found\r\nLocation: https://%s/otra\r\n'
+                                                  b'Content-Length: 0\r\nConnection: close\r\n\r\n' % HOST_TLS.encode())
+        try:
+            with self.assertRaises(transporte.Redirigida) as e:
+                self.descargar(servidor, time.monotonic() + 5)
+        finally:
+            servidor.cerrar()
+        self.assertEqual((e.exception.codigo, e.exception.host, len(servidor.pedidos)), (302, HOST_TLS, 1))
+
+    def test_3_un_5xx_sale_tal_cual_con_su_retry_after(self):
+        servidor = ServidorTls(self.servidor_ctx, b'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 7\r\n'
+                                                  b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                self.descargar(servidor, time.monotonic() + 5)
+        finally:
+            servidor.cerrar()
+        self.assertEqual((e.exception.code, transporte.retry_after(e.exception.headers)), (503, 7))
+        e.exception.close()
+
+    def test_4_cabeceras_de_a_poco_no_pasan_del_plazo(self):
+        """Un byte cada 0.05 s llega antes de cualquier timeout por operación, pero el plazo de 0.5 s es de toda la
+        petición: sin _SocketTls esto tardaría unos 5 s y respondería."""
+        respuesta = (b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 7\r\n'
+                     b'Connection: close\r\n\r\n{"a":1}')
+        servidor = ServidorTls(self.servidor_ctx, respuesta, paso=0.05)
+        inicio = time.monotonic()
+        try:
+            with self.assertRaises(transporte.PlazoVencido):
+                self.descargar(servidor, inicio + 0.5)
+        finally:
+            servidor.cerrar()
+        self.assertLess(time.monotonic() - inicio, 2.5)
+
+    def test_5_un_servidor_que_no_hace_el_handshake_no_pasa_del_plazo(self):
+        """El servidor lee el ClientHello y no contesta hasta cerrar(): sin el plazo en el handshake, descargar
+        esperaría sus 5 s. La duración se mide antes de cerrar()."""
+        servidor = ServidorTls(self.servidor_ctx, b'', sin_tls=True)
+        inicio = time.monotonic()
+        try:
+            with self.assertRaises(transporte.PlazoVencido):
+                self.descargar(servidor, inicio + 0.5)
+            duracion = time.monotonic() - inicio
+        finally:
+            servidor.cerrar()
+        self.assertLess(duracion, 1.5)
+
+    def test_6_conectar_reparte_el_plazo_y_cierra_lo_que_falla(self):
+        # La primera dirección descarta los SYN: su connect gasta solo su parte y la segunda tiene el resto, también
+        # para el handshake
+        reloj = [1000.0]
+        red = Red(['2600::1', '1.2.3.4'], colgadas={'2600::1'}, reloj=reloj)
+        conexion = transporte._Conexion(HOST_TLS, plazo=1010.0, cronometro=lambda: reloj[0])
+        with mock.patch.object(transporte, 'socket', red):
+            s = conexion._conectar((HOST_TLS, 443))
+        primera, segunda = red.sockets
+        self.assertIs(s, segunda)
+        self.assertEqual((primera.plazos, primera.cerrado, segunda.plazos, segunda.cerrado), ([5], True, [5, 5], False))
+        self.assertEqual(red.pedidas, [(HOST_TLS, 443, Red.SOCK_STREAM)])
+        # Las dos colgadas: no pasa del plazo y cierra las dos
+        reloj = [1000.0]
+        red = Red(['2600::1', '1.2.3.4'], colgadas={'2600::1', '1.2.3.4'}, reloj=reloj)
+        conexion = transporte._Conexion(HOST_TLS, plazo=1010.0, cronometro=lambda: reloj[0])
+        with mock.patch.object(transporte, 'socket', red), self.assertRaises(TimeoutError):
+            conexion._conectar((HOST_TLS, 443))
+        self.assertEqual((reloj[0], [x.cerrado for x in red.sockets]), (1010.0, [True, True]))
+        # Sin IPv6 en el kernel se pasa a la IPv4. Con el plazo ya vencido no se crea ningún socket
+        red = Red(['2600::1', '1.2.3.4'], sin_familia={10})
+        conexion = transporte._Conexion(HOST_TLS, plazo=1010.0, cronometro=Cronometro(0))
+        with mock.patch.object(transporte, 'socket', red):
+            self.assertEqual(conexion._conectar((HOST_TLS, 443)).plazos, [10, 10])
+        red = Red(['1.2.3.4'])
+        conexion = transporte._Conexion(HOST_TLS, plazo=999.0, cronometro=Cronometro(0))
+        with mock.patch.object(transporte, 'socket', red), self.assertRaises(transporte.PlazoVencido):
+            conexion._conectar((HOST_TLS, 443))
+        self.assertEqual(red.sockets, [])
+
+    def test_7_getaddrinfo_no_pasa_del_plazo(self):
+        listo = threading.Event()
+        self.addCleanup(listo.set)
+        red = Red(['1.2.3.4'], resolver=lambda: listo.wait(10))
+        inicio = time.monotonic()
+        conexion = transporte._Conexion(HOST_TLS, plazo=inicio + 0.3, cronometro=time.monotonic)
+        with mock.patch.object(transporte, 'socket', red), self.assertRaises(transporte.PlazoVencido):
+            conexion._conectar((HOST_TLS, 443))
+        self.assertLess(time.monotonic() - inicio, 2)
+        self.assertEqual(red.sockets, [])
+
+    def test_8_los_proxies_del_entorno_no_se_usan(self):
+        """La petición va directa al servidor aunque el entorno traiga HTTPS_PROXY, porque el plazo no cubriría el
+        CONNECT de un túnel: conectar recibe (HOST_TLS, 443), no el proxy, y el servidor recibe la ruta."""
+        proxy = 'http://proxy.prueba.example:3128'
+        servidor = ServidorTls(self.servidor_ctx, b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n'
+                                                  b'Connection: close\r\n\r\n{}')
+        try:
+            with mock.patch.dict(os.environ, {'https_proxy': proxy, 'HTTPS_PROXY': proxy}):
+                for variable in ('no_proxy', 'NO_PROXY'):
+                    os.environ.pop(variable, None)
+                self.assertEqual(self.descargar(servidor, time.monotonic() + 5), b'{}')
+        finally:
+            servidor.cerrar()
+        [pedido] = servidor.pedidos
+        self.assertTrue(pedido.startswith(b'GET /domain/olmardo.com HTTP/1.1\r\n'), pedido)
 
 
 if __name__ == '__main__':

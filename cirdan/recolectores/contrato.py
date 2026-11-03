@@ -376,19 +376,27 @@ def con_reintentos(funcion, intentos=3, esperas=(5, 15), errores=(OSError, Value
 
     Un error HTTP 4xx, salvo 408 y 429, sale tal cual sin reintentar: la fuente sí respondió (por ejemplo un
     404 de HIBP es «sin brechas» y un 403 es «sin permiso»), y lo interpreta el recolector.
+
+    Si `dormir` devuelve False, no queda tiempo para otro intento: no se hace y sale el último error con los intentos
+    que sí se hicieron y ', sin tiempo para otro' antes del error, para que no se pierda si el texto se corta (rdap.py y
+    shodan.py, RC-166). time.sleep devuelve None y siempre sigue.
     """
-    ultimo = None
+    ultimo, hechos, sin_tiempo = None, 0, False
     for n in range(intentos):
         try:
+            hechos += 1
             return funcion()
         except errores as e:
             if isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code not in (408, 429):
                 raise
             ultimo = e
-            if n < intentos - 1:
-                dormir(esperas[min(n, len(esperas) - 1)])
-    raise FuenteNoResponde('%s después de %d intentos (%s: %s)' % (getattr(funcion, '__name__', 'consulta'), intentos,
-                                                                  type(ultimo).__name__, ultimo))
+            if n < intentos - 1 and dormir(esperas[min(n, len(esperas) - 1)]) is False:
+                sin_tiempo = True
+                break
+    raise FuenteNoResponde('%s después de %d %s%s (%s: %s)' % (getattr(funcion, '__name__', 'consulta'), hechos,
+                                                              'intento' if hechos == 1 else 'intentos',
+                                                              ', sin tiempo para otro' if sin_tiempo else '',
+                                                              type(ultimo).__name__, ultimo))
 
 
 # ---------------------------------------------------------------- respuestas grabadas

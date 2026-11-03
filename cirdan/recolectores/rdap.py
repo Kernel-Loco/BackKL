@@ -30,19 +30,29 @@ domain_expiring_soon (media) sale sobre el activo domain si el vencimiento cae a
 `ahora`, como dice el texto de la regla (migración 003). Si la fecha ya pasó y el registro sigue publicado no sale,
 porque la regla habla de lo que vence en los siguientes 30 días: queda un aviso con la fecha (_aviso_vencido). Un
 vencimiento anterior o igual al registro, o de hace más de MAX_DIAS_VENCIDO días, es imposible y cuenta como fecha rota.
+La evidencia trae por_vencer_desde, el día en que el vencimiento entró a los DIAS_POR_VENCER días: de ahí cuenta la
+antigüedad del ML (caracteristicas.DESDE). Si el registro publica el dominio en pending restore, redemption period o
+pending delete (ESTADOS_DE_BAJA), el registrador ya lo borró y se libera aunque la fecha diga otra cosa (en un gTLD el
+registro suele renovar solo la fecha): queda un aviso con el estado que más dice y, si no sale domain_expiring_soon, el
+código va a sin_cobertura, porque la fecha ya no dice cuándo se pierde. Un estado en la forma de EPP
+('pendingDelete') se lee como el de RFC 8056 ('pending delete'), en RDAP y en WHOIS (_estado_rdap).
 
 Cobertura. Si no se sabe el vencimiento (ni RDAP ni WHOIS respondieron, el TLD no tiene RDAP ni WHOIS, el registro no
 conoce el dominio o no publica la fecha, o la publica rota o imposible), domain_expiring_soon va a sin_cobertura con un
 aviso y el activo sale con 'No disponible'. La fuente queda succeeded y no failed, como pide RC-166: el escaneo termina
 'partial' y no se lee como 0 hallazgos, pero el orquestador no la reintenta. La geolocalización y el ASN de las IP
 (DB-IP Lite) no son de esta fuente: van en los activos ip de dns y shodan.
-Reintentos: INTENTOS por consulta RDAP (esperas de 5 y 15 s) e INTENTOS_WHOIS por consulta WHOIS (ESPERAS_WHOIS),
-nunca esperas más largas que lo que le queda a la corrida. Cada petición HTTP tiene un plazo absoluto,
-min(TIMEOUT_HTTP, lo que queda), que cubre toda la lectura del cuerpo (_descargar, como shodan.py), sin cubrir
-getaddrinfo. Un 429 o un 4xx, salvo el 408, no se reintentan. Una redirección que sale de https se corta (_SoloHttps).
-Cada conversación por el puerto 43 tiene un plazo absoluto, min(TIMEOUT_WHOIS, lo que queda), que a diferencia de
-_descargar sí cubre getaddrinfo (en un hilo aparte), el connect de cada dirección, el envío y cada recv (_conversar).
-Mientras corre RDAP, restante() guarda RESERVA_WHOIS segundos de TIEMPO_CORRIDA para el respaldo.
+Reintentos: INTENTOS por consulta RDAP (esperas de 5 y 15 s) e INTENTOS_WHOIS por consulta WHOIS (ESPERAS_WHOIS).
+Un 5xx o un 408 con Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA: si pide más, no se reintenta y sale
+ese error. Si después de la espera no le quedarían a la corrida MIN_INTENTO segundos (más HOLGURA), no se espera ni se
+hace otro intento: sale el error del último (esperar). Cada petición HTTP
+tiene un plazo absoluto, min(TIMEOUT_HTTP, lo que queda), que cubre getaddrinfo, el connect, el TLS, el envío y cada
+lectura de las cabeceras y del cuerpo (_descargar con transporte.descargar, como shodan.py). Un 429 o un 4xx, salvo el
+408, no se reintentan. Una redirección no se sigue, ni se usan proxies: cada consulta llega solo al servidor que se
+pidió y cuenta una vez
+en el cupo (MAX_CONSULTAS). Cada conversación por el puerto 43 tiene un plazo absoluto, min(TIMEOUT_WHOIS, lo que
+queda), que también cubre getaddrinfo (en un hilo aparte), el connect de cada dirección, el envío y cada recv
+(_conversar). Mientras corre RDAP, restante() guarda RESERVA_WHOIS segundos de TIEMPO_CORRIDA para el respaldo.
 
 Modos: 'vivo' consulta. 'grabar' además guarda en cirdan/recolectores/respuestas_grabadas/whois/<dominio>/ el bootstrap
 reducido al servicio del dominio y la respuesta RDAP reducida a lo que se lee (reducir_rdap: sin contactos, solo con
@@ -81,6 +91,7 @@ from datetime import datetime, timedelta, timezone
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
+from cirdan.recolectores import transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos)
@@ -105,6 +116,9 @@ INTENTOS = 3                 # intentos por consulta dentro de una corrida (no e
 ESPERAS = (5, 15)            # segundos entre intentos
 TIMEOUT_HTTP = 15            # segundos por petición
 TIEMPO_CORRIDA = 120         # segundos de toda la corrida: ninguna consulta empieza después
+MIN_INTENTO = 1              # segundos que necesita un intento: con menos no se espera ni se intenta
+HOLGURA = 0.1                # segundos de más que pide esperar(): time.sleep puede pasarse un poco
+MAX_ESPERA = 15              # lo más que se espera un Retry-After: si pide más, no se reintenta
 MAX_BYTES = 1024 * 1024      # tope de una respuesta HTTP. El bootstrap completo pesa unas decenas de KB
 INTENTOS_WHOIS = 2           # intentos por consulta al puerto 43
 ESPERAS_WHOIS = (5,)         # segundos entre intentos
@@ -161,6 +175,13 @@ SIN_VENCIMIENTO = 'whois: %s no publica la fecha de vencimiento de este dominio'
 VENCIMIENTO_ROTO = 'whois: %s dio una fecha de vencimiento que no se puede leer'
 VENCIMIENTO_IMPOSIBLE = ('whois: %s dio una fecha de vencimiento imposible (anterior o igual al registro, o de hace '
                          'más de un año) y se ignoró')
+# Estados con los que el registrador ya borró el dominio (RFC 3915 y RFC 8056) -> qué sigue, del que más dice al que
+# menos. pending delete viene también en el periodo de redención y con una restauración pedida, y solo sin ellos quiere
+# decir que ya no se puede restaurar. Va un aviso (EN_BAJA) con el primero que publique el registro.
+ESTADOS_DE_BAJA = {'pending restore': 'el registrador ya lo borró y se pidió restaurarlo',
+                   'redemption period': 'el registrador ya lo borró y se libera si nadie lo restaura',
+                   'pending delete': 'el registrador ya lo borró y se libera en unos días'}
+EN_BAJA = "whois: %s publica %s con el estado '%s': %s, aunque la fecha de vencimiento diga otra cosa"
 NO_SE_GRABO = ('whois: la corrida tuvo fallas (un 429, la red, el tope de tiempo o una respuesta que no se puede leer o '
                'guardar), no se grabó y se conserva la grabación anterior')
 
@@ -174,53 +195,31 @@ class SinTiempo(FuenteNoResponde):
 
 
 class RespuestaIlegible(FuenteNoResponde):
-    """La fuente respondió algo que no se puede leer, un 4xx, una redirección fuera de https o un servidor WHOIS sin
-    IP pública."""
+    """La fuente respondió algo que no se puede leer, un 4xx, una redirección o un servidor WHOIS sin IP pública."""
 
 
 _NO_ENCONTRADO = object()    # el 404, dentro de _http
-BLOQUE = 64 * 1024           # bytes que _descargar lee de una vez
+BLOQUE = 64 * 1024           # bytes que _conversar lee de una vez
 
 
 # ---------------------------------------------------------------- consultas a la red
 
-class _SoloHttps(urllib.request.HTTPRedirectHandler):
-    """Sigue una redirección solo si se queda en https."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urllib.parse.urlsplit(newurl).scheme.lower() != 'https':
-            with contextlib.suppress(Exception):
-                fp.close()
-            raise RespuestaIlegible('whois: %s redirigió fuera de https' % urllib.parse.urlsplit(req.full_url).netloc)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-_ABRIR = urllib.request.build_opener(_SoloHttps).open
-
-
 def _descargar(url, timeout, cronometro=None):
     """El cuerpo de la respuesta, de a lo más MAX_BYTES. La única función que hace HTTP.
 
-    `timeout` es el plazo absoluto de toda la petición: se lee por bloques y, si se pasa del plazo, lanza SinTiempo
-    (como shodan._descargar). No cubre getaddrinfo. `cronometro` es time.monotonic por omisión."""
+    `timeout` es el plazo absoluto de toda la petición, de getaddrinfo al último bloque del cuerpo
+    (transporte.descargar, como shodan._descargar): si se pasa, lanza SinTiempo. Una redirección no se sigue y da
+    RespuestaIlegible.
+    `cronometro` es time.monotonic por omisión."""
     cronometro = cronometro or time.monotonic
-    plazo = cronometro() + timeout
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE,
                                                'Accept': 'application/rdap+json, application/json'})
-    partes, total = [], 0
-    with _ABRIR(req, timeout=timeout) as r:
-        leer = r.read1 if hasattr(r, 'read1') else r.read
-        while True:
-            if cronometro() > plazo:
-                raise SinTiempo('whois: la respuesta tardó más de %s s' % timeout)
-            parte = leer(min(BLOQUE, MAX_BYTES + 1 - total))
-            if not parte:
-                break
-            partes.append(parte)
-            total += len(parte)
-            if total > MAX_BYTES:
-                raise ValueError('respuesta de más de %d bytes' % MAX_BYTES)
-    return b''.join(partes)
+    try:
+        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES, cronometro)
+    except transporte.PlazoVencido:
+        raise SinTiempo('whois: la respuesta tardó más de %s s' % timeout) from None
+    except transporte.Redirigida as e:
+        raise RespuestaIlegible('whois: %s' % e) from None
 
 
 def _resolver(host, espera):
@@ -263,7 +262,7 @@ def _conversar(host, consulta, timeout, cronometro=None):
     """La respuesta de `host` por el puerto 43 a `consulta` seguida de CRLF (RFC 3912), de a lo más MAX_BYTES_WHOIS. La
     única función que abre sockets, como _descargar es la única que hace HTTP.
 
-    `timeout` es el plazo absoluto de toda la conversación y, a diferencia de _descargar, sí cubre getaddrinfo
+    `timeout` es el plazo absoluto de toda la conversación y, como en _descargar, cubre getaddrinfo
     (_resolver), el connect de cada dirección (a lo más MAX_DIRECCIONES), el envío y cada recv: antes de cada operación
     se vuelve a poner settimeout con lo que queda. El connect de cada dirección recibe a lo más lo que queda dividido
     entre las direcciones que faltan por probar (la última, todo lo que queda): así una primera dirección que descarta
@@ -468,6 +467,16 @@ def _iana_id(entidad):
     return None
 
 
+def _estado_rdap(valor):
+    """Un estado en la forma de RDAP de RFC 8056, en minúsculas: 'ok' es 'active' y la forma de EPP
+    ('clientTransferProhibited', la de WHOIS y la de algún servidor RDAP que no sigue RFC 8056) es 'client transfer
+    prohibited'. Uno que ya viene en la forma de RDAP queda igual."""
+    valor = valor.strip()
+    if valor.lower() == 'ok':
+        return 'active'
+    return re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', valor).lower()
+
+
 def reducir_rdap(datos):
     """La respuesta RDAP con solo lo que lee leer_rdap y con la misma forma, para grabarla: leer_rdap da lo mismo con
     ella que con la original. Cada valor pasa el mismo filtro que en leer_rdap, así no se graba texto libre (que puede
@@ -490,8 +499,8 @@ def reducir_rdap(datos):
         reducido['events'] = [{'eventAction': accion, 'eventDate': _iso(fechas[campo]) if campo in fechas else None}
                               for accion, campo in EVENTOS.items() if campo in fechas or campo in rotos]
     if isinstance(datos.get('status'), list):
-        reducido['status'] = sorted({s.strip().lower() for s in datos['status'] if isinstance(s, str)
-                                     and ESTADO_VALIDO.fullmatch(s.strip().lower())})[:MAX_ESTADOS]
+        reducido['status'] = sorted({_estado_rdap(s) for s in datos['status'] if isinstance(s, str)
+                                     and ESTADO_VALIDO.fullmatch(_estado_rdap(s))})[:MAX_ESTADOS]
     if isinstance(datos.get('secureDNS'), dict) and isinstance(datos['secureDNS'].get('delegationSigned'), bool):
         reducido['secureDNS'] = {'delegationSigned': datos['secureDNS']['delegationSigned']}
     if isinstance(datos.get('nameservers'), list):
@@ -525,7 +534,7 @@ def leer_rdap(datos, dominio):
     registrador = _registrador(datos.get('entities'))
     atributos['registrador'] = (registrador and _fn(registrador)) or NO_DISPONIBLE
     atributos['registrador_iana'] = (registrador and _iana_id(registrador)) or NO_DISPONIBLE
-    estados = {s.strip().lower() for s in _lista(datos.get('status')) if isinstance(s, str)}
+    estados = {_estado_rdap(s) for s in _lista(datos.get('status')) if isinstance(s, str)}
     atributos['estado_registro'] = sorted(s for s in estados if ESTADO_VALIDO.fullmatch(s))[:MAX_ESTADOS] or NO_DISPONIBLE
     ns = {_nombre(n.get('ldhName')) for n in _lista(datos.get('nameservers')) if isinstance(n, dict)} - {None}
     atributos['servidores_nombre'] = sorted(ns)[:MAX_NS] or NO_DISPONIBLE
@@ -578,12 +587,9 @@ def servidor_whois_de(texto, tld):
 
 
 def _estado_epp(valor):
-    """El primer token de 'Domain Status' (un código de EPP) en la forma de RDAP de RFC 8056: 'ok' es 'active' y
-    'clientTransferProhibited' es 'client transfer prohibited'. Lo que sigue (la URL de ICANN) no se lee."""
-    token = (valor.split() or [''])[0]
-    if token.lower() == 'ok':
-        return 'active'
-    return re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', token).lower()
+    """El primer token de 'Domain Status' (un código de EPP) en la forma de RDAP de RFC 8056 (_estado_rdap): 'ok' es
+    'active' y 'clientTransferProhibited' es 'client transfer prohibited'. Lo que sigue (la URL de ICANN) no se lee."""
+    return _estado_rdap((valor.split() or [''])[0])
 
 
 def _iana_id_whois(valor):
@@ -711,8 +717,14 @@ class ClienteRdap:
         return TIEMPO_CORRIDA - self.reserva - (self.cronometro() - self.inicio)
 
     def esperar(self, segundos):
-        """El dormir de con_reintentos: nunca más largo que lo que le queda a la corrida."""
-        self.dormir(max(0, min(segundos, self.restante())))
+        """El dormir de con_reintentos. Si después de esperar `segundos` quedaría menos de MIN_INTENTO más HOLGURA para
+        otro intento, no espera y devuelve False: con_reintentos sale con el error del último intento, que es el que
+        vale, sin un intento más que no alcanzaría a terminar. Después de dormir lo vuelve a revisar, por si el sueño se
+        pasó: así el intento no empieza sin tiempo y su SinTiempo no tapa el error."""
+        if self.restante() - segundos < MIN_INTENTO + HOLGURA:
+            return False
+        self.dormir(segundos)
+        return self.restante() >= MIN_INTENTO + HOLGURA
 
     def terminar(self):
         """La corrida terminó: graba todo lo pendiente. Si al grabar hubo una falla (RDAP no respondió aunque el
@@ -747,21 +759,27 @@ class ClienteRdap:
 
     def _http(self, url, que):
         """JSON de `url` con hasta INTENTOS intentos dentro del tiempo de la corrida. _NO_ENCONTRADO con un 404. Un 429
-        lanza LimiteAlcanzado, y otro 4xx salvo el 408 (que se reintenta), un 200 vacío o 'null' o un JSON tan anidado
-        que Python no lo puede leer, RespuestaIlegible, sin reintentar."""
+        lanza LimiteAlcanzado, y otro 4xx salvo el 408 (que se reintenta), un 200 vacío o 'null', un JSON tan anidado
+        que Python no lo puede leer o una redirección, RespuestaIlegible, sin reintentar. Si un 5xx o un 408 traen
+        Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le alcanza a la corrida. Si piden
+        más de MAX_ESPERA, no se reintenta: lanza FuenteNoResponde."""
+        pedida = {}   # el Retry-After del último intento
+
         def intento():
+            pedida.clear()
             limite = min(TIMEOUT_HTTP, self.restante())
-            if limite < 1:
+            if limite < MIN_INTENTO:
                 raise SinTiempo('whois: se acabó el tiempo de la corrida antes de consultar %s' % que)
             self.consultas += 1
             try:
                 cuerpo = (self.descargar or _descargar)(url, limite)
             except SinTiempo:
-                if self.restante() < 1:
+                if self.restante() < MIN_INTENTO:
                     raise SinTiempo('whois: se acabó el tiempo de la corrida mientras se leía %s' % que) from None
                 raise TimeoutError('whois: %s tardó más de %s s en responder' % (que, limite)) from None
             except urllib.error.HTTPError as e:
                 codigo, espera = e.code, (e.headers or {}).get('Retry-After')
+                pedida['segundos'] = transporte.retry_after(e.headers)
                 with contextlib.suppress(Exception):
                     e.close()
                 if codigo == 404:
@@ -771,6 +789,10 @@ class ClienteRdap:
                                           % (que, espera or '?')) from None
                 if codigo < 500 and codigo != 408:
                     raise RespuestaIlegible('whois: %s respondió %d' % (que, codigo)) from None
+                pide = pedida['segundos'] or 0
+                if pide > MAX_ESPERA:   # el servidor no estará antes: otro intento no sirve
+                    raise FuenteNoResponde('whois: %s respondió %d y pide esperar %d s, más de los %d s que se '
+                                           'esperan para otro intento' % (que, codigo, pide, MAX_ESPERA)) from None
                 raise
             if not cuerpo or not cuerpo.strip():
                 raise RespuestaIlegible('whois: %s respondió sin cuerpo' % que)
@@ -782,7 +804,8 @@ class ClienteRdap:
                 raise RespuestaIlegible('whois: %s respondió null' % que)
             return datos
         intento.__name__ = 'whois: %s no respondió' % que
-        return con_reintentos(intento, intentos=INTENTOS, esperas=ESPERAS, dormir=self.esperar)
+        return con_reintentos(intento, intentos=INTENTOS, esperas=ESPERAS,
+                              dormir=lambda segundos: self.esperar(max(segundos, pedida.get('segundos') or 0)))
 
     def bootstrap(self, dominio):
         """El bootstrap de IANA reducido al servicio que cubre `dominio` (reducir_bootstrap)."""
@@ -828,13 +851,13 @@ class ClienteRdap:
         respuesta vacía lanza RespuestaIlegible sin reintentar: el servidor sí respondió."""
         def intento():
             limite = min(TIMEOUT_WHOIS, self.restante())
-            if limite < 1:
+            if limite < MIN_INTENTO:
                 raise SinTiempo('whois: se acabó el tiempo de la corrida antes de consultar %s' % que)
             self.consultas += 1
             try:
                 cuerpo = (self.conversar or _conversar)(host, consulta, limite)
             except SinTiempo:
-                if self.restante() < 1:
+                if self.restante() < MIN_INTENTO:
                     raise SinTiempo('whois: se acabó el tiempo de la corrida mientras se leía %s' % que) from None
                 raise TimeoutError('whois: %s tardó más de %s s en responder' % (que, limite)) from None
             if not cuerpo or not cuerpo.strip():
@@ -916,7 +939,8 @@ def _no_disponible(dominio):
 
 def hallazgo_vencimiento(dominio, vence, atributos, ahora):
     """domain_expiring_soon sobre el activo domain, o None si faltan DIAS_POR_VENCER días o más o si ya venció (eso es
-    el aviso de _aviso_vencido). Los días se truncan, como en crtsh.py."""
+    el aviso de _aviso_vencido). Los días se truncan, como en crtsh.py. por_vencer_desde es el día en que el
+    vencimiento entró a los DIAS_POR_VENCER días, de donde cuenta la antigüedad del ML."""
     segundos = (vence - ahora).total_seconds()
     if not 0 <= segundos < DIAS_POR_VENCER * 86400:
         return None
@@ -928,6 +952,7 @@ def hallazgo_vencimiento(dominio, vence, atributos, ahora):
         titulo = 'El registro de %s vence en %s' % (dominio, _cuantos(dias, 'día', 'días'))
     servidor = 'servidor_whois' if 'servidor_whois' in atributos else 'servidor_rdap'
     evidencia = {'title': titulo, 'vence': _iso(vence), 'dias_para_vencer': dias,
+                 'por_vencer_desde': _iso(vence - timedelta(days=DIAS_POR_VENCER)),
                  'registrador': atributos['registrador'], 'estado_registro': atributos['estado_registro'],
                  'fuente_datos': atributos['fuente_datos'], servidor: atributos[servidor]}
     return Hallazgo(codigo, CODIGOS[codigo], dominio, titulo, evidencia,
@@ -959,9 +984,15 @@ def _motivo(error):
 
 
 def _con_registro(res, dominio, ahora, atributos, rotos, origen):
-    """El activo domain, los avisos de sus fechas y domain_expiring_soon con lo que dio RDAP o WHOIS. `origen` trae
-    fuente_datos y el servidor que respondió (servidor_rdap o servidor_whois)."""
+    """El activo domain, los avisos de sus fechas y de un estado de baja (EN_BAJA) y domain_expiring_soon con lo que
+    dio RDAP o WHOIS. Con un estado de baja y sin el hallazgo, el código va a sin_cobertura: con el dominio ya borrado,
+    la fecha no dice cuándo se pierde, y no es 0 hallazgos. `origen` trae fuente_datos y el servidor que respondió
+    (servidor_rdap o servidor_whois)."""
     nombre = origen['fuente_datos']
+    estados = atributos['estado_registro'] if isinstance(atributos['estado_registro'], list) else []
+    baja = next((estado for estado in ESTADOS_DE_BAJA if estado in estados), None)
+    if baja:
+        res.avisos.append(EN_BAJA % (nombre, dominio, baja, ESTADOS_DE_BAJA[baja]))
     vence, registrado = _fecha(atributos['vence']), _fecha(atributos['registrado'])
     imposible = vence is not None and (vence < ahora - timedelta(days=MAX_DIAS_VENCIDO)
                                        or (registrado is not None and vence <= registrado))
@@ -981,6 +1012,8 @@ def _con_registro(res, dominio, ahora, atributos, rotos, origen):
         h = hallazgo_vencimiento(dominio, vence, atributos, ahora)
         if h:
             res.hallazgos.append(h)
+    if baja and not res.hallazgos:
+        res.sin_cobertura = list(CODIGOS)
 
 
 # ---------------------------------------------------------------- punto de entrada

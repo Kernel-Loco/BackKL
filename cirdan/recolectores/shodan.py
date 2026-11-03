@@ -64,12 +64,16 @@ un tope, y sí lo de una IP que ya no es del dominio (#23). Las CVE que MAX_CVE 
 huella: siguen ahí y el orquestador no cierra las que se reportaron antes. Si no
 queda ninguna IP que consultar y todo respondió, la fuente queda succeeded con 0 hallazgos y un aviso. Si Cert Spotter
 y todos los A fallaron, o todas las IP fallaron por la red, FuenteNoResponde, para que el orquestador la reintente.
-Reintentos: 3 intentos por A y por IP (esperas de 5 y 15 s, nunca más largas que lo que le queda a la corrida) y 2 por
-página de Cert Spotter. El lifetime del A es min(TIMEOUT_DNS, lo que queda). Cada petición HTTP tiene un plazo
-absoluto, min(TIMEOUT_HTTP o TIMEOUT_CT, lo que queda), que cubre toda la lectura del cuerpo (_descargar lee por bloques
-y corta al pasarse). Ese plazo no cubre la búsqueda del nombre del servidor (getaddrinfo), que no tiene timeout en
-urllib. Solo el 404 de InternetDB es 'sin datos'. Un 200 vacío o 'null' no se puede leer. Un 429 de InternetDB o de
-Cert Spotter no se reintenta: otro intento solo gastaría cupo.
+Reintentos: 3 intentos por A y por IP (esperas de 5 y 15 s) y 2 por página de Cert Spotter. Un 5xx o un 408 con
+Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA: si pide más, no se reintenta y sale ese error. Si después
+de la espera no le quedarían a la corrida MIN_INTENTO segundos (más HOLGURA), no se espera ni se hace otro intento: sale
+el error del último, que cuenta como el de su A o su IP (esperar). El
+lifetime del A es min(TIMEOUT_DNS, lo que queda). Cada petición HTTP tiene un plazo absoluto, min(TIMEOUT_HTTP o
+TIMEOUT_CT, lo que queda), que cubre getaddrinfo, el connect, el TLS, el envío y cada lectura de las cabeceras y del
+cuerpo (_descargar con transporte.descargar). Una redirección no se sigue y no se puede leer, y no se usan proxies:
+cada consulta llega solo al servidor que se pidió, por https, y cuenta una vez. Solo el 404 de InternetDB es
+'sin datos'. Un 200 vacío o 'null' no se puede leer. Un 429 de InternetDB o de Cert Spotter no se reintenta: otro
+intento solo gastaría cupo.
 
 Modos: 'vivo' consulta. 'grabar' además guarda lo ya limpio en cirdan/recolectores/respuestas_grabadas/shodan/<dominio>/
 (las páginas de Cert Spotter reducidas a lo que lee certspotter.certificado(), cada A con estado, IP y su cadena CNAME,
@@ -107,7 +111,7 @@ from pathlib import Path
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import certspotter, geoip
+from cirdan.recolectores import certspotter, geoip, transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos, en_alcance_nombre)
@@ -140,6 +144,9 @@ TIMEOUT_HTTP = 10            # segundos por petición a InternetDB
 PAUSA_INTERNETDB = 1         # segundos entre una IP y la siguiente
 TIEMPO_CORRIDA = 360         # segundos de toda la corrida, como github.py: ninguna consulta empieza después
 MIN_RESTANTE = 5             # con menos segundos que esto ya no se empieza otro nombre ni otra IP
+MIN_INTENTO = 1              # segundos que necesita un intento: con menos no se espera ni se intenta
+HOLGURA = 0.1                # segundos de más que pide esperar(): time.sleep puede pasarse un poco
+MAX_ESPERA = 15              # lo más que se espera un Retry-After: si pide más, no se reintenta
 MAX_BYTES = 1024 * 1024      # tope de una respuesta HTTP
 # Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición HTTP o DNS.
 MAX_CONSULTAS = PAGINAS_CT * INTENTOS_CT + MAX_NOMBRES * INTENTOS + MAX_IPS * INTENTOS
@@ -232,7 +239,6 @@ FALLAS = {'limite': LimiteAlcanzado, 'tiempo': SinTiempo, 'ilegible': RespuestaI
 # razón de cobertura parcial es una falla y 'grabar' no escribe (ClienteShodan.degradada).
 TOPES = ('paginas', 'nombres', 'ips')
 _NO_ENCONTRADO = object()    # el 404, dentro de _http
-BLOQUE = 64 * 1024           # bytes que _descargar lee de una vez
 
 
 # ---------------------------------------------------------------- consultas a la red
@@ -240,26 +246,18 @@ BLOQUE = 64 * 1024           # bytes que _descargar lee de una vez
 def _descargar(url, timeout, cronometro=None):
     """El cuerpo de la respuesta, de a lo más MAX_BYTES. La única función que hace HTTP.
 
-    `timeout` es el plazo absoluto de toda la petición, no solo de cada operación de socket: se lee por bloques (read1,
-    una lectura del socket a la vez) y, si se pasa del plazo, lanza SinTiempo. Así un servidor que manda el cuerpo de a
-    poco no estira la corrida. No cubre getaddrinfo. `cronometro` es time.monotonic por omisión."""
+    `timeout` es el plazo absoluto de toda la petición, de getaddrinfo al último bloque del cuerpo, no solo de cada
+    operación de socket (transporte.descargar): si se pasa, lanza SinTiempo. Así un servidor que manda el cuerpo de a
+    poco no estira la corrida. Una redirección no se sigue y da RespuestaIlegible. `cronometro` es time.monotonic por
+    omisión."""
     cronometro = cronometro or time.monotonic
-    plazo = cronometro() + timeout
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/json'})
-    partes, total = [], 0
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        leer = r.read1 if hasattr(r, 'read1') else r.read
-        while True:
-            if cronometro() > plazo:
-                raise SinTiempo('shodan: la respuesta tardó más de %s s' % timeout)
-            parte = leer(min(BLOQUE, MAX_BYTES + 1 - total))
-            if not parte:
-                break
-            partes.append(parte)
-            total += len(parte)
-            if total > MAX_BYTES:
-                raise ValueError('respuesta de más de %d bytes' % MAX_BYTES)
-    return b''.join(partes)
+    try:
+        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES, cronometro)
+    except transporte.PlazoVencido:
+        raise SinTiempo('shodan: la respuesta tardó más de %s s' % timeout) from None
+    except transporte.Redirigida as e:
+        raise RespuestaIlegible('shodan: %s' % e) from None
 
 
 def _cadena_cname(respuesta, nombre):
@@ -467,8 +465,14 @@ class ClienteShodan:
         return TIEMPO_CORRIDA - (self.cronometro() - self.inicio)
 
     def esperar(self, segundos):
-        """El dormir de con_reintentos: nunca más largo que lo que le queda a la corrida."""
-        self.dormir(max(0, min(segundos, self.restante())))
+        """El dormir de con_reintentos. Si después de esperar `segundos` quedaría menos de MIN_INTENTO más HOLGURA para
+        otro intento, no espera y devuelve False: con_reintentos sale con el error del último intento, que es el que
+        vale, sin un intento más que no alcanzaría a terminar. Después de dormir lo vuelve a revisar, por si el sueño se
+        pasó: así el intento no empieza sin tiempo y su SinTiempo no tapa el error."""
+        if self.restante() - segundos < MIN_INTENTO + HOLGURA:
+            return False
+        self.dormir(segundos)
+        return self.restante() >= MIN_INTENTO + HOLGURA
 
     def degradada(self, parcial=()):
         """True si la corrida tuvo alguna falla: una consulta que falló, de cualquier tipo, o una razón de cobertura
@@ -505,10 +509,16 @@ class ClienteShodan:
 
     def _http(self, url, intentos, timeout, que, sin_reintento=()):
         """JSON de `url` con hasta `intentos` intentos dentro del tiempo de la corrida. None solo con un 404. Un 429
-        lanza LimiteAlcanzado, y otro 4xx o un 200 vacío o 'null' RespuestaIlegible, sin reintentar."""
+        lanza LimiteAlcanzado, y otro 4xx, un 200 vacío o 'null' o una redirección RespuestaIlegible, sin reintentar.
+        Si un 5xx o un 408 traen Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le
+        alcanza a la corrida. Si piden más de MAX_ESPERA, no se reintenta: lanza FuenteNoResponde, que cuenta como la
+        falla de red de su A o su IP."""
+        pedida = {}   # el Retry-After del último intento
+
         def intento():
+            pedida.clear()
             limite = min(timeout, self.restante())
-            if limite < 1:
+            if limite < MIN_INTENTO:
                 raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de consultar %s' % que)
             self.consultas += 1
             try:
@@ -516,11 +526,12 @@ class ClienteShodan:
             except SinTiempo:
                 # La respuesta se pasó de su plazo. Si con eso se acabó la corrida, es el corte por tiempo. Si no, es
                 # una respuesta lenta y cuenta como una falla de red, que con_reintentos reintenta.
-                if self.restante() < 1:
+                if self.restante() < MIN_INTENTO:
                     raise SinTiempo('shodan: se acabó el tiempo de la corrida mientras se leía %s' % que) from None
                 raise TimeoutError('shodan: %s tardó más de %s s en responder' % (que, limite)) from None
             except urllib.error.HTTPError as e:
                 codigo, espera = e.code, (e.headers or {}).get('Retry-After')
+                pedida['segundos'] = transporte.retry_after(e.headers)
                 with contextlib.suppress(Exception):
                     e.close()
                 if codigo == 404:
@@ -530,6 +541,10 @@ class ClienteShodan:
                                           % (que, espera or '?')) from None
                 if codigo in sin_reintento or (codigo < 500 and codigo != 408):
                     raise RespuestaIlegible('shodan: %s respondió %d' % (que, codigo)) from None
+                pide = pedida['segundos'] or 0
+                if pide > MAX_ESPERA:   # el servidor no estará antes: otro intento no sirve
+                    raise FuenteNoResponde('shodan: %s respondió %d y pide esperar %d s, más de los %d s que se '
+                                           'esperan para otro intento' % (que, codigo, pide, MAX_ESPERA)) from None
                 raise
             if not cuerpo or not cuerpo.strip():
                 raise RespuestaIlegible('shodan: %s respondió sin cuerpo' % que)
@@ -538,7 +553,8 @@ class ClienteShodan:
                 raise RespuestaIlegible('shodan: %s respondió null' % que)
             return datos
         intento.__name__ = 'shodan: %s no respondió' % que
-        datos = con_reintentos(intento, intentos=intentos, esperas=ESPERAS, dormir=self.esperar)
+        datos = con_reintentos(intento, intentos=intentos, esperas=ESPERAS,
+                               dormir=lambda segundos: self.esperar(max(segundos, pedida.get('segundos') or 0)))
         return None if datos is _NO_ENCONTRADO else datos
 
     def pedir(self, consulta, url, fuente=certspotter.NOMBRE, intentos=INTENTOS_CT, timeout=None, pausa=0,
@@ -579,7 +595,7 @@ class ClienteShodan:
 
         def intento():
             limite = min(TIMEOUT_DNS, self.restante())
-            if limite < 1:
+            if limite < MIN_INTENTO:
                 raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de resolver %s' % nombre)
             self.consultas += 1
             return limpiar_a(*(self.resolver or _resolver_a)(nombre, limite))
