@@ -118,9 +118,10 @@ def sin_api(url, timeout):
 
 class ProcesosSimulados:
     """Hace las veces de github._ejecutar: git clone, gitleaks git y los dos git log, el de los entornos de Python y el
-    de los correos, que escriben su salida en `salida`. Anota cada llamada y si su carpeta existía.
-    `reporte` (lista o texto) y `log` son de todos los repos, salvo los que den `reportes` y `logs` por repo, y
-    `entornos` también. `fallas` da, por (paso, repo), un código de salida o una excepción."""
+    de los correos, que escriben su salida en `salida`. Anota cada llamada, si su carpeta existía y qué archivos ya
+    había en ella (restos). `reporte` (lista o texto) y `log` son de todos los repos, salvo los que den `reportes` y
+    `logs` por repo, y `entornos` también. `fallas` da, por (paso, repo), un código de salida o una excepción, y el paso
+    que falla deja su salida a medias, como un proceso cortado."""
 
     def __init__(self, reporte=None, log=None, reportes=None, logs=None, fallas=None, entornos=''):
         self.reporte = [hallazgo_gitleaks()] if reporte is None else reporte
@@ -136,9 +137,14 @@ class ProcesosSimulados:
                 else 'log' if 'log' in comando else 'gitleaks')
         if paso == 'clone':
             self.repo = comando[comando.index('--') + 1].rsplit('/', 1)[1][:-len('.git')]
+        casa = os.path.isdir(cwd)
         self.llamadas.append(SimpleNamespace(paso=paso, repo=self.repo, comando=comando, timeout=timeout, env=dict(env),
-                                             cwd=cwd, salida=salida, disco=disco, casa=os.path.isdir(cwd)))
+                                             cwd=cwd, salida=salida, disco=disco, casa=casa,
+                                             restos=sorted(os.listdir(cwd)) if casa else None))
         falla = self.fallas.get((paso, self.repo))
+        if falla is not None and salida:
+            with open(salida, 'x', encoding='utf-8', newline='') as f:
+                f.write('x\0' * 10)
         if isinstance(falla, BaseException):
             raise falla
         if falla is not None:
@@ -387,8 +393,9 @@ class Secretos(unittest.TestCase):
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
 
     def test_4b_las_marcas_dan_la_carpeta_del_entorno_y_solo_lo_que_instalo_se_descarta(self):
-        """Con pyvenv.cfg solo site-packages, y con conda también la biblioteca estándar y pkgs/. Una marca en la raíz
-        no esconde lib/ ni pkgs/ del cliente, y lo que esté en una carpeta etc/ se revisa siempre."""
+        """Con pyvenv.cfg solo site-packages, y con conda también la biblioteca estándar (lib/<python>/, con lib en
+        minúsculas, o Lib/) y los paquetes de pkgs/ con la forma <nombre>-<versión>-<build>. Una marca en la raíz no
+        esconde lib/ ni pkgs/ del cliente, y lo que esté en una carpeta etc/ se revisa siempre."""
         texto = ('pyvenv.cfg\0a/.venv/pyvenv.cfg\0env/conda-meta/history\0env/pyvenv.cfg\0notpyvenv.cfg\0'
                  'x/conda-meta/history.bak\0')
         entornos = github.leer_entornos(texto)
@@ -396,15 +403,30 @@ class Secretos(unittest.TestCase):
                                     'env': {'conda-meta/history', 'pyvenv.cfg'}})
         descartadas = ('Lib/site-packages/x.py', 'lib/python3.12/site-packages/p/k.pem', 'site-packages/p/k.pem',
                        'a/.venv/LIB/site-packages/w.py', 'a/.venv/lib64/pypy3.10/site-packages/w.py',
-                       'env/Lib/test/keycert.pem', 'env/lib/python3.13t/test/k.pem', 'env/pkgs/p/k.pem')
+                       'env/Lib/test/keycert.pem', 'env/lib/python3.13t/test/k.pem', 'env/lib/pypy3.10/test/k.pem',
+                       'env/pkgs/openssl-3.0.13-h2466b09_1/info/test/k.pem',
+                       'env/pkgs/python-3.12.1-h1d929f7_1_cpython/Lib/test/k.pem', 'env/pkgs/tzdata-2024a-0/k.pem')
         revisadas = ('pyvenv.cfg', 'app/lib/z.py', 'lib/config.js', 'pkgs/infra/creds.yml', 'Library/k.pem',
                      'lib/python3.12/ajustes.py', 'lib/node/site-packages/k.pem', 'a/.venv/bin/activate',
                      'a/lib/site-packages/v.py', 'env/lib/R/etc/Renviron.site', 'env/Lib/R/etc/Renviron.site',
                      'env/lib/libssl/k.pem', 'env/LIB/test/k.pem', 'env/Library/ssl/k.pem',
-                     'env/etc/conda/activate.d/e.sh', 'lib/site-packages/p/etc/k.pem', 'lib')
+                     'env/etc/conda/activate.d/e.sh', 'lib/site-packages/p/etc/k.pem', 'lib',
+                     'env/lib64/python3.12/test/k.pem', 'env/LIB/python3.12/test/k.pem', 'env/pkgs/api/.env',
+                     'env/pkgs/infra-2-prod/k.pem', 'env/pkgs/api-v2-final/k.pem', 'env/pkgs/k.pem')
         secretos = [{'regla': 'r', 'ruta': ruta, 'primera_vez': None} for ruta in descartadas + revisadas]
         self.assertEqual([s['ruta'] for s in github.fuera_de_entornos(secretos, entornos)], list(revisadas))
         self.assertEqual(github.fuera_de_entornos(secretos, {}), secretos)
+
+    def test_4c_una_marca_de_conda_en_la_raiz_solo_descarta_site_packages(self):
+        """Un conda-meta/history en la raíz, aunque sea de una rama ya fusionada, no esconde pkgs/, Lib/ ni lib/ del
+        cliente: en la raíz solo se descarta site-packages, sea cual sea la marca."""
+        entornos = github.leer_entornos('conda-meta/history\0')
+        self.assertEqual(entornos, {'': {'conda-meta/history'}})
+        descartadas = ('site-packages/p/k.pem', 'Lib/site-packages/p/k.pem', 'lib/python3.12/site-packages/p/k.pem')
+        revisadas = ('pkgs/api/.env', 'pkgs/openssl-3.0.13-h2466b09_1/info/test/k.pem', 'Lib/config.py',
+                     'Lib/test/k.pem', 'lib/python3.12/ajustes.py', 'conda-meta/history')
+        secretos = [{'regla': 'r', 'ruta': ruta, 'primera_vez': None} for ruta in descartadas + revisadas]
+        self.assertEqual([s['ruta'] for s in github.fuera_de_entornos(secretos, entornos)], list(revisadas))
 
     def test_4_un_reporte_ilegible_es_falla_de_ese_repo(self):
         res, _ = recolectar(procesos=ProcesosSimulados(reportes={'sitio': 'esto no es json'}))
@@ -662,17 +684,18 @@ class Procesos(unittest.TestCase):
 
     def test_12_los_paquetes_de_un_entorno_con_marca_se_descartan_y_lo_demas_se_revisa(self):
         """pyvenv.cfg (venv, virtualenv, uv y PyPy) o conda-meta/history (conda) marcan un entorno instalado: se
-        descarta su site-packages, sea cual sea su forma, y con conda también la biblioteca estándar y pkgs/. Se
-        revisa lo demás, como bin/activate, Library/, etc/ o la lib/ de un venv, también con la marca en la raíz."""
+        descarta su site-packages, sea cual sea su forma, y con conda también la biblioteca estándar y los paquetes de
+        pkgs/. Se revisa lo demás, como bin/activate, Library/, etc/ o la lib/ de un venv, y con las dos marcas en la
+        raíz, lib/, Lib/ y pkgs/ del cliente."""
         rutas = {'herramientas/pypy/lib/pypy3.10/site-packages/tornado/test/test.key': False,
                  'py313t/lib/python3.13t/site-packages/paquete/prueba.pem': False,
                  'lib/python3.12/site-packages/paquete/prueba.pem': False,
-                 'conda/Lib/test/keycert.pem': False, 'conda/pkgs/openssl/info/test/clave.pem': False,
+                 'conda/Lib/test/keycert.pem': False, 'conda/pkgs/openssl-3.0.13-h2466b09_1/info/test/clave.pem': False,
                  'conda/Library/ssl/clave.pem': True, 'conda/Lib/R/etc/Renviron.site': True,
                  'py313t/bin/activate': True, 'conda/etc/conda/activate.d/env_vars.sh': True,
                  'conda/Scripts/activate.bat': True, 'herramientas/lib/claves.py': True, '.env/lib/produccion.sh': True,
-                 'lib/config.js': True, 'pkgs/infra/creds.yml': True}
-        marcas = ('pyvenv.cfg\0herramientas/pypy/pyvenv.cfg\0py313t/pyvenv.cfg\0.env/pyvenv.cfg\0'
+                 'lib/config.js': True, 'pkgs/infra/creds.yml': True, 'Lib/ajustes.py': True, 'conda/pkgs/api/.env': True}
+        marcas = ('pyvenv.cfg\0conda-meta/history\0herramientas/pypy/pyvenv.cfg\0py313t/pyvenv.cfg\0.env/pyvenv.cfg\0'
                   'conda/conda-meta/history\0')
         procesos = ProcesosSimulados(reporte=[hallazgo_gitleaks(archivo=ruta) for ruta in rutas], entornos=marcas)
         res, _ = recolectar(procesos=procesos)
@@ -681,28 +704,51 @@ class Procesos(unittest.TestCase):
         self.assertEqual([ll.repo for ll in procesos.de('entornos')], ['sitio', 'api'])
 
     def test_13_sin_hallazgos_no_busca_entornos_y_si_la_busqueda_falla_quedan_todos_los_secretos_con_aviso(self):
-        """Mejor un crítico falso de un paquete que perder un secreto: falle por código, por tiempo o por tamaño, el
-        repo cuenta como revisado, no se descarta nada y queda un aviso, que la grabación conserva."""
+        """Mejor un crítico falso de un paquete que perder un secreto: falle por código, por tiempo, por disco o por
+        tamaño, el repo cuenta como revisado, no se descarta nada y queda un aviso con la causa. El aviso también va
+        en la evidencia de cada secreto del repo, porque el resumen de la corrida no se guarda (keep_raw_payload). La
+        salida de la búsqueda se borra, así no le quita el disco al git log de los correos."""
         procesos = ProcesosSimulados(reporte=[])
         recolectar(procesos=procesos)
         self.assertEqual(procesos.de('entornos'), [])
         paquete = 'venv2/lib/python3.12/site-packages/p/k.pem'
-        casos = [({('entornos', 'sitio'): 1}, '', None, ['sitio']),
-                 ({('entornos', 'sitio'): subprocess.TimeoutExpired('git', 30)}, '', None, ['sitio']),
-                 ({}, 'x/' * 2000, len(LOG.encode('utf-8')), ['sitio', 'api'])]
-        for fallas, relleno, tope, sin_buscar in casos:
+        casos = [({('entornos', 'sitio'): 1}, '', None,
+                  {'sitio': 'github: no se pudo buscar entornos de Python en acme-demo/sitio (código 1)'}),
+                 ({('entornos', 'sitio'): subprocess.TimeoutExpired('git', 30)}, '', None,
+                  {'sitio': 'github: no se terminó de buscar entornos de Python en acme-demo/sitio en 30 s'}),
+                 ({('entornos', 'sitio'): github.MuyGrande()}, '', None,
+                  {'sitio': 'github: se pasó de 300 MB al buscar entornos de Python en acme-demo/sitio'}),
+                 ({}, 'x\0' * 2000, len(LOG.encode('utf-8')),
+                  {r: 'github: los entornos de Python de acme-demo/%s pasan de 0 MB' % r for r in ('sitio', 'api')})]
+        for fallas, relleno, tope, causas in casos:
             procesos = ProcesosSimulados(reporte=[hallazgo_gitleaks(archivo=paquete)], fallas=fallas,
                                          entornos=relleno + 'venv2/pyvenv.cfg\0')
             with mock.patch.object(github, 'MAX_LOG', tope or github.MAX_LOG):
                 res, _ = recolectar(procesos=procesos)
-            self.assertEqual([h.evidencia['ruta'] for h in res.hallazgos if h.codigo == 'secret_in_public_repo'],
-                             [paquete] * len(sin_buscar))
-            self.assertEqual([a for a in res.avisos if 'entornos' in a],
-                             [github.SIN_ENTORNOS % ('acme-demo/' + r) for r in sin_buscar])
+            avisos = {'acme-demo/' + r: github.SIN_ENTORNOS % causa for r, causa in causas.items()}
+            self.assertEqual([(h.evidencia['repo'], h.evidencia['ruta'], h.evidencia.get('aviso'))
+                              for h in res.hallazgos if h.codigo == 'secret_in_public_repo'],
+                             [(r, paquete, aviso) for r, aviso in avisos.items()])
+            self.assertEqual([a for a in res.avisos if 'entornos' in a], list(avisos.values()))
             self.assertEqual([a for a in res.avisos if 'cobertura parcial' in a], [])
-        datos = {'secretos': [], 'correos': []}
-        self.assertIs(github.revision_valida(dict(datos, sin_entornos=True), DOMINIO)['sin_entornos'], True)
-        self.assertNotIn('sin_entornos', github.revision_valida(dict(datos, sin_entornos='sí'), DOMINIO))
+            self.assertEqual((res.revisados, res.sin_revisar), (None, None))
+            self.assertEqual([ll.restos for ll in procesos.de('log')], [['reporte.json']] * 2)
+            self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        self.assertNotIn('sin_entornos', github.revision_valida({'secretos': [], 'correos': [], 'sin_entornos': 'x'},
+                                                                DOMINIO))
+
+    def test_13b_si_el_tiempo_de_la_corrida_se_acaba_en_la_busqueda_el_repo_queda_como_falla(self):
+        """Lo que la búsqueda cortada deja sin tiempo es el git log de los correos: el repo no cuenta como revisado,
+        sale en sin_revisar y no da sus secretos ni un aviso de entornos."""
+        repos = [repo('a', '2026-10-03T00:00:00Z'), repo('b', '2026-10-02T00:00:00Z'), repo('c', '2026-10-01T00:00:00Z')]
+        procesos = ProcesosSimulados(fallas={('entornos', 'b'): subprocess.TimeoutExpired('git', 8)})
+        res, _ = recolectar(ApiSimulada(repos=repos), procesos, cronometro=Cronometro(32))
+        self.assertEqual([(ll.paso, ll.repo, ll.timeout) for ll in procesos.llamadas][-2:],
+                         [('gitleaks', 'b', 40), ('entornos', 'b', 8)])
+        self.assertIn('github: se acabó el tiempo de la corrida al leer los commits de acme-demo/b', res.avisos)
+        self.assertEqual([a for a in res.avisos if 'entornos' in a], [])
+        self.assertEqual([h.partes for h in res.hallazgos if h.codigo == 'secret_in_public_repo'], [['acme-demo/a']])
+        self.assertEqual((res.revisados, res.sin_revisar), (['acme-demo/a'], ['acme-demo/b', 'acme-demo/c']))
 
 
 class Cuota(unittest.TestCase):
@@ -815,6 +861,34 @@ class GrabarYReproducir(unittest.TestCase):
         self.assertNotIn('z@acme-demo.mx', [a.valor for a in res.activos])
         self.assertNotIn(TOKEN, json.dumps(res.a_dict()))
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+
+    def test_5b_al_grabar_una_busqueda_de_entornos_que_falla_es_falla_del_repo(self):
+        """Grabado sin filtrar, cada demo mostraría los críticos falsos de sus paquetes hasta volver a grabar: ese repo no
+        se graba, la corrida queda con cobertura parcial y al reproducir falta su grabación. La grabación nunca trae el
+        aviso de entornos, así que una cambiada a mano tampoco lo mete en la evidencia."""
+        paquete = 'venv2/lib/python3.12/site-packages/p/k.pem'
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d)
+            procesos = ProcesosSimulados(reporte=[hallazgo_gitleaks(archivo=paquete)], entornos='venv2/pyvenv.cfg\0',
+                                         fallas={('entornos', 'sitio'): subprocess.TimeoutExpired('git', 30)})
+            grabado, _ = recolectar(procesos=procesos, modo='grabar', carpeta=carpeta, nueva=True)
+            self.assertIn('github: no se terminó de buscar entornos de Python en acme-demo/sitio en 30 s', grabado.avisos)
+            self.assertIn('github: cobertura parcial, se revisaron 1 de 2 repos', grabado.avisos)
+            self.assertEqual([a for a in grabado.avisos if 'sin descartar' in a], [])
+            grabadora = github.ClienteGitHub(modo='grabar', carpeta=carpeta).grabadora
+            self.assertFalse(grabadora.archivo('repo:acme-demo/sitio').exists())
+            otra, _ = recolectar(sin_api, sin_procesos, modo='reproducir', carpeta=carpeta)
+            self.assertIn('github: falta la grabación de 1 repo', otra.avisos)
+            self.assertEqual((otra.revisados, otra.sin_revisar), (['acme-demo/api'], ['acme-demo/sitio']))
+            archivo = grabadora.archivo('repo:acme-demo/api')
+            contenido = json.loads(archivo.read_text(encoding='utf-8'))
+            contenido['datos']['secretos'].append({'regla': 'cirdan-fake-token', 'ruta': 'x/.env', 'primera_vez': None})
+            contenido['datos']['sin_entornos'] = 'github: ' + TOKEN
+            archivo.write_text(json.dumps(contenido), encoding='utf-8')
+            otra, _ = recolectar(sin_api, sin_procesos, modo='reproducir', carpeta=carpeta)
+        (secreto,) = [h for h in otra.hallazgos if h.codigo == 'secret_in_public_repo']
+        self.assertNotIn('aviso', secreto.evidencia)
+        self.assertNotIn(TOKEN, json.dumps(otra.a_dict()))
 
     def test_6_dos_repos_parecidos_no_comparten_archivo(self):
         self.assertNotEqual(github._archivo('repo:acme-demo/a.b'), github._archivo('repo:acme-demo/a_b'))
@@ -1169,19 +1243,21 @@ class Integracion(unittest.TestCase):
 
     def test_7_con_marca_se_descarta_lo_que_instalo_el_entorno_con_cualquier_python_y_nada_mas(self):
         """Fuera de una carpeta venv, ninguna ruta de gitleaks_cirdan.toml salta PyPy (lib/pypy3.10/), Python sin GIL
-        (lib/python3.13t/) ni conda (Lib/ o lib/python3.13t/ con la biblioteca estándar, y pkgs/): los descarta
-        github.py por la marca. Lo demás del entorno se revisa, y una marca en la raíz no esconde la lib/ ni los pkgs/
-        del cliente. lib/python3.12/ no sirve aquí: la salta gitleaks_cirdan.toml en cualquier carpeta."""
-        marcas = ('pyvenv.cfg', 'herramientas/pypy/pyvenv.cfg', 'py313t/pyvenv.cfg', '.env/pyvenv.cfg',
-                  'conda/conda-meta/history', 'miniconda/conda-meta/history')
+        (lib/python3.13t/) ni conda (Lib/ o lib/python3.13t/ con la biblioteca estándar, y los paquetes de pkgs/): los
+        descarta github.py por la marca. Lo demás del entorno se revisa, y una marca en la raíz, aunque sea de conda, no
+        esconde la lib/, la Lib/ ni los pkgs/ del cliente. lib/python3.12/ no sirve aquí: la salta gitleaks_cirdan.toml
+        en cualquier carpeta."""
+        marcas = ('pyvenv.cfg', 'conda-meta/history', 'herramientas/pypy/pyvenv.cfg', 'py313t/pyvenv.cfg',
+                  '.env/pyvenv.cfg', 'conda/conda-meta/history', 'miniconda/conda-meta/history')
         descartadas = ('lib/python3.13t/site-packages/paquete/prueba.py',
                        'herramientas/pypy/lib/pypy3.10/site-packages/tornado/test/prueba.py',
                        'py313t/lib/python3.13t/site-packages/paquete/prueba.py', 'conda/Lib/test/claves.py',
-                       'miniconda/lib/python3.13t/test/claves.py', 'miniconda/pkgs/openssl-3.0/info/test/claves.py')
-        revisadas = ('lib/claves.rb', 'pkgs/infra/creds.yml', '.env/lib/produccion.sh', 'herramientas/lib/claves.py',
-                     'py313t/bin/activate', 'conda/etc/conda/activate.d/env_vars.sh', 'conda/Scripts/activate.bat',
-                     'conda/Lib/R/etc/Renviron.site', 'conda/Library/ssl/claves.py',
-                     'miniconda/lib/R/etc/Renviron.site')
+                       'miniconda/lib/python3.13t/test/claves.py',
+                       'miniconda/pkgs/openssl-3.0.13-h2466b09_1/info/test/claves.py')
+        revisadas = ('lib/claves.rb', 'pkgs/infra/creds.yml', 'pkgs/api/.env', 'Lib/ajustes.rb', '.env/lib/produccion.sh',
+                     'herramientas/lib/claves.py', 'py313t/bin/activate', 'conda/etc/conda/activate.d/env_vars.sh',
+                     'conda/Scripts/activate.bat', 'conda/Lib/R/etc/Renviron.site', 'conda/Library/ssl/claves.py',
+                     'miniconda/lib/R/etc/Renviron.site', 'miniconda/pkgs/api/.env')
         with tempfile.TemporaryDirectory() as d:
             destino, casa = self.armar(d, descartadas + revisadas, marcas=marcas)
             datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
