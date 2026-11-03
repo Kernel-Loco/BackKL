@@ -340,7 +340,7 @@ Con `shodan` en `REGISTRO` y encendida en `data_sources`, la fuente corre en tod
 docker compose run --rm -v "$(pwd -W)/cirdan/recolectores/respuestas_grabadas/shodan:/app/cirdan/recolectores/respuestas_grabadas/shodan" api python -m cirdan.recolectores.shodan olmardo.com --grabar   # en vivo, con el OK de la persona. En macOS y Linux va "$PWD/..."
 python -m cirdan.recolectores.shodan olmardo.com --reproducir    # solo con lo grabado, sin red
 python -m cirdan.recolectores.shodan olmardo.com --json          # el resultado completo en JSON
-python -m unittest -v pruebas/test_shodan.py                     # 59 pruebas, sin red ni dnspython
+python -m unittest -v pruebas/test_shodan.py                     # 64 pruebas, sin red ni dnspython
 ```
 
 Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. El aviso fijo de los límites (solo IPv4 y sin llave) sale en toda corrida y no cuenta. Desde un escaneo, lo que encuentra se guarda en `assets` y `findings` (ver Orquestador de escaneos).
@@ -374,7 +374,7 @@ Con `whois` en `REGISTRO` y encendida en `data_sources`, la fuente corre en todo
 docker compose run --rm -v "$(pwd -W)/cirdan/recolectores/respuestas_grabadas/whois:/app/cirdan/recolectores/respuestas_grabadas/whois" api python -m cirdan.recolectores.rdap olmardo.com --grabar   # en vivo, con el OK de la persona. En macOS y Linux va "$PWD/..."
 python -m cirdan.recolectores.rdap olmardo.com --reproducir    # solo con lo grabado, sin red
 python -m cirdan.recolectores.rdap olmardo.com --json          # el resultado completo en JSON
-python -m unittest -v pruebas/test_rdap.py                     # 36 pruebas, sin red (tampoco al puerto 43)
+python -m unittest -v pruebas/test_rdap.py                     # 50 pruebas, sin red (tampoco al puerto 43)
 ```
 
 Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la cobertura quedó parcial y 3 si `--grabar` no escribió por una falla y dejó la grabación anterior. Desde un escaneo, lo que encuentra se guarda en `assets` y `findings` (ver Orquestador de escaneos).
