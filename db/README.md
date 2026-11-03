@@ -33,6 +33,7 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `semillas/008_whois.sql` | Límite diario de la fuente `whois` (registrador, fechas y vencimiento del dominio por RDAP): 60 consultas, 10 corridas de 6 (RC-166, #15b). La fila ya la sembró la 001, encendida, y no se edita. Necesita la migración 008 |
 | `semillas/009_score_demo_motor.sql` | Corrige con el motor de score (#31) el score de los tres dominios de Acme, que la 001 guardó a mano (68, 54 y 31) y no salía de sus hallazgos: acme-demo.mx queda en 60 y acme-tienda.mx y acme-portal.mx en 0 (RC-72). Agrega filas con `reason = correction`, así que el score anterior queda en el histórico. Necesita la migración 010 |
 | `semillas/010_corrige_procedencia_009.sql` | Corrige las tres filas que cargó la primera versión de la 009, con `rules_change`, un motivo de fallback a reglas y una hora que no eran ciertos, y deja el antes y el después en `audit_log` (RC-72, desviación 16). En una base nueva no hace nada. Necesita la migración 010 |
+| `semillas/011_shodan_nombres.sql` | Sube el límite diario de `shodan` a 1840 consultas, 10 corridas de 184, porque el tope de nombres que resuelve pasó de 10 a 50 (RC-55, #23). Solo cambia la fila si no tiene límite o si tiene el 640 de la 007. Un límite puesto a mano menor que 184 queda igual y da un WARNING, porque no le cabe ninguna corrida. Necesita la 007 |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 24 tablas con filas y RLS, más el resumen de objetos |
@@ -45,7 +46,7 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 - RLS con ENABLE + FORCE en las 18 tablas por cliente. Las políticas comparan `organization_id` (o `id` en `organizations`) con `app_current_org()`, que devuelve `NULLIF(current_setting('app.current_org', true), '')::uuid`. Sin tenant no se ve nada.
 - Triggers: cadena de hashes SHA-256 por organización en `audit_log` (chain_seq, prev_hash, row_hash); bloqueo de UPDATE, DELETE y TRUNCATE en `audit_log`, `dns_txt_verifications`, `domain_scores` y `score_contributions`; `domain_authorizations` inmutable salvo `revoked_at`; `scans` exige autorización vigente y TXT `match` de la última hora; `scan_source_runs` rechaza `raw_payload` si la fuente tiene `keep_raw_payload = false` (HIBP).
 - Datos de Acme Demo (plan Starter), los mismos de las pantallas de Figma, más Beta Corp solo para la prueba de aislamiento. La semilla 002 agrega Grupo Olmardo (plan Business) con el dominio de prueba olmardo.com.
-- Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200 y `subfinder` 400 consultas por día UTC, de toda la plataforma. La semilla 006 pone 400 a `github`, donde cada intento a la API de GitHub y cada clon cuentan como consulta, y la semilla 007 pone 640 a `shodan`, donde cuentan cada intento HTTP (Cert Spotter e InternetDB) y cada A. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una fuente de su lista blanca consultada en una corrida, no una petición HTTP.
+- Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200 y `subfinder` 400 consultas por día UTC, de toda la plataforma. La semilla 006 pone 400 a `github`, donde cada intento a la API de GitHub y cada clon cuentan como consulta, y la semilla 007 pone 640 a `shodan`, que la 011 sube a 1840, donde cuentan cada intento HTTP (Cert Spotter e InternetDB) y cada A. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una fuente de su lista blanca consultada en una corrida, no una petición HTTP.
 - `subfinder` queda sembrada apagada (`enabled = false`), como `censys` en la semilla 001. Se prende con otra semilla cuando #8 (RC-40) revise los términos de sus 8 fuentes, haya una grabación de `subfinder` para olmardo.com y el contenedor pueda escribir en `respuestas_grabadas/` (hoy no, el Dockerfile copia `cirdan/` como root). Así la demo en reproducir de S12 no la muestra fallida.
 - `github` sí queda sembrada encendida (semilla 006): un dominio sin organización declarada en `ORGS_GITHUB_DECLARADAS` no consulta nada, y en reproducir un dominio sin grabación no falla. En los dos casos la fuente queda `succeeded` con sus 2 códigos sin cobertura. La excepción es el cupo: el orquestador reserva las 16 consultas de `github` antes de llamar al recolector, así que si ya no caben en el límite del día la fuente queda `failed` por falta de cupo, aunque el dominio no tenga organización declarada.
 
@@ -95,6 +96,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/008_whois.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/009_score_demo_motor.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/010_corrige_procedencia_009.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/011_shodan_nombres.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -192,6 +194,15 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, enabled, k
 ```
 
 Da `shodan|t|t|640`. Corre en una sola transacción y se puede correr otra vez sin error: solo pone el límite si la fila todavía no tiene uno, así no pisa uno puesto a mano. No agrega tablas ni políticas. Las páginas de Cert Spotter que pide `shodan` cuentan en su límite, no en el de `ct_logs`.
+
+Para el tope de 50 nombres de `shodan` (RC-55, #23) va la semilla 011, que necesita la 007. Va antes de reconstruir la API: con el tope nuevo una corrida reserva 184, y con el 640 de la 007 solo caben 3 corridas por día en el peor caso:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/011_shodan_nombres.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limit FROM data_sources WHERE code = 'shodan'"
+```
+
+Da `shodan|1840`. Corre en una sola transacción y se puede correr otra vez sin error: solo cambia la fila si no tiene límite o si tiene el 640 de la 007, así no pisa uno puesto a mano. Si ese límite es menor que 184 lo deja igual y da un WARNING, porque no le cabe ninguna corrida y `shodan` queda `failed` con 'Sin cupo diario' en cada escaneo en vivo: súbelo a mano. No agrega tablas ni políticas.
 
 Para la fuente `whois` (RC-166, #15b) basta la semilla 008, que necesita la migración 008. Va antes de reconstruir la API, como la 007: la fila `whois` ya está encendida desde la 001, así que una API con #15b sin la semilla 008 la corre en todo escaneo sin límite diario:
 

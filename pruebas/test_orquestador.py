@@ -18,7 +18,7 @@ import io
 import tempfile
 import time
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -34,8 +34,9 @@ from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
 from cirdan.recolectores import certspotter, crtsh, ejemplo, github, shodan
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado
-from pruebas.test_certspotter import AHORA, RespaldoSimulado
-from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado
+from pruebas.test_certspotter import AHORA, EMISIONES, RespaldoSimulado, emision
+from pruebas.test_certspotter import recolectar as recolectar_ct
+from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado, cert
 
 ACME = '20000000-0000-4000-8000-000000000001'
 BETA = '20000000-0000-4000-8000-000000000002'
@@ -230,12 +231,12 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(f['status'], 'open')
         return s, f
 
-    def reescanear(self, resultado, fuente='ejemplo'):
-        """Otro escaneo de acme-demo.mx en el que `fuente` responde con este resultado."""
+    def reescanear(self, resultado, fuente='ejemplo', ahora=None):
+        """Otro escaneo de acme-demo.mx en el que `fuente` responde con este resultado, a la hora `ahora`."""
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         with mock.patch.object(orquestador, 'ejecutar', lambda *a, **k: resultado):
             return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=[fuente], modo='reproducir',
-                                         conn=self.conn)
+                                         ahora=ahora, conn=self.conn)
 
     def estado(self, finding_id):
         return self.uno('SELECT status, resolved_at, last_scan_id::text FROM findings WHERE id = %s', finding_id)
@@ -582,6 +583,71 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.abiertos('title', en_sitio).popitem()[1], 'open')
         self.assertEqual(self.conteos(s.scan_id)[1], 0)
 
+    NUEVO = emision('9010', ['nuevo.acme-demo.mx'], '2026-07-27T00:00:00Z', '2026-10-25T12:00:00Z')  # solo en Cert Spotter
+    API_RENOVADO = cert(9, ['api.acme-demo.mx'], '2026-10-10T00:00:00', '2027-01-08T00:00:00')
+
+    def ct_logs(self, certs, paginas, limite_en=None):
+        """Lo que da ct_logs sin red: crt.sh responde `certs` y Cert Spotter sus páginas, con un 429 en `limite_en`."""
+        res, _ = recolectar_ct(RespaldoSimulado(paginas=paginas, crtsh={'%.acme-demo.mx': certs}, limite_en=limite_en))
+        return res
+
+    def certificado_que_cert_spotter_no_dio(self, guardados_sin_partes):
+        antes = self.ct_logs(SUBDOMINIOS, [[self.NUEVO]])
+        self.reescanear(antes, 'ct_logs', AHORA)
+        por_vencer = [h for h in antes.hallazgos if h.codigo == 'cert_expiring_soon']
+        self.assertEqual(sorted(h.activo for h in por_vencer), ['api.acme-demo.mx', 'nuevo.acme-demo.mx'])
+        vencido = [h for h in antes.hallazgos if h.codigo == 'cert_expired']
+        self.assertEqual([h.activo for h in vencido], ['dev.acme-demo.mx'])
+        if guardados_sin_partes:
+            self.sin_partes(*antes.hallazgos)
+        # crt.sh ya trae renovado el de api y la segunda página de Cert Spotter, la del nuevo, da 429
+        s, resumen = self.reescanear(self.ct_logs(SUBDOMINIOS + [self.API_RENOVADO], [EMISIONES, [self.NUEVO]],
+                                                  limite_en=1), 'ct_logs', AHORA)
+        self.assertEqual(self.abiertos('host', *por_vencer), {'api.acme-demo.mx': 'resolved',
+                                                               'nuevo.acme-demo.mx': 'open'})
+        # el certificado vencido de dev sí llegó y el comodín de la primera página ya lo cubre: también se cierra
+        self.assertEqual(self.abiertos('host', *vencido), {'dev.acme-demo.mx': 'resolved'})
+        self.assertEqual(resumen['stats']['sources_partial'], ['ct_logs'])
+        self.assertEqual(self.conteos(s.scan_id)[1], 2)
+        self.reescanear(self.ct_logs(SUBDOMINIOS + [self.API_RENOVADO], [EMISIONES]), 'ct_logs',
+                        AHORA)  # una corrida completa
+        self.assertEqual(self.abiertos('host', *por_vencer)['nuevo.acme-demo.mx'], 'resolved')
+
+    def test_2x_un_certificado_que_cert_spotter_no_dio_completo_no_se_cierra(self):
+        """crt.sh responde y Cert Spotter llega sin su segunda página (RC-55): el certificado por vencer que solo Cert
+        Spotter traía, en esa página, sigue abierto y ct_logs va en sources_partial. Lo que sí llegó se decide: el de
+        api, que crt.sh ya trae renovado, se cierra. Una corrida completa sin el nuevo lo cierra."""
+        self.certificado_que_cert_spotter_no_dio(guardados_sin_partes=False)
+
+    def test_2y_un_certificado_guardado_sin_partes_las_saca_de_host_y_vence(self):
+        """Lo de ct_logs guardado antes de evidence.partes saca su parte de 'host' y 'vence' (RC-55)."""
+        self.assertIn("(evidence->>'host') || '@' || (evidence->>'vence')", orquestador.PARTES)
+        self.certificado_que_cert_spotter_no_dio(guardados_sin_partes=True)
+
+    def test_2z_un_por_vencer_que_ya_vencio_se_cierra_aunque_toda_corrida_sea_parcial(self):
+        """RC-55: si ct_logs siempre queda parcial (Cert Spotter con 429 en la página del nuevo), el por vencer que solo
+        traía esa página se cierra cuando pasa su vencimiento, sin esperar una corrida completa. Uno con 'vence' que no
+        es un isoformat en UTC no se cierra por eso ni tumba el escaneo."""
+        antes = self.ct_logs(SUBDOMINIOS, [[self.NUEVO]])
+        self.reescanear(antes, 'ct_logs', AHORA)
+        [nuevo] = [h for h in antes.hallazgos if h.activo == 'nuevo.acme-demo.mx']
+        parcial = self.ct_logs(SUBDOMINIOS + [self.API_RENOVADO], [EMISIONES, [self.NUEVO]], limite_en=1)
+        self.reescanear(parcial, 'ct_logs', datetime(2026, 10, 25, 11, 59, tzinfo=timezone.utc))  # todavía no vence
+        self.assertEqual(self.abiertos('host', nuevo), {'nuevo.acme-demo.mx': 'open'})
+        for vence in ('2026-10-25T12:00:00Z', '25/10/2026', '2026-02-30T00:00:00+00:00x'):
+            with self.subTest(vence=vence):
+                self.conn.execute("UPDATE findings SET evidence = jsonb_set(evidence, '{vence}', to_jsonb(%s::text)) "
+                                  'WHERE fingerprint = %s', (vence, bytes.fromhex(nuevo.huella)))
+                _, resumen = self.reescanear(parcial, 'ct_logs', datetime(2026, 10, 26, tzinfo=timezone.utc))
+                self.assertEqual(resumen['stats']['sources_partial'], ['ct_logs'])
+                self.assertEqual(self.abiertos('host', nuevo), {'nuevo.acme-demo.mx': 'open'})
+        self.assertEqual(nuevo.evidencia['vence'], '2026-10-25T12:00:00+00:00')
+        self.conn.execute("UPDATE findings SET evidence = jsonb_set(evidence, '{vence}', to_jsonb(%s::text)) "
+                          'WHERE fingerprint = %s', (nuevo.evidencia['vence'], bytes.fromhex(nuevo.huella)))
+        s, _ = self.reescanear(parcial, 'ct_logs', datetime(2026, 10, 25, 12, 0, 1, tzinfo=timezone.utc))
+        self.assertEqual(self.abiertos('host', nuevo), {'nuevo.acme-demo.mx': 'resolved'})
+        self.assertEqual(self.conteos(s.scan_id)[1], 1)
+
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         # crt.sh no tiene respuestas grabadas de acme-demo.mx: falla sin salir a la red
@@ -607,6 +673,7 @@ class Orquestador(unittest.TestCase):
                                          conn=self.conn)
         self.assertEqual(resumen['status'], 'partial')
         self.assertEqual(resumen['stats']['rules_without_coverage'], ['cert_expired', 'lookalike_domain'])
+        self.assertNotIn('sources_partial', resumen['stats'])   # el respaldo con todas sus páginas es completo (RC-55)
         self.assertEqual((resumen['stats']['sources_ok'], resumen['stats']['assets']), (1, 4))
         run = self.uno('SELECT status, attempt FROM scan_source_runs WHERE scan_id = %s', s.scan_id)
         self.assertEqual((run['status'], run['attempt']), ('succeeded', 0))
