@@ -43,8 +43,8 @@ aviso y el activo sale con 'No disponible'. La fuente queda succeeded y no faile
 'partial' y no se lee como 0 hallazgos, pero el orquestador no la reintenta. La geolocalización y el ASN de las IP
 (DB-IP Lite) no son de esta fuente: van en los activos ip de dns y shodan.
 Reintentos: INTENTOS por consulta RDAP (esperas de 5 y 15 s) e INTENTOS_WHOIS por consulta WHOIS (ESPERAS_WHOIS).
-Un 5xx o un 408 con Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA: si pide más, no se reintenta y sale
-ese error. Si después de la espera no le quedarían a la corrida MIN_INTENTO segundos (más HOLGURA), no se espera ni se
+Un 5xx o un 408 con Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA aunque pida más, y se reintenta
+igual. Si después de la espera no le quedarían a la corrida MIN_INTENTO segundos (más HOLGURA), no se espera ni se
 hace otro intento: sale el error del último (esperar). Cada petición HTTP
 tiene un plazo absoluto, min(TIMEOUT_HTTP, lo que queda), que cubre getaddrinfo, el connect, el TLS, el envío y cada
 lectura de las cabeceras y del cuerpo (_descargar con transporte.descargar, como shodan.py). Un 429 o un 4xx, salvo el
@@ -118,7 +118,7 @@ TIMEOUT_HTTP = 15            # segundos por petición
 TIEMPO_CORRIDA = 120         # segundos de toda la corrida: ninguna consulta empieza después
 MIN_INTENTO = 1              # segundos que necesita un intento: con menos no se espera ni se intenta
 HOLGURA = 0.1                # segundos de más que pide esperar(): time.sleep puede pasarse un poco
-MAX_ESPERA = 15              # lo más que se espera un Retry-After: si pide más, no se reintenta
+MAX_ESPERA = 15              # lo más que se espera un Retry-After, aunque pida más
 MAX_BYTES = 1024 * 1024      # tope de una respuesta HTTP. El bootstrap completo pesa unas decenas de KB
 INTENTOS_WHOIS = 2           # intentos por consulta al puerto 43
 ESPERAS_WHOIS = (5,)         # segundos entre intentos
@@ -761,8 +761,8 @@ class ClienteRdap:
         """JSON de `url` con hasta INTENTOS intentos dentro del tiempo de la corrida. _NO_ENCONTRADO con un 404. Un 429
         lanza LimiteAlcanzado, y otro 4xx salvo el 408 (que se reintenta), un 200 vacío o 'null', un JSON tan anidado
         que Python no lo puede leer o una redirección, RespuestaIlegible, sin reintentar. Si un 5xx o un 408 traen
-        Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le alcanza a la corrida. Si piden
-        más de MAX_ESPERA, no se reintenta: lanza FuenteNoResponde."""
+        Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le alcanza a la corrida, pero
+        nunca más de MAX_ESPERA."""
         pedida = {}   # el Retry-After del último intento
 
         def intento():
@@ -779,7 +779,7 @@ class ClienteRdap:
                 raise TimeoutError('whois: %s tardó más de %s s en responder' % (que, limite)) from None
             except urllib.error.HTTPError as e:
                 codigo, espera = e.code, (e.headers or {}).get('Retry-After')
-                pedida['segundos'] = transporte.retry_after(e.headers)
+                pedida['segundos'] = min(transporte.retry_after(e.headers) or 0, MAX_ESPERA)   # aunque pida más
                 with contextlib.suppress(Exception):
                     e.close()
                 if codigo == 404:
@@ -789,10 +789,6 @@ class ClienteRdap:
                                           % (que, espera or '?')) from None
                 if codigo < 500 and codigo != 408:
                     raise RespuestaIlegible('whois: %s respondió %d' % (que, codigo)) from None
-                pide = pedida['segundos'] or 0
-                if pide > MAX_ESPERA:   # el servidor no estará antes: otro intento no sirve
-                    raise FuenteNoResponde('whois: %s respondió %d y pide esperar %d s, más de los %d s que se '
-                                           'esperan para otro intento' % (que, codigo, pide, MAX_ESPERA)) from None
                 raise
             if not cuerpo or not cuerpo.strip():
                 raise RespuestaIlegible('whois: %s respondió sin cuerpo' % que)

@@ -1232,26 +1232,24 @@ class Rdap(unittest.TestCase):
         self.assertEqual(atributos['vence'], '2026-11-05T00:00:00Z')
 
     def test_37_un_5xx_con_retry_after_espera_lo_que_pide(self):
-        """RC-166, 15: el Retry-After de un 5xx o un 408 alarga la espera antes del siguiente intento, hasta MAX_ESPERA.
-        Uno más corto que ESPERAS o que no se puede leer no la cambia. Uno de más de MAX_ESPERA no se espera ni se
-        reintenta, aunque la corrida tenga tiempo: el registro sale de WHOIS con el aviso de lo que pidió."""
+        """RC-166, 15: el Retry-After de un 5xx o un 408 alarga la espera antes del siguiente intento, hasta MAX_ESPERA
+        aunque pida más: un valor genérico como 30 o 3600 no quita los reintentos. Uno más corto que ESPERAS o que no se
+        puede leer no la cambia. Si todos fallan, el aviso de WHOIS dice cuántos intentos se hicieron."""
         url = VERISIGN + 'domain/' + DOMINIO
-        for codigo, valor, espera in ((503, '12', 12), (408, '12', 12), (503, '15', 15), (502, '2', 5),
-                                      (503, 'mañana', 5), (503, '-3', 5), (500, None, 5)):
+        for codigo, valor, espera in ((503, '12', 12), (408, '12', 12), (503, '15', 15), (503, '16', 15),
+                                      (503, '40', 15), (408, '3600', 15), (502, '2', 5), (503, 'mañana', 5),
+                                      (503, '-3', 5), (500, None, 5)):
             with self.subTest(codigo=codigo, valor=valor):
                 dormidas = []
                 http = HttpSimulado(dominios={DOMINIO: [error_http(url, codigo, valor), respuesta()]})
                 res = recolectar(http, dormir=dormidas.append)
                 self.assertEqual((dormidas, res.consultas, el_dominio(res).atributos['vence']), ([espera], 3, VENCE))
-        for valor in ('16', '40', '3600'):
-            with self.subTest(valor=valor):
-                dormidas = []
-                http = HttpSimulado(dominios={DOMINIO: [error_http(url, 503, valor), respuesta()]})
-                res = recolectar(http, dormir=dormidas.append, whois=whois_com())
-                self.assertEqual((dormidas, res.consultas, el_dominio(res).atributos['fuente_datos']),
-                                 ([], 4, 'WHOIS'))
-                self.assertIn('RDAP (rdap.verisign.com) respondió 503 y pide esperar %s s, más de los 15 s que se '
-                              'esperan para otro intento' % valor, res.avisos[0])
+        dormidas = []
+        http = HttpSimulado(dominios={DOMINIO: [error_http(url, 503, '3600') for _ in range(rdap.INTENTOS)]})
+        res = recolectar(http, dormir=dormidas.append, whois=whois_com())
+        self.assertEqual((dormidas, res.consultas, el_dominio(res).atributos['fuente_datos']), ([15, 15], 6, 'WHOIS'))
+        self.assertIn('RDAP (rdap.verisign.com) no respondió después de 3 intentos (HTTPError: HTTP Error 503: falla '
+                      '503)', res.avisos[0])
 
     def test_38_retry_after_en_segundos_o_con_fecha(self):
         ahora = datetime(2026, 10, 21, 7, 27, 0, tzinfo=timezone.utc)

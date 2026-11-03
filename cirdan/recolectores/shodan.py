@@ -65,7 +65,7 @@ huella: siguen ahí y el orquestador no cierra las que se reportaron antes. Si n
 queda ninguna IP que consultar y todo respondió, la fuente queda succeeded con 0 hallazgos y un aviso. Si Cert Spotter
 y todos los A fallaron, o todas las IP fallaron por la red, FuenteNoResponde, para que el orquestador la reintente.
 Reintentos: 3 intentos por A y por IP (esperas de 5 y 15 s) y 2 por página de Cert Spotter. Un 5xx o un 408 con
-Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA: si pide más, no se reintenta y sale ese error. Si después
+Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA aunque pida más, y se reintenta igual. Si después
 de la espera no le quedarían a la corrida MIN_INTENTO segundos (más HOLGURA), no se espera ni se hace otro intento: sale
 el error del último, que cuenta como el de su A o su IP (esperar). El
 lifetime del A es min(TIMEOUT_DNS, lo que queda). Cada petición HTTP tiene un plazo absoluto, min(TIMEOUT_HTTP o
@@ -146,7 +146,7 @@ TIEMPO_CORRIDA = 360         # segundos de toda la corrida, como github.py: ning
 MIN_RESTANTE = 5             # con menos segundos que esto ya no se empieza otro nombre ni otra IP
 MIN_INTENTO = 1              # segundos que necesita un intento: con menos no se espera ni se intenta
 HOLGURA = 0.1                # segundos de más que pide esperar(): time.sleep puede pasarse un poco
-MAX_ESPERA = 15              # lo más que se espera un Retry-After: si pide más, no se reintenta
+MAX_ESPERA = 15              # lo más que se espera un Retry-After, aunque pida más
 MAX_BYTES = 1024 * 1024      # tope de una respuesta HTTP
 # Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición HTTP o DNS.
 MAX_CONSULTAS = PAGINAS_CT * INTENTOS_CT + MAX_NOMBRES * INTENTOS + MAX_IPS * INTENTOS
@@ -511,8 +511,7 @@ class ClienteShodan:
         """JSON de `url` con hasta `intentos` intentos dentro del tiempo de la corrida. None solo con un 404. Un 429
         lanza LimiteAlcanzado, y otro 4xx, un 200 vacío o 'null' o una redirección RespuestaIlegible, sin reintentar.
         Si un 5xx o un 408 traen Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le
-        alcanza a la corrida. Si piden más de MAX_ESPERA, no se reintenta: lanza FuenteNoResponde, que cuenta como la
-        falla de red de su A o su IP."""
+        alcanza a la corrida, pero nunca más de MAX_ESPERA."""
         pedida = {}   # el Retry-After del último intento
 
         def intento():
@@ -531,7 +530,7 @@ class ClienteShodan:
                 raise TimeoutError('shodan: %s tardó más de %s s en responder' % (que, limite)) from None
             except urllib.error.HTTPError as e:
                 codigo, espera = e.code, (e.headers or {}).get('Retry-After')
-                pedida['segundos'] = transporte.retry_after(e.headers)
+                pedida['segundos'] = min(transporte.retry_after(e.headers) or 0, MAX_ESPERA)   # aunque pida más
                 with contextlib.suppress(Exception):
                     e.close()
                 if codigo == 404:
@@ -541,10 +540,6 @@ class ClienteShodan:
                                           % (que, espera or '?')) from None
                 if codigo in sin_reintento or (codigo < 500 and codigo != 408):
                     raise RespuestaIlegible('shodan: %s respondió %d' % (que, codigo)) from None
-                pide = pedida['segundos'] or 0
-                if pide > MAX_ESPERA:   # el servidor no estará antes: otro intento no sirve
-                    raise FuenteNoResponde('shodan: %s respondió %d y pide esperar %d s, más de los %d s que se '
-                                           'esperan para otro intento' % (que, codigo, pide, MAX_ESPERA)) from None
                 raise
             if not cuerpo or not cuerpo.strip():
                 raise RespuestaIlegible('shodan: %s respondió sin cuerpo' % que)

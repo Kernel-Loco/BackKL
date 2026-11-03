@@ -987,10 +987,10 @@ class Arreglos(unittest.TestCase):
                 self.assertEqual(res.sin_revisar, [p for p in (CAMARA, CAMARA + '/cve') if p not in esperado])
 
     def test_52_un_5xx_con_retry_after_espera_lo_que_pide(self):
-        """RC-166, 15: el Retry-After de un 5xx alarga la espera antes del siguiente intento, hasta MAX_ESPERA. Uno que
-        pide más no se espera ni se reintenta, aunque la corrida tenga tiempo: sale FuenteNoResponde con lo que pidió,
-        que cuenta como la falla de red de su IP, y no SinTiempo, que cortaría las demás IP."""
-        for valor in ('12', '15'):
+        """RC-166, 15: el Retry-After de un 5xx alarga la espera antes del siguiente intento, hasta MAX_ESPERA aunque
+        pida más: un valor genérico como 30 o 3600 no quita los reintentos. Si todos fallan, sale el error de
+        con_reintentos con los intentos que se hicieron, que cuenta como la falla de red de la IP, y no SinTiempo."""
+        for valor in ('12', '15', '16', '40', '3600'):
             with self.subTest(valor=valor):
                 pedidas, dormidas = [], []
 
@@ -1002,21 +1002,19 @@ class Arreglos(unittest.TestCase):
                 cliente = shodan.ClienteShodan(descargar=descargar, cronometro=Cronometro(0), dormir=dormidas.append)
                 cliente.empezar()
                 self.assertEqual(cliente.internetdb(CAMARA, DOMINIO)['ports'], [50000])
-                self.assertEqual((dormidas, cliente.consultas), ([int(valor)], 2))
-        for valor in ('16', '40', '3600'):
-            with self.subTest(valor=valor):
-                dormidas = []
+                self.assertEqual((dormidas, cliente.consultas), ([min(int(valor), shodan.MAX_ESPERA)], 2))
+        dormidas = []
 
-                def caido(url, timeout, valor=valor):
-                    raise error_http(url, 503, valor)
-                cliente = shodan.ClienteShodan(descargar=caido, cronometro=Cronometro(0), dormir=dormidas.append)
-                cliente.empezar()
-                with self.assertRaises(FuenteNoResponde) as e:
-                    cliente.internetdb(CAMARA, DOMINIO)
-                self.assertNotIsInstance(e.exception, shodan.SinTiempo)
-                self.assertEqual(str(e.exception), 'shodan: InternetDB (%s) respondió 503 y pide esperar %s s, más '
-                                                   'de los 15 s que se esperan para otro intento' % (CAMARA, valor))
-                self.assertEqual((dormidas, cliente.consultas), ([], 1))
+        def caido(url, timeout):
+            raise error_http(url, 503, '3600')
+        cliente = shodan.ClienteShodan(descargar=caido, cronometro=Cronometro(0), dormir=dormidas.append)
+        cliente.empezar()
+        with self.assertRaises(FuenteNoResponde) as e:
+            cliente.internetdb(CAMARA, DOMINIO)
+        self.assertNotIsInstance(e.exception, shodan.SinTiempo)
+        self.assertEqual(str(e.exception), 'shodan: InternetDB (%s) no respondió después de 3 intentos (HTTPError: '
+                                           'HTTP Error 503: falla 503)' % CAMARA)
+        self.assertEqual((dormidas, cliente.consultas), ([15, 15], 3))
 
     def test_53_ninguna_redireccion_se_sigue_y_el_plazo_es_sin_tiempo(self):
         """RC-166, 6 y 7: _descargar usa transporte.descargar. Una redirección no se puede leer y no se reintenta, el
