@@ -388,6 +388,11 @@ class Respaldo(unittest.TestCase):
         caido, _ = recolectar(RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS + [comodin]}, limite_en=0))
         self.assertFalse({dev, www} & set(caido.revisados), caido.revisados)
         self.assertIn(api, caido.revisados)
+        # Un comodín que ya venció no cubre a nadie, así que su revocación no importa: dev sí va
+        vencido = cert(10, ['*.acme-demo.mx'], '2026-04-01T00:00:00', '2026-06-30T00:00:00')
+        viejo, _ = recolectar(RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS + [vencido]}, limite_en=0))
+        self.assertIn(dev, viejo.revisados)
+        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in viejo.hallazgos})
         self.assertEqual(contrato.validar(caido, codigos=set(crtsh.CODIGOS)), [])
         por_nombre, _ = recolectar(CrtshSimulado(fallas=crtsh.INTENTOS, respuestas={'acme-demo.mx': SUBDOMINIOS + [comodin]}))
         self.assertTrue({api, dev, www} <= set(por_nombre.revisados), por_nombre.revisados)
