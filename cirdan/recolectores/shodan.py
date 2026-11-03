@@ -64,8 +64,9 @@ un tope, y sí lo de una IP que ya no es del dominio (#23). Las CVE que MAX_CVE 
 huella: siguen ahí y el orquestador no cierra las que se reportaron antes. Si no
 queda ninguna IP que consultar y todo respondió, la fuente queda succeeded con 0 hallazgos y un aviso. Si Cert Spotter
 y todos los A fallaron, o ninguna IP respondió porque fallaron por la red y el tiempo cortó las demás, si había,
-FuenteNoResponde, para que el orquestador la reintente. Una IP que el tiempo cortó antes o durante su consulta no
-cuenta como falla de red: si el tiempo las corta todas sin una falla de red, la fuente queda succeeded.
+FuenteNoResponde, para que el orquestador la reintente. Una IP cuenta como falla de red si no respondió en sus
+intentos, aunque el tiempo no le dejara hacer otro. La que el tiempo cortó antes de su primer intento o mientras se
+leía no cuenta como falla de red: si todas quedan así, la fuente queda succeeded y esas IP quedan sin revisar.
 Reintentos: 3 intentos por A y por IP (esperas de 5 y 15 s) y 2 por página de Cert Spotter. Un 5xx o un 408 con
 Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA aunque pida más, y se reintenta igual. Si después
 de la espera no le quedarían a la corrida MIN_INTENTO segundos (más HOLGURA), no se espera ni se hace otro intento: sale
@@ -891,8 +892,8 @@ def _revisar(res, cliente, dominio, ahora):
             res.avisos.append(str(e))
             parcial.append('red')
     if sin_tiempo:
-        res.avisos.append('shodan: se acabó el tiempo de la corrida antes de consultar %s en InternetDB'
-                          % _cuantos(sin_tiempo, 'IP', 'IP'))
+        res.avisos.append('shodan: el tiempo de la corrida cortó %s en InternetDB, sin consultar o con la lectura a '
+                          'medias' % _cuantos(sin_tiempo, 'IP', 'IP'))
         parcial.append('tiempo')
     if consultar and fallas_red == len(consultar):
         raise FuenteNoResponde('shodan: InternetDB no respondió por ninguna IP de %s' % dominio)

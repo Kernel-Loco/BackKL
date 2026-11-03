@@ -370,7 +370,7 @@ class Shodan(unittest.TestCase):
                         Cronometro(0), 'shodan: se consultaron 10 de 11 IP en InternetDB (MAX_IPS)'),
             'tiempo': (HttpSimulado(paginas(*nombres), {CAMARA: con_dos}),
                        ResolvedorSimulado(dict({DOMINIO: a(CAMARA)}, **{n: a('20.69.156.%d' % i) for i, n in enumerate(nombres)})),
-                       Cronometro(10), 'shodan: se acabó el tiempo de la corrida antes de consultar'),
+                       Cronometro(10), 'shodan: el tiempo de la corrida cortó'),
         }
         for caso, (http, dns, cronometro, aviso) in casos.items():
             with self.subTest(caso=caso):
@@ -1066,18 +1066,19 @@ class Arreglos(unittest.TestCase):
         self.assertIn('shodan: InternetDB (%s) no respondió después de 1 intento, sin tiempo para otro (HTTPError: '
                       'HTTP Error 503: falla 503)' % RESERVAS, res.avisos)
         self.assertIn(RESERVAS, res.sin_revisar)
-        # Una respondió, otra falló por la red y el tiempo cortó la tercera: queda succeeded con sus hallazgos
+        # CAMARA respondió, `segunda` falló por la red y el tiempo cortó RESERVAS: queda succeeded con sus hallazgos
         reloj['t'] = 0.0
-        tercera = '20.69.155.10'   # entre CAMARA y RESERVAS: las IP se consultan en orden
+        segunda = '20.69.155.10'   # entre CAMARA y RESERVAS: las IP se consultan en orden
         http = Tarda(paginas('camaras.olmardo.com', 'api.olmardo.com', 'reservas.olmardo.com'),
-                     {CAMARA: CAMARA_8080, tercera: 503, RESERVAS: 503})
-        http.lenta = tercera
-        res = recolectar(http, ResolvedorSimulado(zona_olmardo(**{'api.olmardo.com': a(tercera)})),
+                     {CAMARA: CAMARA_8080, segunda: 503, RESERVAS: 503})
+        http.lenta = segunda
+        res = recolectar(http, ResolvedorSimulado(zona_olmardo(**{'api.olmardo.com': a(segunda)})),
                          cronometro=lambda: reloj['t'])
-        self.assertEqual((http.por_ip, res.estado), ({CAMARA: 1, tercera: 1}, 'succeeded'))
+        self.assertEqual((http.por_ip, res.estado), ({CAMARA: 1, segunda: 1}, 'succeeded'))
         self.assertIn('exposed_service', {h.codigo for h in res.hallazgos})
-        self.assertIn('shodan: se acabó el tiempo de la corrida antes de consultar 1 IP en InternetDB', res.avisos)
-        self.assertTrue({tercera, RESERVAS} <= set(res.sin_revisar), res.sin_revisar)
+        self.assertIn('shodan: el tiempo de la corrida cortó 1 IP en InternetDB, sin consultar o con la lectura a '
+                      'medias', res.avisos)
+        self.assertTrue({segunda, RESERVAS} <= set(res.sin_revisar), res.sin_revisar)
         # Ninguna respondió: la primera falló por la red y el tiempo cortó la otra (RC-166, delta-tiempos-1)
         reloj['t'] = 0.0
         http = Tarda(ct_olmardo(), {CAMARA: 503, RESERVAS: 503})
@@ -1099,7 +1100,8 @@ class Arreglos(unittest.TestCase):
         http = SinPlazo(ct_olmardo())
         res = recolectar(http, ResolvedorSimulado(zona_olmardo()), cronometro=lambda: reloj['t'])
         self.assertEqual((http.por_ip, res.estado), ({CAMARA: 1}, 'succeeded'))
-        self.assertIn('shodan: se acabó el tiempo de la corrida antes de consultar 2 IP en InternetDB', res.avisos)
+        self.assertIn('shodan: el tiempo de la corrida cortó 2 IP en InternetDB, sin consultar o con la lectura a '
+                      'medias', res.avisos)
         self.assertTrue({CAMARA, RESERVAS} <= set(res.sin_revisar), res.sin_revisar)
         # Una sola IP consultable: su falla de red es la de todas
         reloj['t'] = 0.0
