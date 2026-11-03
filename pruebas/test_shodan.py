@@ -1066,14 +1066,26 @@ class Arreglos(unittest.TestCase):
         self.assertIn('shodan: InternetDB (%s) no respondió después de 1 intento, sin tiempo para otro (HTTPError: '
                       'HTTP Error 503: falla 503)' % RESERVAS, res.avisos)
         self.assertIn(RESERVAS, res.sin_revisar)
+        # Una respondió, otra falló por la red y el tiempo cortó la tercera: queda succeeded con sus hallazgos
+        reloj['t'] = 0.0
+        tercera = '20.69.155.10'   # entre CAMARA y RESERVAS: las IP se consultan en orden
+        http = Tarda(paginas('camaras.olmardo.com', 'api.olmardo.com', 'reservas.olmardo.com'),
+                     {CAMARA: CAMARA_8080, tercera: 503, RESERVAS: 503})
+        http.lenta = tercera
+        res = recolectar(http, ResolvedorSimulado(zona_olmardo(**{'api.olmardo.com': a(tercera)})),
+                         cronometro=lambda: reloj['t'])
+        self.assertEqual((http.por_ip, res.estado), ({CAMARA: 1, tercera: 1}, 'succeeded'))
+        self.assertIn('exposed_service', {h.codigo for h in res.hallazgos})
+        self.assertIn('shodan: se acabó el tiempo de la corrida antes de consultar 1 IP en InternetDB', res.avisos)
+        self.assertTrue({tercera, RESERVAS} <= set(res.sin_revisar), res.sin_revisar)
         # Ninguna respondió: la primera falló por la red y el tiempo cortó la otra (RC-166, delta-tiempos-1)
         reloj['t'] = 0.0
         http = Tarda(ct_olmardo(), {CAMARA: 503, RESERVAS: 503})
         with self.assertRaises(FuenteNoResponde) as e:
             recolectar(http, ResolvedorSimulado(zona_olmardo()), cronometro=lambda: reloj['t'])
         self.assertEqual((http.por_ip, str(e.exception)),
-                         ({CAMARA: 1}, 'shodan: InternetDB no respondió por ninguna IP de olmardo.com (1 por la red, 1 '
-                                       'sin tiempo para consultarse)'))
+                         ({CAMARA: 1}, 'shodan: InternetDB no respondió por ninguna IP de olmardo.com (por la red: '
+                                       '1, cortadas por el tiempo: 1)'))
         # Sin una falla de red, el tiempo que corta todas las IP deja la fuente succeeded con el aviso
 
         class SinPlazo(HttpSimulado):   # la lectura de la primera IP agota la corrida: SinTiempo, no falla de red

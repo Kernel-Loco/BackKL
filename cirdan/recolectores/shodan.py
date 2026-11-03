@@ -63,8 +63,9 @@ sin_revisar lleva las demás partes de esas IP. Así el orquestador no cierra lo
 un tope, y sí lo de una IP que ya no es del dominio (#23). Las CVE que MAX_CVE deja fuera van en omitidos con su
 huella: siguen ahí y el orquestador no cierra las que se reportaron antes. Si no
 queda ninguna IP que consultar y todo respondió, la fuente queda succeeded con 0 hallazgos y un aviso. Si Cert Spotter
-y todos los A fallaron, o fallaron por la red todas las IP que se alcanzaron a consultar (el tiempo pudo cortar las
-demás), FuenteNoResponde, para que el orquestador la reintente.
+y todos los A fallaron, o ninguna IP respondió porque fallaron por la red y el tiempo cortó las demás, si había,
+FuenteNoResponde, para que el orquestador la reintente. Una IP que el tiempo cortó antes o durante su consulta no
+cuenta como falla de red: si el tiempo las corta todas sin una falla de red, la fuente queda succeeded.
 Reintentos: 3 intentos por A y por IP (esperas de 5 y 15 s) y 2 por página de Cert Spotter. Un 5xx o un 408 con
 Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA aunque pida más, y se reintenta igual. Si después
 de la espera no le quedarían a la corrida MIN_INTENTO segundos (más HOLGURA), no se espera ni se hace otro intento: sale
@@ -896,8 +897,8 @@ def _revisar(res, cliente, dominio, ahora):
     if consultar and fallas_red == len(consultar):
         raise FuenteNoResponde('shodan: InternetDB no respondió por ninguna IP de %s' % dominio)
     if fallas_red and fallas_red + sin_tiempo == len(consultar):   # ninguna respondió: el tiempo cortó las demás
-        raise FuenteNoResponde('shodan: InternetDB no respondió por ninguna IP de %s (%d por la red, %d sin tiempo '
-                               'para consultarse)' % (dominio, fallas_red, sin_tiempo))
+        raise FuenteNoResponde('shodan: InternetDB no respondió por ninguna IP de %s (por la red: %d, cortadas por '
+                               'el tiempo: %d)' % (dominio, fallas_red, sin_tiempo))
     if not consultar and not parcial:
         res.avisos.append(SIN_IP)
 
