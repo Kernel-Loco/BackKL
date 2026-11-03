@@ -47,4 +47,6 @@ gitleaks 8.21.2
   /usr/share/licenses/gitleaks/LICENSE.
   Es el binario del release oficial para linux x64 (amd64) o arm64. Incluye
   sus dependencias de Go, cada una con su propia licencia, que no se listan
-  aquí.
+  aquí. Sus reglas sí están en el repositorio: cirdan/recolectores/
+  gitleaks_cirdan.toml copia las de su config por omisión y trae al inicio el
+  texto completo de su licencia.
