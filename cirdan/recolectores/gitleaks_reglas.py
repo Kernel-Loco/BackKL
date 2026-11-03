@@ -30,7 +30,8 @@ LICENCIA = '/usr/share/licenses/gitleaks/LICENSE'   # la deja el Dockerfile
 MARCA = 'title = "gitleaks config"'                  # primera línea que no es comentario de la config embebida
 TITULO = 'title = "LowTide: reglas de omisión de gitleaks y tokens falsos CIRDAN_FAKE_"'
 
-# Ruta de la lista global de 8.21.2 -> la que la reemplaza, o None si se quita. Las demás se quedan como vienen.
+# Ruta de la lista global de 8.21.2 -> la que la reemplaza, o None si se quita. Las que se quedan como vienen están
+# en CONSERVADAS.
 CAMBIOS = {
     # Archivos del cliente. En los lock files queda el token de una dependencia que se baja de un repo o un registro
     # privado (git+https://<token>@github.com/...). gitleaks.toml sin anclar salta cualquier ruta que lo lleve, como
@@ -42,10 +43,12 @@ CAMBIOS = {
     r'(^|/)npm-shrinkwrap\.json$': None,
     r'(^|/)(Pipfile|poetry)\.lock$': None,
     # Sin punto o sin inicio de carpeta saltaban más de lo que dicen: guia.adoc, api/v2, scripts/bin o
-    # infra/prodenv/lib/ajustes.py.
+    # infra/prodenv/lib/ajustes.py. La de los entornos virtuales solo salta site-packages, lo único que hay en su lib
+    # (Lib en Windows), así que una carpeta .env/lib/ del cliente se revisa.
     r'(.*?)(doc|docx|zip|xls|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$':
         r'\.(doc|docx|zip|xls|pdf|bin|socket|vsidx|v2|suo|wsuo|dll|pdb|exe|gltf)$',
-    r'(?i)/?(v?env|virtualenv)/lib(64)?/.+$': r'(?i)(^|/)\.?(v?env|virtualenv)/lib(64)?/.+$',
+    r'(?i)/?(v?env|virtualenv)/lib(64)?/.+$':
+        r'(?i)(^|/)\.?(v?env|virtualenv)/lib(64)?/(python[23](\.\d{1,2})+/)?site-packages/.+$',
     r'go\.(mod|sum|work(\.sum)?)$': r'(^|/)go\.(mod|sum|work(\.sum)?)$',
     r'verification-metadata.xml': r'(^|/)verification-metadata\.xml$',
     r'Database.refactorlog': r'Database\.refactorlog$',

@@ -1039,7 +1039,7 @@ class Integracion(unittest.TestCase):
         saltadas las dependencias que instala un gestor de paquetes y go.sum (gitleaks_reglas.py)."""
         revisadas = ('package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'poetry.lock', '.gitleaks.toml',
                      'deploy/gitleaks.toml/claves.env', 'docs/guia.adoc', 'api/v2', 'scripts/bin',
-                     'infra/prodenv/lib/ajustes.py')
+                     'infra/prodenv/lib/ajustes.py', '.env/lib/produccion.sh')
         saltadas = ('node_modules/paquete/index.js', 'go.sum', 'venv/lib/python3.12/site-packages/ajustes.py',
                     '.venv/Lib/site-packages/ajustes.py')
         with tempfile.TemporaryDirectory() as d:
