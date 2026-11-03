@@ -1,0 +1,622 @@
+id: hsxv2u24
+título: 49 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: norasela.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Foro del 14 sep 2026, hace 36 días. Aparecen 49 correos de la empresa. Datos expuestos: correos, contraseñas y nombres de usuario.
+
+id: hd3v2hrc
+título: El puerto 3389 (RDP) se vio abierto en 198.51.100.137
+tipo de activo: servicio
+activo: 198.51.100.137:3389/tcp
+fuente: Shodan
+evidencia: En 198.51.100.137 se vio abierto el puerto 3389 (escritorio remoto). La IP es de taritivia.com.example. Nombre del equipo en su certificado RDP: DB-PROD-01. Se vio por primera vez el 12 jul 2026, hace 100 días y por última vez el 18 oct 2026, hace 2 días.
+
+id: h3h9g765
+título: app.vesisdara.com.example usa ServidorDemo 9.2, una versión desactualizada
+tipo de activo: subdominio
+activo: app.vesisdara.com.example
+fuente: Shodan
+evidencia: app.vesisdara.com.example:443 responde con ServidorDemo 9.2. Esa versión sigue con soporte. Atiende una aplicación web de la empresa. Se vio por primera vez el 4 ene 2026, hace 289 días.
+CVE: CVE-2099-20114
+CVSS: 6.5
+EPSS: 0.214
+KEV: no
+
+id: hn2zytdf
+título: Dominio parecido con certificado: torotivia.net.example
+tipo de activo: dominio
+activo: torotivia.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: torotivia.net.example (la misma marca con otra terminación). Nombres en sus certificados: torotivia.net.example, www.torotivia.net.example. 5 certificados, el primero del 20 ene 2026, hace 273 días. El más reciente vence el 21 nov 2026, en 32 días. Emisor: Autoridad Demo R3.
+
+id: hyg7hs7g
+título: tienda.zanodeva.com.example usa ServidorDemo 10.1, una versión desactualizada
+tipo de activo: subdominio
+activo: tienda.zanodeva.com.example
+fuente: Shodan
+evidencia: tienda.zanodeva.com.example:443 responde con ServidorDemo 10.1. Esa versión sigue con soporte. Atiende una aplicación web de la empresa. Se vio por primera vez el 30 sep 2026, hace 20 días.
+CVE: CVE-2099-25663
+CVSS: 5.9
+EPSS: 0.087
+KEV: no
+
+id: hav8uva3
+título: Dominio parecido con certificado: belasela-cuenta.com.example
+tipo de activo: dominio
+activo: belasela.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: belasela-cuenta.com.example (contiene la marca). Nombres en sus certificados: belasela-cuenta.com.example, www.belasela-cuenta.com.example. 3 certificados, el primero del 29 sep 2026, hace 21 días. El más reciente vence el 28 dic 2026, en 69 días. Emisor: CA Ejemplo TLS.
+
+id: hs83fsbw
+título: 13 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: norasela.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Musica del 15 jun 2020, hace 2318 días. Aparecen 13 correos de la empresa. Datos expuestos: correos, contraseñas y nombres de usuario.
+
+id: h4zuu5mg
+título: El puerto 3389 (RDP) se vio abierto en 203.0.113.9
+tipo de activo: servicio
+activo: 203.0.113.9:3389/tcp
+fuente: Shodan
+evidencia: En 203.0.113.9 se vio abierto el puerto 3389 (escritorio remoto). La IP es de norotivia.com.example. Nombre del equipo en su certificado RDP: DEV-03. Se vio por primera vez el 23 mar 2026, hace 211 días y por última vez el 19 oct 2026, hace 1 día.
+
+id: hd29cch6
+título: admin.noristivia.com.example usa PanelDemo 2.4, una versión desactualizada
+tipo de activo: subdominio
+activo: admin.noristivia.com.example
+fuente: Shodan
+evidencia: admin.noristivia.com.example:443 responde con PanelDemo 2.4. Esa versión no tiene soporte desde el 30 jun 2025, hace 477 días. La página pide usuario y contraseña. Se vio por primera vez el 30 ene 2026, hace 263 días.
+CVE: CVE-2099-15102
+CVSS: 8.6
+EPSS: 0.058
+KEV: sí
+
+id: hyb53pnf
+título: panel.belartora.com.example usa PanelDemo 2.3, una versión desactualizada
+tipo de activo: subdominio
+activo: panel.belartora.com.example
+fuente: Shodan
+evidencia: panel.belartora.com.example:443 responde con PanelDemo 2.3. Esa versión no tiene soporte desde el 15 nov 2024, hace 704 días. La página pide usuario y contraseña. Se vio por primera vez el 18 sep 2026, hace 32 días.
+CVE: CVE-2099-13390
+CVSS: 8.1
+EPSS: 0.027
+KEV: sí
+
+id: h2bavceb
+título: El certificado de promo.briarbeno.com.example vence en 22 días
+tipo de activo: subdominio
+activo: promo.briarbeno.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de promo.briarbeno.com.example emitido por Autoridad Demo R4, válido del 11 nov 2025 al 11 nov 2026 (365 días de vigencia). Vence en 22 días. Es un sitio informativo, sin formularios ni inicio de sesión.
+
+id: hsbxmnz6
+título: Falta el registro SPF en dunortora.com.example
+tipo de activo: dominio
+activo: dunortora.com.example
+fuente: DNS
+evidencia: dunortora.com.example no publica registro SPF (ningún TXT empieza con v=spf1). No tiene registros MX. Su DMARC tiene la política p=reject. Se vio por primera vez el 14 abr 2026, hace 189 días.
+
+id: h33wn2t2
+título: Falta el registro SPF en torisbeno.com.example
+tipo de activo: dominio
+activo: torisbeno.com.example
+fuente: DNS
+evidencia: torisbeno.com.example no publica registro SPF (ningún TXT empieza con v=spf1). No tiene registros MX. Su DMARC tiene la política p=reject. Se vio por primera vez el 25 abr 2026, hace 178 días.
+
+id: hv8adde9
+título: Falta el registro SPF en tecivento.com.example
+tipo de activo: dominio
+activo: tecivento.com.example
+fuente: DNS
+evidencia: tecivento.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.tecivento.com.example. Su DMARC tiene la política p=reject. Se vio por primera vez el 28 sep 2026, hace 22 días.
+
+id: h3eafa9c
+título: 54 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: taromeca.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Boletos del 28 sep 2026, hace 22 días. Aparecen 54 correos de la empresa. Datos expuestos: correos, contraseñas y teléfonos.
+
+id: hq2c892k
+título: Dominio parecido con certificado: vesitora-acceso.com.example
+tipo de activo: dominio
+activo: vesitora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: vesitora-acceso.com.example (contiene la marca). Nombres en sus certificados: vesitora-acceso.com.example, www.vesitora-acceso.com.example. 3 certificados, el primero del 28 sep 2026, hace 22 días. El más reciente vence el 27 dic 2026, en 68 días. Emisor: Autoridad Demo R4.
+
+id: hrjpx7nv
+título: El certificado de www.fonevella.com.example vence en 3 días
+tipo de activo: subdominio
+activo: www.fonevella.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de www.fonevella.com.example emitido por Autoridad Demo R4, válido del 25 jul 2026 al 23 oct 2026 (90 días de vigencia). Vence en 3 días. Es un sitio informativo, sin formularios ni inicio de sesión.
+
+id: h8kgnrq7
+título: Falta el registro SPF en garevento.com.example
+tipo de activo: dominio
+activo: garevento.com.example
+fuente: DNS
+evidencia: garevento.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.garevento.com.example. Su DMARC tiene la política p=reject. Se vio por primera vez el 7 oct 2026, hace 13 días.
+
+id: htm2u3t4
+título: Certificado vencido en portal.belartora.com.example
+tipo de activo: subdominio
+activo: portal.belartora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de portal.belartora.com.example emitido por Autoridad Demo R3, válido del 25 jun 2026 al 23 sep 2026 (90 días de vigencia). Venció hace 27 días. El nombre todavía resuelve en DNS. La página pide usuario y contraseña.
+
+id: htes9dnr
+título: acceso.solitora.com.example usa PanelDemo 2.4, una versión desactualizada
+tipo de activo: subdominio
+activo: acceso.solitora.com.example
+fuente: Shodan
+evidencia: acceso.solitora.com.example:443 responde con PanelDemo 2.4. Esa versión no tiene soporte desde el 30 jun 2025, hace 477 días. La página pide usuario y contraseña. Se vio por primera vez el 23 may 2026, hace 150 días.
+CVE: CVE-2099-15102
+CVSS: 8.6
+EPSS: 0.058
+KEV: sí
+
+id: h53s72kw
+título: 9 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: caloquiro.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Juegos del 9 mar 2021, hace 2051 días. Aparecen 9 correos de la empresa. Datos expuestos: correos, contraseñas y nombres de usuario.
+
+id: hymkfmt3
+título: Falta el registro SPF en quinatora.com.example
+tipo de activo: dominio
+activo: quinatora.com.example
+fuente: DNS
+evidencia: quinatora.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.quinatora.com.example. Tampoco tiene DMARC. Se vio por primera vez el 18 jul 2026, hace 94 días.
+
+id: hfr4bq4r
+título: Falta el registro DMARC en solortora.com.example
+tipo de activo: dominio
+activo: solortora.com.example
+fuente: DNS
+evidencia: La consulta de _dmarc.solortora.com.example no encuentra registro DMARC (NXDOMAIN). Tiene MX: mx1.solortora.com.example. Su SPF autoriza servidores de envío: v=spf1 mx include:envios.correo-demo.example -all. Se vio por primera vez el 3 mar 2026, hace 231 días.
+
+id: huavc8pa
+título: Certificado vencido en promo2019.calortora.com.example
+tipo de activo: subdominio
+activo: promo2019.calortora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de promo2019.calortora.com.example emitido por Autoridad Demo R4, válido del 15 feb 2025 al 15 feb 2026 (365 días de vigencia). Venció hace 247 días. El nombre todavía resuelve en DNS. No muestra contenido.
+
+id: hcdgm5pt
+título: 54 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: fonitivia.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Boletos del 28 sep 2026, hace 22 días. Aparecen 54 correos de la empresa. Datos expuestos: correos, contraseñas y teléfonos.
+
+id: h94fetqw
+título: Falta el registro DMARC en promociones.norenbeno.com.example
+tipo de activo: subdominio
+activo: promociones.norenbeno.com.example
+fuente: DNS
+evidencia: La consulta de _dmarc.promociones.norenbeno.com.example no encuentra registro DMARC (NXDOMAIN). Tiene MX: mx.envios.correo-demo.example. Su SPF autoriza servidores de envío: v=spf1 include:envios.correo-demo.example -all. Se vio por primera vez el 2 abr 2026, hace 201 días.
+
+id: h8n8y9rw
+título: reservas.solordara.com.example usa ServidorDemo 10.1, una versión desactualizada
+tipo de activo: subdominio
+activo: reservas.solordara.com.example
+fuente: Shodan
+evidencia: reservas.solordara.com.example:443 responde con ServidorDemo 10.1. Esa versión sigue con soporte. Atiende una aplicación web de la empresa. Se vio por primera vez el 14 jun 2026, hace 128 días.
+CVE: CVE-2099-24750
+CVSS: 4
+EPSS: 0.001
+KEV: no
+
+id: hb8trxat
+título: Falta el registro SPF en praistivia.com.example
+tipo de activo: dominio
+activo: praistivia.com.example
+fuente: DNS
+evidencia: praistivia.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.praistivia.com.example. Tampoco tiene DMARC. Se vio por primera vez el 8 oct 2026, hace 12 días.
+
+id: h9zmfjts
+título: acceso.briarbeno.com.example usa PanelDemo 2.4, una versión desactualizada
+tipo de activo: subdominio
+activo: acceso.briarbeno.com.example
+fuente: Shodan
+evidencia: acceso.briarbeno.com.example:443 responde con PanelDemo 2.4. Esa versión no tiene soporte desde el 30 jun 2025, hace 477 días. La página pide usuario y contraseña. Se vio por primera vez el 21 mar 2026, hace 213 días.
+CVE: CVE-2099-14417
+CVSS: 9.8
+EPSS: 0.215
+KEV: sí
+
+id: hw96j4hz
+título: Falta el registro DMARC en promociones.praetora.com.example
+tipo de activo: subdominio
+activo: promociones.praetora.com.example
+fuente: DNS
+evidencia: La consulta de _dmarc.promociones.praetora.com.example no encuentra registro DMARC (NXDOMAIN). Tiene MX: mx.envios.correo-demo.example. Su SPF autoriza servidores de envío: v=spf1 include:envios.correo-demo.example -all. Se vio por primera vez el 20 jun 2026, hace 122 días.
+
+id: hggwse4s
+título: El certificado de promo.lirisbeno.com.example vence en 20 días
+tipo de activo: subdominio
+activo: promo.lirisbeno.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de promo.lirisbeno.com.example emitido por CA Ejemplo TLS, válido del 9 nov 2025 al 9 nov 2026 (365 días de vigencia). Vence en 20 días. Es un sitio informativo, sin formularios ni inicio de sesión.
+
+id: hd757e23
+título: Falta el registro SPF en noravella.com.example
+tipo de activo: dominio
+activo: noravella.com.example
+fuente: DNS
+evidencia: noravella.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.noravella.com.example. Tampoco tiene DMARC. Se vio por primera vez el 28 sep 2025, hace 387 días.
+
+id: h73jqj9c
+título: Certificado vencido en portal.rivartora.com.example
+tipo de activo: subdominio
+activo: portal.rivartora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de portal.rivartora.com.example emitido por Autoridad Demo R4, válido del 6 jul 2026 al 4 oct 2026 (90 días de vigencia). Venció hace 16 días. El nombre todavía resuelve en DNS. La página pide usuario y contraseña.
+
+id: hzs4ndtn
+título: www.quinatora.com.example usa libreria-demo.js 1.7, una versión desactualizada
+tipo de activo: subdominio
+activo: www.quinatora.com.example
+fuente: Shodan
+evidencia: www.quinatora.com.example:443 responde con libreria-demo.js 1.7. Esa versión no tiene soporte desde el 31 dic 2022, hace 1389 días. Es un sitio informativo, sin formularios ni inicio de sesión. Se vio por primera vez el 7 abr 2026, hace 196 días.
+
+id: heera79s
+título: 53 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: coredara.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Musica del 15 jun 2020, hace 2318 días. Aparecen 53 correos de la empresa. Datos expuestos: correos, contraseñas y nombres de usuario.
+
+id: hdes4662
+título: Certificado vencido en login.rivistora.com.example
+tipo de activo: subdominio
+activo: login.rivistora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de login.rivistora.com.example emitido por Autoridad Demo R4, válido del 16 jul 2026 al 14 oct 2026 (90 días de vigencia). Venció hace 6 días. El nombre todavía resuelve en DNS. La página pide usuario y contraseña.
+
+id: hgt5fjp7
+título: El puerto 3389 (RDP) se vio abierto en 198.51.100.205
+tipo de activo: servicio
+activo: 198.51.100.205:3389/tcp
+fuente: Shodan
+evidencia: En 198.51.100.205 se vio abierto el puerto 3389 (escritorio remoto). La IP es de belarmira.com.example. Nombre del equipo en su certificado RDP: LAB-01. Se vio por primera vez el 23 abr 2026, hace 180 días y por última vez el 20 oct 2026, el día del escaneo.
+
+id: hk9m7kq7
+título: landing.tecasela.com.example usa libreria-demo.js 1.9, una versión desactualizada
+tipo de activo: subdominio
+activo: landing.tecasela.com.example
+fuente: Shodan
+evidencia: landing.tecasela.com.example:443 responde con libreria-demo.js 1.9. Esa versión no tiene soporte desde el 31 ago 2024, hace 780 días. Es un sitio informativo, sin formularios ni inicio de sesión. Se vio por primera vez el 11 sep 2026, hace 39 días.
+
+id: hkkrukfs
+título: Dominio parecido con certificado: belartora.org.example
+tipo de activo: dominio
+activo: belartora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: belartora.org.example (la misma marca con otra terminación). Nombres en sus certificados: belartora.org.example, www.belartora.org.example. 6 certificados, el primero del 1 sep 2025, hace 414 días. El más reciente vence el 20 nov 2026, en 31 días. Emisor: Autoridad Demo R4.
+
+id: hufg292p
+título: El puerto 3389 (RDP) se vio abierto en 198.51.100.252
+tipo de activo: servicio
+activo: 198.51.100.252:3389/tcp
+fuente: Shodan
+evidencia: En 198.51.100.252 se vio abierto el puerto 3389 (escritorio remoto). La IP es de solordara.com.example. Nombre del equipo en su certificado RDP: DEV-03. Se vio por primera vez el 15 abr 2026, hace 188 días y por última vez el 18 oct 2026, hace 2 días.
+
+id: h9cawzyb
+título: 25 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: fonarbeno.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Fotos del 19 ene 2022, hace 1735 días. Aparecen 25 correos de la empresa. Datos expuestos: correos y contraseñas.
+
+id: hfv8fk7b
+título: Falta el registro SPF en liretora.com.example
+tipo de activo: dominio
+activo: liretora.com.example
+fuente: DNS
+evidencia: liretora.com.example no publica registro SPF (ningún TXT empieza con v=spf1). No tiene registros MX. Su DMARC tiene la política p=reject. Se vio por primera vez el 11 jul 2026, hace 101 días.
+
+id: h6eayzrz
+título: 27 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: foniquiro.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Juegos del 9 mar 2021, hace 2051 días. Aparecen 27 correos de la empresa. Datos expuestos: correos, contraseñas y nombres de usuario.
+
+id: hzr8satz
+título: Falta el registro DMARC en torismeca.com.example
+tipo de activo: dominio
+activo: torismeca.com.example
+fuente: DNS
+evidencia: La consulta de _dmarc.torismeca.com.example no encuentra registro DMARC (NXDOMAIN). No tiene registros MX. Su SPF no autoriza a ningún servidor a enviar correo (v=spf1 -all). Se vio por primera vez el 14 mar 2026, hace 220 días.
+
+id: hk6stqsj
+título: Falta el registro DMARC en promociones.menorvento.com.example
+tipo de activo: subdominio
+activo: promociones.menorvento.com.example
+fuente: DNS
+evidencia: La consulta de _dmarc.promociones.menorvento.com.example no encuentra registro DMARC (NXDOMAIN). Tiene MX: mx.envios.correo-demo.example. Su SPF autoriza servidores de envío: v=spf1 include:envios.correo-demo.example -all. Se vio por primera vez el 2 oct 2026, hace 18 días.
+
+id: hvt6zgzj
+título: El certificado de www.torendara.com.example vence en 1 día
+tipo de activo: subdominio
+activo: www.torendara.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de www.torendara.com.example emitido por CA Ejemplo TLS, válido del 23 jul 2026 al 21 oct 2026 (90 días de vigencia). Vence en 1 día. Es un sitio informativo, sin formularios ni inicio de sesión.
+
+id: hq6u8q7v
+título: Certificado vencido en promo2019.menevento.com.example
+tipo de activo: subdominio
+activo: promo2019.menevento.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de promo2019.menevento.com.example emitido por Autoridad Demo R4, válido del 13 nov 2024 al 13 nov 2025 (365 días de vigencia). Venció hace 341 días. El nombre todavía resuelve en DNS. No muestra contenido.
+
+id: hmw7gn4r
+título: El certificado de blog.garorbeno.com.example vence en 26 días
+tipo de activo: subdominio
+activo: blog.garorbeno.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de blog.garorbeno.com.example emitido por CA Ejemplo TLS, válido del 15 nov 2025 al 15 nov 2026 (365 días de vigencia). Vence en 26 días. Es un sitio informativo, sin formularios ni inicio de sesión.
+
+id: hmvnxvur
+título: Dominio parecido con certificado: tor3sela.com.example
+tipo de activo: dominio
+activo: toresela.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: tor3sela.com.example (cambia letras de la marca). Nombres en sus certificados: tor3sela.com.example, www.tor3sela.com.example. 4 certificados, el primero del 14 ene 2024, hace 1010 días. El más reciente venció el 29 ago 2026, hace 52 días. Emisor: Autoridad Demo R4.
+
+id: hct9jagf
+título: Falta el registro DMARC en norenbeno.com.example
+tipo de activo: dominio
+activo: norenbeno.com.example
+fuente: DNS
+evidencia: La consulta de _dmarc.norenbeno.com.example no encuentra registro DMARC (NXDOMAIN). No tiene registros MX. Su SPF no autoriza a ningún servidor a enviar correo (v=spf1 -all). Se vio por primera vez el 30 jul 2026, hace 82 días.
+
+id: h8pgn4g9
+título: El puerto 3389 (RDP) se vio abierto en 203.0.113.146
+tipo de activo: servicio
+activo: 203.0.113.146:3389/tcp
+fuente: Shodan
+evidencia: En 203.0.113.146 se vio abierto el puerto 3389 (escritorio remoto). La IP es de calortora.com.example. Nombre del equipo en su certificado RDP: LAB-01. Se vio por primera vez el 19 mar 2026, hace 215 días y por última vez el 20 oct 2026, el día del escaneo.
+
+id: h29ux3wr
+título: Certificado vencido en clientes.cororrino.com.example
+tipo de activo: subdominio
+activo: clientes.cororrino.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de clientes.cororrino.com.example emitido por CA Ejemplo TLS, válido del 19 jul 2026 al 17 oct 2026 (90 días de vigencia). Venció hace 3 días. El nombre todavía resuelve en DNS. La página pide usuario y contraseña.
+
+id: hdh542c3
+título: blog.fonortivia.com.example usa libreria-demo.js 1.7, una versión desactualizada
+tipo de activo: subdominio
+activo: blog.fonortivia.com.example
+fuente: Shodan
+evidencia: blog.fonortivia.com.example:443 responde con libreria-demo.js 1.7. Esa versión no tiene soporte desde el 31 dic 2022, hace 1389 días. Es un sitio informativo, sin formularios ni inicio de sesión. Se vio por primera vez el 10 sep 2026, hace 40 días.
+
+id: hsp4rm7k
+título: 18 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: briarbeno.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Cupones del 22 nov 2019, hace 2524 días. Aparecen 18 correos de la empresa. Datos expuestos: correos y contraseñas.
+
+id: hpbfmwvd
+título: Dominio parecido con certificado: praedeva.org.example
+tipo de activo: dominio
+activo: praedeva.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: praedeva.org.example (la misma marca con otra terminación). Nombres en sus certificados: praedeva.org.example, www.praedeva.org.example. 5 certificados, el primero del 16 abr 2026, hace 187 días. El más reciente vence el 11 dic 2026, en 52 días. Emisor: Autoridad Demo R3.
+
+id: hzdvrt3j
+título: blog.lirarquiro.com.example usa libreria-demo.js 1.4, una versión desactualizada
+tipo de activo: subdominio
+activo: blog.lirarquiro.com.example
+fuente: Shodan
+evidencia: blog.lirarquiro.com.example:443 responde con libreria-demo.js 1.4. Esa versión no tiene soporte desde el 30 jun 2021, hace 1938 días. Es un sitio informativo, sin formularios ni inicio de sesión. Se vio por primera vez el 13 feb 2026, hace 249 días.
+
+id: h2zjdrxa
+título: Falta el registro DMARC en boletin.foniquiro.com.example
+tipo de activo: subdominio
+activo: boletin.foniquiro.com.example
+fuente: DNS
+evidencia: La consulta de _dmarc.boletin.foniquiro.com.example no encuentra registro DMARC (NXDOMAIN). Tiene MX: mx.envios.correo-demo.example. Su SPF autoriza servidores de envío: v=spf1 include:envios.correo-demo.example -all. Se vio por primera vez el 4 may 2026, hace 169 días.
+
+id: hztjgup2
+título: El certificado de imap.norartora.com.example vence en 10 días
+tipo de activo: subdominio
+activo: imap.norartora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de imap.norartora.com.example emitido por CA Ejemplo TLS, válido del 1 ago 2026 al 30 oct 2026 (90 días de vigencia). Vence en 10 días. Atiende correo.
+
+id: h86tyust
+título: El puerto 3389 (RDP) se vio abierto en 192.0.2.73
+tipo de activo: servicio
+activo: 192.0.2.73:3389/tcp
+fuente: Shodan
+evidencia: En 192.0.2.73 se vio abierto el puerto 3389 (escritorio remoto). La IP es de brientivia.com.example. Nombre del equipo en su certificado RDP: SRV-PROD-01. Se vio por primera vez el 1 feb 2026, hace 261 días y por última vez el 20 oct 2026, el día del escaneo.
+
+id: hfzcy7qe
+título: Dominio parecido con certificado: rivortor4.com.example
+tipo de activo: dominio
+activo: rivortora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: rivortor4.com.example (cambia letras de la marca). Nombres en sus certificados: rivortor4.com.example, www.rivortor4.com.example. 10 certificados, el primero del 17 abr 2023, hace 1282 días. El más reciente venció el 19 sep 2026, hace 31 días. Emisor: CA Ejemplo TLS.
+
+id: hkbdsyw2
+título: Falta el registro SPF en tarartora.com.example
+tipo de activo: dominio
+activo: tarartora.com.example
+fuente: DNS
+evidencia: tarartora.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.tarartora.com.example. Su DMARC tiene la política p=reject. Se vio por primera vez el 5 oct 2026, hace 15 días.
+
+id: h8zt7ss7
+título: El puerto 3389 (RDP) se vio abierto en 203.0.113.41
+tipo de activo: servicio
+activo: 203.0.113.41:3389/tcp
+fuente: Shodan
+evidencia: En 203.0.113.41 se vio abierto el puerto 3389 (escritorio remoto). La IP es de quinenbeno.com.example. Nombre del equipo en su certificado RDP: DB-PROD-01. Se vio por primera vez el 21 nov 2025, hace 333 días y por última vez el 18 oct 2026, hace 2 días.
+
+id: hbzxdkcw
+título: 46 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: tarartora.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Tienda del 2 ago 2026, hace 79 días. Aparecen 46 correos de la empresa. Datos expuestos: correos, nombres y contraseñas.
+
+id: h35mecrv
+título: Falta el registro SPF en lirisbeno.com.example
+tipo de activo: dominio
+activo: lirisbeno.com.example
+fuente: DNS
+evidencia: lirisbeno.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.lirisbeno.com.example. Su DMARC tiene la política p=reject. Se vio por primera vez el 27 mar 2026, hace 207 días.
+
+id: h2kaa7mu
+título: Dominio parecido con certificado: rivistora.org.example
+tipo de activo: dominio
+activo: rivistora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: rivistora.org.example (la misma marca con otra terminación). Nombres en sus certificados: rivistora.org.example, www.rivistora.org.example. 5 certificados, el primero del 29 ene 2026, hace 264 días. El más reciente vence el 7 ene 2027, en 79 días. Emisor: CA Ejemplo TLS.
+
+id: hta6hyzu
+título: El certificado de docs.zanistivia.com.example vence en 28 días
+tipo de activo: subdominio
+activo: docs.zanistivia.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de docs.zanistivia.com.example emitido por Autoridad Demo R3, válido del 17 nov 2025 al 17 nov 2026 (365 días de vigencia). Vence en 28 días. Es un sitio informativo, sin formularios ni inicio de sesión.
+
+id: hcm787g7
+título: Dominio parecido con certificado: lirarquiro.org.example
+tipo de activo: dominio
+activo: lirarquiro.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: lirarquiro.org.example (la misma marca con otra terminación). Nombres en sus certificados: lirarquiro.org.example, www.lirarquiro.org.example. 5 certificados, el primero del 18 sep 2024, hace 762 días. El más reciente vence el 2 nov 2026, en 13 días. Emisor: CA Ejemplo TLS.
+
+id: htt4a6we
+título: Certificado vencido en promo2019.rivartora.com.example
+tipo de activo: subdominio
+activo: promo2019.rivartora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de promo2019.rivartora.com.example emitido por Autoridad Demo R3, válido del 7 dic 2024 al 7 dic 2025 (365 días de vigencia). Venció hace 317 días. El nombre todavía resuelve en DNS. No muestra contenido.
+
+id: heg67x89
+título: Falta el registro SPF en calortora.com.example
+tipo de activo: dominio
+activo: calortora.com.example
+fuente: DNS
+evidencia: calortora.com.example no publica registro SPF (ningún TXT empieza con v=spf1). No tiene registros MX. Su DMARC tiene la política p=reject. Se vio por primera vez el 13 abr 2026, hace 190 días.
+
+id: hk8a7zf7
+título: El certificado de smtp.brientivia.com.example vence en 14 días
+tipo de activo: subdominio
+activo: smtp.brientivia.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de smtp.brientivia.com.example emitido por Autoridad Demo R3, válido del 5 ago 2026 al 3 nov 2026 (90 días de vigencia). Vence en 14 días. Atiende correo.
+
+id: h4ud5j4b
+título: Falta el registro DMARC en praobeno.com.example
+tipo de activo: dominio
+activo: praobeno.com.example
+fuente: DNS
+evidencia: La consulta de _dmarc.praobeno.com.example no encuentra registro DMARC (NXDOMAIN). No tiene registros MX. Su SPF no autoriza a ningún servidor a enviar correo (v=spf1 -all). Se vio por primera vez el 6 ago 2026, hace 75 días.
+
+id: hchu38g9
+título: El puerto 3389 (RDP) se vio abierto en 198.51.100.202
+tipo de activo: servicio
+activo: 198.51.100.202:3389/tcp
+fuente: Shodan
+evidencia: En 198.51.100.202 se vio abierto el puerto 3389 (escritorio remoto). La IP es de taroquiro.com.example. Nombre del equipo en su certificado RDP: APP-PROD-05. Se vio por primera vez el 26 sep 2025, hace 389 días y por última vez el 19 oct 2026, hace 1 día.
+
+id: h958haxt
+título: 33 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: tecivento.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Tienda del 2 ago 2026, hace 79 días. Aparecen 33 correos de la empresa. Datos expuestos: correos, nombres y contraseñas.
+
+id: hutt4ygb
+título: El puerto 3389 (RDP) se vio abierto en 203.0.113.36
+tipo de activo: servicio
+activo: 203.0.113.36:3389/tcp
+fuente: Shodan
+evidencia: En 203.0.113.36 se vio abierto el puerto 3389 (escritorio remoto). La IP es de torotivia.com.example. Nombre del equipo en su certificado RDP: ERP-PROD-02. Se vio por primera vez el 29 nov 2025, hace 325 días y por última vez el 19 oct 2026, hace 1 día.
+
+id: hrqbnung
+título: Falta el registro SPF en torotivia.com.example
+tipo de activo: dominio
+activo: torotivia.com.example
+fuente: DNS
+evidencia: torotivia.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.torotivia.com.example. Su DMARC tiene la política p=reject. Se vio por primera vez el 11 ago 2026, hace 70 días.
+
+id: hw2y6q29
+título: El puerto 3389 (RDP) se vio abierto en 198.51.100.171
+tipo de activo: servicio
+activo: 198.51.100.171:3389/tcp
+fuente: Shodan
+evidencia: En 198.51.100.171 se vio abierto el puerto 3389 (escritorio remoto). La IP es de briimeca.com.example. Nombre del equipo en su certificado RDP: ERP-PROD-02. Se vio por primera vez el 11 jul 2026, hace 101 días y por última vez el 19 oct 2026, hace 1 día.
+
+id: h48u7bxm
+título: Certificado vencido en login.solordara.com.example
+tipo de activo: subdominio
+activo: login.solordara.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Certificado de login.solordara.com.example emitido por Autoridad Demo R4, válido del 17 jul 2026 al 15 oct 2026 (90 días de vigencia). Venció hace 5 días. El nombre todavía resuelve en DNS. La página pide usuario y contraseña.
+
+id: h3x3qmed
+título: Falta el registro SPF en menorvento.com.example
+tipo de activo: dominio
+activo: menorvento.com.example
+fuente: DNS
+evidencia: menorvento.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.menorvento.com.example. Tampoco tiene DMARC. Se vio por primera vez el 24 nov 2025, hace 330 días.
+
+id: hehkhet5
+título: 42 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: lirarquiro.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Musica del 15 jun 2020, hace 2318 días. Aparecen 42 correos de la empresa. Datos expuestos: correos, contraseñas y nombres de usuario.
+
+id: hqr6qy36
+título: Falta el registro SPF en taromeca.com.example
+tipo de activo: dominio
+activo: taromeca.com.example
+fuente: DNS
+evidencia: taromeca.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.taromeca.com.example. Tampoco tiene DMARC. Se vio por primera vez el 5 jul 2026, hace 107 días.
+
+id: hxanrmfp
+título: Dominio parecido con certificado: t0radara.com.example
+tipo de activo: dominio
+activo: toradara.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: t0radara.com.example (cambia letras de la marca). Nombres en sus certificados: t0radara.com.example, www.t0radara.com.example. 12 certificados, el primero del 9 ene 2024, hace 1015 días. El más reciente venció el 5 sep 2026, hace 45 días. Emisor: CA Ejemplo TLS.
+
+id: ht7v5w57
+título: 8 correos de la empresa aparecen en una brecha de datos pública
+tipo de activo: dominio
+activo: briarbeno.com.example
+fuente: HIBP (brechas de datos)
+evidencia: Brecha DemoBreach-Gimnasio del 7 may 2026, hace 166 días. Aparecen 8 correos de la empresa. Datos expuestos: correos, nombres y contraseñas.
+
+id: h8xqpvm3
+título: Dominio parecido con certificado: tarartora-acceso.com.example
+tipo de activo: dominio
+activo: tarartora.com.example
+fuente: Certificate Transparency (crt.sh)
+evidencia: Dominio parecido: tarartora-acceso.com.example (contiene la marca). Nombres en sus certificados: tarartora-acceso.com.example, www.tarartora-acceso.com.example. 3 certificados, el primero del 1 oct 2026, hace 19 días. El más reciente vence el 30 dic 2026, en 71 días. Emisor: CA Ejemplo TLS.
+
+id: h27vc9fr
+título: Falta el registro SPF en vesenbeno.com.example
+tipo de activo: dominio
+activo: vesenbeno.com.example
+fuente: DNS
+evidencia: vesenbeno.com.example no publica registro SPF (ningún TXT empieza con v=spf1). Tiene MX: mx1.vesenbeno.com.example. Su DMARC tiene la política p=reject. Se vio por primera vez el 29 ene 2026, hace 264 días.
+
+id: h82vpsgz
+título: Falta el registro DMARC en noretivia.com.example
+tipo de activo: dominio
+activo: noretivia.com.example
+fuente: DNS
+evidencia: La consulta de _dmarc.noretivia.com.example no encuentra registro DMARC (NXDOMAIN). No tiene registros MX. Su SPF no autoriza a ningún servidor a enviar correo (v=spf1 -all). Se vio por primera vez el 11 jun 2026, hace 131 días.

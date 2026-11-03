@@ -1,0 +1,35 @@
+{
+ "type": "object",
+ "properties": {
+  "etiquetas": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "etiqueta": {
+      "type": "string",
+      "enum": [
+       "alta",
+       "media",
+       "baja"
+      ]
+     },
+     "nota": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "etiqueta",
+     "nota"
+    ]
+   }
+  }
+ },
+ "required": [
+  "etiquetas"
+ ]
+}
