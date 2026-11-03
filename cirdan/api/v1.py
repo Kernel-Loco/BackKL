@@ -82,6 +82,32 @@ def _query(session, sql, params=()):
         return conn.execute(sql, params).fetchall()
 
 
+def _marcos(f):
+    if not f['attack_version']:
+        raise RuntimeError('Falta el mapeo de marcos para la regla %s' % f['rule_code'])
+    return {
+        'mitre_attack': {
+            'version': f['attack_version'],
+            'technique_id': f['attack_technique_id'],
+            'technique_name': f['attack_technique_name'],
+            'source_url': f['attack_source_url'],
+            'unmapped_reason': f['attack_unmapped_reason'],
+        },
+        'iso_27001_2022': {
+            'version': f['iso_version'],
+            'control_id': f['iso_control_id'],
+            'control_name': f['iso_control_name'],
+            'source_url': f['iso_source_url'],
+        },
+        'cis_controls_v8_1': {
+            'version': f['cis_version'],
+            'safeguard_id': f['cis_safeguard_id'],
+            'safeguard_name': f['cis_safeguard_name'],
+            'source_url': f['cis_source_url'],
+        },
+    }
+
+
 def _domain_id(session, fqdn):
     rows = _query(session, 'SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,))
     if not rows:
@@ -177,12 +203,17 @@ SELECT f.id::text, f.evidence, a.value AS asset, a.asset_type, a.first_seen_at A
        f.cve_id, c.cvss_base_score AS cvss, c.epss_score AS epss, coalesce(c.in_kev, false) AS in_kev,
        f.detected_at, f.last_scan_id::text, sc.queued_at AS scan_at,
        b.breach_name, b.breach_date, b.data_classes,
+       fm.attack_version, fm.attack_technique_id, fm.attack_technique_name,
+       fm.attack_source_url, fm.attack_unmapped_reason,
+       fm.iso_version, fm.iso_control_id, fm.iso_control_name, fm.iso_source_url,
+       fm.cis_version, fm.cis_safeguard_id, fm.cis_safeguard_name, fm.cis_source_url,
        CASE WHEN sc.id IS NULL OR f.detected_at >= sc.queued_at THEN 'new' ELSE 'recurring' END AS recurrence
   FROM findings f
   JOIN domains d       ON d.id = f.domain_id
   JOIN assets a        ON a.id = f.asset_id
   JOIN scoring_rules r ON r.id = f.rule_id
   JOIN data_sources s  ON s.id = f.source_id
+  LEFT JOIN scoring_rule_framework_mappings fm ON fm.rule_code = r.code
   LEFT JOIN scans sc   ON sc.id = f.last_scan_id
   LEFT JOIN cves c     ON c.cve_id = f.cve_id
   LEFT JOIN breach_exposures b ON b.finding_id = f.id
@@ -206,6 +237,7 @@ def _finding(f):
         'cve_id': f['cve_id'], 'cvss': float(f['cvss']) if f['cvss'] is not None else None,
         'epss': float(f['epss']) if f['epss'] is not None else None, 'in_kev': f['in_kev'],
         'evidence': evidence, 'caracteristicas': caracteristicas(f),
+        'frameworks': _marcos(f),
         'detected_at': f['detected_at'], 'last_scan_id': f['last_scan_id'],
     }
 
@@ -381,6 +413,10 @@ SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, coalesce(x.
        r.base_severity, r.category,
        r.code AS rule_code, r.max_penalty, a.value AS asset, a.asset_type, a.first_seen_at AS asset_first_seen,
        f.detected_at, sc.queued_at AS scan_at, b.breach_date,
+       fm.attack_version, fm.attack_technique_id, fm.attack_technique_name,
+       fm.attack_source_url, fm.attack_unmapped_reason,
+       fm.iso_version, fm.iso_control_id, fm.iso_control_name, fm.iso_source_url,
+       fm.cis_version, fm.cis_safeguard_id, fm.cis_safeguard_name, fm.cis_source_url,
     ds.id::text AS score_id, ds.computed_at, ds.method, ds.model_version, x.penalty, x.factors,
        t.title AS rule_title, t.meaning, t.recommendation
   FROM findings f
@@ -388,6 +424,7 @@ SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, coalesce(x.
   JOIN assets a ON a.id = f.asset_id
   JOIN scoring_rules r ON r.id = f.rule_id
   JOIN scoring_rule_texts t ON t.code = r.code
+  LEFT JOIN scoring_rule_framework_mappings fm ON fm.rule_code = r.code
   LEFT JOIN scans sc ON sc.id = f.last_scan_id
   LEFT JOIN breach_exposures b ON b.finding_id = f.id
   LEFT JOIN LATERAL (SELECT * FROM domain_scores s WHERE s.domain_id = f.domain_id ORDER BY s.computed_at DESC LIMIT 1) ds ON true
@@ -419,6 +456,7 @@ def finding_explanation(finding_id: str, session: Session = Depends(current_sess
         'factors': factors, 'caracteristicas': caracteristicas(f),
         'summary': RESUMEN[f['severity']],
         'recommendation': f['recommendation'],
+        'frameworks': _marcos(f),
         'confidence': (f['factors'] or {}).get('confidence'),
         'model_prediction': (f['factors'] or {}).get('model_prediction'),
         'explanation_model_version': (f['factors'] or {}).get('explanation_model_version'),
