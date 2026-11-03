@@ -379,7 +379,8 @@ def con_reintentos(funcion, intentos=3, esperas=(5, 15), errores=(OSError, Value
 
     Si `dormir` devuelve False, no queda tiempo para otro intento: no se hace y sale el último error con los intentos
     que sí se hicieron y ', sin tiempo para otro' antes del error, para que no se pierda si el texto se corta (rdap.py y
-    shodan.py, RC-166). time.sleep devuelve None y siempre sigue.
+    shodan.py, RC-166). El error lleva además sin_tiempo, True en ese caso, para quien junta varios en un solo aviso
+    sin su texto (los A de shodan.py). time.sleep devuelve None y siempre sigue.
     """
     ultimo, hechos, sin_tiempo = None, 0, False
     for n in range(intentos):
@@ -393,10 +394,12 @@ def con_reintentos(funcion, intentos=3, esperas=(5, 15), errores=(OSError, Value
             if n < intentos - 1 and dormir(esperas[min(n, len(esperas) - 1)]) is False:
                 sin_tiempo = True
                 break
-    raise FuenteNoResponde('%s después de %d %s%s (%s: %s)' % (getattr(funcion, '__name__', 'consulta'), hechos,
-                                                              'intento' if hechos == 1 else 'intentos',
-                                                              ', sin tiempo para otro' if sin_tiempo else '',
-                                                              type(ultimo).__name__, ultimo))
+    error = FuenteNoResponde('%s después de %d %s%s (%s: %s)' % (getattr(funcion, '__name__', 'consulta'), hechos,
+                                                                'intento' if hechos == 1 else 'intentos',
+                                                                ', sin tiempo para otro' if sin_tiempo else '',
+                                                                type(ultimo).__name__, ultimo))
+    error.sin_tiempo = sin_tiempo
+    raise error
 
 
 # ---------------------------------------------------------------- respuestas grabadas

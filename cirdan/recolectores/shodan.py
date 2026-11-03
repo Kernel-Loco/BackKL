@@ -70,7 +70,9 @@ leía no cuenta como falla de red: si todas quedan así, la fuente queda succeed
 Reintentos: 3 intentos por A y por IP (esperas de 5 y 15 s) y 2 por página de Cert Spotter. Un 5xx o un 408 con
 Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA aunque pida más, y se reintenta igual. Si después
 de la espera no le quedarían a la corrida MIN_INTENTO segundos (más HOLGURA), no se espera ni se hace otro intento: sale
-el error del último, que cuenta como el de su A o su IP (esperar). El
+el error del último, que cuenta como el de su A o su IP (esperar). En los A lo que queda ya descuenta RESERVA_INTERNETDB
+(restante), así que un A que falla con 115 s por delante ya no espera ni se reintenta. Un solo aviso junta los A
+fallidos y dice cuántos se quedaron sin tiempo para otro intento. El
 lifetime del A es min(TIMEOUT_DNS, lo que queda). Cada petición HTTP tiene un plazo absoluto, min(TIMEOUT_HTTP o
 TIMEOUT_CT, lo que queda), que cubre getaddrinfo, el connect, el TLS, el envío y cada lectura de las cabeceras y del
 cuerpo (_descargar con transporte.descargar). Una redirección no se sigue y no se puede leer, y no se usan proxies:
@@ -838,7 +840,7 @@ def _revisar(res, cliente, dominio, ahora):
                 sin_grabar.append(nombre)
                 continue
             except FuenteNoResponde as e:
-                fallas_a.append((nombre, str(e)))
+                fallas_a.append((nombre, str(e), getattr(e, 'sin_tiempo', False)))
                 continue
             for ip in a['ips']:
                 por_ip.setdefault(ip, set()).add(nombre)
@@ -846,12 +848,15 @@ def _revisar(res, cliente, dominio, ahora):
     finally:
         cliente.reserva = 0
     # Un solo aviso para todos los A fallidos y otro para los no grabados: el orquestador guarda 10 avisos y el del
-    # tiempo tiene que verse
+    # tiempo tiene que verse. El de los A dice cuántos se quedaron sin tiempo para otro intento, que no tienen su texto
+    # y, si la reserva cortó el último nombre, no dejan otro aviso del tiempo (RC-166)
     if len(fallas_a) == 1:
         res.avisos.append(fallas_a[0][1])
     elif fallas_a:
-        res.avisos.append('shodan: el DNS no respondió al A de %d nombres: %s' % (
-            len(fallas_a), _lista([n for n, _ in fallas_a])))
+        sin_otro = sum(1 for _, _, corto in fallas_a if corto)
+        res.avisos.append('shodan: el DNS no respondió al A de %d nombres%s: %s' % (
+            len(fallas_a), ' (%d sin tiempo para otro intento)' % sin_otro if sin_otro else '',
+            _lista([n for n, _, _ in fallas_a])))
     if sin_grabar:
         res.avisos.append('shodan: la grabación no trae el A de %s, se grabó con otro tope de nombres: %s'
                           % (_cuantos(len(sin_grabar), 'nombre', 'nombres'), _lista(sin_grabar)))

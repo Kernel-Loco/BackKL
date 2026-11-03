@@ -10,6 +10,7 @@ Verisign (_plan/rc166/estudio/whois43.md), pero son simuladas. Las fechas de olm
 docs/hallazgos_esperados.md, fila 7. El registrador, los contactos y los servidores de .mx y de los TLD zz y yy son
 inventados: no dicen qué TLD tiene RDAP de verdad.
 """
+import importlib.util
 import io
 import json
 import os
@@ -1461,9 +1462,14 @@ class ServidorTls:
 HOST_TLS = 'rdap.prueba.example'
 
 
+@unittest.skipUnless(os.environ.get('TRANSPORTE_TLS') == '1' or importlib.util.find_spec('cryptography'),
+                     'pide cryptography para el certificado: corre dentro del contenedor')
 class Transporte(unittest.TestCase):
     """transporte.py (RC-166, 6 y 7) sin red: el connect con el módulo socket falso de Red y el TLS de verdad con
-    socket.socketpair() y un certificado hecho aquí. Los plazos de las pruebas de TLS son de reloj real y cortos."""
+    socket.socketpair() y un certificado hecho aquí. Los plazos de las pruebas de TLS son de reloj real y cortos.
+    El certificado pide cryptography, que está en la imagen y no en el runner del CI: allí se salta y el CI la corre
+    dentro del contenedor, con el OpenSSL que se despliega. Con TRANSPORTE_TLS=1, como en el CI, falla en vez de
+    saltarse si no hay cryptography."""
 
     def setUp(self):
         carpeta = tempfile.TemporaryDirectory()
