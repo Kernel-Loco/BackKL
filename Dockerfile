@@ -38,7 +38,8 @@ RUN python -c "import os, pathlib, zipfile; z = zipfile.ZipFile('/tmp/subfinder.
 # gitleaks 8.21.2 (#16, RC-50), la misma versión del pre-commit (.pre-commit-config.yaml), entra igual que
 # subfinder: el tar.gz del release oficial por arquitectura, con su sha256 de gitleaks_8.21.2_checksums.txt.
 # El release se compila con CGO_ENABLED=0 y corre en python:3.14-slim. El release llama x64 a amd64.
-# Dependabot tampoco vigila esta versión: se sube a mano, con las dos URL, los dos hash y NOTICE.
+# Dependabot tampoco vigila esta versión: se sube a mano, con las dos URL, los dos hash y NOTICE, y con la imagen
+# nueva se vuelve a generar cirdan/recolectores/gitleaks_cirdan.toml (ver cirdan/recolectores/gitleaks_reglas.py).
 FROM python:3.14-slim AS gitleaks-tar-amd64
 ADD --checksum=sha256:5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba \
     https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz /tmp/gitleaks.tar.gz

@@ -3,7 +3,8 @@
 Revisa los repositorios públicos de la organización de GitHub que la empresa declaró como suya y devuelve:
 - secret_in_public_repo (crítico, sobre el activo domain): una clave de acceso en la versión actual o en el historial
   de un repo. La busca gitleaks 8.21.2 con gitleaks_cirdan.toml: sus reglas de omisión más una para los tokens falsos
-  CIRDAN_FAKE_ de la siembra y de las pruebas. Un secreto que ya solo vive en el historial también es crítico.
+  CIRDAN_FAKE_ de la siembra y de las pruebas, copiadas sin las rutas de su allowlist que saltan archivos del cliente,
+  como los lock files (ver gitleaks_reglas.py). Un secreto que ya solo vive en el historial también es crítico.
 - email_in_public_commits (bajo, sobre un activo email por correo): un correo del dominio, o de un subdominio, como
   autor o como quien subió un commit.
 - el activo domain con atributos['github']: la organización, si su perfil enlaza al dominio, si GitHub la verificó y
@@ -22,8 +23,8 @@ Qué consulta, y nada más:
 - git clone --bare --no-tags por https de hasta MAX_REPOS repos que no sean fork ni deshabilitados, de hasta MAX_KB_REPO
   cada uno, por pushed_at descendente. Los archivados entran, y los de tamaño 0 también: GitHub calcula 'size' cada hora
   y un repo recién creado sale con 0 aunque ya tenga commits.
-- Lo demás es local, sobre el clon: gitleaks git con --redact, que salta los archivos de más de MAX_MB_ARCHIVO MB, y git
-  log para los correos.
+- Lo demás es local, sobre el clon: gitleaks git con --redact, que salta los archivos de más de MAX_MB_ARCHIVO MB y no
+  respeta los comentarios gitleaks:allow del repo (--ignore-gitleaks-allow), y git log para los correos.
 
 Sin secretos ni datos personales de más:
 - gitleaks corre con --redact y su reporte se lee por lista blanca: RuleID, File y Date. Nunca Secret, Match, Author,
@@ -690,12 +691,13 @@ class ClienteGitHub:
 
     def analizar(self, destino, casa, org, repo, dominio):
         """{secretos, correos, ajenos, invalidos} de un clon bare que ya está en disco, sin red: gitleaks y git log.
-        En un clon bare no hay árbol de trabajo, así que el repo no puede traer un .gitleaksignore que gitleaks lea."""
+        En un clon bare no hay árbol de trabajo, así que el repo no puede traer un .gitleaksignore que gitleaks lea.
+        Con --ignore-gitleaks-allow, un comentario gitleaks:allow en la línea de un secreto tampoco se lo esconde."""
         git, gitleaks = self._programas()
         reporte = os.path.join(casa, 'reporte.json')
-        self._correr([gitleaks, 'git', destino, '--config', str(REGLAS), '--log-opts=--all', '--redact', '--no-banner',
-                      '--log-level', 'error', '--report-format', 'json', '--report-path', reporte, '--exit-code', '0',
-                      '--max-target-megabytes', str(MAX_MB_ARCHIVO)],
+        self._correr([gitleaks, 'git', destino, '--config', str(REGLAS), '--log-opts=--all', '--ignore-gitleaks-allow',
+                      '--redact', '--no-banner', '--log-level', 'error', '--report-format', 'json', '--report-path',
+                      reporte, '--exit-code', '0', '--max-target-megabytes', str(MAX_MB_ARCHIVO)],
                      casa, TIMEOUT_GITLEAKS, 'revisar con gitleaks', org, repo)
         try:
             if os.path.getsize(reporte) > MAX_REPORTE:

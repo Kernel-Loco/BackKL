@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre c
 from pruebas.test_catalogo_reglas import POR_CODIGO  # noqa: E402
 from pruebas.test_crtsh import AHORA  # noqa: E402
 from pruebas.test_subfinder import Cronometro  # noqa: E402
-from cirdan.recolectores import REGISTRO, cargar, contrato, github  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, contrato, github, gitleaks_reglas  # noqa: E402
 from cirdan.recolectores.contrato import FuenteNoResponde  # noqa: E402
 
 TOKEN = 'CIRDAN_FAKE_' + secrets.token_hex(16)
@@ -467,8 +467,8 @@ class Procesos(unittest.TestCase):
                                         'https://github.com/acme-demo/sitio.git', os.path.join(casa, 'repo.git')])
         fuga = procesos.de('gitleaks')[0].comando
         self.assertEqual(fuga[:3], [BINARIOS['gitleaks'], 'git', os.path.join(casa, 'repo.git')])
-        for opcion in (['--config', str(github.REGLAS)], ['--log-opts=--all'], ['--redact'], ['--exit-code', '0'],
-                       ['--report-format', 'json']):
+        for opcion in (['--config', str(github.REGLAS)], ['--log-opts=--all'], ['--ignore-gitleaks-allow'],
+                       ['--redact'], ['--exit-code', '0'], ['--report-format', 'json']):
             self.assertTrue(any(fuga[i:i + len(opcion)] == opcion for i in range(len(fuga))), opcion)
         self.assertEqual(fuga[-2:], ['--max-target-megabytes', '100'])
         log = procesos.de('log')[0]
@@ -833,19 +833,26 @@ class Contrato(unittest.TestCase):
         self.assertLessEqual(res.consultas, github.MAX_CONSULTAS)
         self.assertEqual(sorted({h.codigo for h in res.hallazgos}), sorted(CODIGOS))
 
-    def test_3_las_reglas_de_gitleaks_traen_las_de_omision_y_la_propia(self):
+    def test_3_las_reglas_de_gitleaks_traen_las_de_omision_sin_herencia_y_la_propia(self):
+        """Que sea igual a lo que genera gitleaks_reglas.py con el gitleaks de la imagen lo prueba Integracion."""
         texto = github.REGLAS.read_text(encoding='utf-8-sig')  # gitleaks acepta el BOM
-        self.assertIn('useDefault = true', texto)
-        self.assertIn('id = "cirdan-fake-token"', texto)
-        self.assertNotIn('stopwords', texto)
         self.assertNotIn(TOKEN, texto)
-        # Solo estas claves: gitleaks lee la config con viper, que no distingue mayúsculas, así que [AllowList] también
-        # sería una allowlist, y sus paths y regexes se unen con 'OR' (PR 81)
+        # Solo estas claves: con [extend] la allowlist de omisión se sumaría a esta, y gitleaks lee la config con
+        # viper, que no distingue mayúsculas, así que [AllowList] o [Extend] también contarían. En la allowlist, paths
+        # y regexes se unen con 'OR': nada de LowTide, que saltaría lo mismo en los repos de los clientes (PR 81)
         reglas = tomllib.loads(texto)
-        self.assertEqual(sorted(reglas), ['extend', 'rules', 'title'])
-        self.assertEqual(reglas['extend'], {'useDefault': True})  # sin path a otra config
-        for regla in reglas['rules']:
-            self.assertLessEqual(set(regla), {'id', 'description', 'regex', 'keywords'}, regla['id'])
+        self.assertEqual(sorted(reglas), ['allowlist', 'rules', 'title'])
+        self.assertEqual(sorted(reglas['allowlist']), ['description', 'paths', 'regexes', 'stopwords'])
+        self.assertNotIn('cirdan', json.dumps(reglas['allowlist']).lower())
+        rutas = reglas['allowlist']['paths']
+        for vieja, nueva in gitleaks_reglas.CAMBIOS.items():
+            self.assertNotIn(vieja, rutas)
+            if nueva:
+                self.assertIn(nueva, rutas)
+        self.assertIn('(^|/)node_modules/.*?$', rutas)
+        # Las 195 de omisión de 8.21.2 y la propia, cada una con su id
+        self.assertEqual(len({regla['id'] for regla in reglas['rules']}), 196)
+        self.assertEqual(reglas['rules'][-1], tomllib.loads(gitleaks_reglas.REGLA_PROPIA)['rules'][0])
 
     def test_4_la_imagen_pide_buildkit_y_no_fija_targetarch(self):
         """El builder clásico ignora ADD --checksum: la primera etapa lo detiene con --chmod antes de bajar nada, y
@@ -906,6 +913,35 @@ class Semilla(unittest.TestCase):
         self.assertIn("SET client_encoding = 'UTF8';", SEMILLA.read_text(encoding='utf-8'))
 
 
+class Reglas(unittest.TestCase):
+    """gitleaks_reglas.generar sobre una config por omisión de juguete con la forma de la de 8.21.2."""
+
+    LICENCIA = 'MIT License\n\nCopyright (c) 2019 Zachary Rice\n'
+
+    def omision(self, rutas):
+        return ('# auto-generada\n\ntitle = "gitleaks config"\n\n[allowlist]\ndescription = "global allow lists"\n'
+                "regexes = [\n    '''^x$''',\n]\npaths = [\n%s]\nstopwords = [\n    \"abc\",\n]\n\n"
+                "[[rules]]\nid = \"uno\"\nregex = '''uno[0-9]{8}'''\n\n[rules.allowlist]\npaths = [\n    '''x''',\n]\n"
+                % ''.join("    '''%s''',\n" % ruta for ruta in rutas))
+
+    def test_1_quita_o_ancla_las_rutas_de_cambios_y_deja_las_demas_y_las_de_cada_regla(self):
+        texto = gitleaks_reglas.generar(self.omision([*gitleaks_reglas.CAMBIOS, '(^|/)node_modules/.*?$']),
+                                        self.LICENCIA, '8.21.2')
+        self.assertTrue(texto.startswith('# Reglas de gitleaks 8.21.2 '))
+        self.assertIn('\n# Copyright (c) 2019 Zachary Rice\n', texto)
+        reglas = tomllib.loads(texto)
+        self.assertEqual(reglas['title'], 'LowTide: reglas de omisión de gitleaks y tokens falsos CIRDAN_FAKE_')
+        self.assertEqual(reglas['allowlist']['paths'],
+                         [nueva for nueva in gitleaks_reglas.CAMBIOS.values() if nueva] + ['(^|/)node_modules/.*?$'])
+        self.assertEqual((reglas['allowlist']['regexes'], reglas['allowlist']['stopwords']), (['^x$'], ['abc']))
+        self.assertEqual([regla['id'] for regla in reglas['rules']], ['uno', 'cirdan-fake-token'])
+        self.assertEqual(reglas['rules'][0]['allowlist'], {'paths': ['x']})
+
+    def test_2_falla_si_una_ruta_de_cambios_ya_no_viene_en_la_version_de_gitleaks(self):
+        with self.assertRaisesRegex(ValueError, 'ya no vienen'):
+            gitleaks_reglas.generar(self.omision(list(gitleaks_reglas.CAMBIOS)[1:]), self.LICENCIA, '8.21.2')
+
+
 @unittest.skipUnless(os.environ.get('INTEGRACION_GITHUB') == '1'
                      or (os.name == 'posix' and shutil.which('git') and shutil.which('gitleaks')),
                      'pide git y gitleaks: corre dentro del contenedor')
@@ -917,9 +953,9 @@ class Integracion(unittest.TestCase):
     Con INTEGRACION_GITHUB=1, como en el CI, falla en vez de saltarse si no hay git o gitleaks.
     """
 
-    def armar(self, d, extra=()):
+    def armar(self, d, extra=(), permitida=None):
         """Un clon bare de un repo con un token que solo queda en el historial y otro en la versión actual. Cada ruta
-        de `extra` lleva TOKEN en un último commit."""
+        de `extra` lleva TOKEN en un último commit, y `permitida` lo lleva con un comentario gitleaks:allow."""
         fuente, casa = os.path.join(d, 'fuente'), os.path.join(d, 'casa')
         os.mkdir(fuente)
         os.mkdir(casa)
@@ -944,7 +980,11 @@ class Integracion(unittest.TestCase):
             os.makedirs(os.path.join(fuente, os.path.dirname(ruta)), exist_ok=True)
             Path(fuente, ruta).write_text('TOKEN=%s\n' % TOKEN, encoding='utf-8')
             git('add', '-f', ruta)
-        if extra:
+        if permitida:
+            os.makedirs(os.path.join(fuente, os.path.dirname(permitida)), exist_ok=True)
+            Path(fuente, permitida).write_text('TOKEN = "%s"  # gitleaks:allow\n' % TOKEN, encoding='utf-8')
+            git('add', '-f', permitida)
+        if extra or permitida:
             git('commit', '-q', '-m', 'cuatro')
         destino = os.path.join(casa, 'repo.git')
         git('clone', '--bare', '--quiet', fuente, destino, cwd=d)
@@ -983,6 +1023,32 @@ class Integracion(unittest.TestCase):
         texto = json.dumps(datos)
         self.assertNotIn(TOKEN, texto)
         self.assertNotIn(OTRO_TOKEN, texto)
+
+    def test_4_ni_un_gitleaks_allow_ni_la_allowlist_de_omision_le_esconden_un_secreto(self):
+        """Sin --ignore-gitleaks-allow el comentario salta la línea, y la allowlist de 8.21.2 salta los lock files,
+        lo que lleve gitleaks.toml en la ruta y lo que termine en doc, bin o v2 aunque no sea extensión. Siguen
+        saltadas las dependencias que instala un gestor de paquetes y go.sum (gitleaks_reglas.py)."""
+        revisadas = ('package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'poetry.lock', '.gitleaks.toml',
+                     'deploy/gitleaks.toml/claves.env', 'docs/guia.adoc', 'api/v2', 'scripts/bin',
+                     'infra/prodenv/lib/ajustes.py')
+        saltadas = ('node_modules/paquete/index.js', 'go.sum', 'venv/lib/python3.12/site-packages/ajustes.py')
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, revisadas + saltadas, permitida='app/ajustes.py')
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        self.assertEqual([(s['ruta'], s['regla']) for s in datos['secretos']],
+                         [(ruta, 'cirdan-fake-token')
+                          for ruta in sorted(revisadas + ('app/ajustes.py', 'config/.env', 'viejo.txt'))])
+        self.assertNotIn(TOKEN, json.dumps(datos))
+
+    def test_5_gitleaks_cirdan_toml_es_el_que_genera_gitleaks_reglas_con_el_gitleaks_de_la_imagen(self):
+        binario = shutil.which('gitleaks')
+        with open(gitleaks_reglas.LICENCIA, encoding='utf-8') as f:
+            licencia = f.read()
+        omision, version = gitleaks_reglas.omision(binario), gitleaks_reglas.version(binario)
+        esperado = gitleaks_reglas.generar(omision, licencia, version)
+        self.assertTrue(github.REGLAS.read_text(encoding='utf-8') == esperado,
+                        'gitleaks_cirdan.toml no es el que sale del gitleaks de la imagen: vuelve a generarlo como '
+                        'dice cirdan/recolectores/gitleaks_reglas.py')
 
 
 if __name__ == '__main__':
