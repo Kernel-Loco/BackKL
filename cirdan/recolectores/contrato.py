@@ -12,7 +12,12 @@ El orquestador (#22) no llama a recolectar() directo: llama a ejecutar(), que at
 excepción, revisa que el resultado cumpla este esquema y aplica el filtro de alcance. Si el
 recolector falla o rompe el contrato, la fuente queda en 'failed' y el escaneo sigue con las demás.
 Si la fuente respondió pero no pudo revisar algunos códigos, los pone en sin_cobertura y el escaneo
-termina 'partial', así el portal no los muestra como 0 hallazgos.
+termina 'partial', así el portal no los muestra como 0 hallazgos. Si revisó solo una parte de lo suyo (unos repos,
+unas IP), pone en revisados las partes que sí revisó completas y cada hallazgo lleva sus partes: el escaneo termina
+'partial' y solo se cierra lo abierto cuyas partes se revisaron. Si además sabe cuáles son todas sus partes, pone en
+sin_revisar las que no revisó, sin las que tampoco revisa en una corrida completa, y se cierra lo demás que traiga
+partes, como lo de un repo borrado (#23). Lo que sigue ahí pero un tope no deja reportar va en omitidos con su
+huella, y tampoco se cierra.
 La limpieza de datos es de #13b. El documento completo está en docs/contrato_plugin.md.
 """
 import http.client
@@ -70,6 +75,7 @@ class Hallazgo:
     caracteristicas: dict          # tipo, antiguedad_dias, exposicion y sensibilidad (las del reto, para el ML)
     huella: str                    # sha256 estable para no duplicar el hallazgo entre escaneos
     clave: str = ''                # distingue hallazgos del mismo código en el mismo activo (dominio parecido, CVE, brecha)
+    partes: list = field(default_factory=list)  # lo revisado para sacarlo (repos, una IP). Va a evidence['partes']
 
 
 @dataclass
@@ -83,9 +89,23 @@ class Resultado:
     activos: list = field(default_factory=list)
     hallazgos: list = field(default_factory=list)
     sin_cobertura: list = field(default_factory=list)  # códigos que la fuente no pudo revisar: cobertura parcial, no 0
+    revisados: list | None = None    # None si revisó todo. Si no, las partes que sí revisó completas (#23)
+    sin_revisar: list | None = None  # con revisados, las que existen, revisaría y no revisó. None si no las sabe
+    omitidos: list = field(default_factory=list)  # huellas de lo que sigue ahí pero un tope no deja reportar (#23)
 
     def a_dict(self):
         return asdict(self)
+
+
+def _errores_partes(nombre, partes, puede_faltar=False):
+    """revisados, sin_revisar y las partes de un hallazgo: una lista de textos sin repetir (o None si puede faltar)."""
+    if partes is None and puede_faltar:
+        return []
+    if not isinstance(partes, list) or not all(isinstance(p, str) and p for p in partes):
+        return ['%s debe ser %suna lista de textos' % (nombre, 'None o ' if puede_faltar else '')]
+    if len(set(partes)) != len(partes):
+        return ['%s tiene partes repetidas' % nombre]
+    return []
 
 
 def _nombre_ok(nombre):
@@ -161,6 +181,19 @@ def validar(res, codigos=None):
         errores.append('sin_cobertura tiene códigos repetidos')
     elif codigos is not None and set(sin) - set(codigos):
         errores.append('sin_cobertura: %s no está en el catálogo de reglas' % ', '.join(sorted(set(sin) - set(codigos))))
+    rev, falta = res.revisados, res.sin_revisar
+    errores += _errores_partes('revisados', rev, puede_faltar=True)
+    errores += _errores_partes('sin_revisar', falta, puede_faltar=True)
+    if falta is not None and rev is None:
+        errores.append('sin_revisar va solo con revisados')
+    elif isinstance(rev, list) and isinstance(falta, list) and set(map(str, rev)) & set(map(str, falta)):
+        errores.append('una parte no puede estar en revisados y en sin_revisar')
+    omitidos = res.omitidos
+    omitidos_ok = isinstance(omitidos, list) and all(isinstance(x, str) and HUELLA_VALIDA.fullmatch(x) for x in omitidos)
+    if not omitidos_ok:
+        errores.append('omitidos debe ser una lista de huellas')
+    elif len(set(omitidos)) != len(omitidos):
+        errores.append('omitidos tiene huellas repetidas')
     if not isinstance(res.activos, list) or not isinstance(res.hallazgos, list):
         return errores + ['activos y hallazgos deben ser listas']
     if res.estado == 'failed' and (res.activos or res.hallazgos):
@@ -218,12 +251,17 @@ def validar(res, codigos=None):
             errores.append('%s: huella repetida' % donde)
         else:
             huellas.add(h.huella)
+        errores += ['%s: %s' % (donde, e) for e in _errores_partes('partes', h.partes)]
+        if rev is not None and not h.partes:  # sin partes no se cerraría nunca con la cobertura parcial
+            errores.append('%s: con revisados cada hallazgo lleva sus partes' % donde)
         if not isinstance(h.clave, str):
             errores.append('%s: la clave debe ser texto' % donde)
         elif isinstance(h.codigo, str) and isinstance(h.activo, str):
             if (h.codigo, h.activo, h.clave) in llaves:
                 errores.append('%s: se repite con el mismo activo y la misma clave' % donde)
             llaves.add((h.codigo, h.activo, h.clave))
+    if omitidos_ok and huellas & set(omitidos):
+        errores.append('una huella no puede estar en hallazgos y en omitidos')
     try:
         datos = res.a_dict()
         json.dumps(datos, allow_nan=False)
@@ -338,19 +376,30 @@ def con_reintentos(funcion, intentos=3, esperas=(5, 15), errores=(OSError, Value
 
     Un error HTTP 4xx, salvo 408 y 429, sale tal cual sin reintentar: la fuente sí respondió (por ejemplo un
     404 de HIBP es «sin brechas» y un 403 es «sin permiso»), y lo interpreta el recolector.
+
+    Si `dormir` devuelve False, no queda tiempo para otro intento: no se hace y sale el último error con los intentos
+    que sí se hicieron y ', sin tiempo para otro' antes del error, para que no se pierda si el texto se corta (rdap.py y
+    shodan.py, RC-166). El error lleva además sin_tiempo, True en ese caso, para quien junta varios en un solo aviso
+    sin su texto (los A de shodan.py). time.sleep devuelve None y siempre sigue.
     """
-    ultimo = None
+    ultimo, hechos, sin_tiempo = None, 0, False
     for n in range(intentos):
         try:
+            hechos += 1
             return funcion()
         except errores as e:
             if isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code not in (408, 429):
                 raise
             ultimo = e
-            if n < intentos - 1:
-                dormir(esperas[min(n, len(esperas) - 1)])
-    raise FuenteNoResponde('%s después de %d intentos (%s: %s)' % (getattr(funcion, '__name__', 'consulta'), intentos,
-                                                                  type(ultimo).__name__, ultimo))
+            if n < intentos - 1 and dormir(esperas[min(n, len(esperas) - 1)]) is False:
+                sin_tiempo = True
+                break
+    error = FuenteNoResponde('%s después de %d %s%s (%s: %s)' % (getattr(funcion, '__name__', 'consulta'), hechos,
+                                                                'intento' if hechos == 1 else 'intentos',
+                                                                ', sin tiempo para otro' if sin_tiempo else '',
+                                                                type(ultimo).__name__, ultimo))
+    error.sin_tiempo = sin_tiempo
+    raise error
 
 
 # ---------------------------------------------------------------- respuestas grabadas

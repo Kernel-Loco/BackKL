@@ -338,38 +338,43 @@ class Shodan(unittest.TestCase):
             http = HttpSimulado()
             otra = recolectar(http, ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
         self.assertEqual(http.urls, [])
-        self.assertEqual((otra.activos, otra.hallazgos, otra.sin_cobertura, otra.avisos),
-                         (res.activos, res.hallazgos, res.sin_cobertura, res.avisos))
+        self.assertEqual((otra.activos, otra.hallazgos, otra.sin_cobertura, otra.avisos, otra.revisados, otra.sin_revisar,
+                          otra.omitidos),
+                         (res.activos, res.hallazgos, res.sin_cobertura, res.avisos, res.revisados, res.sin_revisar, res.omitidos))
         self.assertEqual(activo(otra, RESERVAS).atributos['internetdb'], 'sin_datos')
 
     def test_14_el_peor_caso_gasta_justo_max_consultas(self):
         """Dos páginas llenas de Cert Spotter al segundo intento, MAX_NOMBRES nombres que resuelven al tercero y
         MAX_IPS IP que responden al tercero."""
-        nombres = ['n%02d.olmardo.com' % i for i in range(12)]
-        ct = [500, paginas(*nombres[:6])[0], 500, paginas(*nombres[6:], id_=9201)[0]]
+        nombres = ['n%02d.olmardo.com' % i for i in range(shodan.MAX_NOMBRES + 1)]
+        mitad = len(nombres) // 2
+        ct = [500, paginas(*nombres[:mitad])[0], 500, paginas(*nombres[mitad:], id_=9201)[0]]
         zona = {DOMINIO: ['falla', 'falla', a('20.69.154.10')]}
         zona.update({n: ['falla', 'falla', a('20.69.154.%d' % (11 + i))] for i, n in enumerate(nombres)})
-        ips = {'20.69.154.%d' % (10 + i): [500, 500, internetdb('', ports=[8080])] for i in range(13)}
+        ips = {'20.69.154.%d' % (10 + i): [500, 500, internetdb('', ports=[8080])] for i in range(len(nombres) + 1)}
         http, dns = HttpSimulado(ct, ips), ResolvedorSimulado(zona)
         res = recolectar(http, dns)
-        self.assertEqual(shodan.MAX_CONSULTAS, 64)
+        self.assertEqual(shodan.MAX_CONSULTAS, 184)
+        self.assertEqual(len(dns.nombres), shodan.MAX_NOMBRES * shodan.INTENTOS)
         self.assertEqual((res.consultas, len(http.urls) + len(dns.nombres)), (shodan.MAX_CONSULTAS, shodan.MAX_CONSULTAS))
         self.assertEqual(len(http.consultadas()), shodan.MAX_IPS)
         self.assertEqual(res.sin_cobertura, codigos_sin(res))
 
     def test_15_los_cortes_dejan_en_sin_cobertura_solo_los_codigos_sin_hallazgos(self):
         con_dos = internetdb(CAMARA, ports=[8080, 3389])
-        nombres = ['n%02d.olmardo.com' % i for i in range(12)]
+        nombres = ['n%02d.olmardo.com' % i for i in range(shodan.MAX_NOMBRES + 2)]
         casos = {
             'MAX_NOMBRES': (HttpSimulado(paginas(*nombres), {CAMARA: con_dos}),
                             ResolvedorSimulado({DOMINIO: a(CAMARA)}), Cronometro(0),
-                            'shodan: se resolvieron 10 de 13 nombres del dominio (MAX_NOMBRES)'),
+                            'shodan: se resolvieron %d de %d nombres del dominio (MAX_NOMBRES)'
+                            % (shodan.MAX_NOMBRES, shodan.MAX_NOMBRES + 3)),
             'MAX_IPS': (HttpSimulado(ips={CAMARA: con_dos}),
                         ResolvedorSimulado({DOMINIO: a(CAMARA, *('20.69.155.%d' % i for i in range(1, 11)))}),
                         Cronometro(0), 'shodan: se consultaron 10 de 11 IP en InternetDB (MAX_IPS)'),
-            'tiempo': (HttpSimulado(paginas(*nombres), {CAMARA: con_dos}),
-                       ResolvedorSimulado(dict({DOMINIO: a(CAMARA)}, **{n: a('20.69.156.%d' % i) for i, n in enumerate(nombres)})),
-                       Cronometro(10), 'shodan: se acabó el tiempo de la corrida antes de consultar'),
+            'tiempo': (HttpSimulado(paginas(*nombres[:12]), {CAMARA: con_dos}),
+                       ResolvedorSimulado(dict({DOMINIO: a(CAMARA)},
+                                               **{n: a('20.69.156.%d' % i) for i, n in enumerate(nombres[:12])})),
+                       Cronometro(10), 'shodan: el tiempo de la corrida cortó'),
         }
         for caso, (http, dns, cronometro, aviso) in casos.items():
             with self.subTest(caso=caso):
@@ -680,8 +685,8 @@ class Arreglos(unittest.TestCase):
 
     def test_34_el_corte_por_tiempo_no_se_graba_y_deja_la_anterior(self):
         """contrato-5 y re-contrato-4: el corte por tiempo es una falla, así que --grabar no escribe nada. Primero se
-        graba una corrida completa. Después cada A tarda 100 s, el corte de MIN_RESTANTE llega en el quinto nombre y
-        la corrida avisa los 3 nombres que no resolvió, pone NO_SE_GRABO primero, sale con 3 y no toca la grabación
+        graba una corrida completa. Después cada A tarda 100 s, el corte de MIN_RESTANTE con RESERVA_INTERNETDB llega en
+        el cuarto nombre y la corrida avisa los 4 nombres que no resolvió, pone NO_SE_GRABO primero, sale con 3 y no toca la grabación
         anterior, que --reproducir sigue dando completa. Ninguna falla 'tiempo' llega al disco."""
         nombres = ['n%02d.olmardo.com' % i for i in range(6)]
         zona = dict({DOMINIO: a(CAMARA)}, **{n: a('20.69.157.%d' % i) for i, n in enumerate(nombres)})
@@ -696,7 +701,7 @@ class Arreglos(unittest.TestCase):
                                            resolver=dns, nueva=True, cronometro=lambda: 1000 + 100 * len(dns.nombres),
                                            dormir=lambda s: None)
             res = shodan.recolectar(DOMINIO, cliente, ahora=AHORA)
-            self.assertIn('shodan: se acabó el tiempo de la corrida antes de resolver 3 nombres', res.avisos)
+            self.assertIn('shodan: se acabó el tiempo de la corrida antes de resolver 4 nombres', res.avisos)
             self.assertEqual(res.avisos[0], shodan.NO_SE_GRABO)
             self.assertEqual(shodan.codigo_salida(res), 3)
             self.assertEqual({p.name: p.read_bytes() for p in carpeta.iterdir()}, archivos)
@@ -753,7 +758,9 @@ class Arreglos(unittest.TestCase):
                 self.assertEqual(shodan.codigo_salida(res), 2)
 
     def test_39_el_tiempo_de_la_corrida_acota_el_lifetime_y_las_esperas(self):
-        """tiempos-3: con 3 s restantes el A usa lifetime 3, y una espera de 15 s duerme solo lo que queda."""
+        """tiempos-3: con 3 s restantes el A usa lifetime 3. RC-166, 14: una espera después de la cual no quedaría
+        MIN_INTENTO más HOLGURA no se duerme, ni vale si el sueño se pasó, y sale el error del último intento, no un
+        SinTiempo que lo tape."""
         reloj = {'t': 0.0}
         dormidas = []
 
@@ -764,8 +771,14 @@ class Arreglos(unittest.TestCase):
         cliente = shodan.ClienteShodan(resolver=dns, cronometro=lambda: reloj['t'], dormir=dormir)
         cliente.empezar()
         reloj['t'] = shodan.TIEMPO_CORRIDA - 8
-        cliente.esperar(15)
-        self.assertEqual(dormidas, [8])
+        self.assertIs(cliente.esperar(15), False)
+        self.assertIs(cliente.esperar(7), False)     # quedaría 1, menos que MIN_INTENTO más HOLGURA
+        self.assertIs(cliente.esperar(6.5), True)
+        self.assertEqual(dormidas, [6.5])
+        reloj['t'] = shodan.TIEMPO_CORRIDA - 8       # un sueño que se pasa 0.2 s: antes quedan 1.15 y después 0.95
+        with mock.patch.object(cliente, 'dormir', lambda s: dormir(s + 0.2)):
+            self.assertIs(cliente.esperar(6.85), False)
+        self.assertEqual(dormidas, [6.5, 6.85 + 0.2])
         reloj['t'] = shodan.TIEMPO_CORRIDA - 9   # falla con lifetime 5, duerme 5 y al segundo intento quedan 4
         self.assertEqual(cliente.resolver_a(DOMINIO)['ips'], [CAMARA])
         self.assertEqual(dns.lifetimes, [shodan.TIMEOUT_DNS, 4])
@@ -773,10 +786,13 @@ class Arreglos(unittest.TestCase):
         dns2 = ResolvedorSimulado({'x.olmardo.com': 'falla'})
         cliente.resolver = dns2
         dormidas.clear()
-        with self.assertRaises(shodan.SinTiempo):
+        with self.assertRaises(FuenteNoResponde) as e:
             cliente.resolver_a('x.olmardo.com')
-        self.assertEqual(dns2.lifetimes, [3])
-        self.assertEqual(dormidas, [3])   # la espera de 5 s se acota a los 3 que quedaban, y el siguiente es SinTiempo
+        self.assertNotIsInstance(e.exception, shodan.SinTiempo)
+        self.assertEqual(str(e.exception), 'shodan: el DNS no respondió al A de x.olmardo.com después de 1 intento,'
+                                           ' sin tiempo para otro (ConsultaFallida: Timeout: ningún servidor'
+                                           ' respondió)')
+        self.assertEqual((dns2.lifetimes, dormidas), ([3], []))   # ni la espera de 5 s ni un intento de menos de 1 s
 
     def test_40_las_cve_se_normalizan_antes_de_quitar_repetidas(self):
         """tiempos-6: CVE-2014-0160 escrita con ceros de más o en minúsculas es la misma: un solo hallazgo.
@@ -807,8 +823,9 @@ class Arreglos(unittest.TestCase):
         """re-contrato-1: los únicos recortes que no impiden grabar son los topes deterministas: PAGINAS_CT (dos páginas
         llenas, sin la vacía que cierra), MAX_NOMBRES, MAX_IPS y MAX_CVE. La corrida queda parcial (código 2), se graba
         y --reproducir da lo mismo."""
-        nombres = ['n%02d.olmardo.com' % i for i in range(12)]
-        ct = [paginas(*nombres[:6])[0], paginas(*nombres[6:], id_=9201)[0]]
+        nombres = ['n%02d.olmardo.com' % i for i in range(shodan.MAX_NOMBRES + 2)]
+        mitad = len(nombres) // 2
+        ct = [paginas(*nombres[:mitad])[0], paginas(*nombres[mitad:], id_=9201)[0]]
         zona = {DOMINIO: a(CAMARA, *('20.69.155.%d' % i for i in range(1, 11)))}
         cves = ['CVE-2024-%04d' % (1000 + i) for i in range(30)]
         with tempfile.TemporaryDirectory() as d:
@@ -817,19 +834,22 @@ class Arreglos(unittest.TestCase):
             res = recolectar(http, ResolvedorSimulado(zona), modo='grabar', carpeta=carpeta, nueva=True)
             self.assertEqual(len([u for u in http.urls if '?' in u]), shodan.PAGINAS_CT)
             self.assertNotIn(shodan.NO_SE_GRABO, res.avisos)
-            for aviso in ('shodan: Cert Spotter no dio todas sus páginas', 'shodan: se resolvieron 10 de 13 nombres',
+            for aviso in ('shodan: Cert Spotter no dio todas sus páginas',
+                          'shodan: se resolvieron %d de %d nombres' % (shodan.MAX_NOMBRES, shodan.MAX_NOMBRES + 3),
                           'shodan: se consultaron 10 de 11 IP', 'shodan: %s trae 30 CVE' % CAMARA):
                 self.assertTrue(any(x.startswith(aviso) for x in res.avisos), aviso)
             self.assertEqual(shodan.codigo_salida(res), 2)
+            self.assertEqual(len(res.omitidos), 5)   # las 5 CVE que MAX_CVE dejó fuera
             self.assertTrue(list(carpeta.glob('internetdb_*.json')))
             otra = recolectar(HttpSimulado(), ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
-        self.assertEqual((otra.activos, otra.hallazgos, otra.sin_cobertura, otra.avisos),
-                         (res.activos, res.hallazgos, res.sin_cobertura, res.avisos))
+        self.assertEqual((otra.activos, otra.hallazgos, otra.sin_cobertura, otra.avisos, otra.revisados, otra.sin_revisar,
+                          otra.omitidos),
+                         (res.activos, res.hallazgos, res.sin_cobertura, res.avisos, res.revisados, res.sin_revisar, res.omitidos))
 
     def test_42_sin_grabar_el_cli_sale_con_3_y_el_aviso_entra_en_los_10_del_orquestador(self):
         """re-contrato-2 y re-contrato-3: python -m cirdan.recolectores.shodan --grabar sale con 3 si no escribió, y
-        con 0 si grabó una corrida completa. Con 8 A caídos hay más de 10 avisos y NO_SE_GRABO sigue en avisos[:10],
-        lo que guarda el orquestador en raw_payload."""
+        con 0 si grabó una corrida completa. Con 9 IP que no responden en InternetDB hay más de 10 avisos y NO_SE_GRABO
+        sigue en avisos[:10], lo que guarda el orquestador en raw_payload. Los A caídos ya van en un solo aviso."""
         with tempfile.TemporaryDirectory() as d, mock.patch.object(shodan, 'CARPETA_GRABADAS', Path(d)), \
                 mock.patch.dict(os.environ, {'DOMINIOS_EN_VIVO': DOMINIO}), \
                 mock.patch.object(shodan.time, 'sleep', lambda s: None), \
@@ -844,11 +864,11 @@ class Arreglos(unittest.TestCase):
                 self.assertEqual(shodan._main([DOMINIO, '--grabar']), 3)
             self.assertIn('aviso: ' + shodan.NO_SE_GRABO, salida.getvalue())
             self.assertEqual({p.name: p.read_bytes() for p in (Path(d) / DOMINIO).iterdir()}, archivos)
-        nombres = ['n%d.olmardo.com' % i for i in range(8)]
-        zona = dict({DOMINIO: a(CAMARA)}, **{n: 'falla' for n in nombres})
+        caidas = ['20.69.155.%d' % i for i in range(1, 11)]
+        zona = {DOMINIO: a(CAMARA, *caidas)}
         with tempfile.TemporaryDirectory() as d:
-            res = recolectar(HttpSimulado(paginas(*nombres), {CAMARA: CAMARA_8080}), ResolvedorSimulado(zona),
-                             modo='grabar', carpeta=Path(d) / DOMINIO, nueva=True)
+            res = recolectar(HttpSimulado(ips=dict({CAMARA: CAMARA_8080}, **{ip: 503 for ip in caidas})),
+                             ResolvedorSimulado(zona), modo='grabar', carpeta=Path(d) / DOMINIO, nueva=True)
         self.assertGreater(len(res.avisos), 10)
         self.assertEqual(res.avisos[0], shodan.NO_SE_GRABO)
         self.assertIn(shodan.NO_SE_GRABO, res.avisos[:10])
@@ -876,17 +896,17 @@ class Arreglos(unittest.TestCase):
                 return self.partes.pop(0)[:n] if self.partes else b''
 
         lenta = Lenta([b'{'] * 100, 5)
-        with mock.patch.object(shodan.urllib.request, 'urlopen', lambda req, timeout: lenta):
+        with mock.patch.object(shodan.transporte, 'abrir', lambda req, plazo, cronometro: lenta):
             with self.assertRaises(shodan.SinTiempo):
                 shodan._descargar(shodan.URL_INTERNETDB + CAMARA, 10, cronometro=lambda: reloj['t'])
         self.assertEqual(lenta.lecturas, 3)    # a los 15 s ya no lee otra parte
         reloj['t'] = 0.0
         rapida = Lenta([b'{"ports":', b' [8080]}'], 1)
-        with mock.patch.object(shodan.urllib.request, 'urlopen', lambda req, timeout: rapida):
+        with mock.patch.object(shodan.transporte, 'abrir', lambda req, plazo, cronometro: rapida):
             self.assertEqual(shodan._descargar(shodan.URL_INTERNETDB + CAMARA, 10, cronometro=lambda: reloj['t']),
                              b'{"ports": [8080]}')
-        enorme = Lenta([b'x' * shodan.BLOQUE] * 20, 0)
-        with mock.patch.object(shodan.urllib.request, 'urlopen', lambda req, timeout: enorme), \
+        enorme = Lenta([b'x' * shodan.transporte.BLOQUE] * 20, 0)
+        with mock.patch.object(shodan.transporte, 'abrir', lambda req, plazo, cronometro: enorme), \
                 self.assertRaises(ValueError):
             shodan._descargar(shodan.URL_INTERNETDB + CAMARA, 10, cronometro=lambda: 0)
 
@@ -905,6 +925,388 @@ class Arreglos(unittest.TestCase):
         with self.assertRaises(shodan.SinTiempo):
             cliente.internetdb(RESERVAS, DOMINIO)
         self.assertEqual(cliente.consultas, shodan.INTENTOS + 1)
+
+
+    def test_43b_con_cobertura_parcial_revisados_lleva_las_partes_revisadas_completas(self):
+        """#23: cada puerto lleva su IP como parte y cada CVE su IP con '/cve'. Con la cobertura parcial, revisados
+        lleva las partes que InternetDB respondió sin campos rotos (también un 404) y las que una corrida completa
+        tampoco consulta (CDN). No van la IP que no respondió, los puertos de una IP con 'ports' roto ni las cortadas
+        por MAX_IPS. Si se conocen todos los nombres, sin_revisar lleva las demás partes de sus IP. Con todo revisado,
+        los dos quedan en None."""
+        rota, sin_datos = '20.69.155.1', '20.69.155.2'
+        zona = {DOMINIO: a(CLOUDFLARE), 'camaras.olmardo.com': a(CAMARA), 'reservas.olmardo.com': a(RESERVAS),
+                'eventos.olmardo.com': a(rota), 'www.olmardo.com': a(sin_datos)}
+        nombres = paginas('camaras.olmardo.com', 'eventos.olmardo.com', 'reservas.olmardo.com', 'www.olmardo.com')
+        con_rdp = internetdb(CAMARA, ports=[3389], vulns=['CVE-2024-0001'])
+        completo = recolectar(HttpSimulado(nombres, {CAMARA: con_rdp, RESERVAS: internetdb(RESERVAS, ports=[3389])}),
+                              ResolvedorSimulado({k: v for k, v in zona.items() if v != a(rota)}))
+        self.assertEqual((completo.revisados, completo.sin_revisar), (None, None))
+        self.assertEqual({(h.codigo, tuple(h.partes)) for h in completo.hallazgos},
+                         {('exposed_rdp', (CAMARA,)), ('known_vulnerability', (CAMARA + '/cve',)),
+                          ('exposed_rdp', (RESERVAS,))})
+        http = HttpSimulado(nombres, {CAMARA: con_rdp, RESERVAS: 503, rota: {'ports': 'muchos'}})
+        res = recolectar(http, ResolvedorSimulado(zona))
+        self.assertTrue(any(x.startswith(shodan.PARCIAL) for x in res.avisos), res.avisos)
+        self.assertCountEqual(res.revisados, [CAMARA, CAMARA + '/cve', rota + '/cve', sin_datos, sin_datos + '/cve',
+                                              CLOUDFLARE, CLOUDFLARE + '/cve'])
+        self.assertCountEqual(res.sin_revisar, [RESERVAS, RESERVAS + '/cve', rota])
+        self.assertEqual({(h.codigo, tuple(h.partes)) for h in res.hallazgos},
+                         {('exposed_rdp', (CAMARA,)), ('known_vulnerability', (CAMARA + '/cve',))})
+        self.assertNotIn('exposed_rdp', res.sin_cobertura)   # el código trae hallazgos: solo las partes protegen a RESERVAS
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        muchas = ['20.69.157.%d' % i for i in range(1, shodan.MAX_IPS + 2)]
+        res = recolectar(HttpSimulado(ips={muchas[0]: internetdb(muchas[0], ports=[3389])}),
+                         ResolvedorSimulado({DOMINIO: a(*muchas)}))
+        self.assertEqual(res.revisados, [p for ip in muchas[:shodan.MAX_IPS] for p in (ip, ip + '/cve')])
+        self.assertEqual(res.sin_revisar, [muchas[-1], muchas[-1] + '/cve'])   # la última quedó fuera por MAX_IPS
+        res = recolectar(HttpSimulado([503] * shodan.INTENTOS_CT, {CAMARA: internetdb(CAMARA, ports=[3389])}),
+                         ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+        # sin Cert Spotter no se saben todas las IP del dominio: solo se cierra lo de las revisadas
+        self.assertEqual((res.revisados, res.sin_revisar), ([CAMARA, CAMARA + '/cve'], None))
+
+    def test_43d_con_mas_de_10_nombres_se_saben_todas_las_ip(self):
+        """RC-55: 12 nombres ya no cortan los nombres. Con todo respondido la corrida es completa, y si una IP no responde,
+        sin_revisar lleva sus partes: así el orquestador cierra lo de una IP que ya no es del dominio. Solo si los nombres
+        pasan de MAX_NOMBRES no se saben todas las IP y sin_revisar queda en None."""
+        nombres = ['n%02d.olmardo.com' % i for i in range(12)]
+        zona = dict({DOMINIO: a(CAMARA)}, **{n: a(RESERVAS if i % 2 else CAMARA) for i, n in enumerate(nombres)})
+        con_rdp = {CAMARA: internetdb(CAMARA, ports=[3389]), RESERVAS: internetdb(RESERVAS, ports=[3389])}
+        res = recolectar(HttpSimulado(paginas(*nombres), con_rdp), ResolvedorSimulado(zona))
+        self.assertEqual((res.revisados, res.sin_revisar), (None, None))
+        self.assertEqual(shodan.codigo_salida(res), 0)
+        res = recolectar(HttpSimulado(paginas(*nombres), dict(con_rdp, **{RESERVAS: 503})), ResolvedorSimulado(zona))
+        self.assertEqual((res.revisados, res.sin_revisar), ([CAMARA, CAMARA + '/cve'], [RESERVAS, RESERVAS + '/cve']))
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        muchos = ['m%03d.olmardo.com' % i for i in range(shodan.MAX_NOMBRES)]   # con la raíz pasan de MAX_NOMBRES
+        res = recolectar(HttpSimulado(paginas(*muchos), {CAMARA: internetdb(CAMARA, ports=[3389])}),
+                         ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+        self.assertTrue(any(x.startswith('shodan: se resolvieron %d de %d nombres' % (shodan.MAX_NOMBRES,
+                                                                                       shodan.MAX_NOMBRES + 1))
+                            for x in res.avisos), res.avisos)
+        self.assertEqual((res.revisados, res.sin_revisar), ([CAMARA, CAMARA + '/cve'], None))
+
+    def test_43e_los_a_que_no_responden_dejan_tiempo_para_internetdb(self):
+        """shodan-1 (RC-55): 11 nombres con el DNS caído, que van antes de 30 que sí resuelven, tardan 35 s cada uno.
+        Sin RESERVA_INTERNETDB se comían los 360 s y no se consultaba ninguna IP. Ahora los A se cortan a tiempo, la
+        IP de la raíz se consulta, la corrida queda parcial y el aviso del tiempo cabe en los 10 que guarda el
+        orquestador porque los A fallidos van en uno solo."""
+        reloj = {'t': 0.0}
+        rotos = ['a%02d.olmardo.com' % i for i in range(11)]
+        buenos = ['b%02d.olmardo.com' % i for i in range(30)]
+        zona = dict({DOMINIO: a(CAMARA)}, **{n: 'falla' for n in rotos},
+                    **{n: a('20.69.160.%d' % (i + 1)) for i, n in enumerate(buenos)})
+
+        class Lento(ResolvedorSimulado):
+            def __call__(self, nombre, lifetime=shodan.TIMEOUT_DNS):
+                try:
+                    return super().__call__(nombre, lifetime)
+                except shodan.ConsultaFallida:
+                    reloj['t'] += lifetime
+                    raise
+
+        def dormir(s):
+            reloj['t'] += s
+        http = HttpSimulado(paginas(*rotos, *buenos), {CAMARA: internetdb(CAMARA, ports=[3389])})
+        cliente = shodan.ClienteShodan(carpeta=shodan.carpeta_de(DOMINIO), descargar=http, resolver=Lento(zona),
+                                       cronometro=lambda: reloj['t'], dormir=dormir)
+        res = shodan.recolectar(DOMINIO, cliente, ahora=AHORA)
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertEqual(http.consultadas(), {CAMARA})
+        self.assertEqual([h.codigo for h in res.hallazgos], ['exposed_rdp'])
+        self.assertLessEqual(reloj['t'], shodan.TIEMPO_CORRIDA - shodan.RESERVA_INTERNETDB)
+        self.assertEqual((res.revisados, res.sin_revisar), ([CAMARA, CAMARA + '/cve'], None))
+        tiempo = [i for i, x in enumerate(res.avisos) if x.startswith('shodan: se acabó el tiempo de la corrida antes '
+                                                                       'de resolver')]
+        self.assertEqual(len(tiempo), 1, res.avisos)
+        self.assertLess(tiempo[0], 10, res.avisos)
+        # 7 A de 35 s caben en los 250 s. El octavo empieza con 5 s, falla su único intento y cuenta como A fallido
+        # aunque no quedara tiempo para otro (RC-166), y el aviso lo dice
+        [fallidos] = [x for x in res.avisos if 'no respondió al A' in x]
+        self.assertTrue(fallidos.startswith('shodan: el DNS no respondió al A de 8 nombres (1 sin tiempo para otro '
+                                            'intento): a00.olmardo.com, '), fallidos)
+        self.assertTrue(fallidos.endswith(' y 3 más'), fallidos)
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+
+    def test_43f_la_ip_de_la_raiz_va_antes_del_corte_de_max_ips(self):
+        """shodan-2 (RC-55): con la raíz en 52.10.0.5 y 15 subdominios en 20.69.x, el orden por dirección dejaba la raíz
+        fuera de MAX_IPS en cada escaneo. Ahora sus IP van primero y su RDP se ve."""
+        raiz = '52.10.0.5'
+        subs = ['s%02d.olmardo.com' % i for i in range(15)]
+        zona = dict({DOMINIO: a(raiz)}, **{n: a('20.69.%d.10' % (140 + i)) for i, n in enumerate(subs)})
+        http = HttpSimulado(paginas(*subs), {raiz: internetdb(raiz, ports=[3389])})
+        res = recolectar(http, ResolvedorSimulado(zona))
+        self.assertIn(raiz, http.consultadas())
+        self.assertEqual(len(http.consultadas()), shodan.MAX_IPS)
+        self.assertEqual([h.codigo for h in res.hallazgos], ['exposed_rdp'])
+        self.assertTrue(any(x.startswith('shodan: se consultaron 10 de 16 IP en InternetDB') for x in res.avisos),
+                        res.avisos)
+        fuera = sorted((x.valor for x in res.activos if x.atributos.get('internetdb') == 'sin_consultar'),
+                       key=ipaddress.ip_address)
+        self.assertEqual(fuera, ['20.69.%d.10' % (140 + i) for i in range(9, 15)])
+
+    def test_43g_una_grabacion_con_el_tope_viejo_de_nombres_da_un_solo_aviso(self):
+        """shodan-5 (RC-55): una grabación hecha con MAX_NOMBRES en 10 no trae los A de los demás nombres. Al reproducir
+        van en un aviso que dice por qué, no en uno por nombre como si el DNS no hubiera respondido, y la corrida queda
+        parcial por la grabación."""
+        nombres = ['n%02d.olmardo.com' % i for i in range(12)]
+        zona = dict({DOMINIO: a(CAMARA)}, **{n: a(RESERVAS) for n in nombres})
+        ips = {CAMARA: internetdb(CAMARA, ports=[3389]), RESERVAS: internetdb(RESERVAS, ports=[8080])}
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(shodan, 'MAX_NOMBRES', 10):
+                vieja = recolectar(HttpSimulado(paginas(*nombres), ips), ResolvedorSimulado(zona), modo='grabar',
+                                   carpeta=Path(d) / DOMINIO, nueva=True)
+            self.assertNotIn(shodan.NO_SE_GRABO, vieja.avisos)
+            http = HttpSimulado()
+            res = recolectar(http, ResolvedorSimulado({}), modo='reproducir', carpeta=Path(d) / DOMINIO)
+        self.assertEqual(http.urls, [])
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertFalse([x for x in res.avisos if 'no respondió al A' in x], res.avisos)
+        self.assertIn('shodan: la grabación no trae el A de 3 nombres, se grabó con otro tope de nombres: '
+                      'n09.olmardo.com, n10.olmardo.com, n11.olmardo.com', res.avisos)
+        self.assertIsNone(res.sin_revisar)
+        self.assertEqual(sorted(res.revisados), sorted([CAMARA, CAMARA + '/cve', RESERVAS, RESERVAS + '/cve']))
+        self.assertEqual({h.codigo for h in res.hallazgos}, {'exposed_rdp', 'exposed_service'})
+
+    def test_43c_el_tope_de_cve_y_los_campos_que_no_deciden_hallazgos(self):
+        """#23: una IP con más de MAX_CVE CVE reporta las más recientes y pone la huella de las demás en omitidos,
+        que siguen ahí: el orquestador no cierra las que se reportaron antes y la corrida no queda parcial. 'cpes' o
+        'hostnames' rotos no quitan nada de revisados: no deciden ningún hallazgo. 'vulns' roto solo quita las CVE y
+        'tags' roto quita las dos partes."""
+        vulns = ['CVE-2024-%04d' % i for i in range(1, shodan.MAX_CVE + 2)]
+        res = recolectar(HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=[3389], vulns=vulns)}),
+                         ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+        self.assertEqual((res.revisados, res.sin_revisar), (None, None))
+        datos = {'tags': [], 'hostnames_ajenos': 0, 'cpes': []}
+        vieja = shodan.hallazgo_cve(DOMINIO, CAMARA, 'CVE-2024-0001', [DOMINIO], datos, AHORA).huella
+        self.assertEqual(res.omitidos, [vieja])   # la más vieja quedó fuera del tope
+        self.assertNotIn(vieja, [h.huella for h in res.hallazgos])
+        self.assertEqual(res.sin_cobertura, list(shodan.SIN_LLAVE))
+        self.assertFalse(any(x.startswith(shodan.PARCIAL) for x in res.avisos), res.avisos)
+        self.assertEqual(shodan.codigo_salida(res), 0)
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        rotos = {'cpes': ({'cpes': 'x'}, [CAMARA, CAMARA + '/cve']),
+                 'hostnames': ({'hostnames': 'x'}, [CAMARA, CAMARA + '/cve']),
+                 'vulns': ({'vulns': ['nada']}, [CAMARA]), 'tags': ({'tags': 'x'}, []),
+                 'ports': ({'ports': 'x'}, [CAMARA + '/cve'])}
+        for campo, (cambio, esperado) in rotos.items():
+            with self.subTest(campo=campo):
+                res = recolectar(HttpSimulado(ips={CAMARA: dict(internetdb(CAMARA, ports=[3389]), **cambio)}),
+                                 ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+                self.assertEqual(res.revisados, esperado)
+                self.assertEqual(res.sin_revisar, [p for p in (CAMARA, CAMARA + '/cve') if p not in esperado])
+
+    def test_52_un_5xx_con_retry_after_espera_lo_que_pide(self):
+        """RC-166, 15: el Retry-After de un 5xx alarga la espera antes del siguiente intento, hasta MAX_ESPERA aunque
+        pida más: un valor genérico como 30 o 3600 no quita los reintentos. Si todos fallan, sale el error de
+        con_reintentos con los intentos que se hicieron, que cuenta como la falla de red de la IP, y no SinTiempo."""
+        for valor in ('12', '15', '16', '40', '3600'):
+            with self.subTest(valor=valor):
+                pedidas, dormidas = [], []
+
+                def descargar(url, timeout, valor=valor, pedidas=pedidas):
+                    pedidas.append(url)
+                    if len(pedidas) == 1:
+                        raise error_http(url, 503, valor)
+                    return REAL_CAMARA
+                cliente = shodan.ClienteShodan(descargar=descargar, cronometro=Cronometro(0), dormir=dormidas.append)
+                cliente.empezar()
+                self.assertEqual(cliente.internetdb(CAMARA, DOMINIO)['ports'], [50000])
+                self.assertEqual((dormidas, cliente.consultas), ([min(int(valor), shodan.MAX_ESPERA)], 2))
+        dormidas = []
+
+        def caido(url, timeout):
+            raise error_http(url, 503, '3600')
+        cliente = shodan.ClienteShodan(descargar=caido, cronometro=Cronometro(0), dormir=dormidas.append)
+        cliente.empezar()
+        with self.assertRaises(FuenteNoResponde) as e:
+            cliente.internetdb(CAMARA, DOMINIO)
+        self.assertNotIsInstance(e.exception, shodan.SinTiempo)
+        self.assertEqual(str(e.exception), 'shodan: InternetDB (%s) no respondió después de 3 intentos (HTTPError: '
+                                           'HTTP Error 503: falla 503)' % CAMARA)
+        self.assertEqual((dormidas, cliente.consultas), ([15, 15], 3))
+
+    def test_53_ninguna_redireccion_se_sigue_y_el_plazo_es_sin_tiempo(self):
+        """RC-166, 6 y 7: _descargar usa transporte.descargar. Una redirección no se puede leer y no se reintenta, el
+        plazo vencido del transporte es SinTiempo y solo se pide por https."""
+        def redirige(req, plazo, cronometro):
+            raise shodan.transporte.Redirigida(302, 'internetdb.shodan.io')
+
+        def vence(req, plazo, cronometro):
+            raise shodan.transporte.PlazoVencido('internetdb.shodan.io no terminó dentro de su plazo')
+
+        def sin_red(req, plazo, cronometro):
+            raise AssertionError('se consultó la red: %s' % req.full_url)
+        with mock.patch.object(shodan.transporte, 'abrir', redirige):
+            with self.assertRaises(shodan.RespuestaIlegible) as e:
+                shodan._descargar(shodan.URL_INTERNETDB + CAMARA, 10)
+            self.assertEqual(str(e.exception),
+                             'shodan: internetdb.shodan.io redirigió (302) y no se siguen redirecciones')
+            cliente = shodan.ClienteShodan(cronometro=Cronometro(0), dormir=lambda s: None)
+            cliente.empezar()
+            with self.assertRaises(shodan.RespuestaIlegible):
+                cliente.internetdb(CAMARA, DOMINIO)
+            self.assertEqual(cliente.consultas, 1)
+        with mock.patch.object(shodan.transporte, 'abrir', vence), self.assertRaises(shodan.SinTiempo) as e:
+            shodan._descargar(shodan.URL_INTERNETDB + CAMARA, 10)
+        self.assertEqual(str(e.exception), 'shodan: la respuesta tardó más de 10 s')
+        with mock.patch.object(shodan.transporte, 'abrir', sin_red), self.assertRaises(ValueError):
+            shodan._descargar('http://internetdb.shodan.io/' + CAMARA, 10)
+
+    def test_54_sin_tiempo_para_otro_intento_la_ip_cuenta_como_falla_de_red(self):
+        """RC-166, 14: una IP cuyo siguiente intento ya no cabe en la corrida queda como falla de red con su error, no
+        como SinTiempo, que antes lo tapaba. El reloj avanza de verdad: el 503 de la IP `lenta` llega con 4.5 s
+        restantes, la espera de 5 s no cabe y la IP siguiente ya no empieza (MIN_RESTANTE). Si otra IP respondió, la
+        fuente queda succeeded con el aviso. Si ninguna respondió, aunque el tiempo cortara las demás, o si la única IP
+        consultable falló, la fuente falla con FuenteNoResponde para que el orquestador la reintente."""
+        reloj = {'t': 0.0}
+
+        class Tarda(HttpSimulado):   # la consulta a InternetDB de `lenta` deja a la corrida con 4.5 s
+            lenta = CAMARA
+
+            def __call__(self, url, timeout):
+                if '?' not in url and url.rsplit('/', 1)[1] == self.lenta and self.lenta not in self.por_ip:
+                    reloj['t'] = shodan.TIEMPO_CORRIDA - 4.5
+                return super().__call__(url, timeout)
+        # Otra IP respondió: queda succeeded con el aviso de la que no
+        http = Tarda(ct_olmardo(), {CAMARA: CAMARA_8080, RESERVAS: 503})
+        http.lenta = RESERVAS
+        res = recolectar(http, ResolvedorSimulado(zona_olmardo()), cronometro=lambda: reloj['t'])
+        self.assertEqual((http.por_ip, res.estado), ({CAMARA: 1, RESERVAS: 1}, 'succeeded'))
+        self.assertIn('shodan: InternetDB (%s) no respondió después de 1 intento, sin tiempo para otro (HTTPError: '
+                      'HTTP Error 503: falla 503)' % RESERVAS, res.avisos)
+        self.assertIn(RESERVAS, res.sin_revisar)
+        # CAMARA respondió, `segunda` falló por la red y el tiempo cortó RESERVAS: queda succeeded con sus hallazgos
+        reloj['t'] = 0.0
+        segunda = '20.69.155.10'   # entre CAMARA y RESERVAS: las IP se consultan en orden
+        http = Tarda(paginas('camaras.olmardo.com', 'api.olmardo.com', 'reservas.olmardo.com'),
+                     {CAMARA: CAMARA_8080, segunda: 503, RESERVAS: 503})
+        http.lenta = segunda
+        res = recolectar(http, ResolvedorSimulado(zona_olmardo(**{'api.olmardo.com': a(segunda)})),
+                         cronometro=lambda: reloj['t'])
+        self.assertEqual((http.por_ip, res.estado), ({CAMARA: 1, segunda: 1}, 'succeeded'))
+        self.assertIn('exposed_service', {h.codigo for h in res.hallazgos})
+        self.assertIn('shodan: el tiempo de la corrida cortó 1 IP en InternetDB, sin consultar o con la lectura a '
+                      'medias', res.avisos)
+        self.assertTrue({segunda, RESERVAS} <= set(res.sin_revisar), res.sin_revisar)
+        # Ninguna respondió: la primera falló por la red y el tiempo cortó la otra (RC-166, delta-tiempos-1)
+        reloj['t'] = 0.0
+        http = Tarda(ct_olmardo(), {CAMARA: 503, RESERVAS: 503})
+        with self.assertRaises(FuenteNoResponde) as e:
+            recolectar(http, ResolvedorSimulado(zona_olmardo()), cronometro=lambda: reloj['t'])
+        self.assertEqual((http.por_ip, str(e.exception)),
+                         ({CAMARA: 1}, 'shodan: InternetDB no respondió por ninguna IP de olmardo.com (por la red: '
+                                       '1, cortadas por el tiempo: 1)'))
+        # Sin una falla de red, el tiempo que corta todas las IP deja la fuente succeeded con el aviso
+
+        class SinPlazo(HttpSimulado):   # la lectura de la primera IP agota la corrida: SinTiempo, no falla de red
+            def __call__(self, url, timeout):
+                if '?' not in url:
+                    self.por_ip[url.rsplit('/', 1)[1]] = 1
+                    reloj['t'] = shodan.TIEMPO_CORRIDA - 0.5
+                    raise shodan.SinTiempo('shodan: la respuesta tardó más de %d s' % timeout)
+                return super().__call__(url, timeout)
+        reloj['t'] = 0.0
+        http = SinPlazo(ct_olmardo())
+        res = recolectar(http, ResolvedorSimulado(zona_olmardo()), cronometro=lambda: reloj['t'])
+        self.assertEqual((http.por_ip, res.estado), ({CAMARA: 1}, 'succeeded'))
+        self.assertIn('shodan: el tiempo de la corrida cortó 2 IP en InternetDB, sin consultar o con la lectura a '
+                      'medias', res.avisos)
+        self.assertTrue({CAMARA, RESERVAS} <= set(res.sin_revisar), res.sin_revisar)
+        # Una sola IP consultable: su falla de red es la de todas
+        reloj['t'] = 0.0
+        http = Tarda(paginas('camaras.olmardo.com'), {CAMARA: 503})
+        with self.assertRaises(FuenteNoResponde) as e:
+            recolectar(http, ResolvedorSimulado({DOMINIO: a(CLOUDFLARE), 'camaras.olmardo.com': a(CAMARA)}),
+                       cronometro=lambda: reloj['t'])
+        self.assertEqual((http.por_ip, str(e.exception)),
+                         ({CAMARA: 1}, 'shodan: InternetDB no respondió por ninguna IP de olmardo.com'))
+
+    def test_55_el_aviso_de_los_a_dice_cuantos_quedaron_sin_tiempo_para_otro_intento(self):
+        """RC-166, buscador de la unión con dev, 1: el aviso único de los A fallidos tiraba el ', sin tiempo para otro'
+        de cada error. Con la raíz bien y a00 a a07 con el DNS caído (35 s cada uno), a07 es el último nombre y empieza
+        con 5 s antes de RESERVA_INTERNETDB: falla su único intento, cuenta como A fallido y no queda otro aviso del
+        tiempo. Ahora el aviso de los A lo dice, sin cambiar estado ni cobertura. Con todos sus intentos no dice nada
+        del tiempo, y un solo A fallido sale con su error tal cual."""
+        reloj = {'t': 0.0}
+
+        class Lento(ResolvedorSimulado):
+            def __call__(self, nombre, lifetime=shodan.TIMEOUT_DNS):
+                try:
+                    return super().__call__(nombre, lifetime)
+                except shodan.ConsultaFallida:
+                    reloj['t'] += lifetime
+                    raise
+
+        class Tarda(HttpSimulado):   # Cert Spotter deja a la corrida en `desde`
+            desde = 0.0
+
+            def __call__(self, url, timeout):
+                if '?' in url:
+                    reloj['t'] = self.desde
+                return super().__call__(url, timeout)
+
+        def dormir(s):
+            reloj['t'] += s
+
+        def correr(rotos, desde=0.0):
+            reloj['t'] = 0.0
+            http = Tarda(paginas(*rotos), {CAMARA: internetdb(CAMARA, ports=[3389])})
+            http.desde = desde
+            cliente = shodan.ClienteShodan(carpeta=shodan.carpeta_de(DOMINIO), descargar=http,
+                                           resolver=Lento(dict({DOMINIO: a(CAMARA)}, **{n: 'falla' for n in rotos})),
+                                           cronometro=lambda: reloj['t'], dormir=dormir)
+            return shodan.recolectar(DOMINIO, cliente, ahora=AHORA)
+        res = correr(['a%02d.olmardo.com' % i for i in range(8)])
+        self.assertEqual(reloj['t'], shodan.TIEMPO_CORRIDA - shodan.RESERVA_INTERNETDB)
+        self.assertEqual((res.estado, [h.codigo for h in res.hallazgos]), ('succeeded', ['exposed_rdp']))
+        self.assertEqual((res.revisados, res.sin_revisar), ([CAMARA, CAMARA + '/cve'], None))
+        self.assertIn('shodan: el DNS no respondió al A de 8 nombres (1 sin tiempo para otro intento): a00.olmardo.com,'
+                      ' a01.olmardo.com, a02.olmardo.com, a03.olmardo.com, a04.olmardo.com y 3 más', res.avisos)
+        self.assertFalse([x for x in res.avisos if 'se acabó el tiempo' in x], res.avisos)
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        # Con sus 3 intentos el aviso no habla del tiempo
+        res = correr(['a00.olmardo.com', 'a01.olmardo.com'])
+        self.assertIn('shodan: el DNS no respondió al A de 2 nombres: a00.olmardo.com, a01.olmardo.com', res.avisos)
+        # Un solo A fallido, con 5 s: su error ya lo dice
+        res = correr(['a00.olmardo.com'], desde=shodan.TIEMPO_CORRIDA - shodan.RESERVA_INTERNETDB - 5)
+        self.assertIn('shodan: el DNS no respondió al A de a00.olmardo.com después de 1 intento, sin tiempo para otro '
+                      '(ConsultaFallida: Timeout: ningún servidor respondió)', res.avisos)
+        # con_reintentos marca el error con sin_tiempo solo si dormir devolvió False
+
+        def falla():
+            raise OSError('conexión cortada')
+        for dormir_, sin_tiempo in ((lambda s: False, True), (lambda s: None, False)):
+            with self.assertRaises(FuenteNoResponde) as e:
+                contrato.con_reintentos(falla, dormir=dormir_)
+            self.assertIs(e.exception.sin_tiempo, sin_tiempo)
+
+    def test_56_en_los_a_la_espera_descuenta_la_reserva_de_internetdb(self):
+        """RC-166, buscador de la unión con dev, 2: README.md decía 'ni un segundo' y ni él ni el docstring decían que
+        en los A esperar() mira restante(), que descuenta RESERVA_INTERNETDB, y pide MIN_INTENTO más HOLGURA: un A que
+        falla con 115 s por delante no espera los 5 s ni se reintenta, y uno con 117 s sí. Fuera de los A esa espera
+        cabe."""
+        self.assertEqual((shodan.MIN_INTENTO + shodan.HOLGURA, shodan.RESERVA_INTERNETDB), (1.1, 110))   # README.md
+        reloj = {'t': 0.0}
+        dormidas = []
+
+        def dormir(s):
+            dormidas.append(s)
+            reloj['t'] += s
+        dns = ResolvedorSimulado({'x.olmardo.com': 'falla', 'y.olmardo.com': ['falla', a(CAMARA)]})
+        cliente = shodan.ClienteShodan(resolver=dns, cronometro=lambda: reloj['t'], dormir=dormir)
+        cliente.empezar()
+        cliente.reserva = shodan.RESERVA_INTERNETDB
+        reloj['t'] = shodan.TIEMPO_CORRIDA - 115
+        with self.assertRaises(FuenteNoResponde) as e:
+            cliente.resolver_a('x.olmardo.com')
+        self.assertIn('x.olmardo.com después de 1 intento, sin tiempo para otro', str(e.exception))
+        self.assertEqual((dns.lifetimes, dormidas), ([shodan.TIMEOUT_DNS], []))
+        reloj['t'] = shodan.TIEMPO_CORRIDA - 117
+        self.assertEqual(cliente.resolver_a('y.olmardo.com')['ips'], [CAMARA])
+        self.assertEqual((dns.lifetimes, dormidas), ([shodan.TIMEOUT_DNS] * 2 + [2], [5]))
+        cliente.reserva = 0
+        reloj['t'] = shodan.TIEMPO_CORRIDA - 115
+        self.assertIs(cliente.esperar(5), True)
 
 
 class Geo(unittest.TestCase):
@@ -1003,13 +1405,16 @@ class Geo(unittest.TestCase):
                 http = HttpSimulado()
                 otra = recolectar(http, ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
         self.assertEqual(http.urls, [])
-        self.assertEqual((con_base.activos, con_base.hallazgos, con_base.sin_cobertura, con_base.avisos),
-                         (vivo.activos, vivo.hallazgos, vivo.sin_cobertura, vivo.avisos))
+        self.assertEqual((con_base.activos, con_base.hallazgos, con_base.sin_cobertura, con_base.avisos,
+                          con_base.revisados, con_base.sin_revisar, con_base.omitidos),
+                         (vivo.activos, vivo.hallazgos, vivo.sin_cobertura, vivo.avisos, vivo.revisados, vivo.sin_revisar,
+                          vivo.omitidos))
 
         def sin_geo(res):
             return [(a.tipo, a.valor, {k: v for k, v in a.atributos.items() if k not in CLAVES_GEO}) for a in res.activos]
         self.assertEqual(sin_geo(otra), sin_geo(vivo))
-        self.assertEqual((otra.hallazgos, otra.sin_cobertura), (vivo.hallazgos, vivo.sin_cobertura))
+        self.assertEqual((otra.hallazgos, otra.sin_cobertura, otra.revisados, otra.sin_revisar, otra.omitidos),
+                         (vivo.hallazgos, vivo.sin_cobertura, vivo.revisados, vivo.sin_revisar, vivo.omitidos))
         self.assertEqual(sorted(otra.avisos),
                          sorted(vivo.avisos + [geoip.aviso_sin_base('shodan', sin_base, sin_asn=shodan.SIN_CDN_POR_ASN)]))
         self.assertEqual((activo(otra, CAMARA).atributos['asn'], activo(vivo, CAMARA).atributos['asn']), (NO, 8075))
@@ -1021,7 +1426,7 @@ class Geo(unittest.TestCase):
         for texto in ('CNAME conocido', 'geoip.CDN_POR_ASN', 'nubes mixtas', 'otros fuera de la lista',
                       'sin la base de DB-IP'):
             self.assertIn(texto, shodan.LIMITES)
-        self.assertEqual(shodan.MAX_CONSULTAS, 64)   # la ubicación es local: no suma consultas
+        self.assertEqual(shodan.MAX_CONSULTAS, 184)   # la ubicación es local: no suma consultas
 
     def test_49_sin_la_base_de_asn_el_cdn_por_asn_se_consulta_y_el_aviso_lo_dice(self):
         """geo-G1: sin la base de ASN, Fastly sin CNAME sí llega a InternetDB (la conducta no cambia), y el único aviso
@@ -1088,17 +1493,34 @@ class Geo(unittest.TestCase):
 
 
 class Semilla(unittest.TestCase):
-    """base-3: lectura estática de db/semillas/007_shodan.sql, sin base."""
+    """base-3: lectura estática de db/semillas/007_shodan.sql y 011_shodan_nombres.sql, sin base."""
 
-    def test_1_shodan_tiene_10_corridas_por_dia_y_client_encoding_antes_de_begin(self):
-        texto = SEMILLA.read_text(encoding='utf-8')
+    @staticmethod
+    def limite_y_texto(semilla):
+        texto = semilla.read_text(encoding='utf-8')
         sin_comentarios = '\n'.join(linea.split('--')[0] for linea in texto.splitlines())
         [limite] = re.findall(r"UPDATE\s+data_sources\s+SET\s+daily_limit\s*=\s*(\d+)\s+WHERE\s+code\s*=\s*'shodan'",
                               sin_comentarios)
-        self.assertEqual(int(limite), 10 * shodan.MAX_CONSULTAS)
+        return int(limite), sin_comentarios
+
+    def test_1_shodan_tiene_10_corridas_por_dia_y_client_encoding_antes_de_begin(self):
+        limite, sin_comentarios = self.limite_y_texto(SEMILLA)
+        self.assertEqual(limite, 640)   # 10 corridas de 64, con MAX_NOMBRES en 10. La 011 lo sube
         self.assertIn("SET client_encoding = 'UTF8';", sin_comentarios)
         self.assertLess(sin_comentarios.index("SET client_encoding = 'UTF8';"), sin_comentarios.index('BEGIN;'))
         self.assertIn('AND daily_limit IS NULL', sin_comentarios)
+
+    def test_2_la_011_sube_el_limite_a_10_corridas_del_tope_nuevo_sin_pisar_uno_puesto_a_mano(self):
+        """RC-55: MAX_NOMBRES pasó a 50. La 011 deja otra vez 10 corridas del peor caso y solo cambia la fila si no tiene
+        límite o si tiene el 640 de la 007. shodan-3: uno puesto a mano menor que una corrida da un WARNING."""
+        limite, sin_comentarios = self.limite_y_texto(SEMILLA.with_name('011_shodan_nombres.sql'))
+        self.assertEqual(limite, 10 * shodan.MAX_CONSULTAS)
+        self.assertLess(sin_comentarios.index("SET client_encoding = 'UTF8';"), sin_comentarios.index('BEGIN;'))
+        self.assertRegex(sin_comentarios, r"AND\s+\(daily_limit\s+IS\s+NULL\s+OR\s+daily_limit\s*=\s*640\)")
+        self.assertRegex(sin_comentarios, r"code\s*=\s*'shodan'\s+AND\s+daily_limit\s*<\s*%d\)" % shodan.MAX_CONSULTAS)
+        self.assertIn("RAISE WARNING 'shodan tiene un límite diario menor que %d" % shodan.MAX_CONSULTAS, sin_comentarios)
+        self.assertEqual(sorted(p.name for p in SEMILLA.parent.glob('*shodan*.sql')),
+                         ['007_shodan.sql', '011_shodan_nombres.sql'])
 
 
 if __name__ == '__main__':

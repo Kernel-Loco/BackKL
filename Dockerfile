@@ -1,6 +1,15 @@
 # syntax=docker/dockerfile:1
 # API de Cirdan. La base y Valkey corren en sus propios contenedores (docker-compose.yml).
 
+# La imagen pide BuildKit: Docker Desktop, o Docker Engine con el plugin buildx. El builder clásico (DOCKER_BUILDKIT=0,
+# o Docker sin buildx) ignora ADD --checksum sin avisar, así que bajaría subfinder y gitleaks sin revisar su sha256, y
+# tampoco define TARGETARCH. Ese builder corre todas las etapas en orden y se detiene aquí, antes de bajar nada, con el
+# aviso de Docker de que --chmod pide BuildKit. BuildKit salta esta etapa porque ninguna otra la usa. No agregues
+# ARG TARGETARCH con valor por omisión: le gana a la plataforma que pone BuildKit, y en una Mac con Apple Silicon la
+# imagen arm64 llevaría los binarios amd64 (PR 79 y 81).
+FROM scratch AS pide-buildkit
+COPY --chmod=0644 requirements.txt /
+
 # subfinder 2.17.0 (#14b, RC-184) entra desde los zips del release oficial, en etapas aparte:
 # - El release se compila con CGO_ENABLED=0 (.goreleaser.yml de v2.17.0), así que el binario es estático
 #   y corre en python:3.14-slim (Debian, glibc). La imagen oficial projectdiscovery/subfinder es Alpine
@@ -29,7 +38,8 @@ RUN python -c "import os, pathlib, zipfile; z = zipfile.ZipFile('/tmp/subfinder.
 # gitleaks 8.21.2 (#16, RC-50), la misma versión del pre-commit (.pre-commit-config.yaml), entra igual que
 # subfinder: el tar.gz del release oficial por arquitectura, con su sha256 de gitleaks_8.21.2_checksums.txt.
 # El release se compila con CGO_ENABLED=0 y corre en python:3.14-slim. El release llama x64 a amd64.
-# Dependabot tampoco vigila esta versión: se sube a mano, con las dos URL, los dos hash y NOTICE.
+# Dependabot tampoco vigila esta versión: se sube a mano, con las dos URL, los dos hash y NOTICE, y con la imagen
+# nueva se vuelve a generar cirdan/recolectores/gitleaks_cirdan.toml (ver cirdan/recolectores/gitleaks_reglas.py).
 FROM python:3.14-slim AS gitleaks-tar-amd64
 ADD --checksum=sha256:5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba \
     https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz /tmp/gitleaks.tar.gz

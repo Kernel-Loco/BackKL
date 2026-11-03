@@ -3,7 +3,8 @@
 Revisan que el maestro tenga la forma de #21, que las copias no delaten la severidad, el bloque común, el reparto y la
 partición, que la misma semilla dé los mismos bytes, que acuerdo.py calcule bien el kappa y que el etiquetador LLM
 nunca vote y solo cubra a quien no entregó cuando su kappa contra las personas alcanza el umbral. Los otros LLM del
-bloque común (llm_sonnet.csv y llm_haiku.csv) tampoco votan: solo miden el acuerdo entre LLM.
+bloque común (llm_sonnet.csv y llm_haiku.csv) tampoco votan: solo miden el acuerdo entre LLM. Los cuatro CSV de los LLM
+salen de lo que devolvió cada agente (procedencia/), y su acuerdo con la clase esperada da los números del doc.
 
     python -m unittest -v pruebas/test_dataset_ml.py
 """
@@ -13,6 +14,7 @@ import csv
 import io
 import ipaddress
 import json
+import random
 import re
 import shutil
 import sys
@@ -75,7 +77,7 @@ class Maestro(unittest.TestCase):
             self.assertEqual(tuple(h)[len(EJEMPLO):], EXTRAS, h['id'])
 
     def test_2_caracteristicas_del_contrato_de_plugin(self):
-        # las mismas revisiones de pruebas/test_contrato_api.py:103-111
+        # las mismas revisiones de pruebas/test_contrato_api.py:103-113
         for h in MAESTRO:
             c = h['caracteristicas']
             self.assertEqual(tuple(c), contrato.CARACTERISTICAS, h['id'])
@@ -1083,6 +1085,140 @@ class DatasetDelRepo(unittest.TestCase):
         self.assertEqual(set(otros), set(acuerdo.LLMS_COMUN))
         for nombre, suyas in otros.items():
             self.assertEqual(set(suyas), {h['id'] for h in maestro if h['bloque'] == 'comun'}, nombre)
+
+
+PROCEDENCIA = generar_lote.CARPETA / 'procedencia'
+LOTES_LLM = ('lote_1', 'lote_2', 'lote_3', 'lote_4', 'lote_5')
+# De qué salida de procedencia/ y de qué partes sale cada CSV de etiquetas/. None: la salida es de un solo agente
+SALIDA_DE = {'llm': ('salida_opus.json', LOTES_LLM), 'llm_repeticion': ('salida_opus.json', ('comun_repeticion',)),
+             'llm_sonnet': ('salida_sonnet.json', None), 'llm_haiku': ('salida_haiku.json', None)}
+# Cómo se llama cada columna visible de la copia en el texto de entrada/
+CAMPOS_ENTRADA = {'id': 'id', 'título': 'titulo', 'tipo de activo': 'tipo_de_activo', 'activo': 'activo',
+                  'fuente': 'fuente', 'evidencia': 'evidencia', 'CVE': 'cve', 'CVSS': 'cvss', 'EPSS': 'epss',
+                  'KEV': 'kev'}
+
+
+def salida_llm(archivo):
+    return json.loads((PROCEDENCIA / archivo).read_text(encoding='utf-8'))
+
+
+def etiquetas_de_salida(nombre):
+    archivo, partes = SALIDA_DE[nombre]
+    salida = salida_llm(archivo)
+    return salida['etiquetas'] if partes is None else [e for parte in partes for e in salida[parte]['etiquetas']]
+
+
+def csv_de_salida(etiquetas):
+    """Como se escribieron los CSV de etiquetas/ el 22 oct: por id, la nota sin espacios en las orillas y con CRLF."""
+    f = io.StringIO()
+    w = csv.writer(f)
+    w.writerow(['id', 'etiqueta', 'nota'])
+    for e in sorted(etiquetas, key=lambda e: e['id']):
+        w.writerow([e['id'], e['etiqueta'], e['nota'].strip()])
+    return f.getvalue().encode('utf-8')
+
+
+def entrada_llm(parte):
+    """Los hallazgos de entrada/<parte>.txt en su orden, cada uno con sus campos tal como los leyó el agente."""
+    texto = (PROCEDENCIA / 'entrada' / ('%s.txt' % parte)).read_text(encoding='utf-8')
+    return [dict(linea.split(': ', 1) for linea in bloque.split('\n')) for bloque in texto.strip('\n').split('\n\n')]
+
+
+class Procedencia(unittest.TestCase):
+    """procedencia/ trae lo que recibió y devolvió cada agente LLM. De ahí salen los cuatro CSV de etiquetas/."""
+
+    def test_1_las_salidas_dan_los_csv_del_repo(self):
+        for nombre in SALIDA_DE:
+            self.assertEqual(csv_de_salida(etiquetas_de_salida(nombre)),
+                             (generar_lote.CARPETA / 'etiquetas' / ('%s.csv' % nombre)).read_bytes(), nombre)
+
+    def test_2_cada_agente_devolvio_justo_los_ids_de_su_entrada(self):
+        campos = json.loads((PROCEDENCIA / 'esquema_salida.json').read_text(encoding='utf-8'))
+        campos = campos['properties']['etiquetas']['items']
+        opus = salida_llm('salida_opus.json')
+        self.assertEqual(set(opus), set(LOTES_LLM) | {'comun_repeticion'})
+        for parte, suya in opus.items():
+            self.assertEqual(suya['faltan'], [], parte)
+            self.assertEqual([e['id'] for e in suya['etiquetas']], [h['id'] for h in entrada_llm(parte)], parte)
+        for archivo in ('salida_sonnet.json', 'salida_haiku.json'):
+            self.assertEqual(sorted(e['id'] for e in salida_llm(archivo)['etiquetas']),
+                             sorted(h['id'] for h in entrada_llm('comun_repeticion')), archivo)
+        for nombre in SALIDA_DE:
+            for e in etiquetas_de_salida(nombre):
+                self.assertEqual(set(e), set(campos['required']), nombre)
+                self.assertIn(e['etiqueta'], campos['properties']['etiqueta']['enum'], nombre)
+        # Las 425 del maestro una vez en los lotes, y el bloque común en el orden de random.Random(7)
+        self.assertEqual(sorted(h['id'] for parte in LOTES_LLM for h in entrada_llm(parte)), sorted(POR_ID))
+        orden = sorted(COMUN)
+        random.Random(7).shuffle(orden)
+        self.assertEqual([h['id'] for h in entrada_llm('comun_repeticion')], orden)
+
+    def test_3_la_entrada_es_el_texto_de_las_copias(self):
+        copias = {}
+        for etiquetador in ETIQUETADORES:
+            for fila in leer_copia(generar_lote.CARPETA, etiquetador):
+                copias[fila['id']] = fila
+        self.assertEqual(set(copias), set(POR_ID))
+        for parte in LOTES_LLM + ('comun_repeticion',):
+            for hallazgo in entrada_llm(parte):
+                vio = {CAMPOS_ENTRADA[campo]: valor for campo, valor in hallazgo.items()}
+                copia = {columna: valor for columna, valor in copias[vio['id']].items()
+                         if valor and columna not in ('etiqueta', 'nota')}
+                # En dos filas el CVSS 4.0 salió como 4: los números se comparan como números
+                for columna in ('cvss', 'epss'):
+                    if columna in copia:
+                        self.assertEqual(float(vio.pop(columna)), float(copia.pop(columna)), (parte, vio['id']))
+                self.assertEqual(vio, copia, (parte, vio['id']))
+
+
+class AcuerdoConElDiseno(unittest.TestCase):
+    """Los números de 'Acuerdo con el diseño del lote' en docs/dataset_ml.md, desde maestro.jsonl y etiquetas/. La
+    clase esperada solo balancea el lote: esto mide qué tan lejos está el LLM del diseño, no si acierta."""
+
+    def test_1_coincidencia_con_la_clase_esperada(self):
+        maestro = acuerdo.leer_maestro(generar_lote.CARPETA)
+        llm, repeticion, errores = acuerdo.leer_llm(generar_lote.CARPETA, maestro)
+        otros, errores_otros = acuerdo.leer_llms_comun(generar_lote.CARPETA, maestro, True)
+        self.assertEqual(errores + errores_otros, [])
+        esperada = {h['id']: h['clase_esperada'] for h in maestro}
+        comun = [h['id'] for h in maestro if h['bloque'] == 'comun']
+        prueba = [h['id'] for h in maestro if h['particion'] == 'prueba']
+
+        def contra_el_diseno(etiquetas, ids):
+            suyas, diseno = [etiquetas[i] for i in ids], [esperada[i] for i in ids]
+            return sum(a == b for a, b in zip(suyas, diseno)), len(ids), round(acuerdo.cohen_kappa(suyas, diseno), 4)
+
+        doc = (RAIZ / 'docs' / 'dataset_ml.md').read_text(encoding='utf-8')
+        seccion = doc.split('\n## Acuerdo con el diseño del lote\n', 1)[1].split('\n## ', 1)[0]
+        filas = [('Opus, `llm.csv`', 'Bloque común', llm, comun, (42, 60, 0.55)),
+                 ('Opus otra vez, `llm_repeticion.csv`', 'Bloque común', repeticion, comun, (45, 60, 0.625)),
+                 ('Sonnet, `llm_sonnet.csv`', 'Bloque común', otros['llm_sonnet'], comun, (41, 60, 0.525)),
+                 ('Haiku, `llm_haiku.csv`', 'Bloque común', otros['llm_haiku'], comun, (49, 60, 0.725)),
+                 ('Opus, `llm.csv`', 'Las 425', llm, list(esperada), (300, 425, 0.5589)),
+                 ('Opus, `llm.csv`', 'Las 138 de prueba', llm, prueba, (83, 138, 0.3964))]
+        for nombre, donde, etiquetas, ids, numeros in filas:
+            self.assertEqual(contra_el_diseno(etiquetas, ids), numeros, (nombre, donde))
+            self.assertIn('| %s | %s | %d de %d | %s |' % ((nombre, donde) + numeros), seccion)
+        # Más suave que el diseño: solo baja de alta a media y de media a baja, y solo sube de baja a media
+        cambios = Counter((esperada[i], llm[i]) for i in esperada if esperada[i] != llm[i])
+        self.assertEqual(cambios, {('alta', 'media'): 43, ('media', 'baja'): 54, ('baja', 'media'): 28})
+        por_clase = Counter(esperada.values())
+        self.assertIn('de las %d de clase esperada alta puso %d en media, de las %d media puso %d en baja y de las %d '
+                      'baja subió %d a media' % (por_clase['alta'], cambios[('alta', 'media')], por_clase['media'],
+                                                 cambios[('media', 'baja')], por_clase['baja'],
+                                                 cambios[('baja', 'media')]), seccion)
+        # Los LLM coinciden más entre ellos que cualquiera con el diseño
+        trio = [('llm', llm), ('llm_sonnet', otros['llm_sonnet']), ('llm_haiku', otros['llm_haiku'])]
+        por_par = {'%s con %s' % (x, y): round(acuerdo.cohen_kappa([a[i] for i in comun], [b[i] for i in comun]), 4)
+                   for n, (x, a) in enumerate(trio) for y, b in trio[n + 1:]}
+        guardado = json.loads((generar_lote.CARPETA / 'acuerdo.json').read_text(encoding='utf-8'))
+        por_pares = guardado['llm']['acuerdo_entre_llm']['cohen_por_pares']
+        self.assertEqual({par: p['cohen_kappa'] for par, p in por_pares.items()}, por_par)
+        pares = list(por_par.values())
+        mas_alto = max(numeros[2] for *_, numeros in filas)
+        self.assertGreater(min(pares), mas_alto)
+        self.assertIn('va de %s a %s' % (min(pares), max(pares)), seccion)
+        self.assertIn('el más alto contra el diseño es %s.' % mas_alto, seccion)
 
 
 if __name__ == '__main__':

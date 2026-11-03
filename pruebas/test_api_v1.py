@@ -77,6 +77,9 @@ class ApiV1(unittest.TestCase):
         hist = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')
         self.assertEqual([(p['score'], p['reason'], p['new_findings']) for p in hist['items']],
                          [(68, 'scan', 3), (60, 'correction', 0)])
+        tienda = self.get(self.acme, '/api/v1/domains/acme-tienda.mx/score/history')['items']
+        semilla = next(p for p in tienda if p['score_id'] == 'a0000000-0000-4000-8000-000000000002')
+        self.assertEqual((semilla['new_findings'], semilla['resolved_findings']), (None, None))  # su escaneo no los contó
         activos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/assets')
         self.assertEqual(activos['total'], 6)
         escaneos = self.get(self.acme, '/api/v1/scans')

@@ -198,7 +198,7 @@ class Dominios(unittest.TestCase):
 
 
 class Textos(unittest.TestCase):
-    # Al final del archivo para no recorrer las líneas que cita pruebas/test_dataset_ml.py:78.
+    # Al final del archivo para no recorrer las líneas que cita pruebas/test_dataset_ml.py:80.
 
     def test_1_cada_regla_con_sus_textos(self):
         for r in PESOS['rules']:

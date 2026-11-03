@@ -55,15 +55,30 @@ quien tuvo la IP antes), el protocolo es tcp salvo PUERTOS_UDP, y el activo serv
 Cobertura. Si algo quedó sin revisar (Cert Spotter caído o con 429, nombres o IP cortados por MAX_NOMBRES o MAX_IPS, un
 A fallido, una IP sin respuesta, una respuesta 200 de InternetDB sin 'ports' o con campos que no se pueden leer, el 429
 de InternetDB o el tope de tiempo), los códigos de CODIGOS sin hallazgos también van a sin_cobertura. Uno con
-hallazgos no puede ir ahí (validar() lo rechaza) y solo queda el aviso. Si no queda ninguna IP que consultar y todo
-respondió, la fuente queda succeeded con 0 hallazgos y un aviso. Si Cert Spotter y todos los A fallaron, o todas las IP
-fallaron por la red, FuenteNoResponde, para que el orquestador la reintente.
-Reintentos: 3 intentos por A y por IP (esperas de 5 y 15 s, nunca más largas que lo que le queda a la corrida) y 2 por
-página de Cert Spotter. El lifetime del A es min(TIMEOUT_DNS, lo que queda). Cada petición HTTP tiene un plazo
-absoluto, min(TIMEOUT_HTTP o TIMEOUT_CT, lo que queda), que cubre toda la lectura del cuerpo (_descargar lee por bloques
-y corta al pasarse). Ese plazo no cubre la búsqueda del nombre del servidor (getaddrinfo), que no tiene timeout en
-urllib. Solo el 404 de InternetDB es 'sin datos'. Un 200 vacío o 'null' no se puede leer. Un 429 de InternetDB o de
-Cert Spotter no se reintenta: otro intento solo gastaría cupo.
+hallazgos no puede ir ahí (validar() lo rechaza) y solo queda el aviso. Para eso cada puerto lleva su IP como parte y
+cada CVE su IP con PARTE_CVE, y revisados lleva las partes que sí quedaron revisadas completas: las de las IP que
+InternetDB respondió sin los campos rotos que las deciden (_partes_revisadas), más las privadas y las de un CDN, que
+una corrida completa tampoco consulta. Si se conocen todas las IP del dominio (sin páginas, nombres ni A de menos),
+sin_revisar lleva las demás partes de esas IP. Así el orquestador no cierra lo de una IP sin respuesta o cortada por
+un tope, y sí lo de una IP que ya no es del dominio (#23). Las CVE que MAX_CVE deja fuera van en omitidos con su
+huella: siguen ahí y el orquestador no cierra las que se reportaron antes. Si no
+queda ninguna IP que consultar y todo respondió, la fuente queda succeeded con 0 hallazgos y un aviso. Si Cert Spotter
+y todos los A fallaron, o ninguna IP respondió porque fallaron por la red y el tiempo cortó las demás, si había,
+FuenteNoResponde, para que el orquestador la reintente. Una IP cuenta como falla de red si no respondió en sus
+intentos, aunque el tiempo no le dejara hacer otro. La que el tiempo cortó antes de su primer intento o mientras se
+leía no cuenta como falla de red: si todas quedan así, la fuente queda succeeded y esas IP quedan sin revisar.
+Reintentos: 3 intentos por A y por IP (esperas de 5 y 15 s) y 2 por página de Cert Spotter. Un 5xx o un 408 con
+Retry-After esperan lo que pide, si es más, hasta MAX_ESPERA aunque pida más, y se reintenta igual. Si después
+de la espera no le quedarían a la corrida MIN_INTENTO segundos (más HOLGURA), no se espera ni se hace otro intento: sale
+el error del último, que cuenta como el de su A o su IP (esperar). En los A lo que queda ya descuenta RESERVA_INTERNETDB
+(restante), así que un A que falla con 115 s por delante ya no espera ni se reintenta. Un solo aviso junta los A
+fallidos y dice cuántos se quedaron sin tiempo para otro intento. El
+lifetime del A es min(TIMEOUT_DNS, lo que queda). Cada petición HTTP tiene un plazo absoluto, min(TIMEOUT_HTTP o
+TIMEOUT_CT, lo que queda), que cubre getaddrinfo, el connect, el TLS, el envío y cada lectura de las cabeceras y del
+cuerpo (_descargar con transporte.descargar). Una redirección no se sigue y no se puede leer, y no se usan proxies:
+cada consulta llega solo al servidor que se pidió, por https, y cuenta una vez. Solo el 404 de InternetDB es
+'sin datos'. Un 200 vacío o 'null' no se puede leer. Un 429 de InternetDB o de Cert Spotter no se reintenta: otro
+intento solo gastaría cupo.
 
 Modos: 'vivo' consulta. 'grabar' además guarda lo ya limpio en cirdan/recolectores/respuestas_grabadas/shodan/<dominio>/
 (las páginas de Cert Spotter reducidas a lo que lee certspotter.certificado(), cada A con estado, IP y su cadena CNAME,
@@ -101,7 +116,7 @@ from pathlib import Path
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import certspotter, geoip
+from cirdan.recolectores import certspotter, geoip, transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos, en_alcance_nombre)
@@ -124,7 +139,8 @@ RESOLVEDORES = ('1.1.1.1', '8.8.8.8')            # públicos y fijos, como regis
 PAGINAS_CT = 2               # páginas de Cert Spotter: casi siempre la página y la vacía que cierra
 INTENTOS_CT = 2              # intentos por página, como certspotter.COMPLEMENTO
 TIMEOUT_CT = 20              # segundos por página
-MAX_NOMBRES = 10             # nombres que se resuelven, con la raíz
+MAX_NOMBRES = 50             # nombres que se resuelven, con la raíz. Con más no se saben todas las IP y la corrida
+                             # queda parcial sin sin_revisar (RC-55), así que va más alto que MAX_IPS
 MAX_IPS = 10                 # IP que se consultan en InternetDB
 MAX_CVE = 25                 # known_vulnerability por IP. Los demás se cuentan en un aviso
 INTENTOS = 3                 # intentos por A y por IP dentro de una corrida (no es scan_source_runs.attempt)
@@ -134,6 +150,12 @@ TIMEOUT_HTTP = 10            # segundos por petición a InternetDB
 PAUSA_INTERNETDB = 1         # segundos entre una IP y la siguiente
 TIEMPO_CORRIDA = 360         # segundos de toda la corrida, como github.py: ninguna consulta empieza después
 MIN_RESTANTE = 5             # con menos segundos que esto ya no se empieza otro nombre ni otra IP
+MIN_INTENTO = 1              # segundos que necesita un intento: con menos no se espera ni se intenta
+HOLGURA = 0.1                # segundos de más que pide esperar(): time.sleep puede pasarse un poco
+MAX_ESPERA = 15              # lo más que se espera un Retry-After, aunque pida más
+# Segundos que los A le dejan a InternetDB (RC-55): una petición y una pausa por IP. Sin esto, con MAX_NOMBRES nombres
+# unos pocos A que no responden (35 s cada uno con sus intentos) se comen la corrida y no se consulta ninguna IP
+RESERVA_INTERNETDB = MAX_IPS * (TIMEOUT_HTTP + PAUSA_INTERNETDB)
 MAX_BYTES = 1024 * 1024      # tope de una respuesta HTTP
 # Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición HTTP o DNS.
 MAX_CONSULTAS = PAGINAS_CT * INTENTOS_CT + MAX_NOMBRES * INTENTOS + MAX_IPS * INTENTOS
@@ -190,6 +212,7 @@ LIMITES = ('shodan: solo IPv4 y sin la llave de Shodan (#8): exposed_iot_device,
 SIN_CDN_POR_ASN = 'las IP de un CDN sin un CNAME conocido no se pudieron descartar por ASN y se consultaron igual en InternetDB'
 SIN_IP = 'shodan: ninguna IP pública del dominio fuera de un CDN, no hubo nada que consultar en InternetDB'
 PARCIAL = 'shodan: cobertura parcial'
+PARTE_CVE = '/cve'   # las CVE de una IP son otra parte que sus puertos: 'vulns' roto no frena el cierre de sus puertos
 NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiempo o una respuesta que no se puede leer), '
                'no se grabó y se conserva la grabación anterior')
 NOTA_SIN_FECHA = ('InternetDB no dice cuándo vio este dato: puede ser viejo o de quien tuvo la IP antes que el dominio')
@@ -225,7 +248,6 @@ FALLAS = {'limite': LimiteAlcanzado, 'tiempo': SinTiempo, 'ilegible': RespuestaI
 # razón de cobertura parcial es una falla y 'grabar' no escribe (ClienteShodan.degradada).
 TOPES = ('paginas', 'nombres', 'ips')
 _NO_ENCONTRADO = object()    # el 404, dentro de _http
-BLOQUE = 64 * 1024           # bytes que _descargar lee de una vez
 
 
 # ---------------------------------------------------------------- consultas a la red
@@ -233,26 +255,18 @@ BLOQUE = 64 * 1024           # bytes que _descargar lee de una vez
 def _descargar(url, timeout, cronometro=None):
     """El cuerpo de la respuesta, de a lo más MAX_BYTES. La única función que hace HTTP.
 
-    `timeout` es el plazo absoluto de toda la petición, no solo de cada operación de socket: se lee por bloques (read1,
-    una lectura del socket a la vez) y, si se pasa del plazo, lanza SinTiempo. Así un servidor que manda el cuerpo de a
-    poco no estira la corrida. No cubre getaddrinfo. `cronometro` es time.monotonic por omisión."""
+    `timeout` es el plazo absoluto de toda la petición, de getaddrinfo al último bloque del cuerpo, no solo de cada
+    operación de socket (transporte.descargar): si se pasa, lanza SinTiempo. Así un servidor que manda el cuerpo de a
+    poco no estira la corrida. Una redirección no se sigue y da RespuestaIlegible. `cronometro` es time.monotonic por
+    omisión."""
     cronometro = cronometro or time.monotonic
-    plazo = cronometro() + timeout
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/json'})
-    partes, total = [], 0
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        leer = r.read1 if hasattr(r, 'read1') else r.read
-        while True:
-            if cronometro() > plazo:
-                raise SinTiempo('shodan: la respuesta tardó más de %s s' % timeout)
-            parte = leer(min(BLOQUE, MAX_BYTES + 1 - total))
-            if not parte:
-                break
-            partes.append(parte)
-            total += len(parte)
-            if total > MAX_BYTES:
-                raise ValueError('respuesta de más de %d bytes' % MAX_BYTES)
-    return b''.join(partes)
+    try:
+        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES, cronometro)
+    except transporte.PlazoVencido:
+        raise SinTiempo('shodan: la respuesta tardó más de %s s' % timeout) from None
+    except transporte.Redirigida as e:
+        raise RespuestaIlegible('shodan: %s' % e) from None
 
 
 def _cadena_cname(respuesta, nombre):
@@ -436,6 +450,7 @@ class ClienteShodan:
         self.dormir = dormir or time.sleep
         self.consultas = 0
         self.inicio = None
+        self.reserva = 0       # segundos de la corrida que restante() no cuenta (RESERVA_INTERNETDB mientras van los A)
         self.pendientes = []   # lo que se graba cuando la corrida termina
         self.fallas = 0        # consultas que fallaron en esta corrida, de cualquier tipo
         self.raras_ct = 0      # emisiones de Cert Spotter que no se pueden leer (certspotter.legible)
@@ -452,16 +467,22 @@ class ClienteShodan:
         self.inicio = self.cronometro()
 
     def restante(self):
-        """Segundos que le quedan a la corrida. Al reproducir no hay consultas y no hay tope."""
+        """Segundos que le quedan a la corrida, sin la reserva. Al reproducir no hay consultas y no hay tope."""
         if self.modo == 'reproducir':
             return TIEMPO_CORRIDA
         if self.inicio is None:
             self.inicio = self.cronometro()
-        return TIEMPO_CORRIDA - (self.cronometro() - self.inicio)
+        return TIEMPO_CORRIDA - self.reserva - (self.cronometro() - self.inicio)
 
     def esperar(self, segundos):
-        """El dormir de con_reintentos: nunca más largo que lo que le queda a la corrida."""
-        self.dormir(max(0, min(segundos, self.restante())))
+        """El dormir de con_reintentos. Si después de esperar `segundos` quedaría menos de MIN_INTENTO más HOLGURA para
+        otro intento, no espera y devuelve False: con_reintentos sale con el error del último intento, que es el que
+        vale, sin un intento más que no alcanzaría a terminar. Después de dormir lo vuelve a revisar, por si el sueño se
+        pasó: así el intento no empieza sin tiempo y su SinTiempo no tapa el error."""
+        if self.restante() - segundos < MIN_INTENTO + HOLGURA:
+            return False
+        self.dormir(segundos)
+        return self.restante() >= MIN_INTENTO + HOLGURA
 
     def degradada(self, parcial=()):
         """True si la corrida tuvo alguna falla: una consulta que falló, de cualquier tipo, o una razón de cobertura
@@ -498,10 +519,15 @@ class ClienteShodan:
 
     def _http(self, url, intentos, timeout, que, sin_reintento=()):
         """JSON de `url` con hasta `intentos` intentos dentro del tiempo de la corrida. None solo con un 404. Un 429
-        lanza LimiteAlcanzado, y otro 4xx o un 200 vacío o 'null' RespuestaIlegible, sin reintentar."""
+        lanza LimiteAlcanzado, y otro 4xx, un 200 vacío o 'null' o una redirección RespuestaIlegible, sin reintentar.
+        Si un 5xx o un 408 traen Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le
+        alcanza a la corrida, pero nunca más de MAX_ESPERA."""
+        pedida = {}   # el Retry-After del último intento
+
         def intento():
+            pedida.clear()
             limite = min(timeout, self.restante())
-            if limite < 1:
+            if limite < MIN_INTENTO:
                 raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de consultar %s' % que)
             self.consultas += 1
             try:
@@ -509,11 +535,12 @@ class ClienteShodan:
             except SinTiempo:
                 # La respuesta se pasó de su plazo. Si con eso se acabó la corrida, es el corte por tiempo. Si no, es
                 # una respuesta lenta y cuenta como una falla de red, que con_reintentos reintenta.
-                if self.restante() < 1:
+                if self.restante() < MIN_INTENTO:
                     raise SinTiempo('shodan: se acabó el tiempo de la corrida mientras se leía %s' % que) from None
                 raise TimeoutError('shodan: %s tardó más de %s s en responder' % (que, limite)) from None
             except urllib.error.HTTPError as e:
                 codigo, espera = e.code, (e.headers or {}).get('Retry-After')
+                pedida['segundos'] = min(transporte.retry_after(e.headers) or 0, MAX_ESPERA)   # aunque pida más
                 with contextlib.suppress(Exception):
                     e.close()
                 if codigo == 404:
@@ -531,7 +558,8 @@ class ClienteShodan:
                 raise RespuestaIlegible('shodan: %s respondió null' % que)
             return datos
         intento.__name__ = 'shodan: %s no respondió' % que
-        datos = con_reintentos(intento, intentos=intentos, esperas=ESPERAS, dormir=self.esperar)
+        datos = con_reintentos(intento, intentos=intentos, esperas=ESPERAS,
+                               dormir=lambda segundos: self.esperar(max(segundos, pedida.get('segundos') or 0)))
         return None if datos is _NO_ENCONTRADO else datos
 
     def pedir(self, consulta, url, fuente=certspotter.NOMBRE, intentos=INTENTOS_CT, timeout=None, pausa=0,
@@ -572,7 +600,7 @@ class ClienteShodan:
 
         def intento():
             limite = min(TIMEOUT_DNS, self.restante())
-            if limite < 1:
+            if limite < MIN_INTENTO:
                 raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de resolver %s' % nombre)
             self.consultas += 1
             return limpiar_a(*(self.resolver or _resolver_a)(nombre, limite))
@@ -678,6 +706,11 @@ def _cuantos(n, singular, plural):
     return '%d %s' % (n, singular if n == 1 else plural)
 
 
+def _lista(nombres, maximo=5):
+    """Los primeros `maximo` nombres y cuántos más, para un aviso que no crece con los nombres."""
+    return ', '.join(nombres[:maximo]) + (' y %d más' % (len(nombres) - maximo) if len(nombres) > maximo else '')
+
+
 def _donde(hosts):
     """El primer nombre de la IP y cuántos más tiene, para el título."""
     return hosts[0] if len(hosts) == 1 else '%s y %s' % (hosts[0], _cuantos(len(hosts) - 1, 'nombre más', 'nombres más'))
@@ -700,7 +733,8 @@ def hallazgo_puerto(codigo, dominio, servicio, ip, puerto, hosts, datos, ahora):
     if puerto in PUERTOS_INDUSTRIALES:
         evidencia['puerto_industrial'] = True
     return Hallazgo(codigo, CODIGOS[codigo], servicio, titulo, evidencia,
-                    rubrica.calcular(codigo, 'service', evidencia, ahora), _huella(codigo, dominio, servicio))
+                    rubrica.calcular(codigo, 'service', evidencia, ahora), _huella(codigo, dominio, servicio),
+                    partes=[ip])
 
 
 def hallazgo_cve(dominio, ip, cve, hosts, datos, ahora):
@@ -709,7 +743,7 @@ def hallazgo_cve(dominio, ip, cve, hosts, datos, ahora):
     titulo = TITULO_CVE % (cve, _donde(hosts))
     evidencia = dict(_evidencia(titulo, ip, hosts, datos), cve=cve, cpes=datos['cpes'], deducida_por_version=True)
     return Hallazgo(codigo, CODIGOS[codigo], ip, titulo, evidencia, rubrica.calcular(codigo, 'ip', evidencia, ahora),
-                    _huella(codigo, dominio, ip, cve), clave=cve)
+                    _huella(codigo, dominio, ip, cve), clave=cve, partes=[ip + PARTE_CVE])
 
 
 def _sin_cobertura(res, aviso):
@@ -750,6 +784,23 @@ def _nombres(dominio, certs):
     return [dominio] + sorted(nombres)
 
 
+def _partes_revisadas(ip, marca, d):
+    """Las partes de una IP que quedaron revisadas completas (#23): la IP (sus puertos) y ip/cve (sus CVE). Las privadas
+    y las de un CDN, que una corrida completa tampoco consulta, cuentan completas, igual que un 404 o el tag cdn de
+    InternetDB. Un campo roto deja a medias lo que decide: ports la IP, vulns sus CVE y tags las dos (honeypot)."""
+    if marca is not None:
+        return [] if marca.get('internetdb') else [ip, ip + PARTE_CVE]
+    if d is None:
+        return []
+    if d.get('sin_datos') or d.get('cdn'):
+        return [ip, ip + PARTE_CVE]
+    rotos = set(d['rotos'])
+    if 'tags' in rotos:
+        return []
+    return ([ip] if 'ports' not in rotos else []) + (
+        [ip + PARTE_CVE] if 'vulns' not in rotos else [])
+
+
 def _revisar(res, cliente, dominio, ahora):
     parcial = []    # por qué la cobertura quedó parcial
 
@@ -772,32 +823,53 @@ def _revisar(res, cliente, dominio, ahora):
         nombres = nombres[:MAX_NOMBRES]
         parcial.append('nombres')
 
-    # 2. Un A por nombre
-    por_ip, cnames, fallas_a, sin_tiempo = {}, {}, 0, 0
-    for i, nombre in enumerate(nombres):
-        if cliente.restante() < MIN_RESTANTE:
-            sin_tiempo = len(nombres) - i
-            break
-        try:
-            a = cliente.resolver_a(nombre)
-        except SinTiempo:
-            sin_tiempo = len(nombres) - i
-            break
-        except FuenteNoResponde as e:
-            fallas_a += 1
-            res.avisos.append(str(e))
-            continue
-        for ip in a['ips']:
-            por_ip.setdefault(ip, set()).add(nombre)
-            cnames.setdefault(ip, set()).update(a['cnames'])
+    # 2. Un A por nombre, sin tocar RESERVA_INTERNETDB: el lifetime, las esperas y el corte de cada A la descuentan
+    por_ip, cnames, fallas_a, sin_grabar, sin_tiempo = {}, {}, [], [], 0
+    cliente.reserva = RESERVA_INTERNETDB
+    try:
+        for i, nombre in enumerate(nombres):
+            if cliente.restante() < MIN_RESTANTE:
+                sin_tiempo = len(nombres) - i
+                break
+            try:
+                a = cliente.resolver_a(nombre)
+            except SinTiempo:
+                sin_tiempo = len(nombres) - i
+                break
+            except SinGrabacion:   # una grabación hecha con un tope de nombres más chico (antes de RC-55 era 10)
+                sin_grabar.append(nombre)
+                continue
+            except FuenteNoResponde as e:
+                fallas_a.append((nombre, str(e), getattr(e, 'sin_tiempo', False)))
+                continue
+            for ip in a['ips']:
+                por_ip.setdefault(ip, set()).add(nombre)
+                cnames.setdefault(ip, set()).update(a['cnames'])
+    finally:
+        cliente.reserva = 0
+    # Un solo aviso para todos los A fallidos y otro para los no grabados: el orquestador guarda 10 avisos y el del
+    # tiempo tiene que verse. El de los A dice cuántos se quedaron sin tiempo para otro intento, que no tienen su texto
+    # y, si la reserva cortó el último nombre, no dejan otro aviso del tiempo (RC-166)
+    if len(fallas_a) == 1:
+        res.avisos.append(fallas_a[0][1])
+    elif fallas_a:
+        sin_otro = sum(1 for _, _, corto in fallas_a if corto)
+        res.avisos.append('shodan: el DNS no respondió al A de %d nombres%s: %s' % (
+            len(fallas_a), ' (%d sin tiempo para otro intento)' % sin_otro if sin_otro else '',
+            _lista([n for n, _, _ in fallas_a])))
+    if sin_grabar:
+        res.avisos.append('shodan: la grabación no trae el A de %s, se grabó con otro tope de nombres: %s'
+                          % (_cuantos(len(sin_grabar), 'nombre', 'nombres'), _lista(sin_grabar)))
+        parcial.append('grabacion')
     if sin_tiempo:
         res.avisos.append('shodan: se acabó el tiempo de la corrida antes de resolver %s'
                           % _cuantos(sin_tiempo, 'nombre', 'nombres'))
         parcial.append('tiempo')
-    if not ct_respondio and fallas_a == len(nombres):
+    if not ct_respondio and len(fallas_a) + len(sin_grabar) == len(nombres):
         raise FuenteNoResponde('shodan: no respondieron Cert Spotter ni el DNS de %s' % dominio)
     if fallas_a:
         parcial.append('a')
+    todas_las_ip = not parcial   # sin nombres cortados ni A fallidos se conocen todas las IP del dominio
 
     # 3. Qué IP se consultan: públicas (consultable), fuera de un CDN en toda su cadena CNAME y fuera de un ASN de CDN.
     # La ubicación sale de la base local, sin red: las bases se piden una vez por corrida y solo si alguna IP es
@@ -819,6 +891,8 @@ def _revisar(res, cliente, dominio, ahora):
             marcas[ip] = {'cdn': cdn}
         else:
             consultar.append(ip)
+    # Las IP de la raíz van primero: con MAX_NOMBRES nombres las de los subdominios no la dejan fuera de MAX_IPS (RC-55)
+    consultar.sort(key=lambda ip: (dominio not in por_ip[ip], ipaddress.ip_address(ip)))
     if len(consultar) > MAX_IPS:
         res.avisos.append('shodan: se consultaron %d de %d IP en InternetDB (MAX_IPS)' % (MAX_IPS, len(consultar)))
         for ip in consultar[MAX_IPS:]:
@@ -852,11 +926,14 @@ def _revisar(res, cliente, dominio, ahora):
             res.avisos.append(str(e))
             parcial.append('red')
     if sin_tiempo:
-        res.avisos.append('shodan: se acabó el tiempo de la corrida antes de consultar %s en InternetDB'
-                          % _cuantos(sin_tiempo, 'IP', 'IP'))
+        res.avisos.append('shodan: el tiempo de la corrida cortó %s en InternetDB, sin consultar o con la lectura a '
+                          'medias' % _cuantos(sin_tiempo, 'IP', 'IP'))
         parcial.append('tiempo')
     if consultar and fallas_red == len(consultar):
         raise FuenteNoResponde('shodan: InternetDB no respondió por ninguna IP de %s' % dominio)
+    if fallas_red and fallas_red + sin_tiempo == len(consultar):   # ninguna respondió: el tiempo cortó las demás
+        raise FuenteNoResponde('shodan: InternetDB no respondió por ninguna IP de %s (por la red: %d, cortadas por '
+                               'el tiempo: %d)' % (dominio, fallas_red, sin_tiempo))
     if not consultar and not parcial:
         res.avisos.append(SIN_IP)
 
@@ -905,8 +982,10 @@ def _revisar(res, cliente, dominio, ahora):
             codigo = codigo_de_puerto(puerto)
             if codigo:
                 res.hallazgos.append(hallazgo_puerto(codigo, dominio, servicio, ip, puerto, hosts, d, ahora))
-        # d['vulns'] va de la más reciente a la más vieja: se reportan las MAX_CVE más recientes
+        # d['vulns'] va de la más reciente a la más vieja: se reportan las MAX_CVE más recientes. Las omitidas siguen
+        # ahí: van en omitidos, para que el orquestador no cierre las que se reportaron antes (#23)
         res.hallazgos += [hallazgo_cve(dominio, ip, cve, hosts, d, ahora) for cve in d['vulns'][:MAX_CVE]]
+        res.omitidos += [_huella('known_vulnerability', dominio, ip, cve) for cve in d['vulns'][MAX_CVE:]]
         if len(d['vulns']) > MAX_CVE:
             res.avisos.append('shodan: %s trae %d CVE, se reportan las %d más recientes y se omitieron %d'
                               % (ip, len(d['vulns']), MAX_CVE, len(d['vulns']) - MAX_CVE))
@@ -919,6 +998,9 @@ def _revisar(res, cliente, dominio, ahora):
         res.sin_cobertura = [c for c in CODIGOS if c not in con_hallazgos] + list(SIN_LLAVE)
         res.avisos.append('%s, se revisaron %d de %d IP del dominio en InternetDB'
                           % (PARCIAL, len(datos), len(consultar) + sum(1 for m in marcas.values() if m.get('internetdb'))))
+        res.revisados = [parte for ip in ips for parte in _partes_revisadas(ip, marcas.get(ip), datos.get(ip))]
+        if todas_las_ip:
+            res.sin_revisar = [parte for ip in ips for parte in (ip, ip + PARTE_CVE) if parte not in res.revisados]
     # Una corrida con fallas no pisa una grabación completa (como github.py con SIN_CUOTA). El aviso va primero, para
     # que entre en los 10 que guarda el orquestador
     if cliente.modo == 'grabar' and cliente.degradada(parcial):
@@ -963,7 +1045,8 @@ def codigo_salida(res):
         return 1
     if NO_SE_GRABO in res.avisos:
         return 3
-    parcial = set(res.sin_cobertura) - set(SIN_LLAVE) or any(a.startswith(PARCIAL) for a in res.avisos)
+    parcial = (res.revisados is not None or set(res.sin_cobertura) - set(SIN_LLAVE)
+               or any(a.startswith(PARCIAL) for a in res.avisos))
     return 2 if parcial else 0
 
 

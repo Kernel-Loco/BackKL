@@ -81,6 +81,12 @@ ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta f
 MODOS_CON_CUPO = ('vivo', 'grabar')
 SIN_CUPO = 'Sin cupo diario: %s no tiene cupo para una corrida completa hoy (día UTC).'
 
+# Los hallazgos de una empresa se guardan de una fuente a la vez (RC-55). Dos dominios de la misma empresa pueden dar
+# la misma huella (un repo de GitHub declarado en los dos, el certificado de un subdominio) y escanearse a la vez:
+# así el segundo ve lo que insertó el primero y no lo cuenta otra vez como nuevo. Es la forma de dos llaves de
+# pg_advisory_xact_lock, que no choca con la de una llave del trigger de audit_log.
+CANDADO_HALLAZGOS = 'cirdan.findings'
+
 
 def dominios_en_vivo():
     """Dominios que se pueden consultar en vivo (DNS y fuentes). '*' = todos (producción)."""
@@ -270,7 +276,27 @@ def _latido(org, scan_id, conn=None):
                          (scan_id,)).fetchone() is not None
 
 
-def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas):
+# Las partes de un hallazgo guardado, como arreglo jsonb (#23). Lo guardado antes de evidence.partes las tiene en otra
+# llave: el secreto de GitHub su repo en 'repo', el puerto de Shodan su IP en 'ip' (la CVE, con '/cve'), y el correo
+# sus repos en 'repos', que sirven solo si no se cortaron en MAX_REPOS_ACTIVO (5) de github.py. La vigencia de un
+# certificado de ct_logs la arma con 'host' y 'vence', como _parte de crtsh.py (RC-55).
+PARTES = ('''COALESCE(evidence->'partes', '''
+          '''CASE WHEN jsonb_typeof(evidence->'repo') = 'string' THEN jsonb_build_array(evidence->'repo') END, '''
+          '''CASE WHEN jsonb_typeof(evidence->'ip') = 'string' THEN '''
+          '''jsonb_build_array(evidence->>'ip' || CASE WHEN evidence ? 'cve' THEN '/cve' ELSE '' END) END, '''
+          '''CASE WHEN jsonb_typeof(evidence->'repos') = 'array' THEN CASE WHEN jsonb_array_length(evidence->'repos') '''
+          '''< 5 THEN evidence->'repos' END END, '''
+          '''CASE WHEN evidence->>'origen' IN ('crtsh', 'certspotter') AND jsonb_typeof(evidence->'host') = 'string' '''
+          '''AND jsonb_typeof(evidence->'vence') = 'string' '''
+          '''THEN jsonb_build_array((evidence->>'host') || '@' || (evidence->>'vence')) END, '[]'::jsonb)''')
+
+
+def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas, ahora=None):
+    """Guarda activos y hallazgos de una fuente que respondió. Devuelve dos conjuntos de id de hallazgos: los que
+    abrió (insertó o reabrió) y los que dio por resueltos. `ahora` es la hora del escaneo (la de correr), y sin ella
+    la de este momento."""
+    # org pasa por uuid para que la llave sea la misma aunque la línea de comandos la reciba en mayúsculas.
+    conn.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s::uuid::text))', (CANDADO_HALLAZGOS, org))
     atributos_raiz = {}
     for activo in resultado.activos:
         if activo.tipo == 'domain' and activo.valor == resultado.dominio:
@@ -310,6 +336,25 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         ).fetchone()['id']
         activos[activo.valor] = asset_id
 
+    # El estado de antes dice si el hallazgo es nuevo o se reabre. FOR NO KEY UPDATE lo deja fijo hasta el commit, como
+    # el upsert, sin chocar con el FOR KEY SHARE de la llave foránea cuando otro escaneo guarda sus score_contributions.
+    # Con la cobertura parcial, lo abierto conserva las partes que esta corrida no revisó y que siguen ahí: un correo
+    # que esta vez salió solo en el repo A sigue también en el B que no se clonó, y no se cierra mientras B no se revise.
+    # Lo guardado antes sin partes que se puedan saber (un correo con 5 repos o más) puede seguir en cualquier parte que
+    # no se revisó: lleva las de sin_revisar o, si no se saben, queda sin partes y espera a una corrida completa. Las
+    # partes se leen por organización, como el upsert, que mueve a este dominio un correo de GitHub guardado en otro
+    # dominio de la misma empresa: su huella no lleva el dominio (#23)
+    huellas = [bytes.fromhex(h.huella) for h in resultado.hallazgos]
+    previos, previas = {}, {}
+    for f in conn.execute(
+            'SELECT fingerprint, status, {p} AS partes FROM findings WHERE organization_id = %s '
+            'AND fingerprint = ANY(%s::bytea[]) ORDER BY fingerprint FOR NO KEY UPDATE'.format(p=PARTES),
+            (org, huellas)).fetchall():
+        previos[bytes(f['fingerprint'])] = f['status']
+        if resultado.revisados is not None and f['status'] == 'open':
+            previas[bytes(f['fingerprint']).hex()] = f['partes']
+    abiertos = set()
+
     for hallazgo in resultado.hallazgos:
         regla = reglas.get(hallazgo.codigo)
         if not regla:
@@ -317,13 +362,22 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         evidencia = dict(hallazgo.evidencia)
         if isinstance(hallazgo.caracteristicas, dict):  # las del reto quedan guardadas para la API y el ML (#23)
             evidencia['caracteristicas'] = hallazgo.caracteristicas
+        if hallazgo.partes:  # para no cerrarlo en un escaneo que no revisó sus repos o su IP (#23)
+            previa = previas.get(bytes.fromhex(hallazgo.huella).hex())
+            if previa == [] and resultado.sin_revisar is None:  # se guardó antes sin partes que se puedan saber
+                evidencia['partes'] = []
+            else:  # con [] y sin_revisar, puede seguir en cualquiera de las partes que no se revisaron
+                evidencia['partes'] = hallazgo.partes + [
+                    p for p in (resultado.sin_revisar if previa == [] else previa or []) if p not in resultado.revisados
+                    and p not in hallazgo.partes and (resultado.sin_revisar is None or p in resultado.sin_revisar)]
         asset_id = activos.get(hallazgo.activo)
         if not asset_id:  # un activo que la fuente no dio no tumba el escaneo: el hallazgo cuelga del dominio
             log.warning('%s: hallazgo %s sin su activo %s, va en el dominio', resultado.fuente, hallazgo.codigo,
                         hallazgo.activo)
             evidencia['activo_no_encontrado'] = hallazgo.activo
             asset_id = raiz
-        conn.execute(
+        huella = bytes.fromhex(hallazgo.huella)
+        finding_id = conn.execute(
             'INSERT INTO findings (organization_id, domain_id, asset_id, rule_id, source_id, fingerprint, severity, '
             "status, evidence, detected_at, last_scan_id) VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, now(), %s) "
             'ON CONFLICT (organization_id, fingerprint) DO UPDATE SET '
@@ -331,20 +385,45 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
             'source_id = EXCLUDED.source_id, severity = EXCLUDED.severity, evidence = EXCLUDED.evidence, '
             'status = CASE WHEN findings.status = %s THEN %s ELSE findings.status END, '
             'resolved_at = CASE WHEN findings.status = %s THEN NULL ELSE findings.resolved_at END, '
-            'last_scan_id = EXCLUDED.last_scan_id, updated_at = now()',
-            (org, domain_id, asset_id, regla['id'], source_id, bytes.fromhex(hallazgo.huella), hallazgo.severidad,
+            'last_scan_id = EXCLUDED.last_scan_id, updated_at = now() RETURNING id::text',
+            (org, domain_id, asset_id, regla['id'], source_id, huella, hallazgo.severidad,
              Jsonb(evidencia), scan_id, 'resolved', 'open', 'resolved'),
-        )
+        ).fetchone()['id']
+        if previos.get(huella) in (None, 'resolved'):  # no existía o estaba resuelto: ahora queda abierto
+            abiertos.add(finding_id)
 
-    # Lo abierto de esta fuente que ya no salió se arregló (#23). No se tocan los códigos que la fuente no pudo
-    # revisar (sin_cobertura), ni lo que el cliente marcó como riesgo aceptado o falso positivo.
-    conn.execute(
-        "UPDATE findings SET status = 'resolved', resolved_at = now(), last_scan_id = %s, updated_at = now() "
-        "WHERE domain_id = %s AND source_id = %s AND status = 'open' AND fingerprint <> ALL(%s::bytea[]) "
-        'AND rule_id NOT IN (SELECT id FROM scoring_rules WHERE code = ANY(%s::text[]))',
-        (scan_id, domain_id, source_id, [bytes.fromhex(h.huella) for h in resultado.hallazgos],
-         list(resultado.sin_cobertura)),
-    )
+    # Lo abierto de esta fuente que ya no salió se arregló (#23). No se toca lo que siguió ahí sin reportarse por un
+    # tope (omitidos), ni lo que el cliente marcó como riesgo aceptado o falso positivo. Si la fuente revisó todo
+    # (revisados es None), tampoco los códigos que no pudo revisar (sin_cobertura). Si revisó solo una parte, deciden
+    # las partes, porque una parte revisada se revisó para todos los códigos: solo se cierra lo que trae partes y todas
+    # se revisaron. Si además dio sin_revisar, se cierra lo que trae partes y ninguna está ahí: así se cierra lo de un
+    # repo borrado o de una IP que ya no resuelve. Lo que no trae partes espera a una corrida completa.
+    # Un certificado por vencer cuyo vencimiento ya pasó se cierra en toda corrida de su fuente que respondió, aunque no
+    # lo haya visto: ya no está por vencer, y si la fuente siempre queda parcial (crt.sh solo con la búsqueda por nombre,
+    # o más certificados de los que caben en las páginas de Cert Spotter) nunca llegaría la corrida completa que lo
+    # cierra (RC-55). 'vence' es un isoformat en UTC
+    # (crtsh._fecha): se compara como texto con la hora del escaneo en el mismo formato, así una fecha rota no lo cierra
+    # ni tumba la transacción.
+    cerrados = {f['id'] for f in conn.execute(
+        "UPDATE findings SET status = 'resolved', resolved_at = now(), last_scan_id = %(scan)s, updated_at = now() "
+        "WHERE domain_id = %(dominio)s AND source_id = %(fuente)s AND status = 'open' "
+        'AND fingerprint <> ALL(%(huellas)s::bytea[]) '
+        'AND (((%(revisados)s::text[] IS NOT NULL '
+        'OR rule_id NOT IN (SELECT id FROM scoring_rules WHERE code = ANY(%(sin_cobertura)s::text[]))) '
+        'AND (%(revisados)s::text[] IS NULL OR (jsonb_array_length({p}) > 0 AND CASE '
+        'WHEN %(sin_revisar)s::text[] IS NULL THEN {p} <@ to_jsonb(%(revisados)s::text[]) '
+        'ELSE NOT ({p} ?| %(sin_revisar)s::text[]) END))) '
+        "OR (rule_id IN (SELECT id FROM scoring_rules WHERE code = 'cert_expiring_soon') "
+        "AND jsonb_typeof(evidence->'vence') = 'string' "
+        "AND evidence->>'vence' ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}(\\.\\d{{1,6}})?\\+00:00$' "
+        "AND (evidence->>'vence') COLLATE \"C\" < %(ahora)s)) RETURNING id::text".format(p=PARTES),
+        {'scan': scan_id, 'dominio': domain_id, 'fuente': source_id,
+         'huellas': huellas + [bytes.fromhex(h) for h in resultado.omitidos],
+         'sin_cobertura': list(resultado.sin_cobertura), 'revisados': resultado.revisados,
+         'sin_revisar': resultado.sin_revisar,
+         'ahora': (ahora or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()},
+    ).fetchall()}
+    return abiertos, cerrados
 
 
 def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, parcial):
@@ -493,10 +572,19 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     Una fuente que no se recupera deja el escaneo 'partial' si otra respondió, o 'failed' si ninguna respondió.
     También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
-    se muestran como 0 hallazgos. crt.sh nunca busca dominios parecidos desde aquí, porque consulta
+    se muestran como 0 hallazgos, o si revisó solo una parte de lo suyo (revisados, en stats.sources_partial).
+    crt.sh nunca busca dominios parecidos desde aquí, porque consulta
     variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
     En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
     ct_logs y subfinder cuenta una vez. En assets van una sola vez, con sus atributos unidos.
+    new_findings cuenta los hallazgos que el escaneo dejó abiertos y antes no lo estaban: los que insertó y los que
+    reabrió porque estaban en 'resolved'. No cuenta los que ya estaban abiertos ni los que el cliente marcó como
+    riesgo aceptado o falso positivo, que no cambian. resolved_findings cuenta los que pasó a 'resolved' porque su
+    fuente respondió y ya no los dio: nunca los de una fuente caída ni lo que _guardar_resultado deja abierto
+    (omitidos, sin_cobertura de una fuente que revisó todo y, en una corrida parcial, lo que no trae partes o trae
+    una sin revisar, salvo un cert_expiring_soon ya vencido). Un hallazgo que una fuente resuelve y otra reabre en
+    el mismo escaneo quedó como estaba y no cuenta en ninguno. Los conteos solo se guardan al cerrar: lo que
+    guardaron las fuentes de un escaneo que se cae o lo dan por caído no se cuenta.
     `dormir` reemplaza time.sleep (pruebas).
     """
     dormir = dormir or time.sleep
@@ -523,6 +611,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     reintenta = modo == 'vivo'
     con_cupo = modo in MODOS_CON_CUPO
     corridas, activos, hallazgos = [], set(), 0
+    nuevos, resueltos = set(), set()  # id de los hallazgos que este escaneo abrió y los que resolvió
     for codigo in fuentes:
         intento, gastadas, previos = 0, 0, []
         modulo = cargar(codigo)
@@ -547,9 +636,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             gastadas += res.consultas
             avisos = previos + res.avisos
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
-                       'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura}
+                       'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura,
+                       'cobertura_parcial': res.estado == 'succeeded' and res.revisados is not None}
             # La marca de vida y la fila van en una transacción: si lo dieron por caído mientras la fuente corría,
             # no se escribe encima de la fila que ya se cerró, y nadie lo puede dar por caído en medio.
+            cambios = None
             with _tx(org, conn) as c:  # una fila por fuente: cada reintento la actualiza
                 vivo = _latido(org, scan_id, c)
                 if vivo:
@@ -562,9 +653,18 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                         (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
                          Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
                     if res.estado == 'succeeded':
-                        _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas)
+                        cambios = _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas,
+                                                     ahora)
             if not vivo:
                 return _ya_no_corre(org, scan_id, conn, corridas)
+            if cambios:
+                # Lo que una fuente resuelve y otra reabre en este escaneo (o al revés) no cuenta. Hoy dos fuentes no
+                # dan la misma huella y no pasa, pero el conteo no depende de eso.
+                abiertos, cerrados = cambios
+                resueltos |= cerrados - nuevos
+                nuevos -= cerrados
+                nuevos |= abiertos - resueltos
+                resueltos -= abiertos
             if status != 'retrying':
                 break
             previos.append('Intento %d: %s' % (attempt, (res.error or '')[:300]))
@@ -579,10 +679,15 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
 
     ok = sum(1 for r in corridas if r['status'] == 'succeeded')
     sin_cobertura = sorted({c for r in corridas if r['status'] == 'succeeded' for c in r['sin_cobertura']})
-    estado = 'completed' if ok == len(corridas) and not sin_cobertura else 'failed' if ok == 0 else 'partial'
-    stats = {'assets': len(activos), 'findings': hallazgos, 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
+    a_medias = [r['source'] for r in corridas if r['status'] == 'succeeded' and r['cobertura_parcial']]
+    completo = ok == len(corridas) and not sin_cobertura and not a_medias
+    estado = 'completed' if completo else 'failed' if ok == 0 else 'partial'
+    stats = {'assets': len(activos), 'findings': hallazgos, 'new_findings': len(nuevos),
+             'resolved_findings': len(resueltos), 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
     if sin_cobertura:
         stats['rules_without_coverage'] = sin_cobertura
+    if a_medias:
+        stats['sources_partial'] = a_medias
     with _tx(org, conn) as c:
         cerrado = c.execute("UPDATE scans SET status = %s, finished_at = now(), stats = %s, updated_at = now() "
                             "WHERE id = %s AND status = 'running' RETURNING id", (estado, Jsonb(stats), scan_id)).fetchone()
