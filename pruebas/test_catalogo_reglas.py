@@ -191,7 +191,7 @@ class Reglas(unittest.TestCase):
             self.assertTrue(code in codigos, 'el texto de %r no tiene regla' % code)
 
     def test_4b_toda_regla_tiene_mapeo_a_marcos(self):
-        archivo = RAIZ / 'db' / 'migraciones' / '010_mapeo_marcos.sql'
+        archivo = RAIZ / 'db' / 'migraciones' / '011_mapeo_marcos.sql'
         sql = archivo.read_text(encoding='utf-8')
         codigos = FILA_MAPEO.findall(sql)
         self.assertEqual(len(codigos), len(set(codigos)), 'hay códigos repetidos en los mapeos')
