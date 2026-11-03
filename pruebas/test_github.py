@@ -117,21 +117,23 @@ def sin_api(url, timeout):
 
 
 class ProcesosSimulados:
-    """Hace las veces de github._ejecutar: git clone, gitleaks git y git log, que escribe su salida en `salida`. Anota
-    cada llamada y si su carpeta existía.
-    `reporte` (lista o texto) y `log` son de todos los repos, salvo los que den `reportes` y `logs` por repo. `fallas`
-    da, por (paso, repo), un código de salida o una excepción."""
+    """Hace las veces de github._ejecutar: git clone, gitleaks git y los dos git log, el de los entornos de Python y el
+    de los correos, que escriben su salida en `salida`. Anota cada llamada y si su carpeta existía.
+    `reporte` (lista o texto) y `log` son de todos los repos, salvo los que den `reportes` y `logs` por repo, y
+    `entornos` también. `fallas` da, por (paso, repo), un código de salida o una excepción."""
 
-    def __init__(self, reporte=None, log=None, reportes=None, logs=None, fallas=None):
+    def __init__(self, reporte=None, log=None, reportes=None, logs=None, fallas=None, entornos=''):
         self.reporte = [hallazgo_gitleaks()] if reporte is None else reporte
         self.log = LOG if log is None else log
+        self.entornos = entornos
         self.reportes, self.logs, self.fallas = reportes or {}, logs or {}, fallas or {}
         self.llamadas = []
         self.repo = None
 
     def __call__(self, comando, timeout, env, cwd, salida=None, disco=None):
         comando = list(comando)
-        paso = 'clone' if 'clone' in comando else 'log' if 'log' in comando else 'gitleaks'
+        paso = ('clone' if 'clone' in comando else 'entornos' if '--name-only' in comando
+                else 'log' if 'log' in comando else 'gitleaks')
         if paso == 'clone':
             self.repo = comando[comando.index('--') + 1].rsplit('/', 1)[1][:-len('.git')]
         self.llamadas.append(SimpleNamespace(paso=paso, repo=self.repo, comando=comando, timeout=timeout, env=dict(env),
@@ -145,9 +147,9 @@ class ProcesosSimulados:
             reporte = self.reportes.get(self.repo, self.reporte)
             with open(comando[comando.index('--report-path') + 1], 'w', encoding='utf-8') as f:
                 f.write(reporte if isinstance(reporte, str) else json.dumps(reporte))
-        if paso == 'log':
+        if paso in ('log', 'entornos'):
             with open(salida, 'x', encoding='utf-8', newline='') as f:
-                f.write(self.logs.get(self.repo, self.log))
+                f.write(self.logs.get(self.repo, self.log) if paso == 'log' else self.entornos)
         return subprocess.CompletedProcess(comando, 0, None, None)
 
     def de(self, paso):
@@ -384,6 +386,19 @@ class Secretos(unittest.TestCase):
         self.assertEqual(h.evidencia['ruta'], ('a?b?c' + 'x' * 400)[:300])
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
 
+    def test_4b_las_marcas_dan_la_carpeta_del_entorno_y_solo_sus_paquetes_se_descartan(self):
+        texto = 'pyvenv.cfg\0a/.venv/pyvenv.cfg\0env/conda-meta/history\0notpyvenv.cfg\0x/conda-meta/history.bak\0'
+        raices = github.leer_entornos(texto)
+        self.assertEqual(raices, {'', 'a/.venv', 'env'})
+        secretos = [{'regla': 'r', 'ruta': ruta, 'primera_vez': None}
+                    for ruta in ('Lib/site-packages/x.py', 'lib64/y.pem', 'pyvenv.cfg', 'app/lib/z.py',
+                                 'a/.venv/LIB/w.py', 'a/.venv/bin/activate', 'a/lib/v.py', 'env/pkgs/p/k.pem',
+                                 'env/etc/conda/activate.d/e.sh', 'lib')]
+        self.assertEqual([s['ruta'] for s in github.fuera_de_entornos(secretos, raices)],
+                         ['pyvenv.cfg', 'app/lib/z.py', 'a/.venv/bin/activate', 'a/lib/v.py',
+                          'env/etc/conda/activate.d/e.sh', 'lib'])
+        self.assertEqual(github.fuera_de_entornos(secretos, set()), secretos)
+
     def test_4_un_reporte_ilegible_es_falla_de_ese_repo(self):
         res, _ = recolectar(procesos=ProcesosSimulados(reportes={'sitio': 'esto no es json'}))
         self.assertEqual(res.estado, 'succeeded')
@@ -474,6 +489,11 @@ class Procesos(unittest.TestCase):
         log = procesos.de('log')[0]
         self.assertEqual(log.comando, [BINARIOS['git'], *github.OPCIONES_GIT, '-C', os.path.join(casa, 'repo.git'),
                                        'log', '--all', '--format=%ae%x00%ce%x00%ct'])
+        entornos = procesos.de('entornos')[0]
+        self.assertEqual(entornos.comando, [BINARIOS['git'], *github.OPCIONES_GIT, '-C', os.path.join(casa, 'repo.git'),
+                                            'log', '--all', '--no-renames', '--format=', '--name-only', '-z', '--',
+                                            ':(glob)**/pyvenv.cfg', ':(glob)**/conda-meta/history'])
+        salidas = {'log': 'log.txt', 'entornos': 'entornos.txt'}
         entorno = {'PATH': os.environ.get('PATH', os.defpath), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
                    'GIT_TERMINAL_PROMPT': '0', 'GIT_LFS_SKIP_SMUDGE': '1'}
         if os.name == 'nt':
@@ -482,7 +502,7 @@ class Procesos(unittest.TestCase):
             self.assertEqual(ll.env, dict(entorno, HOME=ll.cwd))
             self.assertTrue(ll.casa)
             self.assertTrue(os.path.basename(ll.cwd).startswith(github.PREFIJO_TEMPORAL))
-            self.assertEqual(ll.salida, os.path.join(ll.cwd, 'log.txt') if ll.paso == 'log' else None)
+            self.assertEqual(ll.salida, os.path.join(ll.cwd, salidas[ll.paso]) if ll.paso in salidas else None)
             self.assertEqual(ll.disco, github.MAX_DISCO)
 
     def test_2_nombres_de_repo_peligrosos_no_llegan_a_la_linea_de_comandos(self):
@@ -594,7 +614,7 @@ class Procesos(unittest.TestCase):
 
     def test_8_el_tiempo_de_la_corrida_recorta_cada_paso_y_corta_los_repos(self):
         repos = [repo('a', '2026-10-03T00:00:00Z'), repo('b', '2026-10-02T00:00:00Z'), repo('c', '2026-10-01T00:00:00Z')]
-        procesos = ProcesosSimulados()
+        procesos = ProcesosSimulados(reporte=[])   # sin hallazgos no se buscan entornos: clon, gitleaks y git log
         res, _ = recolectar(ApiSimulada(repos=repos), procesos, cronometro=Cronometro(35))
         self.assertEqual([ll.repo for ll in procesos.de('clone')], ['a', 'b'])
         self.assertEqual([ll.timeout for ll in procesos.llamadas], [120, 120, 60, 80, 45, 10])
@@ -626,6 +646,30 @@ class Procesos(unittest.TestCase):
     def test_11_un_proceso_que_llena_el_disco_es_falla_de_ese_repo(self):
         res, _ = recolectar(procesos=ProcesosSimulados(fallas={('clone', 'sitio'): github.MuyGrande()}))
         self.assertIn('github: se pasó de 300 MB al clonar acme-demo/sitio', res.avisos)
+        self.assertIn('github: cobertura parcial, se revisaron 1 de 2 repos', res.avisos)
+
+    def test_12_los_paquetes_de_un_entorno_con_marca_se_descartan_y_lo_demas_se_revisa(self):
+        """pyvenv.cfg (venv, virtualenv, uv y PyPy) o conda-meta/history (conda) marcan un entorno instalado: se
+        descarta lo de sus paquetes, sea cual sea su forma, y se revisa lo demás, como bin/activate o
+        etc/conda/activate.d/."""
+        rutas = {'herramientas/pypy/lib/pypy3.10/site-packages/tornado/test/test.key': False,
+                 'py313t/lib/python3.13t/site-packages/paquete/prueba.pem': False,
+                 'conda/Lib/test/keycert.pem': False, 'conda/Library/ssl/clave.pem': False,
+                 'py313t/bin/activate': True, 'conda/etc/conda/activate.d/env_vars.sh': True,
+                 'conda/Scripts/activate.bat': True, 'herramientas/lib/claves.py': True, '.env/lib/produccion.sh': True}
+        marcas = 'herramientas/pypy/pyvenv.cfg\0py313t/pyvenv.cfg\0conda/conda-meta/history\0'
+        procesos = ProcesosSimulados(reporte=[hallazgo_gitleaks(archivo=ruta) for ruta in rutas], entornos=marcas)
+        res, _ = recolectar(procesos=procesos)
+        self.assertEqual({h.evidencia['ruta'] for h in res.hallazgos if h.codigo == 'secret_in_public_repo'},
+                         {ruta for ruta, revisada in rutas.items() if revisada})
+        self.assertEqual([ll.repo for ll in procesos.de('entornos')], ['sitio', 'api'])
+
+    def test_13_sin_hallazgos_no_busca_entornos_y_si_la_busqueda_falla_es_falla_de_ese_repo(self):
+        procesos = ProcesosSimulados(reporte=[])
+        recolectar(procesos=procesos)
+        self.assertEqual(procesos.de('entornos'), [])
+        res, _ = recolectar(procesos=ProcesosSimulados(fallas={('entornos', 'sitio'): 1}))
+        self.assertIn('github: no se pudo buscar entornos de Python en acme-demo/sitio (código 1)', res.avisos)
         self.assertIn('github: cobertura parcial, se revisaron 1 de 2 repos', res.avisos)
 
 
@@ -957,10 +1001,11 @@ class Integracion(unittest.TestCase):
     Con INTEGRACION_GITHUB=1, como en el CI, falla en vez de saltarse si no hay git o gitleaks.
     """
 
-    def armar(self, d, extra=(), permitida=None, renombrar=None):
+    def armar(self, d, extra=(), permitida=None, renombrar=None, marcas=()):
         """Un clon bare de un repo con un token que solo queda en el historial y otro en la versión actual. Cada ruta
         de `extra` lleva TOKEN en un último commit, y `permitida` lo lleva con un comentario gitleaks:allow. Con
-        `renombrar` = (de, a), otro commit mueve el archivo de una ruta a la otra sin cambiarlo."""
+        `renombrar` = (de, a), otro commit mueve el archivo de una ruta a la otra sin cambiarlo. Las rutas de `marcas`
+        van en el último commit sin token, como marcas de entornos de Python."""
         fuente, casa = os.path.join(d, 'fuente'), os.path.join(d, 'casa')
         os.mkdir(fuente)
         os.mkdir(casa)
@@ -989,6 +1034,10 @@ class Integracion(unittest.TestCase):
             os.makedirs(os.path.join(fuente, os.path.dirname(permitida)), exist_ok=True)
             Path(fuente, permitida).write_text('TOKEN = "%s"  # gitleaks:allow\n' % TOKEN, encoding='utf-8')
             git('add', '-f', permitida)
+        for ruta in marcas:
+            os.makedirs(os.path.join(fuente, os.path.dirname(ruta)), exist_ok=True)
+            Path(fuente, ruta).write_text('home = /usr/bin\n', encoding='utf-8')
+            git('add', '-f', ruta)
         if extra or permitida:
             git('commit', '-q', '-m', 'cuatro')
         if renombrar:
@@ -1041,7 +1090,8 @@ class Integracion(unittest.TestCase):
                      'deploy/gitleaks.toml/claves.env', 'docs/guia.adoc', 'api/v2', 'scripts/bin',
                      'infra/prodenv/lib/ajustes.py', '.env/lib/produccion.sh')
         saltadas = ('node_modules/paquete/index.js', 'go.sum', 'venv/lib/python3.12/site-packages/ajustes.py',
-                    '.venv/Lib/site-packages/ajustes.py')
+                    '.venv/Lib/site-packages/ajustes.py', '.venv/lib/pypy3.10/site-packages/ajustes.py',
+                    'venv/lib/python3.13t/site-packages/ajustes.py')
         with tempfile.TemporaryDirectory() as d:
             destino, casa = self.armar(d, revisadas + saltadas, permitida='app/ajustes.py')
             datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
@@ -1070,6 +1120,21 @@ class Integracion(unittest.TestCase):
                                        renombrar=('node_modules/paquete/.env', 'config/claves.env'))
             datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
         self.assertEqual([s['ruta'] for s in datos['secretos']], ['config/.env', 'config/claves.env', 'viejo.txt'])
+
+    def test_7_los_paquetes_de_un_entorno_con_marca_se_descartan_con_cualquier_python(self):
+        """Fuera de una carpeta venv, ninguna ruta de gitleaks_cirdan.toml salta PyPy (lib/pypy3.10/), Python sin GIL
+        (lib/python3.13t/) ni conda en Windows (Lib/ con la biblioteca estándar): los descarta github.py por la marca.
+        Lo demás del entorno y una carpeta sin marca se revisan."""
+        marcas = ('herramientas/pypy/pyvenv.cfg', 'py313t/pyvenv.cfg', 'conda/conda-meta/history')
+        descartadas = ('herramientas/pypy/lib/pypy3.10/site-packages/tornado/test/prueba.py',
+                       'py313t/lib/python3.13t/site-packages/paquete/prueba.py', 'conda/Lib/test/claves.py',
+                       'conda/Library/ssl/claves.py')
+        revisadas = ('py313t/bin/activate', 'conda/etc/conda/activate.d/env_vars.sh', 'conda/Scripts/activate.bat',
+                     'herramientas/lib/claves.py')
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, descartadas + revisadas, marcas=marcas)
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        self.assertEqual([s['ruta'] for s in datos['secretos']], sorted(revisadas + ('config/.env', 'viejo.txt')))
 
 
 if __name__ == '__main__':

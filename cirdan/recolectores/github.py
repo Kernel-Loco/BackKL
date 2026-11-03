@@ -24,7 +24,9 @@ Qué consulta, y nada más:
   cada uno, por pushed_at descendente. Los archivados entran, y los de tamaño 0 también: GitHub calcula 'size' cada hora
   y un repo recién creado sale con 0 aunque ya tenga commits.
 - Lo demás es local, sobre el clon: gitleaks git con --redact, que salta los archivos de más de MAX_MB_ARCHIVO MB y no
-  respeta los comentarios gitleaks:allow del repo (--ignore-gitleaks-allow), y git log para los correos.
+  respeta los comentarios gitleaks:allow del repo (--ignore-gitleaks-allow), y git log para los correos. Si gitleaks
+  halló algo, otro git log busca las marcas de los entornos de Python que el repo trae instalados (MARCAS_ENTORNO) y
+  se descarta lo que esté en sus paquetes (fuera_de_entornos).
 
 Sin secretos ni datos personales de más:
 - gitleaks corre con --redact y su reporte se lee por lista blanca: RuleID, File y Date. Nunca Secret, Match, Author,
@@ -137,6 +139,8 @@ REDACTADO = 'REDACTED'           # lo que pone gitleaks --redact en Secret y den
 OPCIONES_GIT = ('-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always',
                 '-c', 'transfer.fsckObjects=true', '-c', 'credential.helper=')
 FORMATO_LOG = '--format=%ae%x00%ce%x00%ct'      # correo del autor, de quien subió el commit y fecha (epoch)
+MARCAS_ENTORNO = ('pyvenv.cfg', 'conda-meta/history')   # las crean venv, virtualenv, uv y PyPy, y conda
+CARPETAS_ENTORNO = ('lib', 'lib64', 'library', 'pkgs', 'site-packages')   # lo que instala un entorno, en minúsculas
 
 ORG_VALIDA = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}')        # sin '-' inicial, '/' ni '.'
 REPO_VALIDO = re.compile(r'[A-Za-z0-9._][A-Za-z0-9._-]{0,99}')   # sin '-' inicial ni '/'. '..' se rechaza aparte
@@ -347,6 +351,32 @@ def leer_reporte(texto):
         llave = (_ruta(f.get('File')), regla)
         vistos[llave] = _primera(vistos.get(llave), _fecha(f.get('Date')))
     return [{'regla': regla, 'ruta': ruta, 'primera_vez': fecha} for (ruta, regla), fecha in sorted(vistos.items())]
+
+
+def leer_entornos(texto):
+    """Carpetas de los entornos de Python del repo, de la salida de git log -z --name-only con las rutas de
+    MARCAS_ENTORNO. '' es la raíz del repo."""
+    raices = set()
+    for nombre in texto.split('\0'):
+        nombre = _texto(nombre.strip('\n'))
+        for marca in MARCAS_ENTORNO:
+            if nombre == marca or nombre.endswith('/' + marca):
+                raices.add(nombre[:-len(marca)].rstrip('/'))
+    return raices
+
+
+def fuera_de_entornos(secretos, raices):
+    """Los secretos que no están en los paquetes de un entorno de `raices` (CARPETAS_ENTORNO justo debajo de su
+    carpeta). Ahí solo hay código de terceros, con llaves y certificados de prueba que darían hallazgos críticos
+    falsos, y su forma cambia con cada Python: lib/python3.13t/ sin GIL, lib/pypy3.10/ en PyPy o Lib/ con la
+    biblioteca estándar en conda para Windows. Lo demás del entorno se revisa, como bin/activate, Scripts/ o
+    etc/conda/activate.d/, donde sí se ponen claves, y también una carpeta sin marca, como una .env/lib/ del
+    cliente."""
+    def instalado(ruta):
+        partes = ruta.split('/')
+        return any(partes[i].lower() in CARPETAS_ENTORNO and '/'.join(partes[:i]) in raices
+                   for i in range(len(partes) - 1))
+    return [s for s in secretos if not instalado(s['ruta'])]
 
 
 def leer_correos(texto, dominio):
@@ -708,6 +738,8 @@ class ClienteGitHub:
                 secretos = leer_reporte(f.read())
         except (OSError, ValueError, RecursionError):
             raise FallaRepo('github: no se pudo leer el reporte de gitleaks de %s/%s' % (org, repo)) from None
+        if secretos:
+            secretos = fuera_de_entornos(secretos, self._entornos(git, destino, casa, org, repo))
         log = os.path.join(casa, 'log.txt')
         self._correr([git, *OPCIONES_GIT, '-C', destino, 'log', '--all', FORMATO_LOG], casa, TIMEOUT_LOG,
                      'leer los commits de', org, repo, salida=log)
@@ -720,6 +752,19 @@ class ClienteGitHub:
             raise FallaRepo('github: los commits de %s/%s pasan de %d MB' % (org, repo, MAX_LOG // 2 ** 20))
         correos, ajenos, invalidos = leer_correos(texto, dominio)
         return {'secretos': secretos, 'correos': correos, 'ajenos': ajenos, 'invalidos': invalidos}
+
+    def _entornos(self, git, destino, casa, org, repo):
+        """Las carpetas de los entornos de Python que el repo trae o trajo en su historial (leer_entornos)."""
+        salida = os.path.join(casa, 'entornos.txt')
+        self._correr([git, *OPCIONES_GIT, '-C', destino, 'log', '--all', '--no-renames', '--format=', '--name-only',
+                      '-z', '--', *(':(glob)**/' + marca for marca in MARCAS_ENTORNO)], casa, TIMEOUT_LOG,
+                     'buscar entornos de Python en', org, repo, salida=salida)
+        try:
+            if os.path.getsize(salida) > MAX_LOG:
+                raise ValueError('salida demasiado grande')
+            return leer_entornos(Path(salida).read_bytes().decode('utf-8', 'replace'))
+        except (OSError, ValueError):
+            raise FallaRepo('github: no se pudieron leer los entornos de Python de %s/%s' % (org, repo)) from None
 
 
 def carpeta_de(dominio):

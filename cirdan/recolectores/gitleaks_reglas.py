@@ -43,12 +43,13 @@ CAMBIOS = {
     r'(^|/)npm-shrinkwrap\.json$': None,
     r'(^|/)(Pipfile|poetry)\.lock$': None,
     # Sin punto o sin inicio de carpeta saltaban más de lo que dicen: guia.adoc, api/v2, scripts/bin o
-    # infra/prodenv/lib/ajustes.py. La de los entornos virtuales solo salta site-packages, lo único que hay en su lib
-    # (Lib en Windows), así que una carpeta .env/lib/ del cliente se revisa.
+    # infra/prodenv/lib/ajustes.py. La de los entornos virtuales solo salta site-packages, así que una carpeta
+    # .env/lib/ del cliente se revisa. Es el respaldo para un entorno subido sin su marca: con pyvenv.cfg o
+    # conda-meta/, github.py descarta lo de sus paquetes sea cual sea su forma (fuera_de_entornos).
     r'(.*?)(doc|docx|zip|xls|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$':
         r'\.(doc|docx|zip|xls|pdf|bin|socket|vsidx|v2|suo|wsuo|dll|pdb|exe|gltf)$',
     r'(?i)/?(v?env|virtualenv)/lib(64)?/.+$':
-        r'(?i)(^|/)\.?(v?env|virtualenv)/lib(64)?/(python[23](\.\d{1,2})+/)?site-packages/.+$',
+        r'(?i)(^|/)\.?(v?env|virtualenv)/lib(64)?/((python|pypy)[23](\.\d{1,2})+t?/)?site-packages/.+$',
     r'go\.(mod|sum|work(\.sum)?)$': r'(^|/)go\.(mod|sum|work(\.sum)?)$',
     r'verification-metadata.xml': r'(^|/)verification-metadata\.xml$',
     r'Database.refactorlog': r'Database\.refactorlog$',
