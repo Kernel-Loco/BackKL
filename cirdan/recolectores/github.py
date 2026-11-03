@@ -692,12 +692,14 @@ class ClienteGitHub:
     def analizar(self, destino, casa, org, repo, dominio):
         """{secretos, correos, ajenos, invalidos} de un clon bare que ya está en disco, sin red: gitleaks y git log.
         En un clon bare no hay árbol de trabajo, así que el repo no puede traer un .gitleaksignore que gitleaks lea.
-        Con --ignore-gitleaks-allow, un comentario gitleaks:allow en la línea de un secreto tampoco se lo esconde."""
+        Con --ignore-gitleaks-allow, un comentario gitleaks:allow en la línea de un secreto tampoco se lo esconde, y con
+        --no-renames git log muestra el contenido de un archivo renombrado, así que un secreto que entró en una ruta que
+        se salta, como node_modules/, se halla al moverlo a otra."""
         git, gitleaks = self._programas()
         reporte = os.path.join(casa, 'reporte.json')
-        self._correr([gitleaks, 'git', destino, '--config', str(REGLAS), '--log-opts=--all', '--ignore-gitleaks-allow',
-                      '--redact', '--no-banner', '--log-level', 'error', '--report-format', 'json', '--report-path',
-                      reporte, '--exit-code', '0', '--max-target-megabytes', str(MAX_MB_ARCHIVO)],
+        self._correr([gitleaks, 'git', destino, '--config', str(REGLAS), '--log-opts=--all --no-renames',
+                      '--ignore-gitleaks-allow', '--redact', '--no-banner', '--log-level', 'error', '--report-format',
+                      'json', '--report-path', reporte, '--exit-code', '0', '--max-target-megabytes', str(MAX_MB_ARCHIVO)],
                      casa, TIMEOUT_GITLEAKS, 'revisar con gitleaks', org, repo)
         try:
             if os.path.getsize(reporte) > MAX_REPORTE:

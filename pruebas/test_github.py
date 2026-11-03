@@ -467,7 +467,7 @@ class Procesos(unittest.TestCase):
                                         'https://github.com/acme-demo/sitio.git', os.path.join(casa, 'repo.git')])
         fuga = procesos.de('gitleaks')[0].comando
         self.assertEqual(fuga[:3], [BINARIOS['gitleaks'], 'git', os.path.join(casa, 'repo.git')])
-        for opcion in (['--config', str(github.REGLAS)], ['--log-opts=--all'], ['--ignore-gitleaks-allow'],
+        for opcion in (['--config', str(github.REGLAS)], ['--log-opts=--all --no-renames'], ['--ignore-gitleaks-allow'],
                        ['--redact'], ['--exit-code', '0'], ['--report-format', 'json']):
             self.assertTrue(any(fuga[i:i + len(opcion)] == opcion for i in range(len(fuga))), opcion)
         self.assertEqual(fuga[-2:], ['--max-target-megabytes', '100'])
@@ -845,12 +845,11 @@ class Contrato(unittest.TestCase):
         self.assertEqual(sorted(reglas['allowlist']), ['description', 'paths', 'regexes', 'stopwords'])
         self.assertNotIn('cirdan', json.dumps(reglas['allowlist']).lower())
         rutas = reglas['allowlist']['paths']
-        for vieja, nueva in gitleaks_reglas.CAMBIOS.items():
-            self.assertNotIn(vieja, rutas)
-            if nueva:
-                self.assertIn(nueva, rutas)
-        self.assertIn('(^|/)node_modules/.*?$', rutas)
+        self.assertEqual(len(rutas), len(set(rutas)))
+        self.assertEqual(set(rutas), {nueva for nueva in gitleaks_reglas.CAMBIOS.values() if nueva}
+                         | set(gitleaks_reglas.CONSERVADAS))
         # Las 195 de omisión de 8.21.2 y la propia, cada una con su id
+        self.assertEqual(len(reglas['rules']), 196)
         self.assertEqual(len({regla['id'] for regla in reglas['rules']}), 196)
         self.assertEqual(reglas['rules'][-1], tomllib.loads(gitleaks_reglas.REGLA_PROPIA)['rules'][0])
 
@@ -921,7 +920,7 @@ class Reglas(unittest.TestCase):
     def omision(self, rutas):
         return ('# auto-generada\n\ntitle = "gitleaks config"\n\n[allowlist]\ndescription = "global allow lists"\n'
                 "regexes = [\n    '''^x$''',\n]\npaths = [\n%s]\nstopwords = [\n    \"abc\",\n]\n\n"
-                "[[rules]]\nid = \"uno\"\nregex = '''uno[0-9]{8}'''\n\n[rules.allowlist]\npaths = [\n    '''x''',\n]\n"
+                "[[rules]]\nid = \"uno\"\nregex = '''uno[0-9]{8}'''\n\n[rules.allowlist]\npaths = [\n    '''gitleaks\\.toml''',\n]\n"
                 % ''.join("    '''%s''',\n" % ruta for ruta in rutas))
 
     def test_1_quita_o_ancla_las_rutas_de_cambios_y_deja_las_demas_y_las_de_cada_regla(self):
@@ -935,11 +934,16 @@ class Reglas(unittest.TestCase):
                          [nueva for nueva in gitleaks_reglas.CAMBIOS.values() if nueva] + ['(^|/)node_modules/.*?$'])
         self.assertEqual((reglas['allowlist']['regexes'], reglas['allowlist']['stopwords']), (['^x$'], ['abc']))
         self.assertEqual([regla['id'] for regla in reglas['rules']], ['uno', 'cirdan-fake-token'])
-        self.assertEqual(reglas['rules'][0]['allowlist'], {'paths': ['x']})
+        self.assertEqual(reglas['rules'][0]['allowlist'], {'paths': [r'gitleaks\.toml']})  # la de cada regla no cambia
 
     def test_2_falla_si_una_ruta_de_cambios_ya_no_viene_en_la_version_de_gitleaks(self):
         with self.assertRaisesRegex(ValueError, 'ya no vienen'):
             gitleaks_reglas.generar(self.omision(list(gitleaks_reglas.CAMBIOS)[1:]), self.LICENCIA, '8.21.2')
+
+    def test_3_falla_si_la_version_de_gitleaks_trae_una_ruta_sin_revisar(self):
+        with self.assertRaisesRegex(ValueError, 'sin revisar'):
+            gitleaks_reglas.generar(self.omision([*gitleaks_reglas.CAMBIOS, r'(^|/)composer\.lock$']), self.LICENCIA,
+                                    '8.21.2')
 
 
 @unittest.skipUnless(os.environ.get('INTEGRACION_GITHUB') == '1'
@@ -953,9 +957,10 @@ class Integracion(unittest.TestCase):
     Con INTEGRACION_GITHUB=1, como en el CI, falla en vez de saltarse si no hay git o gitleaks.
     """
 
-    def armar(self, d, extra=(), permitida=None):
+    def armar(self, d, extra=(), permitida=None, renombrar=None):
         """Un clon bare de un repo con un token que solo queda en el historial y otro en la versión actual. Cada ruta
-        de `extra` lleva TOKEN en un último commit, y `permitida` lo lleva con un comentario gitleaks:allow."""
+        de `extra` lleva TOKEN en un último commit, y `permitida` lo lleva con un comentario gitleaks:allow. Con
+        `renombrar` = (de, a), otro commit mueve el archivo de una ruta a la otra sin cambiarlo."""
         fuente, casa = os.path.join(d, 'fuente'), os.path.join(d, 'casa')
         os.mkdir(fuente)
         os.mkdir(casa)
@@ -986,6 +991,10 @@ class Integracion(unittest.TestCase):
             git('add', '-f', permitida)
         if extra or permitida:
             git('commit', '-q', '-m', 'cuatro')
+        if renombrar:
+            os.makedirs(os.path.join(fuente, os.path.dirname(renombrar[1])), exist_ok=True)
+            git('mv', '-f', *renombrar)
+            git('commit', '-q', '-m', 'cinco')
         destino = os.path.join(casa, 'repo.git')
         git('clone', '--bare', '--quiet', fuente, destino, cwd=d)
         return destino, casa
@@ -1031,7 +1040,8 @@ class Integracion(unittest.TestCase):
         revisadas = ('package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'poetry.lock', '.gitleaks.toml',
                      'deploy/gitleaks.toml/claves.env', 'docs/guia.adoc', 'api/v2', 'scripts/bin',
                      'infra/prodenv/lib/ajustes.py')
-        saltadas = ('node_modules/paquete/index.js', 'go.sum', 'venv/lib/python3.12/site-packages/ajustes.py')
+        saltadas = ('node_modules/paquete/index.js', 'go.sum', 'venv/lib/python3.12/site-packages/ajustes.py',
+                    '.venv/Lib/site-packages/ajustes.py')
         with tempfile.TemporaryDirectory() as d:
             destino, casa = self.armar(d, revisadas + saltadas, permitida='app/ajustes.py')
             datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
@@ -1041,14 +1051,25 @@ class Integracion(unittest.TestCase):
         self.assertNotIn(TOKEN, json.dumps(datos))
 
     def test_5_gitleaks_cirdan_toml_es_el_que_genera_gitleaks_reglas_con_el_gitleaks_de_la_imagen(self):
+        if not os.path.exists(gitleaks_reglas.LICENCIA) and os.environ.get('INTEGRACION_GITHUB') != '1':
+            self.skipTest('pide el gitleaks de la imagen, con su licencia')
         binario = shutil.which('gitleaks')
         with open(gitleaks_reglas.LICENCIA, encoding='utf-8') as f:
             licencia = f.read()
         omision, version = gitleaks_reglas.omision(binario), gitleaks_reglas.version(binario)
+        self.assertEqual(len(tomllib.loads(omision)['rules']), 195)
         esperado = gitleaks_reglas.generar(omision, licencia, version)
         self.assertTrue(github.REGLAS.read_text(encoding='utf-8') == esperado,
                         'gitleaks_cirdan.toml no es el que sale del gitleaks de la imagen: vuelve a generarlo como '
                         'dice cirdan/recolectores/gitleaks_reglas.py')
+
+    def test_6_un_secreto_que_entra_en_una_ruta_que_se_salta_se_halla_al_renombrarlo(self):
+        """Sin --no-renames, git log solo dice 'rename from' y 'rename to', sin el contenido."""
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, ('node_modules/paquete/.env',),
+                                       renombrar=('node_modules/paquete/.env', 'config/claves.env'))
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        self.assertEqual([s['ruta'] for s in datos['secretos']], ['config/.env', 'config/claves.env', 'viejo.txt'])
 
 
 if __name__ == '__main__':

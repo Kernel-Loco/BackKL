@@ -3,9 +3,10 @@
 Es la config por omisión que gitleaks trae embebida, copiada sin herencia y con tres cambios:
 - CAMBIOS quita o ancla rutas de la lista global que se salta (paths de [allowlist]). La de 8.21.2 salta archivos que
   escribe el cliente: los lock files, todo lo que lleve 'gitleaks.toml' en la ruta y lo que termine en doc, bin o v2
-  aunque no sea extensión, como guia.adoc, api/v2 o scripts/bin. Las demás rutas se quedan: son código de terceros que
+  aunque no sea extensión, como guia.adoc, api/v2 o scripts/bin. CONSERVADAS se quedan como vienen: dependencias que
   instala un gestor de paquetes, como node_modules/, donde las claves de ejemplo de las librerías llenarían el reporte
-  de hallazgos críticos, o archivos generados donde las reglas dan falsos positivos, como go.sum.
+  de hallazgos críticos, binarios, archivos generados donde las reglas dan falsos positivos, como go.sum, y las copias
+  de jQuery y Swagger UI. Esa última también salta un archivo del cliente cuyo nombre empiece con jquery o swagger-ui.
 - Se agrega la regla cirdan-fake-token. Ninguna de omisión halla un token CIRDAN_FAKE_: generic-api-key descarta los
   valores con la palabra 'fake' y el token sembrado en olmardo/sitio-reservas no tiene la forma de ningún proveedor.
 - Cambian el encabezado y el título. El encabezado trae la licencia MIT de gitleaks, porque las reglas son suyas.
@@ -15,8 +16,9 @@ se le puede quitar nada.
 Al subir gitleaks se vuelve a generar dentro de la imagen nueva, desde la raíz de BackKL:
     docker compose run --rm -T --no-deps api python -m cirdan.recolectores.gitleaks_reglas \\
         > cirdan/recolectores/gitleaks_cirdan.toml
-Falla si una ruta de CAMBIOS ya no está en la lista de la versión nueva, y Integracion de pruebas/test_github.py falla
-si el archivo no es igual a lo que esto genera con el gitleaks de la imagen.
+Falla si la lista de la versión nueva trae una ruta que no está en CAMBIOS ni en CONSERVADAS, o si le falta una de
+CAMBIOS: hay que revisarla antes de copiarla. Integracion de pruebas/test_github.py falla si el archivo no es igual a
+lo que esto genera con el gitleaks de la imagen.
 """
 import re
 import shutil
@@ -43,11 +45,30 @@ CAMBIOS = {
     # infra/prodenv/lib/ajustes.py.
     r'(.*?)(doc|docx|zip|xls|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$':
         r'\.(doc|docx|zip|xls|pdf|bin|socket|vsidx|v2|suo|wsuo|dll|pdb|exe|gltf)$',
-    r'(?i)/?(v?env|virtualenv)/lib(64)?/.+$': r'(?i)(^|/)(v?env|virtualenv)/lib(64)?/.+$',
+    r'(?i)/?(v?env|virtualenv)/lib(64)?/.+$': r'(?i)(^|/)\.?(v?env|virtualenv)/lib(64)?/.+$',
     r'go\.(mod|sum|work(\.sum)?)$': r'(^|/)go\.(mod|sum|work(\.sum)?)$',
     r'verification-metadata.xml': r'(^|/)verification-metadata\.xml$',
     r'Database.refactorlog': r'Database\.refactorlog$',
 }
+
+# Rutas de la lista global de 8.21.2 que se quedan como vienen.
+CONSERVADAS = (
+    r'(?i)\.(bmp|gif|jpe?g|svg|tiff?)$',
+    r'\.(eot|[ot]tf|woff2?)$',
+    r'(^|/)vendor/modules\.txt$',
+    r'(^|/)vendor/(github\.com|golang\.org/x|google\.golang\.org|gopkg\.in|istio\.io|k8s\.io|sigs\.k8s\.io)/.*$',
+    r'(^|/)gradlew(\.bat)?$',
+    r'(^|/)gradle\.lockfile$',
+    r'(^|/)mvnw(\.cmd)?$',
+    r'(^|/)\.mvn/wrapper/MavenWrapperDownloader\.java$',
+    r'(^|/)node_modules/.*?$',
+    r'(^|/)bower_components/.*?$',
+    r'(^|/)(jquery(-?ui)?|swagger-?ui)[a-zA-Z0-9.-]+\.js(\.map)?$',
+    r'(?i)(^|/)(lib(64)?/python[23](\.\d{1,2})+/|python/[23](\.\d{1,2})+/lib(64)?/).+$',
+    r'(?i)(^|/)[a-z0-9_.]+-[0-9.]+\.dist-info/.+$',
+    r'(^|/)vendor/(bundle|ruby)/.*?$',
+    r'\.gem$',
+)
 
 REGLA_PROPIA = '''[[rules]]
 id = "cirdan-fake-token"
@@ -142,6 +163,9 @@ def generar(texto, licencia, version):
     faltan = [ruta for ruta in CAMBIOS if ruta not in rutas]
     if faltan:
         raise ValueError('estas rutas de CAMBIOS ya no vienen en la config por omisión: %s' % faltan)
+    nuevas = [ruta for ruta in rutas if ruta not in CAMBIOS and ruta not in CONSERVADAS]
+    if nuevas:
+        raise ValueError('la config por omisión trae rutas sin revisar, que van en CAMBIOS o CONSERVADAS: %s' % nuevas)
     nuevas = [CAMBIOS.get(ruta, ruta) for ruta in rutas]
     paths = 'paths = [\n%s]\n' % ''.join("    '''%s''',\n" % ruta for ruta in nuevas if ruta is not None)
     cuerpo = cuerpo[:bloque.start()] + paths + cuerpo[bloque.end():]

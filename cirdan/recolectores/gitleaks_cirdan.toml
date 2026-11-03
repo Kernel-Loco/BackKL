@@ -63,7 +63,7 @@ paths = [
     '''(^|/)node_modules/.*?$''',
     '''(^|/)bower_components/.*?$''',
     '''(^|/)(jquery(-?ui)?|swagger-?ui)[a-zA-Z0-9.-]+\.js(\.map)?$''',
-    '''(?i)(^|/)(v?env|virtualenv)/lib(64)?/.+$''',
+    '''(?i)(^|/)\.?(v?env|virtualenv)/lib(64)?/.+$''',
     '''(?i)(^|/)(lib(64)?/python[23](\.\d{1,2})+/|python/[23](\.\d{1,2})+/lib(64)?/).+$''',
     '''(?i)(^|/)[a-z0-9_.]+-[0-9.]+\.dist-info/.+$''',
     '''(^|/)vendor/(bundle|ruby)/.*?$''',
