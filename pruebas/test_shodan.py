@@ -1045,22 +1045,49 @@ class Arreglos(unittest.TestCase):
 
     def test_54_sin_tiempo_para_otro_intento_la_ip_cuenta_como_falla_de_red(self):
         """RC-166, 14: una IP cuyo siguiente intento ya no cabe en la corrida queda como falla de red con su error, no
-        como SinTiempo, que antes lo tapaba. El reloj avanza de verdad: el 503 de la primera IP llega con 4.5 s
-        restantes, la espera de 5 s no cabe y la segunda IP ya no empieza (MIN_RESTANTE). Con una sola IP consultable,
-        esa falla de red es la de todas y la fuente falla con FuenteNoResponde."""
+        como SinTiempo, que antes lo tapaba. El reloj avanza de verdad: el 503 de la IP `lenta` llega con 4.5 s
+        restantes, la espera de 5 s no cabe y la IP siguiente ya no empieza (MIN_RESTANTE). Si otra IP respondió, la
+        fuente queda succeeded con el aviso. Si ninguna respondió, aunque el tiempo cortara las demás, o si la única IP
+        consultable falló, la fuente falla con FuenteNoResponde para que el orquestador la reintente."""
         reloj = {'t': 0.0}
 
-        class Tarda(HttpSimulado):   # la primera consulta a InternetDB deja a la corrida con 4.5 s
+        class Tarda(HttpSimulado):   # la consulta a InternetDB de `lenta` deja a la corrida con 4.5 s
+            lenta = CAMARA
+
             def __call__(self, url, timeout):
-                if '?' not in url and not self.por_ip:
+                if '?' not in url and url.rsplit('/', 1)[1] == self.lenta and self.lenta not in self.por_ip:
                     reloj['t'] = shodan.TIEMPO_CORRIDA - 4.5
                 return super().__call__(url, timeout)
+        # Otra IP respondió: queda succeeded con el aviso de la que no
+        http = Tarda(ct_olmardo(), {CAMARA: CAMARA_8080, RESERVAS: 503})
+        http.lenta = RESERVAS
+        res = recolectar(http, ResolvedorSimulado(zona_olmardo()), cronometro=lambda: reloj['t'])
+        self.assertEqual((http.por_ip, res.estado), ({CAMARA: 1, RESERVAS: 1}, 'succeeded'))
+        self.assertIn('shodan: InternetDB (%s) no respondió después de 1 intento, sin tiempo para otro (HTTPError: '
+                      'HTTP Error 503: falla 503)' % RESERVAS, res.avisos)
+        self.assertIn(RESERVAS, res.sin_revisar)
+        # Ninguna respondió: la primera falló por la red y el tiempo cortó la otra (RC-166, delta-tiempos-1)
+        reloj['t'] = 0.0
         http = Tarda(ct_olmardo(), {CAMARA: 503, RESERVAS: 503})
+        with self.assertRaises(FuenteNoResponde) as e:
+            recolectar(http, ResolvedorSimulado(zona_olmardo()), cronometro=lambda: reloj['t'])
+        self.assertEqual((http.por_ip, str(e.exception)),
+                         ({CAMARA: 1}, 'shodan: InternetDB no respondió por ninguna IP de olmardo.com (1 por la red, 1 '
+                                       'sin tiempo para consultarse)'))
+        # Sin una falla de red, el tiempo que corta todas las IP deja la fuente succeeded con el aviso
+
+        class SinPlazo(HttpSimulado):   # la lectura de la primera IP agota la corrida: SinTiempo, no falla de red
+            def __call__(self, url, timeout):
+                if '?' not in url:
+                    self.por_ip[url.rsplit('/', 1)[1]] = 1
+                    reloj['t'] = shodan.TIEMPO_CORRIDA - 0.5
+                    raise shodan.SinTiempo('shodan: la respuesta tardó más de %d s' % timeout)
+                return super().__call__(url, timeout)
+        reloj['t'] = 0.0
+        http = SinPlazo(ct_olmardo())
         res = recolectar(http, ResolvedorSimulado(zona_olmardo()), cronometro=lambda: reloj['t'])
         self.assertEqual((http.por_ip, res.estado), ({CAMARA: 1}, 'succeeded'))
-        self.assertIn('shodan: InternetDB (%s) no respondió después de 1 intento, sin tiempo para otro (HTTPError: '
-                      'HTTP Error 503: falla 503)' % CAMARA, res.avisos)
-        self.assertIn('shodan: se acabó el tiempo de la corrida antes de consultar 1 IP en InternetDB', res.avisos)
+        self.assertIn('shodan: se acabó el tiempo de la corrida antes de consultar 2 IP en InternetDB', res.avisos)
         self.assertTrue({CAMARA, RESERVAS} <= set(res.sin_revisar), res.sin_revisar)
         # Una sola IP consultable: su falla de red es la de todas
         reloj['t'] = 0.0
