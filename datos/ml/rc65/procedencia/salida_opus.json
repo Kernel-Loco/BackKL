@@ -1,0 +1,2457 @@
+{
+ "lote_1": {
+  "etiquetas": [
+   {
+    "id": "hsxv2u24",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hd3v2hrc",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h3h9g765",
+    "etiqueta": "media",
+    "nota": "CVSS 6.5 pero EPSS 0.214 relativamente alto; versión con soporte y sin KEV."
+   },
+   {
+    "id": "hn2zytdf",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hyg7hs7g",
+    "etiqueta": "media",
+    "nota": "CVSS 5.9 y EPSS bajo; podría ser baja."
+   },
+   {
+    "id": "hav8uva3",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hs83fsbw",
+    "etiqueta": "media",
+    "nota": "Brecha de 2020 con contraseñas; por antigüedad la bajé de alta."
+   },
+   {
+    "id": "h4zuu5mg",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hd29cch6",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hyb53pnf",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h2bavceb",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hsbxmnz6",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h33wn2t2",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hv8adde9",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject frena la suplantación."
+   },
+   {
+    "id": "h3eafa9c",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hq2c892k",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hrjpx7nv",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h8kgnrq7",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject frena la suplantación."
+   },
+   {
+    "id": "htm2u3t4",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM pero requiere otra condición."
+   },
+   {
+    "id": "htes9dnr",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h53s72kw",
+    "etiqueta": "media",
+    "nota": "Brecha de 2021 con contraseñas; por antigüedad la bajé de alta."
+   },
+   {
+    "id": "hymkfmt3",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hfr4bq4r",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "huavc8pa",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hcdgm5pt",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h94fetqw",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h8n8y9rw",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hb8trxat",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h9zmfjts",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hw96j4hz",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hggwse4s",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hd757e23",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h73jqj9c",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM pero requiere otra condición."
+   },
+   {
+    "id": "hzs4ndtn",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "heera79s",
+    "etiqueta": "media",
+    "nota": "Brecha de 2020 con contraseñas; por antigüedad la bajé de alta."
+   },
+   {
+    "id": "hdes4662",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM pero requiere otra condición."
+   },
+   {
+    "id": "hgt5fjp7",
+    "etiqueta": "alta",
+    "nota": "Equipo de laboratorio, pero RDP expuesto sigue siendo exposición seria."
+   },
+   {
+    "id": "hk9m7kq7",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hkkrukfs",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hufg292p",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h9cawzyb",
+    "etiqueta": "media",
+    "nota": "Brecha de 2022 con contraseñas; por antigüedad la bajé de alta."
+   },
+   {
+    "id": "hfv8fk7b",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h6eayzrz",
+    "etiqueta": "media",
+    "nota": "Brecha de 2021 con contraseñas; por antigüedad la bajé de alta."
+   },
+   {
+    "id": "hzr8satz",
+    "etiqueta": "baja",
+    "nota": "Dominio sin MX y SPF -all; aún cabe suplantar el From sin DMARC, podría ser media."
+   },
+   {
+    "id": "hk6stqsj",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hvt6zgzj",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hq6u8q7v",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hmw7gn4r",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hmvnxvur",
+    "etiqueta": "media",
+    "nota": "Su último certificado venció hace 52 días; puede estar inactivo."
+   },
+   {
+    "id": "hct9jagf",
+    "etiqueta": "baja",
+    "nota": "Dominio sin MX y SPF -all; aún cabe suplantar el From sin DMARC, podría ser media."
+   },
+   {
+    "id": "h8pgn4g9",
+    "etiqueta": "alta",
+    "nota": "Equipo de laboratorio, pero RDP expuesto sigue siendo exposición seria."
+   },
+   {
+    "id": "h29ux3wr",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM pero requiere otra condición."
+   },
+   {
+    "id": "hdh542c3",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hsp4rm7k",
+    "etiqueta": "media",
+    "nota": "Brecha de 2019 con contraseñas; por antigüedad la bajé de alta."
+   },
+   {
+    "id": "hpbfmwvd",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hzdvrt3j",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h2zjdrxa",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hztjgup2",
+    "etiqueta": "baja",
+    "nota": "Servicio de correo, pero el certificado aún no vence."
+   },
+   {
+    "id": "h86tyust",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hfzcy7qe",
+    "etiqueta": "media",
+    "nota": "Su último certificado venció hace 31 días; puede estar inactivo."
+   },
+   {
+    "id": "hkbdsyw2",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject frena la suplantación."
+   },
+   {
+    "id": "h8zt7ss7",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hbzxdkcw",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h35mecrv",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject frena la suplantación."
+   },
+   {
+    "id": "h2kaa7mu",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hta6hyzu",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hcm787g7",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "htt4a6we",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "heg67x89",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hk8a7zf7",
+    "etiqueta": "baja",
+    "nota": "Servicio de correo, pero el certificado aún no vence."
+   },
+   {
+    "id": "h4ud5j4b",
+    "etiqueta": "baja",
+    "nota": "Dominio sin MX y SPF -all; aún cabe suplantar el From sin DMARC, podría ser media."
+   },
+   {
+    "id": "hchu38g9",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h958haxt",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hutt4ygb",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hrqbnung",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject frena la suplantación."
+   },
+   {
+    "id": "hw2y6q29",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h48u7bxm",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM pero requiere otra condición."
+   },
+   {
+    "id": "h3x3qmed",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hehkhet5",
+    "etiqueta": "media",
+    "nota": "Brecha de 2020 con contraseñas; por antigüedad la bajé de alta."
+   },
+   {
+    "id": "hqr6qy36",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hxanrmfp",
+    "etiqueta": "media",
+    "nota": "Su último certificado venció hace 45 días; puede estar inactivo."
+   },
+   {
+    "id": "ht7v5w57",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h8xqpvm3",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h27vc9fr",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject frena la suplantación."
+   },
+   {
+    "id": "h82vpsgz",
+    "etiqueta": "baja",
+    "nota": "Dominio sin MX y SPF -all; aún cabe suplantar el From sin DMARC, podría ser media."
+   }
+  ],
+  "faltan": []
+ },
+ "lote_2": {
+  "etiquetas": [
+   {
+    "id": "h6qmw9p3",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hu2km52w",
+    "etiqueta": "media",
+    "nota": "Sus certificados vencieron hace 71 días, así que puede estar inactivo, pero sigue sirviendo para suplantar."
+   },
+   {
+    "id": "heyskhcw",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hkz8yj6q",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en una API activa: facilita un MITM si los clientes ignoran el error."
+   },
+   {
+    "id": "hxb7znfg",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hzwffygm",
+    "etiqueta": "media",
+    "nota": "Sus certificados vencieron hace 83 días, así que puede estar inactivo, pero sigue sirviendo para suplantar."
+   },
+   {
+    "id": "he55wq3m",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h6swmrqd",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h99evjhu",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "has6fdjm",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hvgsddft",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h28se5eq",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hs9htg3h",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hxfsxfad",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h75xnn8h",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hc5kqwu2",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hhh8jber",
+    "etiqueta": "baja",
+    "nota": "El dominio no envía correo (sin MX y con SPF -all), aunque sin DMARC el campo From aún se puede falsificar."
+   },
+   {
+    "id": "hck4xbmh",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en una API activa: facilita un MITM si los clientes ignoran el error."
+   },
+   {
+    "id": "hp69sypc",
+    "etiqueta": "media",
+    "nota": "Expone contraseñas, pero la brecha es de 2019 (hace casi 7 años)."
+   },
+   {
+    "id": "hmmu99za",
+    "etiqueta": "media",
+    "nota": "Dominio reciente y activo que usa 'acceso'; huele a phishing de credenciales, pero por sí solo no da acceso."
+   },
+   {
+    "id": "h9p7dxsv",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hj79ubxa",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hhfy8bpp",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hy3be5qv",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hwbvd7zn",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hq9zkpbd",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hzrg5mfv",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hb5pp4fr",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hcgg5xh4",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hjm2tw5j",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hhnsqfu7",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "huxhf2zs",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hzv9gtbv",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h52dtdpb",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hxzaxtzj",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hp2zqcjh",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hc89ee2z",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hbqrgvy9",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hbhv34g7",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "htm6jauc",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hfyk4zhs",
+    "etiqueta": "media",
+    "nota": "Expone contraseñas, pero la brecha es de 2019 (hace casi 7 años)."
+   },
+   {
+    "id": "h75buhp9",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hazwnc9f",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h2ezpm9j",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h7tpgy2b",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h99npj6d",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h6gkbfwy",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h92ucpww",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h6dghg6v",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h2typptv",
+    "etiqueta": "media",
+    "nota": "Expone contraseñas, pero la brecha tiene unos 3.5 años."
+   },
+   {
+    "id": "hpt2atgy",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h8whmh84",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hgggt5d6",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hhq3s5w2",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hwedwycf",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hrv6u7q5",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h29erbd3",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hjmhg6w4",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "he5aerqb",
+    "etiqueta": "baja",
+    "nota": "El dominio no envía correo (sin MX y con SPF -all), aunque sin DMARC el campo From aún se puede falsificar."
+   },
+   {
+    "id": "hrfjkq3p",
+    "etiqueta": "baja",
+    "nota": "No expone contraseñas; los nombres solo ayudan a dirigir el phishing (podría ser media)."
+   },
+   {
+    "id": "hut6tuw6",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hdjpad99",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hmjh3vrn",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h39yxvhk",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h6jqjrj5",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hujzdck3",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h7m58gdn",
+    "etiqueta": "media",
+    "nota": "Sus certificados vencieron hace 59 días, así que puede estar inactivo, pero sigue sirviendo para suplantar."
+   },
+   {
+    "id": "hu93f2bg",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hz92nh24",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hkbzthj8",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h642tn3k",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h5w5v2z2",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hmxe8fmx",
+    "etiqueta": "media",
+    "nota": "Dominio de hace 2 días que usa 'acceso'; huele a phishing, pero por sí solo no da acceso."
+   },
+   {
+    "id": "hjd6ck97",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hhtzvyd4",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hmenekfc",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hjgydbd7",
+    "etiqueta": "alta",
+    "nota": "El EPSS es bajo (0.027), pero está en KEV y el panel de login no tiene soporte."
+   },
+   {
+    "id": "hjzhq4mv",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h6f9sjv3",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h9dnw6sc",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hz4s8dty",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en un servidor de correo IMAP activo: facilita un MITM de credenciales si los clientes ignoran el error."
+   },
+   {
+    "id": "humctzqg",
+    "etiqueta": "media",
+    "nota": "Expone contraseñas, pero la brecha es de 2021 (hace más de 5 años)."
+   },
+   {
+    "id": "h42nacwf",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "ha8mpzg6",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hc3napfd",
+    "etiqueta": "baja",
+    "nota": ""
+   }
+  ],
+  "faltan": []
+ },
+ "lote_3": {
+  "etiquetas": [
+   {
+    "id": "huvgtda9",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hhgmfykf",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h5y59a53",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h7xgchvm",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hkc6gkrb",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "ha7eqk2t",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hyfyc7u5",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hrfuusk8",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hj62xt9s",
+    "etiqueta": "media",
+    "nota": "CVSS 6.1 con EPSS alto (0.296), pero la versión tiene soporte y no está en KEV."
+   },
+   {
+    "id": "h9gte76j",
+    "etiqueta": "media",
+    "nota": "Expuso contraseñas, pero la brecha tiene más de 5 años; sería alta si se reutilizan."
+   },
+   {
+    "id": "htdsatc4",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h8eptdhs",
+    "etiqueta": "media",
+    "nota": "Página de login con certificado vencido; el MITM necesita posición en la red, podría verse como alta."
+   },
+   {
+    "id": "hdu8mweu",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hw2ymjkc",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hdyd779m",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hhjynv63",
+    "etiqueta": "baja",
+    "nota": "Se vio por última vez hace 219 días; es probable que el puerto ya esté cerrado."
+   },
+   {
+    "id": "haumvdbe",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject bloquea la suplantación."
+   },
+   {
+    "id": "hz9kh9uv",
+    "etiqueta": "media",
+    "nota": "Hay contraseñas, pero la brecha es de 2022; el riesgo depende de que se reutilicen."
+   },
+   {
+    "id": "h4j5gww2",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h2543nrz",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h949pfbd",
+    "etiqueta": "media",
+    "nota": "Página de login con certificado vencido; el MITM necesita posición en la red."
+   },
+   {
+    "id": "hkpaj528",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hd3f97jm",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hq36k8bc",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hmq783fa",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hcrehx26",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hws6ayvg",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hpn3jqus",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h5qn2uyz",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hvhnb79j",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hrzaz96v",
+    "etiqueta": "baja",
+    "nota": "Se vio por última vez hace 290 días; es probable que el puerto ya esté cerrado."
+   },
+   {
+    "id": "hxzmmv8j",
+    "etiqueta": "baja",
+    "nota": "Es un dominio parecido, pero su último certificado venció hace 72 días; parece inactivo."
+   },
+   {
+    "id": "hg48dgzh",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h7efcyzf",
+    "etiqueta": "baja",
+    "nota": "Se vio por última vez hace 247 días; es probable que el puerto ya esté cerrado."
+   },
+   {
+    "id": "hr9wsnca",
+    "etiqueta": "baja",
+    "nota": "Se vio por última vez hace 249 días; es probable que el puerto ya esté cerrado."
+   },
+   {
+    "id": "huv5fg73",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "havq6f6s",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "havtp8pb",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h4rqjfm6",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h7nq9hfs",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hadxzccw",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hsxzbrey",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "ha27z2r7",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h2ghn23n",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hyatq2ja",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hjk8t9eq",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hszewnjf",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hzatwqv2",
+    "etiqueta": "media",
+    "nota": "CVSS 5.9 con EPSS bajo; la versión tiene soporte y no está en KEV, podría ser baja."
+   },
+   {
+    "id": "h4yc3sfr",
+    "etiqueta": "media",
+    "nota": "Página de login con certificado vencido; el MITM necesita posición en la red."
+   },
+   {
+    "id": "hnrdq2d2",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "he8rp63x",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hw5h2vzw",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h8gvcycf",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h2d2zvwg",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hrcj5kcm",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hnn3nbs9",
+    "etiqueta": "media",
+    "nota": "Hay contraseñas, pero la brecha es de 2019; el riesgo depende de que se reutilicen."
+   },
+   {
+    "id": "hpshvm99",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hpt28hsf",
+    "etiqueta": "media",
+    "nota": "Hay contraseñas, pero la brecha es de 2022; el riesgo depende de que se reutilicen."
+   },
+   {
+    "id": "hdyym69y",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hqs5gn3g",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hmdvgzzr",
+    "etiqueta": "media",
+    "nota": "Hay contraseñas, pero la brecha es de 2022; el riesgo depende de que se reutilicen."
+   },
+   {
+    "id": "hjj3taw8",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hute33e8",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hxqv4pzu",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h2cyamqu",
+    "etiqueta": "media",
+    "nota": "CVSS 5.9 con EPSS bajo; la versión tiene soporte y no está en KEV, podría ser baja."
+   },
+   {
+    "id": "hssr7rba",
+    "etiqueta": "baja",
+    "nota": "Se vio por última vez hace 278 días; es probable que el puerto ya esté cerrado."
+   },
+   {
+    "id": "h2hxkm8p",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hevjhzp9",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hn3u7hdd",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hpwf2qkb",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hxkdmz5c",
+    "etiqueta": "media",
+    "nota": "Página de login con certificado vencido; el MITM necesita posición en la red."
+   },
+   {
+    "id": "hemycjyn",
+    "etiqueta": "baja",
+    "nota": "Es un dominio parecido, pero su último certificado venció hace 73 días; parece inactivo."
+   },
+   {
+    "id": "hfpax4ek",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hhmj99p9",
+    "etiqueta": "baja",
+    "nota": "Solo expuso correos y nombres; podría verse como media porque facilita el phishing."
+   },
+   {
+    "id": "h85ytkqv",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h9twpabc",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hwnmgtvp",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hdvyhr3d",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject bloquea la suplantación."
+   },
+   {
+    "id": "hqf7haj6",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h6fnyfcr",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hw4tdjvy",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hsecb5ux",
+    "etiqueta": "baja",
+    "nota": "Se vio por última vez hace 238 días; es probable que el puerto ya esté cerrado."
+   },
+   {
+    "id": "h6wu73wf",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "ha2buxnq",
+    "etiqueta": "baja",
+    "nota": "Solo expuso correos y nombres; podría verse como media porque facilita el phishing."
+   },
+   {
+    "id": "hq7ukd6v",
+    "etiqueta": "media",
+    "nota": "Tiene un certificado vigente con la misma marca y otra terminación; podría ser de la propia empresa."
+   }
+  ],
+  "faltan": []
+ },
+ "lote_4": {
+  "etiquetas": [
+   {
+    "id": "hr678tmz",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hhzh7mse",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hpbw3gms",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hrme7cre",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hzjb2ckg",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hzcj8hrk",
+    "etiqueta": "alta",
+    "nota": "Expone contraseñas, pero la brecha tiene más de 3 años y pueden haberse cambiado."
+   },
+   {
+    "id": "hzcugkb6",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "haun24st",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hy83gfjz",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hmqxagvd",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hurswacf",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hdvbkcdj",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hxevztgx",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hjsw95c2",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hnf48c8x",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "heq5ax57",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hxmcdkqr",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "ht4n3tdk",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hvmh8acs",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "heva7rjy",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hxws7zzc",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hngwaeek",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hfhb4cx7",
+    "etiqueta": "media",
+    "nota": "Es un subdominio y podría heredar el DMARC del dominio padre; el texto no lo dice."
+   },
+   {
+    "id": "h2edbv64",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h577hugn",
+    "etiqueta": "media",
+    "nota": "Es reciente, tiene certificado vigente y usa 'pagos', lo que apunta a phishing; aun así es suplantación."
+   },
+   {
+    "id": "hg4sjg5q",
+    "etiqueta": "media",
+    "nota": "El certificado más reciente ya venció, así que no está claro que siga activo."
+   },
+   {
+    "id": "hqdrsanz",
+    "etiqueta": "media",
+    "nota": "El certificado más reciente ya venció, así que no está claro que siga activo."
+   },
+   {
+    "id": "hxe4c2x8",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hfsbj68q",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hkjbbjxs",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hkp59d33",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h85khx8x",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hzc9tsv7",
+    "etiqueta": "media",
+    "nota": "No se ve desde hace 208 días, así que probablemente ya está cerrado; si sigue abierto sería alta."
+   },
+   {
+    "id": "hbqg8c96",
+    "etiqueta": "media",
+    "nota": "Es un subdominio y podría heredar el DMARC del dominio padre; el texto no lo dice."
+   },
+   {
+    "id": "ha6cmaqs",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hhyq6a6v",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hqsv7kt6",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hhtaphyx",
+    "etiqueta": "alta",
+    "nota": "Expone contraseñas, pero la brecha tiene más de 4 años y pueden haberse cambiado."
+   },
+   {
+    "id": "hbgarrd3",
+    "etiqueta": "media",
+    "nota": "El certificado más reciente ya venció, así que no está claro que siga activo."
+   },
+   {
+    "id": "hz5h2n5e",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hyy4zffs",
+    "etiqueta": "media",
+    "nota": "El certificado más reciente ya venció, así que no está claro que siga activo."
+   },
+   {
+    "id": "h483usbh",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hcvtxkn9",
+    "etiqueta": "baja",
+    "nota": "El CVSS de 4.3 es medio, pero el EPSS es muy bajo, no está en KEV y la versión sigue con soporte."
+   },
+   {
+    "id": "hnqqd87q",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hseahtv8",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h4tjgujg",
+    "etiqueta": "baja",
+    "nota": "El CVSS de 4.3 es medio, pero el EPSS es muy bajo, no está en KEV y la versión sigue con soporte."
+   },
+   {
+    "id": "h68mrpzd",
+    "etiqueta": "media",
+    "nota": "No se ve desde hace 192 días, así que probablemente ya está cerrado; si sigue abierto sería alta."
+   },
+   {
+    "id": "hu7zem9q",
+    "etiqueta": "alta",
+    "nota": "Expone contraseñas, pero la brecha tiene más de 4 años y pueden haberse cambiado."
+   },
+   {
+    "id": "hkptq3az",
+    "etiqueta": "media",
+    "nota": "El certificado más reciente ya venció, así que no está claro que siga activo."
+   },
+   {
+    "id": "hns9a8k4",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h6xw7zn3",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hcu9fssf",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hv3fc9rz",
+    "etiqueta": "alta",
+    "nota": "Expone contraseñas, pero la brecha tiene más de 3 años y pueden haberse cambiado."
+   },
+   {
+    "id": "hatzfysw",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "htv2bbnh",
+    "etiqueta": "media",
+    "nota": "El certificado más reciente ya venció, así que no está claro que siga activo."
+   },
+   {
+    "id": "hb6ncqgy",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hjaq666n",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hkxw6284",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "htx56zxf",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "haxkfdyy",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hpmw4xqp",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h2ectjp9",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hs58zxc2",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hq9wkqjw",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hjmtgbzc",
+    "etiqueta": "baja",
+    "nota": "El CVSS de 4.3 es medio, pero el EPSS es muy bajo, no está en KEV y la versión sigue con soporte."
+   },
+   {
+    "id": "hky5e75d",
+    "etiqueta": "media",
+    "nota": "Es una página de acceso, lo que facilita interceptar contraseñas, pero hace falta un ataque de intermediario."
+   },
+   {
+    "id": "hac6478m",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hqrnm7bs",
+    "etiqueta": "baja",
+    "nota": "Solo expone correos, que facilitan poco el phishing."
+   },
+   {
+    "id": "hu6mx2xn",
+    "etiqueta": "media",
+    "nota": "Es una página de acceso, lo que facilita interceptar contraseñas, pero hace falta un ataque de intermediario."
+   },
+   {
+    "id": "h9nqwnc7",
+    "etiqueta": "media",
+    "nota": "Es una página de acceso, lo que facilita interceptar contraseñas, pero hace falta un ataque de intermediario."
+   },
+   {
+    "id": "h8rnhukm",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h4sccnxx",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h6qfgu92",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h5mqj2cg",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h5vmh92y",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hpsny58g",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h78aqp77",
+    "etiqueta": "media",
+    "nota": "No se ve desde hace 262 días, así que probablemente ya está cerrado; si sigue abierto sería alta."
+   },
+   {
+    "id": "hqbr66tj",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h28cpy4g",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hmamf84t",
+    "etiqueta": "media",
+    "nota": "Es reciente, tiene certificado vigente y usa 'cuenta', lo que apunta a phishing; aun así es suplantación."
+   },
+   {
+    "id": "h6a7ynm2",
+    "etiqueta": "media",
+    "nota": "Es un subdominio y podría heredar el DMARC del dominio padre; el texto no lo dice."
+   },
+   {
+    "id": "hcnrnuq5",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hnw5tn9h",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "harx9t9n",
+    "etiqueta": "media",
+    "nota": "Es una página de acceso, lo que facilita interceptar contraseñas, pero hace falta un ataque de intermediario."
+   },
+   {
+    "id": "hdywwrbh",
+    "etiqueta": "baja",
+    "nota": ""
+   }
+  ],
+  "faltan": []
+ },
+ "lote_5": {
+  "etiquetas": [
+   {
+    "id": "hb44m3a4",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hynqydpa",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hgq6wshq",
+    "etiqueta": "baja",
+    "nota": "RDP no se ve desde hace 268 días, probablemente ya cerrado; sería alta si sigue abierto."
+   },
+   {
+    "id": "hukx57ap",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h7sx8dkt",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hd3rpg4d",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h6kydwc8",
+    "etiqueta": "media",
+    "nota": "Brecha con contraseñas pero de hace más de 4 años; dudé entre media y baja."
+   },
+   {
+    "id": "h6xarq6g",
+    "etiqueta": "media",
+    "nota": "Brecha con contraseñas pero de hace más de 3 años; dudé entre media y alta."
+   },
+   {
+    "id": "h68vns5s",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hdr73v63",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hb27zhz7",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hedmn83h",
+    "etiqueta": "baja",
+    "nota": "RDP no se ve desde hace 232 días, probablemente ya cerrado."
+   },
+   {
+    "id": "hwyczzfc",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "huj99qpp",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hg545qnv",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h5mmuxh9",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+   },
+   {
+    "id": "hgvgmmqw",
+    "etiqueta": "baja",
+    "nota": "Brecha antigua sin contraseñas; usuarios y nombres podrían facilitar phishing (media)."
+   },
+   {
+    "id": "hcn8kswa",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "ht4rtcv9",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h73vea7g",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hj6bqnmy",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject frena la suplantación."
+   },
+   {
+    "id": "h7ewzuwt",
+    "etiqueta": "media",
+    "nota": "Typosquat, pero su último certificado ya venció y podría estar inactivo."
+   },
+   {
+    "id": "hvne6chz",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hfdd98yg",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hpybz4az",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hdr4bbzu",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h2d2t9k9",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h7fb48ut",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject frena la suplantación."
+   },
+   {
+    "id": "hjtjjgc7",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hxdyavb6",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hbbuzrdk",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hcbv9xnz",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h7ux6crz",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hd88kwtx",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hc99b2tg",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hvf59rh4",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h2vnxr7z",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hjt2jjav",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hgsxa2dc",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h8fwexgn",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "ht9nxvwa",
+    "etiqueta": "media",
+    "nota": "Misma marca con otra terminación y activo desde hace tiempo; podría ser legítimo (baja)."
+   },
+   {
+    "id": "hjckp2q2",
+    "etiqueta": "media",
+    "nota": "API con certificado vencido; dudé entre media y baja."
+   },
+   {
+    "id": "hd65dk3q",
+    "etiqueta": "media",
+    "nota": "Misma marca con otra terminación y activo desde hace tiempo; podría ser legítimo (baja)."
+   },
+   {
+    "id": "h7ax5ytd",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h5u457kn",
+    "etiqueta": "media",
+    "nota": "API con certificado vencido; dudé entre media y baja."
+   },
+   {
+    "id": "hj3b8pb2",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hrrbkr9s",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+   },
+   {
+    "id": "ht8st3y2",
+    "etiqueta": "baja",
+    "nota": "CVE con CVSS 5.3 y EPSS muy bajo en una versión con soporte; podría ser media."
+   },
+   {
+    "id": "hsutwj53",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hckx49q5",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "htdhawh9",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h3vfqq37",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hepcbrxb",
+    "etiqueta": "baja",
+    "nota": "RDP no se ve desde hace 228 días, probablemente ya cerrado."
+   },
+   {
+    "id": "hk8ejg56",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+   },
+   {
+    "id": "h6nrc9mc",
+    "etiqueta": "media",
+    "nota": "Brecha con contraseñas pero de hace casi 7 años; podría ser baja."
+   },
+   {
+    "id": "hr6frmwf",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hry33zjq",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h7ah43ym",
+    "etiqueta": "media",
+    "nota": "Brecha con contraseñas pero de hace más de 6 años; podría ser baja."
+   },
+   {
+    "id": "hphafesm",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hrfchaks",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hcusat8f",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hhsqkevy",
+    "etiqueta": "baja",
+    "nota": "RDP no se ve desde hace 196 días, probablemente ya cerrado."
+   },
+   {
+    "id": "huf68ent",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hccrsz3m",
+    "etiqueta": "media",
+    "nota": "Misma marca con otra terminación; podría ser legítimo (baja)."
+   },
+   {
+    "id": "hz2z2jdz",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hmjzg5ef",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h2xzjupj",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h34v4a4s",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hryrbgex",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hfr95mpc",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hky8ebjk",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+   },
+   {
+    "id": "hwxhgtzw",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h3797edy",
+    "etiqueta": "media",
+    "nota": "Certificado vencido en página de login; facilita MITM, dudé entre media y alta."
+   },
+   {
+    "id": "hh7xtcab",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hdc38r7r",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h6bydfhb",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h465pdnz",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h73xgxn6",
+    "etiqueta": "baja",
+    "nota": "Tiene MX, pero DMARC p=reject frena la suplantación."
+   },
+   {
+    "id": "hj7ys96v",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h79f7hx7",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hrvysqtq",
+    "etiqueta": "media",
+    "nota": "Servidor IMAP con certificado vencido; dudé entre media y baja."
+   },
+   {
+    "id": "h8w8znpg",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "huv5xpk3",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h37z7wnu",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "htxk6tfs",
+    "etiqueta": "media",
+    "nota": ""
+   }
+  ],
+  "faltan": []
+ },
+ "comun_repeticion": {
+  "etiquetas": [
+   {
+    "id": "h7fb48ut",
+    "etiqueta": "baja",
+    "nota": "Sin SPF pero DMARC p=reject frena la suplantación; dudé con media."
+   },
+   {
+    "id": "ht8st3y2",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h78aqp77",
+    "etiqueta": "media",
+    "nota": "RDP de producción, pero visto por última vez hace 262 días; puede ya no estar abierto."
+   },
+   {
+    "id": "hqdrsanz",
+    "etiqueta": "baja",
+    "nota": "Dominio parecido con el último certificado vencido; parece inactivo."
+   },
+   {
+    "id": "hxe4c2x8",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hz4s8dty",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hjaq666n",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h9nqwnc7",
+    "etiqueta": "media",
+    "nota": "Página con login y certificado vencido; dudé con alta."
+   },
+   {
+    "id": "h28cpy4g",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hbbuzrdk",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hdh542c3",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h7ax5ytd",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h4zuu5mg",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hhmj99p9",
+    "etiqueta": "baja",
+    "nota": "Solo correos y nombres de una brecha antigua; dudé con media."
+   },
+   {
+    "id": "hzwffygm",
+    "etiqueta": "baja",
+    "nota": "Dominio parecido con el último certificado vencido; parece inactivo."
+   },
+   {
+    "id": "hxevztgx",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hccrsz3m",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hpt28hsf",
+    "etiqueta": "media",
+    "nota": "Hay contraseñas, pero la brecha es de 2022; dudé con alta."
+   },
+   {
+    "id": "hdc38r7r",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "huj99qpp",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "havtp8pb",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hjm2tw5j",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "heyskhcw",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hrfjkq3p",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "htes9dnr",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hzv9gtbv",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hzcj8hrk",
+    "etiqueta": "media",
+    "nota": "Hay contraseñas, pero la brecha es de 2023; dudé con alta."
+   },
+   {
+    "id": "hw4tdjvy",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "ha7eqk2t",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h2d2zvwg",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hpsny58g",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hk8a7zf7",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hzdvrt3j",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hmw7gn4r",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "h958haxt",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h4yc3sfr",
+    "etiqueta": "media",
+    "nota": "Página con login y certificado vencido; dudé con alta."
+   },
+   {
+    "id": "hvt6zgzj",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hrqbnung",
+    "etiqueta": "baja",
+    "nota": "Sin SPF pero DMARC p=reject frena la suplantación; dudé con media."
+   },
+   {
+    "id": "hmamf84t",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hrzaz96v",
+    "etiqueta": "media",
+    "nota": "Visto por última vez hace 290 días y es un equipo de laboratorio; dudé con baja."
+   },
+   {
+    "id": "h99npj6d",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hz9kh9uv",
+    "etiqueta": "media",
+    "nota": "Hay contraseñas, pero la brecha es de 2022; dudé con alta."
+   },
+   {
+    "id": "he5aerqb",
+    "etiqueta": "baja",
+    "nota": "No envía correo y su SPF es -all; dudé con media."
+   },
+   {
+    "id": "heq5ax57",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h37z7wnu",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h2edbv64",
+    "etiqueta": "baja",
+    "nota": "Sin SPF pero DMARC p=reject frena la suplantación; dudé con media."
+   },
+   {
+    "id": "h7sx8dkt",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hjmhg6w4",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hzatwqv2",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "hngwaeek",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hdes4662",
+    "etiqueta": "media",
+    "nota": "Página con login y certificado vencido; dudé con alta."
+   },
+   {
+    "id": "h42nacwf",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hk9m7kq7",
+    "etiqueta": "baja",
+    "nota": ""
+   },
+   {
+    "id": "hy83gfjz",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h2vnxr7z",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "h2typptv",
+    "etiqueta": "media",
+    "nota": "Hay contraseñas, pero la brecha es de 2023; dudé con alta."
+   },
+   {
+    "id": "hqs5gn3g",
+    "etiqueta": "alta",
+    "nota": ""
+   },
+   {
+    "id": "hdjpad99",
+    "etiqueta": "media",
+    "nota": ""
+   },
+   {
+    "id": "h73vea7g",
+    "etiqueta": "baja",
+    "nota": "No envía correo y su SPF es -all; dudé con media."
+   },
+   {
+    "id": "hbzxdkcw",
+    "etiqueta": "alta",
+    "nota": ""
+   }
+  ],
+  "faltan": []
+ }
+}
