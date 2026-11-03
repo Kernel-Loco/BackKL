@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre c
 from pruebas.test_catalogo_reglas import POR_CODIGO  # noqa: E402
 from pruebas.test_crtsh import AHORA  # noqa: E402
 from pruebas.test_subfinder import Cronometro  # noqa: E402
-from cirdan.recolectores import REGISTRO, cargar, contrato, github  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, contrato, github, gitleaks_reglas  # noqa: E402
 from cirdan.recolectores.contrato import FuenteNoResponde  # noqa: E402
 
 TOKEN = 'CIRDAN_FAKE_' + secrets.token_hex(16)
@@ -117,26 +117,34 @@ def sin_api(url, timeout):
 
 
 class ProcesosSimulados:
-    """Hace las veces de github._ejecutar: git clone, gitleaks git y git log, que escribe su salida en `salida`. Anota
-    cada llamada y si su carpeta existía.
-    `reporte` (lista o texto) y `log` son de todos los repos, salvo los que den `reportes` y `logs` por repo. `fallas`
-    da, por (paso, repo), un código de salida o una excepción."""
+    """Hace las veces de github._ejecutar: git clone, gitleaks git y los dos git log, el de los entornos de Python y el
+    de los correos, que escriben su salida en `salida`. Anota cada llamada, si su carpeta existía y qué archivos ya
+    había en ella (restos). `reporte` (lista o texto) y `log` son de todos los repos, salvo los que den `reportes` y
+    `logs` por repo, y `entornos` también. `fallas` da, por (paso, repo), un código de salida o una excepción, y el paso
+    que falla deja su salida a medias, como un proceso cortado."""
 
-    def __init__(self, reporte=None, log=None, reportes=None, logs=None, fallas=None):
+    def __init__(self, reporte=None, log=None, reportes=None, logs=None, fallas=None, entornos=''):
         self.reporte = [hallazgo_gitleaks()] if reporte is None else reporte
         self.log = LOG if log is None else log
+        self.entornos = entornos
         self.reportes, self.logs, self.fallas = reportes or {}, logs or {}, fallas or {}
         self.llamadas = []
         self.repo = None
 
     def __call__(self, comando, timeout, env, cwd, salida=None, disco=None):
         comando = list(comando)
-        paso = 'clone' if 'clone' in comando else 'log' if 'log' in comando else 'gitleaks'
+        paso = ('clone' if 'clone' in comando else 'entornos' if '--name-only' in comando
+                else 'log' if 'log' in comando else 'gitleaks')
         if paso == 'clone':
             self.repo = comando[comando.index('--') + 1].rsplit('/', 1)[1][:-len('.git')]
+        casa = os.path.isdir(cwd)
         self.llamadas.append(SimpleNamespace(paso=paso, repo=self.repo, comando=comando, timeout=timeout, env=dict(env),
-                                             cwd=cwd, salida=salida, disco=disco, casa=os.path.isdir(cwd)))
+                                             cwd=cwd, salida=salida, disco=disco, casa=casa,
+                                             restos=sorted(os.listdir(cwd)) if casa else None))
         falla = self.fallas.get((paso, self.repo))
+        if falla is not None and salida:
+            with open(salida, 'x', encoding='utf-8', newline='') as f:
+                f.write('x\0' * 10)
         if isinstance(falla, BaseException):
             raise falla
         if falla is not None:
@@ -145,9 +153,9 @@ class ProcesosSimulados:
             reporte = self.reportes.get(self.repo, self.reporte)
             with open(comando[comando.index('--report-path') + 1], 'w', encoding='utf-8') as f:
                 f.write(reporte if isinstance(reporte, str) else json.dumps(reporte))
-        if paso == 'log':
+        if paso in ('log', 'entornos'):
             with open(salida, 'x', encoding='utf-8', newline='') as f:
-                f.write(self.logs.get(self.repo, self.log))
+                f.write(self.logs.get(self.repo, self.log) if paso == 'log' else self.entornos)
         return subprocess.CompletedProcess(comando, 0, None, None)
 
     def de(self, paso):
@@ -384,6 +392,42 @@ class Secretos(unittest.TestCase):
         self.assertEqual(h.evidencia['ruta'], ('a?b?c' + 'x' * 400)[:300])
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
 
+    def test_4b_las_marcas_dan_la_carpeta_del_entorno_y_solo_lo_que_instalo_se_descarta(self):
+        """Con pyvenv.cfg solo site-packages, y con conda también la biblioteca estándar (lib/<python>/, con lib en
+        minúsculas, o Lib/) y los paquetes de pkgs/ con la forma <nombre>-<versión>-<build>. Una marca en la raíz no
+        esconde lib/ ni pkgs/ del cliente, y lo que esté en una carpeta etc/ se revisa siempre."""
+        texto = ('pyvenv.cfg\0a/.venv/pyvenv.cfg\0env/conda-meta/history\0env/pyvenv.cfg\0notpyvenv.cfg\0'
+                 'x/conda-meta/history.bak\0')
+        entornos = github.leer_entornos(texto)
+        self.assertEqual(entornos, {'': {'pyvenv.cfg'}, 'a/.venv': {'pyvenv.cfg'},
+                                    'env': {'conda-meta/history', 'pyvenv.cfg'}})
+        descartadas = ('Lib/site-packages/x.py', 'lib/python3.12/site-packages/p/k.pem', 'site-packages/p/k.pem',
+                       'a/.venv/LIB/site-packages/w.py', 'a/.venv/lib64/pypy3.10/site-packages/w.py',
+                       'env/Lib/test/keycert.pem', 'env/lib/python3.13t/test/k.pem', 'env/lib/pypy3.10/test/k.pem',
+                       'env/pkgs/openssl-3.0.13-h2466b09_1/info/test/k.pem',
+                       'env/pkgs/python-3.12.1-h1d929f7_1_cpython/Lib/test/k.pem', 'env/pkgs/tzdata-2024a-0/k.pem')
+        revisadas = ('pyvenv.cfg', 'app/lib/z.py', 'lib/config.js', 'pkgs/infra/creds.yml', 'Library/k.pem',
+                     'lib/python3.12/ajustes.py', 'lib/node/site-packages/k.pem', 'a/.venv/bin/activate',
+                     'a/lib/site-packages/v.py', 'env/lib/R/etc/Renviron.site', 'env/Lib/R/etc/Renviron.site',
+                     'env/lib/libssl/k.pem', 'env/LIB/test/k.pem', 'env/Library/ssl/k.pem',
+                     'env/etc/conda/activate.d/e.sh', 'lib/site-packages/p/etc/k.pem', 'lib',
+                     'env/lib64/python3.12/test/k.pem', 'env/LIB/python3.12/test/k.pem', 'env/pkgs/api/.env',
+                     'env/pkgs/infra-2-prod/k.pem', 'env/pkgs/api-v2-final/k.pem', 'env/pkgs/k.pem')
+        secretos = [{'regla': 'r', 'ruta': ruta, 'primera_vez': None} for ruta in descartadas + revisadas]
+        self.assertEqual([s['ruta'] for s in github.fuera_de_entornos(secretos, entornos)], list(revisadas))
+        self.assertEqual(github.fuera_de_entornos(secretos, {}), secretos)
+
+    def test_4c_una_marca_de_conda_en_la_raiz_solo_descarta_site_packages(self):
+        """Un conda-meta/history en la raíz, aunque sea de una rama ya fusionada, no esconde pkgs/, Lib/ ni lib/ del
+        cliente: en la raíz solo se descarta site-packages, sea cual sea la marca."""
+        entornos = github.leer_entornos('conda-meta/history\0')
+        self.assertEqual(entornos, {'': {'conda-meta/history'}})
+        descartadas = ('site-packages/p/k.pem', 'Lib/site-packages/p/k.pem', 'lib/python3.12/site-packages/p/k.pem')
+        revisadas = ('pkgs/api/.env', 'pkgs/openssl-3.0.13-h2466b09_1/info/test/k.pem', 'Lib/config.py',
+                     'Lib/test/k.pem', 'lib/python3.12/ajustes.py', 'conda-meta/history')
+        secretos = [{'regla': 'r', 'ruta': ruta, 'primera_vez': None} for ruta in descartadas + revisadas]
+        self.assertEqual([s['ruta'] for s in github.fuera_de_entornos(secretos, entornos)], list(revisadas))
+
     def test_4_un_reporte_ilegible_es_falla_de_ese_repo(self):
         res, _ = recolectar(procesos=ProcesosSimulados(reportes={'sitio': 'esto no es json'}))
         self.assertEqual(res.estado, 'succeeded')
@@ -467,13 +511,20 @@ class Procesos(unittest.TestCase):
                                         'https://github.com/acme-demo/sitio.git', os.path.join(casa, 'repo.git')])
         fuga = procesos.de('gitleaks')[0].comando
         self.assertEqual(fuga[:3], [BINARIOS['gitleaks'], 'git', os.path.join(casa, 'repo.git')])
-        for opcion in (['--config', str(github.REGLAS)], ['--log-opts=--all'], ['--redact'], ['--exit-code', '0'],
-                       ['--report-format', 'json']):
+        for opcion in (['--config', str(github.REGLAS)], ['--log-opts=--all --no-renames'], ['--ignore-gitleaks-allow'],
+                       ['--redact'], ['--exit-code', '0'], ['--report-format', 'json']):
             self.assertTrue(any(fuga[i:i + len(opcion)] == opcion for i in range(len(fuga))), opcion)
         self.assertEqual(fuga[-2:], ['--max-target-megabytes', '100'])
         log = procesos.de('log')[0]
         self.assertEqual(log.comando, [BINARIOS['git'], *github.OPCIONES_GIT, '-C', os.path.join(casa, 'repo.git'),
                                        'log', '--all', '--format=%ae%x00%ce%x00%ct'])
+        entornos = procesos.de('entornos')[0]
+        self.assertEqual(entornos.comando, [BINARIOS['git'], *github.OPCIONES_GIT, '-C', os.path.join(casa, 'repo.git'),
+                                            'log', '--all', '--full-history', '--no-renames', '--format=',
+                                            '--name-only', '-z', '--', ':(glob)**/pyvenv.cfg',
+                                            ':(glob)**/conda-meta/history'])
+        self.assertEqual(entornos.timeout, github.TIMEOUT_ENTORNOS)
+        salidas = {'log': 'log.txt', 'entornos': 'entornos.txt'}
         entorno = {'PATH': os.environ.get('PATH', os.defpath), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
                    'GIT_TERMINAL_PROMPT': '0', 'GIT_LFS_SKIP_SMUDGE': '1'}
         if os.name == 'nt':
@@ -482,7 +533,7 @@ class Procesos(unittest.TestCase):
             self.assertEqual(ll.env, dict(entorno, HOME=ll.cwd))
             self.assertTrue(ll.casa)
             self.assertTrue(os.path.basename(ll.cwd).startswith(github.PREFIJO_TEMPORAL))
-            self.assertEqual(ll.salida, os.path.join(ll.cwd, 'log.txt') if ll.paso == 'log' else None)
+            self.assertEqual(ll.salida, os.path.join(ll.cwd, salidas[ll.paso]) if ll.paso in salidas else None)
             self.assertEqual(ll.disco, github.MAX_DISCO)
 
     def test_2_nombres_de_repo_peligrosos_no_llegan_a_la_linea_de_comandos(self):
@@ -594,12 +645,15 @@ class Procesos(unittest.TestCase):
 
     def test_8_el_tiempo_de_la_corrida_recorta_cada_paso_y_corta_los_repos(self):
         repos = [repo('a', '2026-10-03T00:00:00Z'), repo('b', '2026-10-02T00:00:00Z'), repo('c', '2026-10-01T00:00:00Z')]
-        procesos = ProcesosSimulados()
-        res, _ = recolectar(ApiSimulada(repos=repos), procesos, cronometro=Cronometro(35))
+        procesos = ProcesosSimulados()   # con un hallazgo: clon, gitleaks, entornos y git log
+        res, _ = recolectar(ApiSimulada(repos=repos), procesos, cronometro=Cronometro(32))
         self.assertEqual([ll.repo for ll in procesos.de('clone')], ['a', 'b'])
-        self.assertEqual([ll.timeout for ll in procesos.llamadas], [120, 120, 60, 80, 45, 10])
+        self.assertEqual([(ll.paso, ll.timeout) for ll in procesos.llamadas],
+                         [('clone', 120), ('gitleaks', 120), ('entornos', 30), ('log', 60),
+                          ('clone', 72), ('gitleaks', 40), ('entornos', 8)])
+        self.assertIn('github: se acabó el tiempo de la corrida al leer los commits de acme-demo/b', res.avisos)
         self.assertIn('github: se acabó el tiempo de la corrida antes de revisar 1 repo', res.avisos)
-        self.assertIn('github: cobertura parcial, se revisaron 2 de 3 repos', res.avisos)
+        self.assertIn('github: cobertura parcial, se revisaron 1 de 3 repos', res.avisos)
 
     def test_8b_el_tiempo_de_la_corrida_tambien_corta_la_api(self):
         api = ApiSimulada()
@@ -627,6 +681,74 @@ class Procesos(unittest.TestCase):
         res, _ = recolectar(procesos=ProcesosSimulados(fallas={('clone', 'sitio'): github.MuyGrande()}))
         self.assertIn('github: se pasó de 300 MB al clonar acme-demo/sitio', res.avisos)
         self.assertIn('github: cobertura parcial, se revisaron 1 de 2 repos', res.avisos)
+
+    def test_12_los_paquetes_de_un_entorno_con_marca_se_descartan_y_lo_demas_se_revisa(self):
+        """pyvenv.cfg (venv, virtualenv, uv y PyPy) o conda-meta/history (conda) marcan un entorno instalado: se
+        descarta su site-packages, sea cual sea su forma, y con conda también la biblioteca estándar y los paquetes de
+        pkgs/. Se revisa lo demás, como bin/activate, Library/, etc/ o la lib/ de un venv, y con las dos marcas en la
+        raíz, lib/, Lib/ y pkgs/ del cliente."""
+        rutas = {'herramientas/pypy/lib/pypy3.10/site-packages/tornado/test/test.key': False,
+                 'py313t/lib/python3.13t/site-packages/paquete/prueba.pem': False,
+                 'lib/python3.12/site-packages/paquete/prueba.pem': False,
+                 'conda/Lib/test/keycert.pem': False, 'conda/pkgs/openssl-3.0.13-h2466b09_1/info/test/clave.pem': False,
+                 'conda/Library/ssl/clave.pem': True, 'conda/Lib/R/etc/Renviron.site': True,
+                 'py313t/bin/activate': True, 'conda/etc/conda/activate.d/env_vars.sh': True,
+                 'conda/Scripts/activate.bat': True, 'herramientas/lib/claves.py': True, '.env/lib/produccion.sh': True,
+                 'lib/config.js': True, 'pkgs/infra/creds.yml': True, 'Lib/ajustes.py': True, 'conda/pkgs/api/.env': True}
+        marcas = ('pyvenv.cfg\0conda-meta/history\0herramientas/pypy/pyvenv.cfg\0py313t/pyvenv.cfg\0.env/pyvenv.cfg\0'
+                  'conda/conda-meta/history\0')
+        procesos = ProcesosSimulados(reporte=[hallazgo_gitleaks(archivo=ruta) for ruta in rutas], entornos=marcas)
+        res, _ = recolectar(procesos=procesos)
+        self.assertEqual({h.evidencia['ruta'] for h in res.hallazgos if h.codigo == 'secret_in_public_repo'},
+                         {ruta for ruta, revisada in rutas.items() if revisada})
+        self.assertEqual([ll.repo for ll in procesos.de('entornos')], ['sitio', 'api'])
+
+    def test_13_sin_hallazgos_no_busca_entornos_y_si_la_busqueda_falla_quedan_todos_los_secretos_con_aviso(self):
+        """Mejor un crítico falso de un paquete que perder un secreto: falle por código, por tiempo, por disco o por
+        tamaño, el repo cuenta como revisado, no se descarta nada y queda un aviso con la causa. El aviso también va
+        en la evidencia de cada secreto del repo, porque el resumen de la corrida no se guarda (keep_raw_payload). La
+        salida de la búsqueda se borra, así no le quita el disco al git log de los correos."""
+        procesos = ProcesosSimulados(reporte=[])
+        recolectar(procesos=procesos)
+        self.assertEqual(procesos.de('entornos'), [])
+        paquete = 'venv2/lib/python3.12/site-packages/p/k.pem'
+        casos = [({('entornos', 'sitio'): 1}, '', None,
+                  {'sitio': 'github: no se pudo buscar entornos de Python en acme-demo/sitio (código 1)'}),
+                 ({('entornos', 'sitio'): subprocess.TimeoutExpired('git', 30)}, '', None,
+                  {'sitio': 'github: no se terminó de buscar entornos de Python en acme-demo/sitio en 30 s'}),
+                 ({('entornos', 'sitio'): github.MuyGrande()}, '', None,
+                  {'sitio': 'github: se pasó de 300 MB al buscar entornos de Python en acme-demo/sitio'}),
+                 ({}, 'x\0' * 2000, len(LOG.encode('utf-8')),
+                  {r: 'github: los entornos de Python de acme-demo/%s pasan de 0 MB' % r for r in ('sitio', 'api')})]
+        for fallas, relleno, tope, causas in casos:
+            procesos = ProcesosSimulados(reporte=[hallazgo_gitleaks(archivo=paquete)], fallas=fallas,
+                                         entornos=relleno + 'venv2/pyvenv.cfg\0')
+            with mock.patch.object(github, 'MAX_LOG', tope or github.MAX_LOG):
+                res, _ = recolectar(procesos=procesos)
+            avisos = {'acme-demo/' + r: github.SIN_ENTORNOS % causa for r, causa in causas.items()}
+            self.assertEqual([(h.evidencia['repo'], h.evidencia['ruta'], h.evidencia.get('aviso'))
+                              for h in res.hallazgos if h.codigo == 'secret_in_public_repo'],
+                             [(r, paquete, aviso) for r, aviso in avisos.items()])
+            self.assertEqual([a for a in res.avisos if 'entornos' in a], list(avisos.values()))
+            self.assertEqual([a for a in res.avisos if 'cobertura parcial' in a], [])
+            self.assertEqual((res.revisados, res.sin_revisar), (None, None))
+            self.assertEqual([ll.restos for ll in procesos.de('log')], [['reporte.json']] * 2)
+            self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+        self.assertNotIn('sin_entornos', github.revision_valida({'secretos': [], 'correos': [], 'sin_entornos': 'x'},
+                                                                DOMINIO))
+
+    def test_13b_si_el_tiempo_de_la_corrida_se_acaba_en_la_busqueda_el_repo_queda_como_falla(self):
+        """Lo que la búsqueda cortada deja sin tiempo es el git log de los correos: el repo no cuenta como revisado,
+        sale en sin_revisar y no da sus secretos ni un aviso de entornos."""
+        repos = [repo('a', '2026-10-03T00:00:00Z'), repo('b', '2026-10-02T00:00:00Z'), repo('c', '2026-10-01T00:00:00Z')]
+        procesos = ProcesosSimulados(fallas={('entornos', 'b'): subprocess.TimeoutExpired('git', 8)})
+        res, _ = recolectar(ApiSimulada(repos=repos), procesos, cronometro=Cronometro(32))
+        self.assertEqual([(ll.paso, ll.repo, ll.timeout) for ll in procesos.llamadas][-2:],
+                         [('gitleaks', 'b', 40), ('entornos', 'b', 8)])
+        self.assertIn('github: se acabó el tiempo de la corrida al leer los commits de acme-demo/b', res.avisos)
+        self.assertEqual([a for a in res.avisos if 'entornos' in a], [])
+        self.assertEqual([h.partes for h in res.hallazgos if h.codigo == 'secret_in_public_repo'], [['acme-demo/a']])
+        self.assertEqual((res.revisados, res.sin_revisar), (['acme-demo/a'], ['acme-demo/b', 'acme-demo/c']))
 
 
 class Cuota(unittest.TestCase):
@@ -740,6 +862,34 @@ class GrabarYReproducir(unittest.TestCase):
         self.assertNotIn(TOKEN, json.dumps(res.a_dict()))
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
 
+    def test_5b_al_grabar_una_busqueda_de_entornos_que_falla_es_falla_del_repo(self):
+        """Grabado sin filtrar, cada demo mostraría los críticos falsos de sus paquetes hasta volver a grabar: ese repo no
+        se graba, la corrida queda con cobertura parcial y al reproducir falta su grabación. La grabación nunca trae el
+        aviso de entornos, así que una cambiada a mano tampoco lo mete en la evidencia."""
+        paquete = 'venv2/lib/python3.12/site-packages/p/k.pem'
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d)
+            procesos = ProcesosSimulados(reporte=[hallazgo_gitleaks(archivo=paquete)], entornos='venv2/pyvenv.cfg\0',
+                                         fallas={('entornos', 'sitio'): subprocess.TimeoutExpired('git', 30)})
+            grabado, _ = recolectar(procesos=procesos, modo='grabar', carpeta=carpeta, nueva=True)
+            self.assertIn('github: no se terminó de buscar entornos de Python en acme-demo/sitio en 30 s', grabado.avisos)
+            self.assertIn('github: cobertura parcial, se revisaron 1 de 2 repos', grabado.avisos)
+            self.assertEqual([a for a in grabado.avisos if 'sin descartar' in a], [])
+            grabadora = github.ClienteGitHub(modo='grabar', carpeta=carpeta).grabadora
+            self.assertFalse(grabadora.archivo('repo:acme-demo/sitio').exists())
+            otra, _ = recolectar(sin_api, sin_procesos, modo='reproducir', carpeta=carpeta)
+            self.assertIn('github: falta la grabación de 1 repo', otra.avisos)
+            self.assertEqual((otra.revisados, otra.sin_revisar), (['acme-demo/api'], ['acme-demo/sitio']))
+            archivo = grabadora.archivo('repo:acme-demo/api')
+            contenido = json.loads(archivo.read_text(encoding='utf-8'))
+            contenido['datos']['secretos'].append({'regla': 'cirdan-fake-token', 'ruta': 'x/.env', 'primera_vez': None})
+            contenido['datos']['sin_entornos'] = 'github: ' + TOKEN
+            archivo.write_text(json.dumps(contenido), encoding='utf-8')
+            otra, _ = recolectar(sin_api, sin_procesos, modo='reproducir', carpeta=carpeta)
+        (secreto,) = [h for h in otra.hallazgos if h.codigo == 'secret_in_public_repo']
+        self.assertNotIn('aviso', secreto.evidencia)
+        self.assertNotIn(TOKEN, json.dumps(otra.a_dict()))
+
     def test_6_dos_repos_parecidos_no_comparten_archivo(self):
         self.assertNotEqual(github._archivo('repo:acme-demo/a.b'), github._archivo('repo:acme-demo/a_b'))
         self.assertNotEqual(github._archivo('repo:acme-demo/A'), github._archivo('repo:acme-demo/a'))
@@ -833,19 +983,25 @@ class Contrato(unittest.TestCase):
         self.assertLessEqual(res.consultas, github.MAX_CONSULTAS)
         self.assertEqual(sorted({h.codigo for h in res.hallazgos}), sorted(CODIGOS))
 
-    def test_3_las_reglas_de_gitleaks_traen_las_de_omision_y_la_propia(self):
+    def test_3_las_reglas_de_gitleaks_traen_las_de_omision_sin_herencia_y_la_propia(self):
+        """Que sea igual a lo que genera gitleaks_reglas.py con el gitleaks de la imagen lo prueba Integracion."""
         texto = github.REGLAS.read_text(encoding='utf-8-sig')  # gitleaks acepta el BOM
-        self.assertIn('useDefault = true', texto)
-        self.assertIn('id = "cirdan-fake-token"', texto)
-        self.assertNotIn('stopwords', texto)
         self.assertNotIn(TOKEN, texto)
-        # Solo estas claves: gitleaks lee la config con viper, que no distingue mayúsculas, así que [AllowList] también
-        # sería una allowlist, y sus paths y regexes se unen con 'OR' (PR 81)
+        # Solo estas claves: con [extend] la allowlist de omisión se sumaría a esta, y gitleaks lee la config con
+        # viper, que no distingue mayúsculas, así que [AllowList] o [Extend] también contarían. En la allowlist, paths
+        # y regexes se unen con 'OR': nada de LowTide, que saltaría lo mismo en los repos de los clientes (PR 81)
         reglas = tomllib.loads(texto)
-        self.assertEqual(sorted(reglas), ['extend', 'rules', 'title'])
-        self.assertEqual(reglas['extend'], {'useDefault': True})  # sin path a otra config
-        for regla in reglas['rules']:
-            self.assertLessEqual(set(regla), {'id', 'description', 'regex', 'keywords'}, regla['id'])
+        self.assertEqual(sorted(reglas), ['allowlist', 'rules', 'title'])
+        self.assertEqual(sorted(reglas['allowlist']), ['description', 'paths', 'regexes', 'stopwords'])
+        self.assertNotIn('cirdan', json.dumps(reglas['allowlist']).lower())
+        rutas = reglas['allowlist']['paths']
+        self.assertEqual(len(rutas), len(set(rutas)))
+        self.assertEqual(set(rutas), {nueva for nueva in gitleaks_reglas.CAMBIOS.values() if nueva}
+                         | set(gitleaks_reglas.CONSERVADAS))
+        # Las 195 de omisión de 8.21.2 y la propia, cada una con su id
+        self.assertEqual(len(reglas['rules']), 196)
+        self.assertEqual(len({regla['id'] for regla in reglas['rules']}), 196)
+        self.assertEqual(reglas['rules'][-1], tomllib.loads(gitleaks_reglas.REGLA_PROPIA)['rules'][0])
 
     def test_4_la_imagen_pide_buildkit_y_no_fija_targetarch(self):
         """El builder clásico ignora ADD --checksum: la primera etapa lo detiene con --chmod antes de bajar nada, y
@@ -906,6 +1062,40 @@ class Semilla(unittest.TestCase):
         self.assertIn("SET client_encoding = 'UTF8';", SEMILLA.read_text(encoding='utf-8'))
 
 
+class Reglas(unittest.TestCase):
+    """gitleaks_reglas.generar sobre una config por omisión de juguete con la forma de la de 8.21.2."""
+
+    LICENCIA = 'MIT License\n\nCopyright (c) 2019 Zachary Rice\n'
+
+    def omision(self, rutas):
+        return ('# auto-generada\n\ntitle = "gitleaks config"\n\n[allowlist]\ndescription = "global allow lists"\n'
+                "regexes = [\n    '''^x$''',\n]\npaths = [\n%s]\nstopwords = [\n    \"abc\",\n]\n\n"
+                "[[rules]]\nid = \"uno\"\nregex = '''uno[0-9]{8}'''\n\n[rules.allowlist]\npaths = [\n    '''gitleaks\\.toml''',\n]\n"
+                % ''.join("    '''%s''',\n" % ruta for ruta in rutas))
+
+    def test_1_quita_o_ancla_las_rutas_de_cambios_y_deja_las_demas_y_las_de_cada_regla(self):
+        texto = gitleaks_reglas.generar(self.omision([*gitleaks_reglas.CAMBIOS, '(^|/)node_modules/.*?$']),
+                                        self.LICENCIA, '8.21.2')
+        self.assertTrue(texto.startswith('# Reglas de gitleaks 8.21.2 '))
+        self.assertIn('\n# Copyright (c) 2019 Zachary Rice\n', texto)
+        reglas = tomllib.loads(texto)
+        self.assertEqual(reglas['title'], 'LowTide: reglas de omisión de gitleaks y tokens falsos CIRDAN_FAKE_')
+        self.assertEqual(reglas['allowlist']['paths'],
+                         [nueva for nueva in gitleaks_reglas.CAMBIOS.values() if nueva] + ['(^|/)node_modules/.*?$'])
+        self.assertEqual((reglas['allowlist']['regexes'], reglas['allowlist']['stopwords']), (['^x$'], ['abc']))
+        self.assertEqual([regla['id'] for regla in reglas['rules']], ['uno', 'cirdan-fake-token'])
+        self.assertEqual(reglas['rules'][0]['allowlist'], {'paths': [r'gitleaks\.toml']})  # la de cada regla no cambia
+
+    def test_2_falla_si_una_ruta_de_cambios_ya_no_viene_en_la_version_de_gitleaks(self):
+        with self.assertRaisesRegex(ValueError, 'ya no vienen'):
+            gitleaks_reglas.generar(self.omision(list(gitleaks_reglas.CAMBIOS)[1:]), self.LICENCIA, '8.21.2')
+
+    def test_3_falla_si_la_version_de_gitleaks_trae_una_ruta_sin_revisar(self):
+        with self.assertRaisesRegex(ValueError, 'sin revisar'):
+            gitleaks_reglas.generar(self.omision([*gitleaks_reglas.CAMBIOS, r'(^|/)composer\.lock$']), self.LICENCIA,
+                                    '8.21.2')
+
+
 @unittest.skipUnless(os.environ.get('INTEGRACION_GITHUB') == '1'
                      or (os.name == 'posix' and shutil.which('git') and shutil.which('gitleaks')),
                      'pide git y gitleaks: corre dentro del contenedor')
@@ -917,9 +1107,12 @@ class Integracion(unittest.TestCase):
     Con INTEGRACION_GITHUB=1, como en el CI, falla en vez de saltarse si no hay git o gitleaks.
     """
 
-    def armar(self, d, extra=()):
+    def armar(self, d, extra=(), permitida=None, renombrar=None, marcas=(), rama=()):
         """Un clon bare de un repo con un token que solo queda en el historial y otro en la versión actual. Cada ruta
-        de `extra` lleva TOKEN en un último commit."""
+        de `extra` lleva TOKEN en un último commit, y `permitida` lo lleva con un comentario gitleaks:allow. Con
+        `renombrar` = (de, a), otro commit mueve el archivo de una ruta a la otra sin cambiarlo. Las rutas de `marcas`
+        van en el último commit sin token, como marcas de entornos de Python. Una rama agrega las rutas de `rama` (las
+        marcas sin token y las demás con TOKEN), otro commit las quita, se fusiona con --no-ff y se borra."""
         fuente, casa = os.path.join(d, 'fuente'), os.path.join(d, 'casa')
         os.mkdir(fuente)
         os.mkdir(casa)
@@ -944,8 +1137,33 @@ class Integracion(unittest.TestCase):
             os.makedirs(os.path.join(fuente, os.path.dirname(ruta)), exist_ok=True)
             Path(fuente, ruta).write_text('TOKEN=%s\n' % TOKEN, encoding='utf-8')
             git('add', '-f', ruta)
-        if extra:
+        if permitida:
+            os.makedirs(os.path.join(fuente, os.path.dirname(permitida)), exist_ok=True)
+            Path(fuente, permitida).write_text('TOKEN = "%s"  # gitleaks:allow\n' % TOKEN, encoding='utf-8')
+            git('add', '-f', permitida)
+        for ruta in marcas:
+            os.makedirs(os.path.join(fuente, os.path.dirname(ruta)), exist_ok=True)
+            Path(fuente, ruta).write_text('home = /usr/bin\n', encoding='utf-8')
+            git('add', '-f', ruta)
+        if extra or permitida or marcas:
             git('commit', '-q', '-m', 'cuatro')
+        if renombrar:
+            os.makedirs(os.path.join(fuente, os.path.dirname(renombrar[1])), exist_ok=True)
+            git('mv', '-f', *renombrar)
+            git('commit', '-q', '-m', 'cinco')
+        if rama:
+            git('checkout', '-q', '-b', 'entorno')
+            for ruta in rama:
+                os.makedirs(os.path.join(fuente, os.path.dirname(ruta)), exist_ok=True)
+                marca = ruta.endswith(github.MARCAS_ENTORNO)
+                Path(fuente, ruta).write_text('home = /usr/bin\n' if marca else 'TOKEN=%s\n' % TOKEN, encoding='utf-8')
+                git('add', '-f', ruta)
+            git('commit', '-q', '-m', 'seis')
+            git('rm', '-q', *rama)
+            git('commit', '-q', '-m', 'siete')
+            git('checkout', '-q', '-')
+            git('merge', '-q', '--no-ff', '-m', 'ocho', 'entorno')
+            git('branch', '-q', '-D', 'entorno')
         destino = os.path.join(casa, 'repo.git')
         git('clone', '--bare', '--quiet', fuente, destino, cwd=d)
         return destino, casa
@@ -983,6 +1201,76 @@ class Integracion(unittest.TestCase):
         texto = json.dumps(datos)
         self.assertNotIn(TOKEN, texto)
         self.assertNotIn(OTRO_TOKEN, texto)
+
+    def test_4_ni_un_gitleaks_allow_ni_la_allowlist_de_omision_le_esconden_un_secreto(self):
+        """Sin --ignore-gitleaks-allow el comentario salta la línea, y la allowlist de 8.21.2 salta los lock files,
+        lo que lleve gitleaks.toml en la ruta y lo que termine en doc, bin o v2 aunque no sea extensión. Siguen
+        saltadas las dependencias que instala un gestor de paquetes y go.sum (gitleaks_reglas.py)."""
+        revisadas = ('package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'poetry.lock', '.gitleaks.toml',
+                     'deploy/gitleaks.toml/claves.env', 'docs/guia.adoc', 'api/v2', 'scripts/bin',
+                     'infra/prodenv/lib/ajustes.py', '.env/lib/produccion.sh')
+        saltadas = ('node_modules/paquete/index.js', 'go.sum', 'venv/lib/python3.12/site-packages/ajustes.py',
+                    '.venv/Lib/site-packages/ajustes.py', '.venv/lib/pypy3.10/site-packages/ajustes.py',
+                    'venv/lib/python3.13t/site-packages/ajustes.py')
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, revisadas + saltadas, permitida='app/ajustes.py')
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        self.assertEqual([(s['ruta'], s['regla']) for s in datos['secretos']],
+                         [(ruta, 'cirdan-fake-token')
+                          for ruta in sorted(revisadas + ('app/ajustes.py', 'config/.env', 'viejo.txt'))])
+        self.assertNotIn(TOKEN, json.dumps(datos))
+
+    def test_5_gitleaks_cirdan_toml_es_el_que_genera_gitleaks_reglas_con_el_gitleaks_de_la_imagen(self):
+        if not os.path.exists(gitleaks_reglas.LICENCIA) and os.environ.get('INTEGRACION_GITHUB') != '1':
+            self.skipTest('pide el gitleaks de la imagen, con su licencia')
+        binario = shutil.which('gitleaks')
+        with open(gitleaks_reglas.LICENCIA, encoding='utf-8') as f:
+            licencia = f.read()
+        omision, version = gitleaks_reglas.omision(binario), gitleaks_reglas.version(binario)
+        self.assertEqual(len(tomllib.loads(omision)['rules']), 195)
+        esperado = gitleaks_reglas.generar(omision, licencia, version)
+        self.assertTrue(github.REGLAS.read_text(encoding='utf-8') == esperado,
+                        'gitleaks_cirdan.toml no es el que sale del gitleaks de la imagen: vuelve a generarlo como '
+                        'dice cirdan/recolectores/gitleaks_reglas.py')
+
+    def test_6_un_secreto_que_entra_en_una_ruta_que_se_salta_se_halla_al_renombrarlo(self):
+        """Sin --no-renames, git log solo dice 'rename from' y 'rename to', sin el contenido."""
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, ('node_modules/paquete/.env',),
+                                       renombrar=('node_modules/paquete/.env', 'config/claves.env'))
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        self.assertEqual([s['ruta'] for s in datos['secretos']], ['config/.env', 'config/claves.env', 'viejo.txt'])
+
+    def test_7_con_marca_se_descarta_lo_que_instalo_el_entorno_con_cualquier_python_y_nada_mas(self):
+        """Fuera de una carpeta venv, ninguna ruta de gitleaks_cirdan.toml salta PyPy (lib/pypy3.10/), Python sin GIL
+        (lib/python3.13t/) ni conda (Lib/ o lib/python3.13t/ con la biblioteca estándar, y los paquetes de pkgs/): los
+        descarta github.py por la marca. Lo demás del entorno se revisa, y una marca en la raíz, aunque sea de conda, no
+        esconde la lib/, la Lib/ ni los pkgs/ del cliente. lib/python3.12/ no sirve aquí: la salta gitleaks_cirdan.toml
+        en cualquier carpeta."""
+        marcas = ('pyvenv.cfg', 'conda-meta/history', 'herramientas/pypy/pyvenv.cfg', 'py313t/pyvenv.cfg',
+                  '.env/pyvenv.cfg', 'conda/conda-meta/history', 'miniconda/conda-meta/history')
+        descartadas = ('lib/python3.13t/site-packages/paquete/prueba.py',
+                       'herramientas/pypy/lib/pypy3.10/site-packages/tornado/test/prueba.py',
+                       'py313t/lib/python3.13t/site-packages/paquete/prueba.py', 'conda/Lib/test/claves.py',
+                       'miniconda/lib/python3.13t/test/claves.py',
+                       'miniconda/pkgs/openssl-3.0.13-h2466b09_1/info/test/claves.py')
+        revisadas = ('lib/claves.rb', 'pkgs/infra/creds.yml', 'pkgs/api/.env', 'Lib/ajustes.rb', '.env/lib/produccion.sh',
+                     'herramientas/lib/claves.py', 'py313t/bin/activate', 'conda/etc/conda/activate.d/env_vars.sh',
+                     'conda/Scripts/activate.bat', 'conda/Lib/R/etc/Renviron.site', 'conda/Library/ssl/claves.py',
+                     'miniconda/lib/R/etc/Renviron.site', 'miniconda/pkgs/api/.env')
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, descartadas + revisadas, marcas=marcas)
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        self.assertEqual([s['ruta'] for s in datos['secretos']], sorted(revisadas + ('config/.env', 'viejo.txt')))
+
+    def test_8_cuenta_la_marca_de_una_rama_ya_fusionada_y_borrada(self):
+        """Sin --full-history, git log con rutas sigue solo al primer padre de un merge que no cambió nada, así que no
+        ve la marca de la rama que agregó un entorno y lo quitó, y su site-packages daría un crítico falso."""
+        rama = ('venv2/pyvenv.cfg', 'venv2/lib/python3.13t/site-packages/paquete/prueba.py', 'venv2/bin/activate')
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, rama=rama)
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        self.assertEqual([s['ruta'] for s in datos['secretos']], ['config/.env', 'venv2/bin/activate', 'viejo.txt'])
 
 
 if __name__ == '__main__':
