@@ -543,6 +543,8 @@ class GrabarYReproducir(unittest.TestCase):
             self.assertIsNone(grabado.sin_revisar)
             self.assertIsInstance(grabado.revisados, list)
             self.assertIn('api.acme-demo.mx@2026-10-25T12:00:00+00:00', grabado.revisados)
+            # crtsh-2: sin la grabación del complemento no se sabe qué está revocado, y www tiene dos vigencias
+            self.assertNotIn('www.acme-demo.mx@2026-12-19T00:00:00+00:00', grabado.revisados)
             self.assertIn('Falta 1 respuesta grabada: certspotter:acme-demo.mx. Se completa con --grabar --completar.',
                           crtsh.resumen(grabado, cliente))
             t = RespaldoSimulado(crtsh={'%.acme-demo.mx': SUBDOMINIOS})

@@ -582,9 +582,9 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     riesgo aceptado o falso positivo, que no cambian. resolved_findings cuenta los que pasó a 'resolved' porque su
     fuente respondió y ya no los dio: nunca los de una fuente caída ni lo que _guardar_resultado deja abierto
     (omitidos, sin_cobertura de una fuente que revisó todo y, en una corrida parcial, lo que no trae partes o trae
-    una sin revisar). Un hallazgo que una fuente resuelve y otra reabre en el mismo escaneo quedó como estaba y no
-    cuenta en ninguno. Los conteos solo se guardan al cerrar: lo que guardaron las fuentes de un escaneo que se cae
-    o lo dan por caído no se cuenta.
+    una sin revisar, salvo un cert_expiring_soon ya vencido). Un hallazgo que una fuente resuelve y otra reabre en
+    el mismo escaneo quedó como estaba y no cuenta en ninguno. Los conteos solo se guardan al cerrar: lo que
+    guardaron las fuentes de un escaneo que se cae o lo dan por caído no se cuenta.
     `dormir` reemplaza time.sleep (pruebas).
     """
     dormir = dormir or time.sleep
