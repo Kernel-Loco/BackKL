@@ -1,0 +1,304 @@
+{
+ "etiquetas": [
+  {
+   "id": "h7fb48ut",
+   "etiqueta": "baja",
+   "nota": "Sin SPF, pero DMARC p=reject frena la suplantación."
+  },
+  {
+   "id": "ht8st3y2",
+   "etiqueta": "baja",
+   "nota": "Dudé con media: CVSS 5.3, EPSS bajo, sin KEV y la versión sigue con soporte."
+  },
+  {
+   "id": "h78aqp77",
+   "etiqueta": "media",
+   "nota": "Dudé: servidor de producción con RDP, pero no se ve desde hace 262 días y puede estar cerrado."
+  },
+  {
+   "id": "hqdrsanz",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "hxe4c2x8",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hz4s8dty",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "hjaq666n",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "h9nqwnc7",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "h28cpy4g",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hbbuzrdk",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hdh542c3",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "h7ax5ytd",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "h4zuu5mg",
+   "etiqueta": "alta",
+   "nota": "Es un equipo de desarrollo, pero RDP abierto a internet y visto ayer."
+  },
+  {
+   "id": "hhmj99p9",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hzwffygm",
+   "etiqueta": "media",
+   "nota": "Dudé con baja: el último certificado venció hace 83 días y el dominio parece inactivo."
+  },
+  {
+   "id": "hxevztgx",
+   "etiqueta": "alta",
+   "nota": "Es un equipo de QA, pero RDP abierto a internet y visto ayer."
+  },
+  {
+   "id": "hccrsz3m",
+   "etiqueta": "media",
+   "nota": "Dudé con baja: es la misma marca con otra terminación y podría ser legítimo."
+  },
+  {
+   "id": "hpt28hsf",
+   "etiqueta": "media",
+   "nota": "Dudé con alta: hay contraseñas, pero la brecha es de 2022."
+  },
+  {
+   "id": "hdc38r7r",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "huj99qpp",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "havtp8pb",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "hjm2tw5j",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "heyskhcw",
+   "etiqueta": "media",
+   "nota": "Dudé con baja: SPF -all protege parcialmente, pero sin DMARC se puede suplantar el From."
+  },
+  {
+   "id": "hrfjkq3p",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "htes9dnr",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hzv9gtbv",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hzcj8hrk",
+   "etiqueta": "media",
+   "nota": "Dudé con alta: hay contraseñas, pero la brecha es de 2023."
+  },
+  {
+   "id": "hw4tdjvy",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "ha7eqk2t",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "h2d2zvwg",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hpsny58g",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hk8a7zf7",
+   "etiqueta": "baja",
+   "nota": "Vence en 14 días, hay tiempo para renovar."
+  },
+  {
+   "id": "hzdvrt3j",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hmw7gn4r",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "h958haxt",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "h4yc3sfr",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "hvt6zgzj",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hrqbnung",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hmamf84t",
+   "etiqueta": "media",
+   "nota": "Dominio nuevo con la marca y la palabra cuenta, huele a phishing, pero por sí solo no da acceso."
+  },
+  {
+   "id": "hrzaz96v",
+   "etiqueta": "baja",
+   "nota": "Dudé con media: es un equipo de laboratorio y no se ve desde hace 290 días."
+  },
+  {
+   "id": "h99npj6d",
+   "etiqueta": "media",
+   "nota": "Dudé con baja: SPF -all protege parcialmente, pero sin DMARC se puede suplantar el From."
+  },
+  {
+   "id": "hz9kh9uv",
+   "etiqueta": "media",
+   "nota": "Dudé con alta: hay contraseñas, pero la brecha es de 2022."
+  },
+  {
+   "id": "he5aerqb",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "heq5ax57",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "h37z7wnu",
+   "etiqueta": "media",
+   "nota": "Dominio nuevo con la marca y la palabra pagos, huele a phishing, pero por sí solo no da acceso."
+  },
+  {
+   "id": "h2edbv64",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "h7sx8dkt",
+   "etiqueta": "baja",
+   "nota": "Vence en 15 días, hay tiempo para renovar."
+  },
+  {
+   "id": "hjmhg6w4",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hzatwqv2",
+   "etiqueta": "media",
+   "nota": "Dudé con baja: CVSS 5.9 y EPSS 0.087, sin KEV y la versión tiene soporte."
+  },
+  {
+   "id": "hngwaeek",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hdes4662",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "h42nacwf",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "hk9m7kq7",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hy83gfjz",
+   "etiqueta": "media",
+   "nota": "Dudé con baja: misma marca con otra terminación, un solo certificado."
+  },
+  {
+   "id": "h2vnxr7z",
+   "etiqueta": "alta",
+   "nota": ""
+  },
+  {
+   "id": "h2typptv",
+   "etiqueta": "media",
+   "nota": "Dudé con alta: hay contraseñas, pero la brecha es de 2023."
+  },
+  {
+   "id": "hqs5gn3g",
+   "etiqueta": "alta",
+   "nota": "Es un equipo de pruebas, pero RDP abierto a internet y visto hace 3 días."
+  },
+  {
+   "id": "hdjpad99",
+   "etiqueta": "media",
+   "nota": ""
+  },
+  {
+   "id": "h73vea7g",
+   "etiqueta": "baja",
+   "nota": ""
+  },
+  {
+   "id": "hbzxdkcw",
+   "etiqueta": "alta",
+   "nota": ""
+  }
+ ]
+}

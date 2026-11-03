@@ -137,7 +137,8 @@ RESOLVEDORES = ('1.1.1.1', '8.8.8.8')            # públicos y fijos, como regis
 PAGINAS_CT = 2               # páginas de Cert Spotter: casi siempre la página y la vacía que cierra
 INTENTOS_CT = 2              # intentos por página, como certspotter.COMPLEMENTO
 TIMEOUT_CT = 20              # segundos por página
-MAX_NOMBRES = 10             # nombres que se resuelven, con la raíz
+MAX_NOMBRES = 50             # nombres que se resuelven, con la raíz. Con más no se saben todas las IP y la corrida
+                             # queda parcial sin sin_revisar (RC-55), así que va más alto que MAX_IPS
 MAX_IPS = 10                 # IP que se consultan en InternetDB
 MAX_CVE = 25                 # known_vulnerability por IP. Los demás se cuentan en un aviso
 INTENTOS = 3                 # intentos por A y por IP dentro de una corrida (no es scan_source_runs.attempt)
@@ -150,6 +151,9 @@ MIN_RESTANTE = 5             # con menos segundos que esto ya no se empieza otro
 MIN_INTENTO = 1              # segundos que necesita un intento: con menos no se espera ni se intenta
 HOLGURA = 0.1                # segundos de más que pide esperar(): time.sleep puede pasarse un poco
 MAX_ESPERA = 15              # lo más que se espera un Retry-After, aunque pida más
+# Segundos que los A le dejan a InternetDB (RC-55): una petición y una pausa por IP. Sin esto, con MAX_NOMBRES nombres
+# unos pocos A que no responden (35 s cada uno con sus intentos) se comen la corrida y no se consulta ninguna IP
+RESERVA_INTERNETDB = MAX_IPS * (TIMEOUT_HTTP + PAUSA_INTERNETDB)
 MAX_BYTES = 1024 * 1024      # tope de una respuesta HTTP
 # Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición HTTP o DNS.
 MAX_CONSULTAS = PAGINAS_CT * INTENTOS_CT + MAX_NOMBRES * INTENTOS + MAX_IPS * INTENTOS
@@ -444,6 +448,7 @@ class ClienteShodan:
         self.dormir = dormir or time.sleep
         self.consultas = 0
         self.inicio = None
+        self.reserva = 0       # segundos de la corrida que restante() no cuenta (RESERVA_INTERNETDB mientras van los A)
         self.pendientes = []   # lo que se graba cuando la corrida termina
         self.fallas = 0        # consultas que fallaron en esta corrida, de cualquier tipo
         self.raras_ct = 0      # emisiones de Cert Spotter que no se pueden leer (certspotter.legible)
@@ -460,12 +465,12 @@ class ClienteShodan:
         self.inicio = self.cronometro()
 
     def restante(self):
-        """Segundos que le quedan a la corrida. Al reproducir no hay consultas y no hay tope."""
+        """Segundos que le quedan a la corrida, sin la reserva. Al reproducir no hay consultas y no hay tope."""
         if self.modo == 'reproducir':
             return TIEMPO_CORRIDA
         if self.inicio is None:
             self.inicio = self.cronometro()
-        return TIEMPO_CORRIDA - (self.cronometro() - self.inicio)
+        return TIEMPO_CORRIDA - self.reserva - (self.cronometro() - self.inicio)
 
     def esperar(self, segundos):
         """El dormir de con_reintentos. Si después de esperar `segundos` quedaría menos de MIN_INTENTO más HOLGURA para
@@ -699,6 +704,11 @@ def _cuantos(n, singular, plural):
     return '%d %s' % (n, singular if n == 1 else plural)
 
 
+def _lista(nombres, maximo=5):
+    """Los primeros `maximo` nombres y cuántos más, para un aviso que no crece con los nombres."""
+    return ', '.join(nombres[:maximo]) + (' y %d más' % (len(nombres) - maximo) if len(nombres) > maximo else '')
+
+
 def _donde(hosts):
     """El primer nombre de la IP y cuántos más tiene, para el título."""
     return hosts[0] if len(hosts) == 1 else '%s y %s' % (hosts[0], _cuantos(len(hosts) - 1, 'nombre más', 'nombres más'))
@@ -811,29 +821,46 @@ def _revisar(res, cliente, dominio, ahora):
         nombres = nombres[:MAX_NOMBRES]
         parcial.append('nombres')
 
-    # 2. Un A por nombre
-    por_ip, cnames, fallas_a, sin_tiempo = {}, {}, 0, 0
-    for i, nombre in enumerate(nombres):
-        if cliente.restante() < MIN_RESTANTE:
-            sin_tiempo = len(nombres) - i
-            break
-        try:
-            a = cliente.resolver_a(nombre)
-        except SinTiempo:
-            sin_tiempo = len(nombres) - i
-            break
-        except FuenteNoResponde as e:
-            fallas_a += 1
-            res.avisos.append(str(e))
-            continue
-        for ip in a['ips']:
-            por_ip.setdefault(ip, set()).add(nombre)
-            cnames.setdefault(ip, set()).update(a['cnames'])
+    # 2. Un A por nombre, sin tocar RESERVA_INTERNETDB: el lifetime, las esperas y el corte de cada A la descuentan
+    por_ip, cnames, fallas_a, sin_grabar, sin_tiempo = {}, {}, [], [], 0
+    cliente.reserva = RESERVA_INTERNETDB
+    try:
+        for i, nombre in enumerate(nombres):
+            if cliente.restante() < MIN_RESTANTE:
+                sin_tiempo = len(nombres) - i
+                break
+            try:
+                a = cliente.resolver_a(nombre)
+            except SinTiempo:
+                sin_tiempo = len(nombres) - i
+                break
+            except SinGrabacion:   # una grabación hecha con un tope de nombres más chico (antes de RC-55 era 10)
+                sin_grabar.append(nombre)
+                continue
+            except FuenteNoResponde as e:
+                fallas_a.append((nombre, str(e)))
+                continue
+            for ip in a['ips']:
+                por_ip.setdefault(ip, set()).add(nombre)
+                cnames.setdefault(ip, set()).update(a['cnames'])
+    finally:
+        cliente.reserva = 0
+    # Un solo aviso para todos los A fallidos y otro para los no grabados: el orquestador guarda 10 avisos y el del
+    # tiempo tiene que verse
+    if len(fallas_a) == 1:
+        res.avisos.append(fallas_a[0][1])
+    elif fallas_a:
+        res.avisos.append('shodan: el DNS no respondió al A de %d nombres: %s' % (
+            len(fallas_a), _lista([n for n, _ in fallas_a])))
+    if sin_grabar:
+        res.avisos.append('shodan: la grabación no trae el A de %s, se grabó con otro tope de nombres: %s'
+                          % (_cuantos(len(sin_grabar), 'nombre', 'nombres'), _lista(sin_grabar)))
+        parcial.append('grabacion')
     if sin_tiempo:
         res.avisos.append('shodan: se acabó el tiempo de la corrida antes de resolver %s'
                           % _cuantos(sin_tiempo, 'nombre', 'nombres'))
         parcial.append('tiempo')
-    if not ct_respondio and fallas_a == len(nombres):
+    if not ct_respondio and len(fallas_a) + len(sin_grabar) == len(nombres):
         raise FuenteNoResponde('shodan: no respondieron Cert Spotter ni el DNS de %s' % dominio)
     if fallas_a:
         parcial.append('a')
@@ -859,6 +886,8 @@ def _revisar(res, cliente, dominio, ahora):
             marcas[ip] = {'cdn': cdn}
         else:
             consultar.append(ip)
+    # Las IP de la raíz van primero: con MAX_NOMBRES nombres las de los subdominios no la dejan fuera de MAX_IPS (RC-55)
+    consultar.sort(key=lambda ip: (dominio not in por_ip[ip], ipaddress.ip_address(ip)))
     if len(consultar) > MAX_IPS:
         res.avisos.append('shodan: se consultaron %d de %d IP en InternetDB (MAX_IPS)' % (MAX_IPS, len(consultar)))
         for ip in consultar[MAX_IPS:]:

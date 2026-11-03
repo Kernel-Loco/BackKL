@@ -22,6 +22,13 @@ responde después de los reintentos, los subdominios y certificados vigentes sal
 sin vencidos ni dominios parecidos: esos dos códigos quedan en sin_cobertura. Si Cert Spotter tampoco
 responde, el resultado queda en 'failed' y no trae activos ni hallazgos.
 
+Cobertura (#23, RC-55). Cada hallazgo de vigencia lleva como parte el nombre con el vencimiento de su
+certificado (_parte) y uno de dominio parecido, el dominio parecido. Si pueden faltar certificados (se usó
+la búsqueda por nombre, o Cert Spotter no respondió, no estaba grabado o no dio todas sus páginas),
+revisados lleva las partes de todos los certificados que llegaron y sin_revisar queda en None: así el
+orquestador no cierra lo de un certificado que esta corrida no vio. En el respaldo no van los ya
+vencidos, porque cert_expired queda en sin_cobertura.
+
     python -m cirdan.recolectores.crtsh olmardo.com
     python -m cirdan.recolectores.crtsh olmardo.com --con-parecidos     (solo cuando el equipo apruebe las variantes)
     python -m cirdan.recolectores.crtsh olmardo.com --grabar
@@ -316,12 +323,44 @@ def _serie(cert):
     return '%s/%s' % (_fecha(cert['not_before']).isoformat(), _fecha(cert['not_after']).isoformat())
 
 
+def _del_dominio(nombre, dominio):
+    return nombre == dominio or nombre.endswith('.' + dominio)
+
+
+def _parte(nombre, cert):
+    """La parte de un hallazgo de vigencia (#23): el nombre con el vencimiento de su certificado, el mismo texto que
+    'host' y 'vence' de la evidencia. Así el orquestador la saca también de lo guardado antes de evidence.partes."""
+    return '%s@%s' % (nombre, _fecha(cert['not_after']).isoformat())
+
+
+def _revisados(dominio, certs, ahora, respaldo=False, sin_revocaciones=False):
+    """Las partes que revisó una corrida a la que pueden faltarle certificados (#23, RC-55): cada nombre del dominio con
+    el vencimiento de cada certificado que llegó. Con `respaldo` (solo Cert Spotter) no van los que ya vencieron:
+    cert_expired queda sin cobertura, así que su hallazgo no se revisó aunque llegue el certificado.
+    Con `sin_revocaciones` (el complemento de Cert Spotter no respondió, y es el que dice qué certificado de crt.sh está
+    revocado) tampoco van los nombres cuyo hallazgo depende de una revocación: los de más de una vigencia, porque una
+    renovación revocada no cuenta como la reciente, y los ya vencidos con un comodín vigente en su padre, porque un
+    comodín revocado no los cubre."""
+    por_nombre, comodines = {}, set()
+    for c in certs:
+        for n, comodin in _nombres(c):
+            if _del_dominio(n, dominio):
+                por_nombre.setdefault(n, []).append(c)
+                if comodin and _fecha(c['not_before']) <= ahora < _fecha(c['not_after']):
+                    comodines.add(n)
+    dudosos = {n for n, cs in por_nombre.items()
+               if len({_serie(c) for c in cs}) > 1 or (n != dominio and n.split('.', 1)[1] in comodines
+                                                        and max(_fecha(c['not_after']) for c in cs) < ahora)}
+    return sorted({_parte(n, c) for n, cs in por_nombre.items() if not (sin_revocaciones and n in dudosos)
+                   for c in cs if not respaldo or _fecha(c['not_after']) >= ahora})
+
+
 def _unir(certs, otros, dominio):
     """Los certificados de `certs` (crt.sh) más los de `otros` (Cert Spotter) que no están en `certs`. El mismo
     certificado tiene en las dos fuentes la misma vigencia y los mismos nombres del dominio, aunque cada una le dé su
     propio id: queda el de crt.sh, con la marca de revocado de Cert Spotter, que crt.sh no da."""
     def clave(c):
-        return _serie(c), tuple(n for n in _nombres(c) if n[0] == dominio or n[0].endswith('.' + dominio))
+        return _serie(c), tuple(n for n in _nombres(c) if _del_dominio(n[0], dominio))
     revocados = {clave(c) for c in otros if c.get('revocado')} - {clave(c) for c in otros if not c.get('revocado')}
     vistos = {clave(c) for c in certs}
     return ([dict(c, revocado=True) if clave(c) in revocados else c for c in certs] +
@@ -379,7 +418,7 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
         vistos.add((c.get('origen'), c.get('id')))
         vigente = _fecha(c['not_before']) <= ahora < _fecha(c['not_after']) and not c.get('revocado')
         for nombre, comodin in _nombres(c):
-            if nombre != dominio and not nombre.endswith('.' + dominio):
+            if not _del_dominio(nombre, dominio):
                 continue
             g = por_nombre.setdefault(nombre, {'certs': [], 'comodin': False})
             g['certs'].append(c)
@@ -420,7 +459,7 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
                 dict(evidencia, title=titulo, dias_vencido=int(-dias)),
                 {'tipo': 'certificado_vencido', 'antiguedad_dias': int(-dias), 'exposicion': 'publica',
                  'sensibilidad': 'media'},
-                _huella('cert_expired', nombre, _serie(reciente))))
+                _huella('cert_expired', nombre, _serie(reciente)), partes=[_parte(nombre, reciente)]))
         elif 0 <= dias < DIAS_POR_VENCER and dias * 86400 < (vence - _fecha(reciente['not_before'])).total_seconds() / FRACCION_POR_VENCER:
             titulo = ('El certificado de %s vence en menos de un día' % nombre if dias < 1 else
                       'El certificado de %s vence en %s' % (nombre, _cuantos(int(dias), 'día', 'días')))
@@ -429,7 +468,7 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
                 dict(evidencia, title=titulo, dias_para_vencer=int(dias)),
                 {'tipo': 'certificado_por_vencer', 'antiguedad_dias': max(0, (ahora - _fecha(reciente['not_before'])).days),
                  'exposicion': 'publica', 'sensibilidad': 'baja'},
-                _huella('cert_expiring_soon', nombre, _serie(reciente))))
+                _huella('cert_expiring_soon', nombre, _serie(reciente)), partes=[_parte(nombre, reciente)]))
     return activos, hallazgos
 
 
@@ -466,7 +505,7 @@ def _parecidos(dominio, certs_por_tipo, propios, ahora):
              'emisor': reciente.get('issuer_name', ''), 'origen': ORIGEN, 'crtsh_id': reciente.get('id')},
             {'tipo': 'dominio_parecido', 'antiguedad_dias': max(0, (ahora - primero).days), 'exposicion': 'publica',
              'sensibilidad': 'alta'},
-            _huella('lookalike_domain', dominio, reg), clave=reg))
+            _huella('lookalike_domain', dominio, reg), clave=reg, partes=[reg]))
     return hallazgos
 
 
@@ -496,6 +535,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
         except CrtshNoResponde as e:
             fallas.append((consulta, e))
     respaldo = certs is None
+    completo = not fallas  # sin la búsqueda por nombre ni Cert Spotter a medias llegaron todos los certificados
+    sin_revocaciones = False  # el complemento no respondió: no se sabe qué certificado de crt.sh se revocó
     if respaldo:  # crt.sh no respondió a ninguna: los certificados vigentes salen de Cert Spotter (#14b)
         try:
             certs, completos = certspotter.certificados(cliente, dominio)
@@ -510,6 +551,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
         if not completos:
             res.avisos.append(certspotter.INCOMPLETO)
         res.sin_cobertura = list(certspotter.SIN_COBERTURA)
+        completo = completos  # vencidos y parecidos ya van en sin_cobertura
     else:
         fallidas = dict(fallas)
         for consulta, _ in consultas:  # la falla de hoy se graba (--reproducir repite el aviso) y una vieja se borra
@@ -523,12 +565,15 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             de_cert_spotter, completos = certspotter.certificados(cliente, dominio, **certspotter.COMPLEMENTO)
         except SinGrabacion as e:  # grabación de antes de que #14 consultara siempre Cert Spotter
             res.avisos.append(str(e))
+            completo, sin_revocaciones = False, True
         except FuenteNoResponde as e:
             res.avisos.append('%s. %s' % (e, certspotter.SIN_COMPLEMENTO))
+            completo, sin_revocaciones = False, True
         else:
             certs = _unir(certs, _con_fechas(de_cert_spotter), dominio)
             if not completos:
                 res.avisos.append(certspotter.INCOMPLETO)
+                completo = False  # las revocaciones de las páginas que faltan quedan como residual (README)
     res.consultas = cliente.consultas
     desconocidos = []
 
@@ -544,6 +589,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                                               anticipar=getattr(cliente, 'modo', 'vivo') == 'grabar')
     # Un código sin cobertura no trae hallazgos: al reproducir el respaldo meses después, ya vencieron.
     res.hallazgos = [h for h in res.hallazgos if h.codigo not in res.sin_cobertura]
+    if not completo:  # pueden faltar certificados: el orquestador solo cierra lo de los que llegaron (#23, RC-55)
+        res.revisados = _revisados(dominio, certs, ahora, respaldo, sin_revocaciones)
     vencidos = {h.activo for h in res.hallazgos if h.codigo == 'cert_expired'}
     res.avisos += ['No se pudo comprobar en DNS si %s resuelve. Se reporta su certificado vencido.' % n
                    for n in desconocidos if n in vencidos]
