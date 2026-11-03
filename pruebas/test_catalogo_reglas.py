@@ -38,6 +38,7 @@ BLOQUE_TEXTOS = re.compile(r"INSERT INTO scoring_rule_texts\s*\(.*?(?:^\s*ON CON
 INICIO_DE_FILA = re.compile(r"^\s*\(\s*'", re.MULTILINE)
 FILA_REGLA = re.compile(r"\(\s*%s\s*,\s*%s\s*,\s*'([a-z0-9_]+)'\s*,\s*'([a-z_]+)'\s*,\s*'([a-z]+)'\s*,"
                         r"\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)" % (UUID, UUID))
+FILA_MAPEO = re.compile(r"^\s*\('([a-z][a-z0-9_]+)',", re.MULTILINE)
 FILA_TEXTO = re.compile(r"\(\s*'([a-z0-9_]+)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)")
 # Corrección de un texto ya aplicado (docs/codigos_reglas.md): un UPDATE por código con WHERE code = '...'.
 UPDATE_TEXTO = re.compile(r"UPDATE scoring_rule_texts\s+SET\s+(.*?)\s+WHERE\s+code\s*=\s*'([a-z0-9_]+)'\s*;",
@@ -188,6 +189,17 @@ class Reglas(unittest.TestCase):
             self.assertTrue(code in TEXTOS_POR_CODIGO, '%r no tiene texto en scoring_rule_texts' % code)
         for code in TEXTOS_POR_CODIGO:
             self.assertTrue(code in codigos, 'el texto de %r no tiene regla' % code)
+
+    def test_4b_toda_regla_tiene_mapeo_a_marcos(self):
+        archivo = RAIZ / 'db' / 'migraciones' / '011_mapeo_marcos.sql'
+        sql = archivo.read_text(encoding='utf-8')
+        codigos = FILA_MAPEO.findall(sql)
+        self.assertEqual(len(codigos), len(set(codigos)), 'hay códigos repetidos en los mapeos')
+        self.assertEqual(set(codigos), set(TEXTOS_POR_CODIGO),
+                         'los mapeos no cubren exactamente las reglas del catálogo')
+        self.assertIn('CIS Controls v8.1', sql)
+        self.assertIn('ISO/IEC 27001:2022', sql)
+        self.assertIn('Enterprise v19', sql)
 
     def test_5_textos_simples(self):
         for code, title, meaning, recommendation in TEXTOS_POR_CODIGO.values():

@@ -57,6 +57,25 @@ class ApiV1(unittest.TestCase):
         for real, ej in zip(body['items'], esperado['items']):
             for campo in ('id', 'title', 'asset', 'category', 'rule_code', 'source', 'severity', 'recurrence', 'caracteristicas'):
                 self.assertEqual(real[campo], ej[campo], (real['id'], campo))
+            marcos = real['frameworks']
+            self.assertEqual(set(marcos), {'mitre_attack', 'iso_27001_2022', 'cis_controls_v8_1'})
+            self.assertEqual(marcos['mitre_attack']['version'], 'Enterprise v19')
+            self.assertTrue(marcos['mitre_attack']['source_url'].startswith('https://'))
+            if marcos['mitre_attack']['technique_id'] is None:
+                self.assertIsNone(marcos['mitre_attack']['technique_name'])
+                self.assertTrue(marcos['mitre_attack']['unmapped_reason'])
+            else:
+                self.assertRegex(marcos['mitre_attack']['technique_id'], r'^T\d{4}(\.\d{3})?$')
+                self.assertTrue(marcos['mitre_attack']['technique_name'])
+                self.assertIsNone(marcos['mitre_attack']['unmapped_reason'])
+            self.assertEqual(marcos['iso_27001_2022']['version'], 'ISO/IEC 27001:2022')
+            self.assertRegex(marcos['iso_27001_2022']['control_id'], r'^A\.[5-8]\.\d{1,2}$')
+            self.assertTrue(marcos['iso_27001_2022']['control_name'])
+            self.assertTrue(marcos['iso_27001_2022']['source_url'].startswith('https://'))
+            self.assertEqual(marcos['cis_controls_v8_1']['version'], 'CIS Controls v8.1')
+            self.assertRegex(marcos['cis_controls_v8_1']['safeguard_id'], r'^(?:[1-9]|1[0-8])\.\d{1,2}$')
+            self.assertTrue(marcos['cis_controls_v8_1']['safeguard_name'])
+            self.assertTrue(marcos['cis_controls_v8_1']['source_url'].startswith('https://'))
 
     def test_3_score_igual_al_contrato(self):
         self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), ejemplo('score.json'))
@@ -68,6 +87,9 @@ class ApiV1(unittest.TestCase):
                       'model_version', 'model_prediction', 'explanation_model_version', 'confidence', 'shap',
                       'rule_title', 'meaning', 'recommendation'):
             self.assertEqual(exp[campo], esperado[campo], campo)
+        hallazgos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
+        hallazgo = next(item for item in hallazgos['items'] if item['id'] == exp['finding_id'])
+        self.assertEqual(exp['frameworks'], hallazgo['frameworks'])
         pesos = self.get(self.acme, '/api/v1/scoring/weights')
         esperado = ejemplo('pesos.json')
         for campo in ('rule_set_version', 'category_weights', 'bands', 'floor', 'alert_threshold_default', 'rules'):
