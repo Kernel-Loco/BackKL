@@ -77,7 +77,7 @@ Todo es ficticio y se puede publicar: empresas con nombres inventados bajo `.com
 | Característica | Cómo sale |
 |---|---|
 | `tipo` | Del código de regla, con los mismos nombres que `cirdan/api/v1.py:21-26` |
-| `antiguedad_dias` | Días hasta el escaneo desde `breach_date` en brechas, `not_after` o `vence` en certificados vencidos, `not_before` en certificados por vencer, el primer certificado en dominios parecidos y `primera_vez` en los demás. Si la evidencia no trae esa fecha, desde `detected_at`, o `asset_first_seen` en `outdated_software` y `exposed_rdp`, como `v1.py:59-66` |
+| `antiguedad_dias` | Días hasta el escaneo desde `breach_date` en brechas, `not_after` o `vence` en certificados vencidos, `not_before` en certificados por vencer, el primer certificado en dominios parecidos, `por_vencer_desde` (el vencimiento menos 30 días) en dominios por vencer y `primera_vez` en los demás. Si la evidencia no trae esa fecha, desde `detected_at`, o `asset_first_seen` en `outdated_software` y `exposed_rdp`, como `v1.py:59-66` |
 | `exposicion` | `directa` en `outdated_software` y `exposed_rdp`, y cuando el activo es una `ip` o un `service` (`v1.py:27` y 72). En los demás casos `publica` |
 | `sensibilidad` | La rúbrica de abajo, a partir de la evidencia |
 
