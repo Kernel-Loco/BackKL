@@ -180,7 +180,9 @@ class CorreccionScore(unittest.TestCase):
 
 # Mapeo a marcos (migraciones 011 y 012, #68): la FK diferida de la 012 obliga a que todo texto de regla tenga su
 # mapeo, así un hallazgo nunca llega a la API sin él. SET CONSTRAINTS ... IMMEDIATE la revisa en el momento y no
-# en el COMMIT, y todo se deshace con ROLLBACK.
+# en el COMMIT, y todo se deshace con ROLLBACK. La prueba 15 revisa lo que quedó en la base después de cargar todas las
+# migraciones y semillas, que la prueba 4b de test_catalogo_reglas.py no ve sin base (si cada INSERT y UPDATE del mapeo
+# corrió, en qué orden y en qué transacción).
 class MapeoMarcos(unittest.TestCase):
     TEXTO = ("INSERT INTO scoring_rule_texts (code, title, meaning, recommendation)"
              " VALUES ('prueba_mapeo', 'Prueba', 'Prueba.', 'Prueba.');")
@@ -189,6 +191,24 @@ class MapeoMarcos(unittest.TestCase):
              " cis_safeguard_id, cis_safeguard_name, cis_source_url) VALUES ('prueba_mapeo', 'Enterprise v19',"
              " 'https://attack.mitre.org/', 'Prueba', 'ISO/IEC 27001:2022', 'A.8.8', 'Prueba', 'https://www.iso.org/',"
              " 'CIS Controls v8.1', '7.1', 'Prueba', 'https://www.cisecurity.org/');")
+    # Los CHECK de la 011 como los escribe pg_get_constraintdef en Postgres 16.
+    CHECKS_011 = (
+        "CHECK ((attack_source_url ~~ 'https://%'::text))",
+        "CHECK ((((attack_technique_id IS NOT NULL) AND (attack_technique_name IS NOT NULL)"
+        " AND (btrim(attack_technique_name) <> ''::text) AND (attack_unmapped_reason IS NULL))"
+        " OR ((attack_technique_id IS NULL) AND (attack_technique_name IS NULL)"
+        " AND (attack_unmapped_reason IS NOT NULL) AND (btrim(attack_unmapped_reason) <> ''::text))))",
+        "CHECK (((attack_technique_id IS NULL) OR (attack_technique_id ~ '^T[0-9]{4}(\\.[0-9]{3})?$'::text)))",
+        "CHECK ((btrim(attack_version) <> ''::text))",
+        "CHECK ((btrim(cis_safeguard_name) <> ''::text))",
+        "CHECK ((btrim(cis_version) <> ''::text))",
+        "CHECK ((btrim(iso_control_name) <> ''::text))",
+        "CHECK ((btrim(iso_version) <> ''::text))",
+        "CHECK ((cis_safeguard_id ~ '^(?:[1-9]|1[0-8])\\.[0-9]{1,2}$'::text))",
+        "CHECK ((cis_source_url ~~ 'https://%'::text))",
+        "CHECK ((iso_control_id ~ '^A\\.[5-8]\\.[0-9]{1,2}$'::text))",
+        "CHECK ((iso_source_url ~~ 'https://%'::text))",
+    )
 
     def test_14_un_texto_de_regla_no_entra_ni_queda_sin_su_mapeo(self):
         self.assertEqual(scalar("SELECT coalesce(string_agg(condeferrable || ',' || condeferred, ';'), 'sin FK')"
@@ -208,6 +228,47 @@ class MapeoMarcos(unittest.TestCase):
                                 " SELECT count(*) FROM scoring_rule_framework_mappings WHERE rule_code = 'prueba_mapeo';"
                                 " ROLLBACK;" % (self.TEXTO, self.MAPEO), user='postgres'), '1')
         self.assertEqual(scalar("SELECT count(*) FROM scoring_rule_texts WHERE code = 'prueba_mapeo';", user='postgres'), '0')
+
+    def test_15_el_mapeo_cargado_cubre_toda_regla_con_sus_versiones(self):
+        def filas(sql):
+            ok, out, err = psql(sql, user='postgres')
+            if not ok:
+                raise AssertionError(err)
+            return out.splitlines()
+
+        # Los 30 textos y los 30 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 30 son
+        # las reglas de docs/codigos_reglas.md: una regla nueva lo sube.
+        self.assertEqual(scalar("SELECT (SELECT count(*) FROM scoring_rule_texts) || ',' ||"
+                                " (SELECT count(*) FROM scoring_rule_framework_mappings) || ',' ||"
+                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '30,30,30')
+        self.assertEqual(filas("SELECT coalesce(t.code, m.rule_code) FROM scoring_rule_texts t"
+                               " FULL JOIN scoring_rule_framework_mappings m ON m.rule_code = t.code"
+                               " WHERE t.code IS NULL OR m.rule_code IS NULL"
+                               " UNION SELECT r.code FROM scoring_rules r"
+                               " LEFT JOIN scoring_rule_framework_mappings m ON m.rule_code = r.code"
+                               " WHERE m.rule_code IS NULL ORDER BY 1;"), [],
+                         'códigos con texto y sin mapeo, con mapeo y sin texto, o reglas sin mapeo')
+        # Las versiones de los marcos de cada fila, como quedan después de todos los INSERT y UPDATE.
+        self.assertEqual(filas("SELECT rule_code || ': ' || attack_version || ', ' || iso_version || ', '"
+                               " || cis_version FROM scoring_rule_framework_mappings"
+                               " WHERE (attack_version, iso_version, cis_version) IS DISTINCT FROM ('Enterprise v19', 'ISO/IEC 27001:2022', 'CIS Controls v8.1')"
+                               " ORDER BY 1;"), [], 'mapeos con otra versión de los marcos')
+        # Los CHECK y los NOT NULL de la 011, validados, y la FK diferida de la 012.
+        checks = filas("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE contype = 'c' AND convalidated"
+                       " AND conrelid = 'scoring_rule_framework_mappings'::regclass;")
+        self.assertEqual(sorted(set(self.CHECKS_011) - set(checks)), [], 'faltan CHECK de la 011 en el mapeo')
+        self.assertEqual(filas("SELECT attname FROM pg_attribute"
+                               " WHERE attrelid = 'scoring_rule_framework_mappings'::regclass AND attnum > 0"
+                               " AND NOT attisdropped AND NOT attnotnull ORDER BY 1;"),
+                         ['attack_technique_id', 'attack_technique_name', 'attack_unmapped_reason'],
+                         'columnas del mapeo sin NOT NULL')
+        self.assertEqual(filas("SELECT conrelid::regclass || ' ' || pg_get_constraintdef(oid) || ' ' || convalidated"
+                               " FROM pg_constraint WHERE conname = 'scoring_rule_texts_mapping_fk';"),
+                         ['scoring_rule_texts FOREIGN KEY (code) REFERENCES scoring_rule_framework_mappings(rule_code)'
+                          ' DEFERRABLE INITIALLY DEFERRED true'], 'la FK de la 012 no está o no es diferida')
+        # created_at y updated_at de la 012, llenos en todas las filas.
+        self.assertEqual(scalar("SELECT count(*) FROM scoring_rule_framework_mappings"
+                                " WHERE created_at IS NULL OR updated_at IS NULL;", user='postgres'), '0')
 
 
 if __name__ == '__main__':
