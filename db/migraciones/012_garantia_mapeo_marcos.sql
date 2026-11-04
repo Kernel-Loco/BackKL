@@ -12,14 +12,23 @@
 --    Es DEFERRABLE INITIALLY DEFERRED porque la FK de la 011 va al revés
 --    (del mapeo al texto): la migración que agregue una regla inserta el
 --    texto y el mapeo en la misma transacción, en ese orden, y esta FK se
---    revisa en el COMMIT. Para borrar una regla, en una sola transacción
---    se borra la regla, después el mapeo y al final el texto.
+--    revisa en el COMMIT. Solo una regla que nunca se usó (sin filas en
+--    findings ni en score_contributions, que no admite DELETE) se puede
+--    borrar: en una sola transacción se borran sus filas de scoring_rules
+--    en todos los juegos, después el mapeo y al final el texto.
+--    Como las dos tablas se apuntan entre sí, un respaldo con --data-only
+--    ya no se restaura sin --disable-triggers. Se respalda la base
+--    completa con pg_dump -Fc.
 -- 2. created_at y updated_at en el mapeo, como en las demás tablas
 --    (convención 10 de db/README.md). En las 30 filas de la 011 quedan con
 --    la hora en que se aplica esta migración, no con la de la 011.
 -- Necesita la 011. No agrega tablas, índices, triggers ni políticas:
 -- solo una FK (60 en total).
--- Corre en una sola transacción y se puede correr otra vez sin error.
+-- Corre en una sola transacción y se puede correr otra vez sin error y
+-- sin frenar las lecturas del mapeo. La primera vez espera a lo más 5 s
+-- cada bloqueo que pide, así no deja en espera las lecturas de la API.
+-- Si otra sesión tiene las tablas, falla sin cambiar nada y se vuelve a
+-- correr.
 -- En una base que ya existe se aplica a mano, antes de reconstruir la API
 -- (ver db/README.md).
 -- =====================================================================
@@ -27,6 +36,8 @@
 SET client_encoding = 'UTF8';
 
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
 
 DO $$
 DECLARE
@@ -51,14 +62,23 @@ BEGIN
       REFERENCES scoring_rule_framework_mappings (rule_code)
       DEFERRABLE INITIALLY DEFERRED;
   END IF;
+  -- ADD COLUMN IF NOT EXISTS pide ACCESS EXCLUSIVE aunque la columna ya exista, así que se revisa antes.
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute
+                  WHERE attrelid = 'public.scoring_rule_framework_mappings'::regclass
+                    AND attname = 'created_at' AND NOT attisdropped) THEN
+    ALTER TABLE scoring_rule_framework_mappings
+      ADD COLUMN created_at timestamptz NOT NULL DEFAULT now();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute
+                  WHERE attrelid = 'public.scoring_rule_framework_mappings'::regclass
+                    AND attname = 'updated_at' AND NOT attisdropped) THEN
+    ALTER TABLE scoring_rule_framework_mappings
+      ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();
+  END IF;
 END $$;
 
 COMMENT ON CONSTRAINT scoring_rule_texts_mapping_fk ON scoring_rule_texts IS
   'Todo texto (y toda regla) tiene su mapeo a marcos (migración 012). Se revisa en el COMMIT: el texto y su mapeo entran en la misma transacción.';
-
-ALTER TABLE scoring_rule_framework_mappings
-  ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
-  ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
 COMMENT ON COLUMN scoring_rule_framework_mappings.created_at IS
   'Cuándo entró el mapeo. En las 30 filas de la 011 es la hora en que se aplicó la 012.';

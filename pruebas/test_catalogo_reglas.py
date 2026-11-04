@@ -35,13 +35,27 @@ UUID = r"'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'"
 BLOQUE_REGLAS = re.compile(r"INSERT INTO scoring_rules\s*\(.*?;[ \t]*$", re.DOTALL | re.MULTILINE)
 BLOQUE_TEXTOS = re.compile(r"INSERT INTO scoring_rule_texts\s*\(.*?(?:^\s*ON CONFLICT|;[ \t]*$)",
                            re.DOTALL | re.MULTILINE)
-BLOQUE_MAPEOS = re.compile(r"INSERT INTO scoring_rule_framework_mappings\s*\(.*?(?:^\s*ON CONFLICT|;[ \t]*$)",
-                           re.DOTALL | re.MULTILINE)
 INICIO_DE_FILA = re.compile(r"^\s*\(\s*'", re.MULTILINE)
 FILA_REGLA = re.compile(r"\(\s*%s\s*,\s*%s\s*,\s*'([a-z0-9_]+)'\s*,\s*'([a-z_]+)'\s*,\s*'([a-z]+)'\s*,"
                         r"\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)" % (UUID, UUID))
-# Inicio de una fila de mapeo: código de la regla y versión de ATT&CK, que van en la primera línea de la fila.
-FILA_MAPEO = re.compile(r"^\s*\('([a-z][a-z0-9_]+)',\s*'([^']*)'", re.MULTILINE)
+# El mapeo se lee sin comentarios: cada INSERT con su lista de columnas, hasta su primer ; fuera de comillas.
+CADENA_SQL = r"'(?:[^']|'')*'"
+COMENTARIO_SQL = re.compile(r"(%s)|--[^\n]*|/\*.*?\*/" % CADENA_SQL, re.DOTALL)
+BLOQUE_MAPEOS = re.compile(r"INSERT INTO (?:public\.)?scoring_rule_framework_mappings\s*\(([^)]*)\)"
+                           r"((?:%s|[^';])*);" % CADENA_SQL)
+INSERT_MAPEO = re.compile(r"\bINSERT\s+INTO\s+(?:public\.)?scoring_rule_framework_mappings\b", re.IGNORECASE)
+UPDATE_MAPEO = re.compile(r"\bUPDATE\s+(?:public\.)?scoring_rule_framework_mappings\b", re.IGNORECASE)
+COLUMNAS_MAPEO = ('rule_code', 'attack_version', 'attack_technique_id', 'attack_technique_name', 'attack_source_url',
+                  'attack_unmapped_reason', 'iso_version', 'iso_control_id', 'iso_control_name', 'iso_source_url',
+                  'cis_version', 'cis_safeguard_id', 'cis_safeguard_name', 'cis_source_url')
+# Una fila de mapeo entera, aunque vaya en la misma línea que otra: el código y los otros 13 valores, en ese orden.
+FILA_MAPEO = re.compile(r"\(\s*'([a-z][a-z0-9_]+)'\s*,\s*" + r"\s*,\s*".join([r"(NULL|%s)" % CADENA_SQL] * 13) +
+                        r"\s*\)")
+INICIO_DE_MAPEO = re.compile(r"\(\s*'")
+# Las versiones de los marcos que dicen el DBML y db/README para todas las reglas.
+VERSIONES_MAPEO = {'attack_version': 'Enterprise v19', 'iso_version': 'ISO/IEC 27001:2022',
+                   'cis_version': 'CIS Controls v8.1'}
+MIGRACION_011 = 'db/migraciones/011_mapeo_marcos.sql'
 FILA_TEXTO = re.compile(r"\(\s*'([a-z0-9_]+)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)")
 # Corrección de un texto ya aplicado (docs/codigos_reglas.md): un UPDATE por código con WHERE code = '...'.
 UPDATE_TEXTO = re.compile(r"UPDATE scoring_rule_texts\s+SET\s+(.*?)\s+WHERE\s+code\s*=\s*'([a-z0-9_]+)'\s*;",
@@ -122,12 +136,52 @@ def leer_textos():
     return insertados, finales, mal_leidos
 
 
+def posiciones_textos():
+    """{code: (archivo, posición)} del INSERT de cada texto, para ver que su mapeo vaya después."""
+    posiciones = {}
+    for ruta in ARCHIVOS_SQL:
+        sql = ruta.read_text(encoding='utf-8')
+        for m in BLOQUE_TEXTOS.finditer(sql):
+            for f in FILA_TEXTO.finditer(m.group(0)):
+                posiciones.setdefault(f.group(1), (_relativa(ruta), m.start() + f.start()))
+    return posiciones
+
+
+def _sin_comentarios(sql):
+    """El SQL con sus comentarios cambiados por espacios, así no se leen y no se mueve ninguna posición."""
+    return COMENTARIO_SQL.sub(lambda m: m.group(1) or re.sub(r'\S', ' ', m.group(0)), sql)
+
+
+def _valor(v):
+    return None if v == 'NULL' else v[1:-1].replace("''", "'")
+
+
 def leer_mapeos():
-    """Los (archivo, code, attack_version) de los INSERT INTO scoring_rule_framework_mappings de todo db/ (la 011 y las
-    migraciones que vengan, porque la 011 ya no se edita), su texto junto y lo que no se pudo leer."""
-    filas, mal_leidos = _filas(BLOQUE_MAPEOS, FILA_MAPEO)
-    texto = '\n'.join(m.group(0) for ruta in ARCHIVOS_SQL for m in BLOQUE_MAPEOS.finditer(ruta.read_text(encoding='utf-8')))
-    return filas, texto, mal_leidos
+    """Los (archivo, posición, code, {columna: valor}) de los INSERT INTO scoring_rule_framework_mappings de todo db/
+    (la 011 y las migraciones que vengan, porque la 011 ya no se edita) y lo que no se pudo leer. Los UPDATE del mapeo
+    todavía no se leen, así que también van en lo que no se pudo leer."""
+    mapeos, mal_leidos = [], []
+    for ruta in ARCHIVOS_SQL:
+        archivo, sql = _relativa(ruta), _sin_comentarios(ruta.read_text(encoding='utf-8'))
+        sin_cadenas = re.sub(CADENA_SQL, "''", sql)
+        if UPDATE_MAPEO.search(sin_cadenas):
+            mal_leidos.append('%s: UPDATE scoring_rule_framework_mappings, que la prueba todavía no lee' % archivo)
+        bloques = list(BLOQUE_MAPEOS.finditer(sql))
+        if len(bloques) != len(INSERT_MAPEO.findall(sin_cadenas)):
+            mal_leidos.append('%s: INSERT INTO scoring_rule_framework_mappings que la prueba no pudo leer' % archivo)
+        for m in bloques:
+            columnas = tuple(c.strip() for c in m.group(1).split(','))
+            if columnas != COLUMNAS_MAPEO:
+                mal_leidos.append('%s: INSERT del mapeo con las columnas %s' % (archivo, ', '.join(columnas)))
+                continue
+            filas = list(FILA_MAPEO.finditer(m.group(2)))
+            esperadas = len(INICIO_DE_MAPEO.findall(re.sub(CADENA_SQL, "''", m.group(2))))
+            if len(filas) != esperadas:
+                mal_leidos.append('%s: %d filas de mapeo y se leyeron %d' % (archivo, esperadas, len(filas)))
+            for f in filas:
+                valores = dict(zip(COLUMNAS_MAPEO, (f.group(1),) + tuple(_valor(v) for v in f.groups()[1:])))
+                mapeos.append((archivo, m.start(2) + f.start(), f.group(1), valores))
+    return mapeos, mal_leidos
 
 
 def leer_doc():
@@ -142,7 +196,8 @@ REGLAS, REGLAS_MAL_LEIDAS = leer_reglas()
 REGLAS_V1 = sorted((r for r in REGLAS if r[2] == JUEGO_V1), key=lambda r: r[1])
 POR_CODIGO = {r[3]: r for r in REGLAS_V1}
 TEXTOS, TEXTOS_POR_CODIGO, TEXTOS_MAL_LEIDOS = leer_textos()
-MAPEOS, TEXTO_MAPEOS, MAPEOS_MAL_LEIDOS = leer_mapeos()
+POSICION_TEXTOS = posiciones_textos()
+MAPEOS, MAPEOS_MAL_LEIDOS = leer_mapeos()
 FILAS_DOC = FILA_DOC.findall(leer_doc())
 
 
@@ -203,16 +258,31 @@ class Reglas(unittest.TestCase):
             self.assertTrue(code in codigos, 'el texto de %r no tiene regla' % code)
 
     def test_4b_toda_regla_tiene_mapeo_a_marcos(self):
-        # Una regla nueva trae su mapeo en su propia migración, junto con su texto (FK diferida de la 012).
-        self.assertEqual(MAPEOS_MAL_LEIDOS, [], 'INSERT de scoring_rule_framework_mappings que la prueba no pudo leer')
-        codigos = [m[1] for m in MAPEOS]
+        # Una regla nueva trae su mapeo en la migración de su texto y después de él: la FK de la 011 (del mapeo al
+        # texto) se revisa en el momento y la de la 012 (del texto al mapeo) en el COMMIT. Los textos de antes de la 011
+        # tienen su mapeo en la 011.
+        self.assertEqual(MAPEOS_MAL_LEIDOS, [],
+                         'INSERT o UPDATE de scoring_rule_framework_mappings que la prueba no pudo leer')
+        codigos = [m[2] for m in MAPEOS]
         repetidos = sorted(c for c, n in Counter(codigos).items() if n > 1)
         self.assertEqual(repetidos, [], 'hay mapeos insertados dos veces (una corrección va con UPDATE): %s' % repetidos)
         self.assertEqual(set(codigos), set(TEXTOS_POR_CODIGO),
                          'los mapeos no cubren exactamente las reglas del catálogo')
-        self.assertIn('CIS Controls v8.1', TEXTO_MAPEOS)
-        self.assertIn('ISO/IEC 27001:2022', TEXTO_MAPEOS)
-        self.assertIn('Enterprise v19', TEXTO_MAPEOS)
+        for archivo, posicion, code, valores in MAPEOS:
+            for columna, version in VERSIONES_MAPEO.items():
+                self.assertEqual(valores[columna], version, '%s: el mapeo de %r tiene %s = %r'
+                                 % (archivo, code, columna, valores[columna]))
+            self.assertTrue(archivo.startswith('db/migraciones/'),
+                            '%s: el mapeo de %r va en una semilla y las semillas corren después de todas las migraciones'
+                            % (archivo, code))
+            archivo_texto, posicion_texto = POSICION_TEXTOS[code]
+            if archivo_texto < MIGRACION_011:
+                self.assertEqual(archivo, MIGRACION_011, '%r tiene su texto en %s y su mapeo en %s, no en la 011'
+                                 % (code, archivo_texto, archivo))
+            else:
+                self.assertEqual(archivo, archivo_texto, '%r tiene su texto en %s y su mapeo en %s'
+                                 % (code, archivo_texto, archivo))
+                self.assertGreater(posicion, posicion_texto, '%s: el mapeo de %r va antes que su texto' % (archivo, code))
 
     def test_5_textos_simples(self):
         for code, title, meaning, recommendation in TEXTOS_POR_CODIGO.values():

@@ -242,23 +242,35 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT d.fqdn, s.score,
 
 Da seis filas: el score de septiembre de cada dominio con `scan` y después el corregido con `correction` y sin motivo de fallback, que es 60 para acme-demo.mx y 0 para acme-portal.mx y acme-tienda.mx. Cada archivo corre en una sola transacción y se puede correr otra vez sin error: la 009 no repite filas y la semilla 010 ya no encuentra nada que corregir.
 
-Para el mapeo a marcos (#68, RC-131) van la 011 y la 012, en ese orden, y la base va antes de reconstruir la API, como con la 003. Primero se trae el código (`git pull`), después se aplican las dos y al final se reconstruye la API con `docker compose up -d --build api`. La API de esta versión hace JOIN a `scoring_rule_framework_mappings` en los hallazgos y en la explicación, y `/db/tables` la cuenta, así que sin la 011 `/api/v1/domains/{fqdn}/findings`, `/api/v1/findings/{id}/explanation` y `/db/tables` responden 500. La API anterior no lee la tabla y funciona igual con las dos aplicadas. Antes de aplicarlas, respalda la base:
-
-```bash
-MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 pg_dump -U postgres -Fc -f /tmp/cirdan_antes_011.dump cirdan
-docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/011_mapeo_marcos.sql
-docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/012_garantia_mapeo_marcos.sql
-```
-
-Cada una corre en una sola transacción. La 011 no se puede correr dos veces: su CREATE TABLE no lleva IF NOT EXISTS, así que la segunda vez falla con `relation "scoring_rule_framework_mappings" already exists` y se deshace sin cambiar nada. Por eso, antes de correrla, revisa con esta consulta qué falta: da `f|0` sin ninguna de las dos, `t|0` con la 011 sola (aplica solo la 012) y `t|1` con las dos:
+Para el mapeo a marcos (#68, RC-131) van la 011 y la 012, en ese orden, y la base va antes de reconstruir la API, como con la 003. Primero se trae el código (`git pull`), después se aplican las que falten y al final se reconstruye la API con `docker compose up -d --build api`. La API de esta versión hace JOIN a `scoring_rule_framework_mappings` en los hallazgos y en la explicación, y `/db/tables` la cuenta, así que sin la 011 `/api/v1/domains/{fqdn}/findings`, `/api/v1/findings/{id}/explanation` y `/db/tables` responden 500. La API anterior no lee la tabla y funciona igual con las dos aplicadas. Antes de aplicar nada, revisa con esta consulta qué falta: da `f|0` sin ninguna de las dos, `t|0` con la 011 sola y `t|1` con las dos:
 
 ```bash
 docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT to_regclass('public.scoring_rule_framework_mappings') IS NOT NULL, (SELECT count(*) FROM pg_constraint WHERE conname = 'scoring_rule_texts_mapping_fk')"
 ```
 
-La 012 sí se puede correr otra vez sin error. Falla sin cambiar nada si falta la 011 o si algún texto de `scoring_rule_texts` no tiene mapeo. Agrega la FK de `scoring_rule_texts.code` al mapeo, diferida hasta el COMMIT, y `created_at` y `updated_at` al mapeo. Con las dos, el resumen de `conteo_tablas.sql` da tablas=25, fk=60 e indices=69, y ya con la API reconstruida `python -m unittest -v pruebas/test_api_v1.py` pasa. Cuando pase, borra el respaldo con `MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 rm /tmp/cirdan_antes_011.dump`.
+Con `t|1` no hay nada que aplicar. Si falta alguna, respalda la base. El respaldo queda dentro del contenedor y se pierde si se recrea, también con el `docker compose up -d --build api` del final si recrea `cirdan-pg16` (antes, `docker compose --dry-run up -d --build api` dice si lo haría):
 
-Desde la 012, una regla nueva trae su mapeo en la misma migración que su texto y en la misma transacción: primero el INSERT del texto y después el del mapeo, porque la FK del mapeo al texto se revisa en el momento y la del texto al mapeo en el COMMIT. Si falta el mapeo, la migración entera se deshace. Para borrar una regla, en una sola transacción se borra la regla, después el mapeo y al final el texto. La prueba 4b de `pruebas/test_catalogo_reglas.py` lee los mapeos de todas las migraciones, no solo de la 011, y la prueba 14 de `pruebas/test_aislamiento.py` revisa la FK.
+```bash
+MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 pg_dump -U postgres -Fc -f /tmp/cirdan_antes_011.dump cirdan
+```
+
+Solo con `f|0` corre la 011. Con `t|0` sáltala, porque no se puede correr dos veces: su CREATE TABLE no lleva IF NOT EXISTS, así que la segunda vez falla con `relation "scoring_rule_framework_mappings" already exists` y se deshace sin cambiar nada:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/011_mapeo_marcos.sql
+```
+
+Después, con `f|0` o con `t|0`, corre la 012:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/012_garantia_mapeo_marcos.sql
+```
+
+Cada una corre en una sola transacción, y la consulta de arriba debe dar `t|1`. La 012 sí se puede correr otra vez sin error y sin frenar las lecturas del mapeo. Falla sin cambiar nada si falta la 011, si algún texto de `scoring_rule_texts` no tiene mapeo o si en 5 s no consigue un bloqueo porque otra sesión tiene las tablas (en ese caso se vuelve a correr). Agrega la FK de `scoring_rule_texts.code` al mapeo, diferida hasta el COMMIT, y `created_at` y `updated_at` al mapeo. Con las dos, el resumen de `conteo_tablas.sql` da tablas=25, fk=60 e indices=69, y ya con la API reconstruida `python -m unittest -v pruebas/test_api_v1.py` pasa. Cuando pase, borra el respaldo con `MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 rm /tmp/cirdan_antes_011.dump`.
+
+Desde la 012, `scoring_rule_texts` y el mapeo se apuntan entre sí, así que un respaldo con `--data-only` ya no se restaura sin `--disable-triggers`. Respalda la base completa con `pg_dump -Fc`, como arriba.
+
+Desde la 012, una regla nueva trae su mapeo en la misma migración que su texto y en la misma transacción: primero el INSERT del texto y después el del mapeo, porque la FK del mapeo al texto se revisa en el momento y la del texto al mapeo en el COMMIT. Si falta el mapeo, la migración entera se deshace. Solo una regla que nunca se usó (sin filas en `findings` ni en `score_contributions`, que no admite DELETE) se puede borrar: en una sola transacción se borran sus filas de `scoring_rules` en todos los juegos, después el mapeo y al final el texto. La prueba 4b de `pruebas/test_catalogo_reglas.py` lee los mapeos de todas las migraciones, no solo de la 011, y revisa que cada mapeo vaya en la misma migración que su texto y después de él (los 30 de la 011 van en la 011), y la prueba 14 de `pruebas/test_aislamiento.py` revisa la FK.
 
 ## Decisiones y desviaciones respecto al DBML
 
