@@ -35,10 +35,13 @@ UUID = r"'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'"
 BLOQUE_REGLAS = re.compile(r"INSERT INTO scoring_rules\s*\(.*?;[ \t]*$", re.DOTALL | re.MULTILINE)
 BLOQUE_TEXTOS = re.compile(r"INSERT INTO scoring_rule_texts\s*\(.*?(?:^\s*ON CONFLICT|;[ \t]*$)",
                            re.DOTALL | re.MULTILINE)
+BLOQUE_MAPEOS = re.compile(r"INSERT INTO scoring_rule_framework_mappings\s*\(.*?(?:^\s*ON CONFLICT|;[ \t]*$)",
+                           re.DOTALL | re.MULTILINE)
 INICIO_DE_FILA = re.compile(r"^\s*\(\s*'", re.MULTILINE)
 FILA_REGLA = re.compile(r"\(\s*%s\s*,\s*%s\s*,\s*'([a-z0-9_]+)'\s*,\s*'([a-z_]+)'\s*,\s*'([a-z]+)'\s*,"
                         r"\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)" % (UUID, UUID))
-FILA_MAPEO = re.compile(r"^\s*\('([a-z][a-z0-9_]+)',", re.MULTILINE)
+# Inicio de una fila de mapeo: código de la regla y versión de ATT&CK, que van en la primera línea de la fila.
+FILA_MAPEO = re.compile(r"^\s*\('([a-z][a-z0-9_]+)',\s*'([^']*)'", re.MULTILINE)
 FILA_TEXTO = re.compile(r"\(\s*'([a-z0-9_]+)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)")
 # Corrección de un texto ya aplicado (docs/codigos_reglas.md): un UPDATE por código con WHERE code = '...'.
 UPDATE_TEXTO = re.compile(r"UPDATE scoring_rule_texts\s+SET\s+(.*?)\s+WHERE\s+code\s*=\s*'([a-z0-9_]+)'\s*;",
@@ -119,6 +122,14 @@ def leer_textos():
     return insertados, finales, mal_leidos
 
 
+def leer_mapeos():
+    """Los (archivo, code, attack_version) de los INSERT INTO scoring_rule_framework_mappings de todo db/ (la 011 y las
+    migraciones que vengan, porque la 011 ya no se edita), su texto junto y lo que no se pudo leer."""
+    filas, mal_leidos = _filas(BLOQUE_MAPEOS, FILA_MAPEO)
+    texto = '\n'.join(m.group(0) for ruta in ARCHIVOS_SQL for m in BLOQUE_MAPEOS.finditer(ruta.read_text(encoding='utf-8')))
+    return filas, texto, mal_leidos
+
+
 def leer_doc():
     return (RAIZ / 'docs' / 'codigos_reglas.md').read_text(encoding='utf-8')
 
@@ -131,6 +142,7 @@ REGLAS, REGLAS_MAL_LEIDAS = leer_reglas()
 REGLAS_V1 = sorted((r for r in REGLAS if r[2] == JUEGO_V1), key=lambda r: r[1])
 POR_CODIGO = {r[3]: r for r in REGLAS_V1}
 TEXTOS, TEXTOS_POR_CODIGO, TEXTOS_MAL_LEIDOS = leer_textos()
+MAPEOS, TEXTO_MAPEOS, MAPEOS_MAL_LEIDOS = leer_mapeos()
 FILAS_DOC = FILA_DOC.findall(leer_doc())
 
 
@@ -191,15 +203,16 @@ class Reglas(unittest.TestCase):
             self.assertTrue(code in codigos, 'el texto de %r no tiene regla' % code)
 
     def test_4b_toda_regla_tiene_mapeo_a_marcos(self):
-        archivo = RAIZ / 'db' / 'migraciones' / '011_mapeo_marcos.sql'
-        sql = archivo.read_text(encoding='utf-8')
-        codigos = FILA_MAPEO.findall(sql)
-        self.assertEqual(len(codigos), len(set(codigos)), 'hay códigos repetidos en los mapeos')
+        # Una regla nueva trae su mapeo en su propia migración, junto con su texto (FK diferida de la 012).
+        self.assertEqual(MAPEOS_MAL_LEIDOS, [], 'INSERT de scoring_rule_framework_mappings que la prueba no pudo leer')
+        codigos = [m[1] for m in MAPEOS]
+        repetidos = sorted(c for c, n in Counter(codigos).items() if n > 1)
+        self.assertEqual(repetidos, [], 'hay mapeos insertados dos veces (una corrección va con UPDATE): %s' % repetidos)
         self.assertEqual(set(codigos), set(TEXTOS_POR_CODIGO),
                          'los mapeos no cubren exactamente las reglas del catálogo')
-        self.assertIn('CIS Controls v8.1', sql)
-        self.assertIn('ISO/IEC 27001:2022', sql)
-        self.assertIn('Enterprise v19', sql)
+        self.assertIn('CIS Controls v8.1', TEXTO_MAPEOS)
+        self.assertIn('ISO/IEC 27001:2022', TEXTO_MAPEOS)
+        self.assertIn('Enterprise v19', TEXTO_MAPEOS)
 
     def test_5_textos_simples(self):
         for code, title, meaning, recommendation in TEXTOS_POR_CODIGO.values():

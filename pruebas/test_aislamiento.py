@@ -178,5 +178,37 @@ class CorreccionScore(unittest.TestCase):
                          '3')
 
 
+# Mapeo a marcos (migraciones 011 y 012, #68): la FK diferida de la 012 obliga a que todo texto de regla tenga su
+# mapeo, así un hallazgo nunca llega a la API sin él. SET CONSTRAINTS ... IMMEDIATE la revisa en el momento y no
+# en el COMMIT, y todo se deshace con ROLLBACK.
+class MapeoMarcos(unittest.TestCase):
+    TEXTO = ("INSERT INTO scoring_rule_texts (code, title, meaning, recommendation)"
+             " VALUES ('prueba_mapeo', 'Prueba', 'Prueba.', 'Prueba.');")
+    MAPEO = ("INSERT INTO scoring_rule_framework_mappings (rule_code, attack_version, attack_source_url,"
+             " attack_unmapped_reason, iso_version, iso_control_id, iso_control_name, iso_source_url, cis_version,"
+             " cis_safeguard_id, cis_safeguard_name, cis_source_url) VALUES ('prueba_mapeo', 'Enterprise v19',"
+             " 'https://attack.mitre.org/', 'Prueba', 'ISO/IEC 27001:2022', 'A.8.8', 'Prueba', 'https://www.iso.org/',"
+             " 'CIS Controls v8.1', '7.1', 'Prueba', 'https://www.cisecurity.org/');")
+
+    def test_14_un_texto_de_regla_no_entra_ni_queda_sin_su_mapeo(self):
+        self.assertEqual(scalar("SELECT coalesce(string_agg(condeferrable || ',' || condeferred, ';'), 'sin FK')"
+                                " FROM pg_constraint WHERE conname = 'scoring_rule_texts_mapping_fk';", user='postgres'),
+                         'true,true')
+        ok, _, err = psql("BEGIN; SET CONSTRAINTS scoring_rule_texts_mapping_fk IMMEDIATE; %s ROLLBACK;" % self.TEXTO,
+                          user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('scoring_rule_texts_mapping_fk', err)
+        ok, _, err = psql("BEGIN; SET CONSTRAINTS scoring_rule_texts_mapping_fk IMMEDIATE;"
+                          " DELETE FROM scoring_rule_framework_mappings WHERE rule_code = 'spf_missing'; ROLLBACK;",
+                          user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('scoring_rule_texts_mapping_fk', err)
+        # El texto y su mapeo en la misma transacción, en ese orden, sí entran.
+        self.assertEqual(scalar("BEGIN; %s %s SET CONSTRAINTS ALL IMMEDIATE;"
+                                " SELECT count(*) FROM scoring_rule_framework_mappings WHERE rule_code = 'prueba_mapeo';"
+                                " ROLLBACK;" % (self.TEXTO, self.MAPEO), user='postgres'), '1')
+        self.assertEqual(scalar("SELECT count(*) FROM scoring_rule_texts WHERE code = 'prueba_mapeo';", user='postgres'), '0')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

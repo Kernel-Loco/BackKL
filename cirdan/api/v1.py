@@ -82,6 +82,8 @@ def _query(session, sql, params=()):
         return conn.execute(sql, params).fetchall()
 
 
+# Sin respaldo, como los textos: la FK diferida de la migración 012 obliga a que todo texto de regla tenga su mapeo
+# (scoring_rule_framework_mappings, 011). Si falta, la base no tiene la 012 y entró un texto sin mapeo.
 def _marcos(f):
     if not f['attack_version']:
         raise RuntimeError('Falta el mapeo de marcos para la regla %s' % f['rule_code'])
