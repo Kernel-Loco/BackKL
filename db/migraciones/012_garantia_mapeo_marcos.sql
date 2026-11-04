@@ -26,7 +26,9 @@
 -- solo una FK (60 en total).
 -- Corre en una sola transacción y se puede correr otra vez sin error y
 -- sin frenar las lecturas del mapeo. La primera vez espera a lo más 5 s
--- cada bloqueo que pide, así no deja en espera las lecturas de la API.
+-- cada bloqueo que pide. Mientras espera el del ADD COLUMN, las lecturas
+-- nuevas del mapeo (y las de la API que lo leen) esperan detrás de ella,
+-- también a lo más 5 s, y después hasta su COMMIT, que llega enseguida.
 -- Si otra sesión tiene las tablas, falla sin cambiar nada y se vuelve a
 -- correr.
 -- En una base que ya existe se aplica a mano, antes de reconstruir la API
