@@ -12,4 +12,4 @@ maxminddb==3.2.0
 pandas==3.0.3
 scikit-learn==1.9.0
 shap==0.54.1
-joblib==1.5.3
+joblib==1.6.0
