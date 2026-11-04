@@ -14,7 +14,7 @@ import json
 import re
 import sys
 import unittest
-from collections import Counter
+from collections import Counter, namedtuple
 from decimal import Decimal
 from pathlib import Path
 
@@ -40,60 +40,95 @@ BLOQUE_TEXTOS = re.compile(r"INSERT INTO scoring_rule_texts\s*\(.*?(?:^\s*ON CON
 INICIO_DE_FILA = re.compile(r"^\s*\(\s*'", re.MULTILINE)
 FILA_REGLA = re.compile(r"\(\s*%s\s*,\s*%s\s*,\s*'([a-z0-9_]+)'\s*,\s*'([a-z_]+)'\s*,\s*'([a-z]+)'\s*,"
                         r"\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)" % (UUID, UUID))
-# El SQL se lee como Postgres (_sql): cadenas con '' o E'\'', identificadores entre comillas, comentarios anidados y
-# $tag$...$tag$. Un \ fuera de todo eso empieza un meta-comando de psql, que llega hasta el fin de la línea y no es SQL.
-CADENA_SQL = r"'(?:[^']|'')*'"
-ESPECIAL_SQL = re.compile(r"--|/\*|['\"$\\]")
-DOLAR_SQL = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
-# Los meta-comandos que no cambian qué corre ni cómo se confirma. \set AUTOCOMMIT sí lo cambia, y lo que va después de
-# otro \ en la misma línea puede ser SQL.
-METACOMANDOS_LEIDOS = ('\\echo', '\\qecho', '\\warn', '\\set', '\\unset')
-# Variable de psql en el SQL de primer nivel (:nombre, :'nombre', :"nombre" o :{?nombre}): psql la cambia por su valor.
-VARIABLE_PSQL = re.compile(r"(?<!:):(?!:)")
-INICIO_DE_VARIABLE = re.compile(r"[^\W\d]|['\"{]")
-# Las sentencias se cortan como en psql: en cada ; fuera de paréntesis y, en un CREATE FUNCTION o PROCEDURE, fuera de
-# su BEGIN ATOMIC ... END (cuenta BEGIN y CASE, que también cierra con END).
-PALABRA_SQL = re.compile(r"[^\W\d][\w$]*|[();]")
-CREA_FUNCION = re.compile(r"create (?:or replace )?(?:function|procedure)\b")
-# Sentencias de primer nivel que abren o cierran una transacción o vuelven a un SAVEPOINT. Fuera de un BEGIN psql
-# confirma cada sentencia sola, y si el archivo termina con un BEGIN abierto la base lo deshace.
-ABRE_TRANSACCION = re.compile(r"\s*(?:BEGIN|START\s+TRANSACTION)\b", re.IGNORECASE)
-CIERRA_TRANSACCION = re.compile(r"\s*(COMMIT|END|ROLLBACK|ABORT)(?:\s+(?:WORK|TRANSACTION))?(\s+AND\s+(NO\s+)?CHAIN)?"
-                                r"\s*;?\s*", re.IGNORECASE)
-PUNTO_DE_RETORNO = re.compile(r"\s*(?:(SAVEPOINT)|(RELEASE)(?:\s+SAVEPOINT)?|(ROLLBACK)(?:\s+(?:WORK|TRANSACTION))?"
-                              r"\s+TO(?:\s+SAVEPOINT)?)\s+([^\W\d][\w$]*)\s*;?\s*", re.IGNORECASE)
-OTRO_CIERRE = re.compile(r"\s*(?:COMMIT|END|ROLLBACK|ABORT|PREPARE\s+TRANSACTION|SAVEPOINT|RELEASE)\b", re.IGNORECASE)
-# El mapeo se lee sin comentarios: cada INSERT con su lista de columnas, hasta su primer ; fuera de comillas.
-BLOQUE_MAPEOS = re.compile(r"INSERT INTO (?:public\.)?scoring_rule_framework_mappings\s*\(([^)]*)\)"
-                           r"((?:%s|[^';])*);" % CADENA_SQL)
-TABLA_MAPEO = r"(?:ONLY\s+)?(?:public\s*\.\s*)?scoring_rule_framework_mappings\b"
-INSERT_MAPEO = re.compile(r"\bINSERT\s+INTO\s+" + TABLA_MAPEO, re.IGNORECASE)
-UPDATE_MAPEO = re.compile(r"\bUPDATE\s+" + TABLA_MAPEO, re.IGNORECASE)
-# Corrección de un mapeo ya aplicado: un UPDATE por código con WHERE rule_code = '...', que pone updated_at = now().
-UPDATE_MAPEO_LEIDO = re.compile(r"UPDATE scoring_rule_framework_mappings\s+SET\s+([^;]*?)\s+WHERE\s+rule_code\s*=\s*"
-                                r"('[^']*')\s*;")
-CODIGO_MAPEO = re.compile(r"'([a-z][a-z0-9_]+)'")
-ASIGNACION_MAPEO = re.compile(r"\s*([a-z_]+)\s*=\s*(NULL|now\(\)|%s)\s*(,|$)" % CADENA_SQL)
-# Lo que la prueba no lee del mapeo: borrar filas o cargarlas sin INSERT. Un TRUNCATE cuenta si el mapeo va en su lista
-# de tablas, no en un trigger BEFORE TRUNCATE ON ni en un GRANT o REVOKE TRUNCATE ON.
-NOMBRE_SQL = r"[^\W\d][\w$]*(?:\s*\.\s*[^\W\d][\w$]*)?"
-BORRADO_MAPEO = re.compile(r"\b(?:DELETE\s+FROM\s+|MERGE\s+INTO\s+|COPY\s+|TRUNCATE\s+(?:TABLE\s+)?"
-                           r"(?:(?:ONLY\s+)?%s\s*\*?\s*,\s*)*)" % NOMBRE_SQL + TABLA_MAPEO, re.IGNORECASE)
-# Un INSERT del mapeo se lee si es VALUES con sus filas y, si acaso, ON CONFLICT (rule_code) DO NOTHING. Cada fila
-# leída se cambia por \0, que no puede ir en el SQL. Un upsert con DO UPDATE o un INSERT ... SELECT no se leen.
-FORMA_MAPEO = re.compile(r"\s*VALUES\s*\x00(?:\s*,\s*\x00)*"
-                         r"(?:\s+ON\s+CONFLICT\s*\(\s*rule_code\s*\)\s*DO\s+NOTHING)?\s*")
+# El SQL se lee como lo leen psql y Postgres (_Lexico): cadenas '...' con '' (y la que la sigue en otra línea),
+# E'...' con \, B'...' y X'...', identificadores entre comillas (distinguen mayúsculas y nunca son palabras clave),
+# $tag$ con cualquier letra en la etiqueta, comentarios -- y /* */ anidados, y palabras sin comillas, que se comparan en
+# minúsculas ASCII como en Postgres. Un \ fuera de todo eso y de un $tag$ empieza un meta-comando de psql, hasta el fin
+# de la línea.
+Token = namedtuple('Token', 'tipo inicio fin valor cuerpo')  # cuerpo: los tokens dentro de un $tag$
+LETRA = 'A-Za-z_\x80-\U0010ffff'  # Postgres: ident_start, con todo lo que no es ASCII
+PALABRA = re.compile(r"[%s][%s0-9$]*" % (LETRA, LETRA))
+ETIQUETA = re.compile(r"\$(?:[%s][%s0-9]*)?\$" % (LETRA, LETRA))
+PARAMETRO = re.compile(r"\$[0-9]+")
+NUMERO = re.compile(r"0[xXoObB][0-9A-Fa-f_]+|(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9][0-9_]*)(?:[eE][+-]?[0-9]+)?")
+ESPACIOS = re.compile(r"[ \t\n\r\f\v]+")
+HASTA_SALTO = re.compile(r"[^\n\r]*")  # un comentario -- termina en \n o en \r
+HASTA_FIN_DE_LINEA = re.compile(r"[^\n]*")  # psql lee el SQL por líneas, cortadas solo en \n
+MARCA_DE_COMENTARIO = re.compile(r"/\*|\*/")
+# Lo que va dentro de cada clase de cadena hasta su comilla de cierre. Las B'...' y X'...' cierran en la primera '.
+DENTRO = {'cadena': re.compile(r"(?:[^']+|'')*"), 'cadena_u': re.compile(r"(?:[^']+|'')*"),
+          'cadena_e': re.compile(r"(?:[^'\\]+|''|\\.)*", re.DOTALL), 'cadena_b': re.compile(r"[^']*"),
+          'cadena_x': re.compile(r"[^']*"), 'nombre': re.compile(r'(?:[^"]+|"")*'),
+          'nombre_u': re.compile(r'(?:[^"]+|"")*')}
+PREFIJO_DE_CADENA = {'e': 'cadena_e', 'b': 'cadena_b', 'x': 'cadena_x', 'n': 'cadena'}
+ESCAPE_E = re.compile(r"''|\\(x[0-9A-Fa-f]{1,2}|[0-7]{1,3}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)", re.DOTALL)
+ESCAPES_E = {'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t'}
+MINUSCULAS_ASCII = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+OPERADORES = '~!@#^&|`?+-*/%<>='  # Postgres: op_chars. Un -- o un /* corta el operador
+SIMBOLOS = ',()[].;'
+# Variable de psql (:nombre, :'nombre', :"nombre" o :{?nombre}) en el SQL o en un meta-comando: psql la cambia por su
+# valor.
+VARIABLE_PSQL = re.compile(r":(?:[A-Za-z0-9_\x80-\U0010ffff'\"]|\{\?)")
+# Los únicos meta-comandos que se leen, porque no cambian qué corre ni cómo se confirma: \echo, \qecho y \warn sin
+# comillas invertidas (corren un comando del sistema), variables de psql ni otro \ fuera de comillas (empieza otro
+# meta-comando o vuelve al SQL en la misma línea), y \set ON_ERROR_STOP on. Cualquier otro hace fallar la prueba.
+ECOS_PSQL = ('\\echo', '\\qecho', '\\warn')
+NOMBRE_METACOMANDO = re.compile(r'\\[^ \t\n\r\f\v\\]*')
+# Argumentos de un meta-comando como los lee psql: '...' con \ y '', "..." tal cual, texto suelto o un carácter
+# especial.
+ARGUMENTO_PSQL = re.compile(r"'(?:[^'\\]+|''|\\.?)*'?|\"[^\"]*\"?|[^'\"`:\\]+|(.)")
+ON_ERROR_STOP = re.compile(r"\\set[ \t\r\f\v]+ON_ERROR_STOP[ \t\r\f\v]+(?i:on|true|1)[ \t\r\f\v]*")
+# Cada sentencia se lee también en forma pareja (_forma), con regex: sus tokens separados por un espacio.
+NOMBRE_SIMPLE = re.compile(r"[a-z_][a-z0-9_$]*")
+PALABRA_F = '[a-z_\x80-\U0010ffff][a-z0-9_$\x80-\U0010ffff]*'
+# psql corta las sentencias en cada ; fuera de paréntesis y, en un CREATE FUNCTION o PROCEDURE, fuera de su BEGIN
+# ... END (_sentencias). Fuera de un BEGIN confirma cada sentencia sola, y si el archivo termina con un BEGIN abierto la
+# base lo deshace. Un SAVEPOINT, RELEASE o ROLLBACK TO se lee solo con el nombre sin comillas.
+CREA_FUNCION = re.compile(r"create (?:or replace )?(?:function|procedure)(?![^ ])")
+ABRE_TRANSACCION = re.compile(r"(?:begin|start transaction)(?![^ ])")
+CIERRA_TRANSACCION = re.compile(r"(commit|end|rollback|abort)(?: (?:work|transaction))?( and( no)? chain)?(?: ;)?")
+PUNTO_DE_RETORNO = re.compile(r"(?:(savepoint)|(release)(?: savepoint)?|(rollback)(?: (?:work|transaction))? to"
+                              r"(?: savepoint)?) (%s|\"[^\"]*\")(?: ;)?" % PALABRA_F)
+OTRO_CIERRE = re.compile(r"(?:commit|end|rollback|abort|savepoint|release|prepare transaction)(?![^ ])")
+# Lo que cambia cómo leen las cadenas psql y Postgres, que la prueba no imita: standard_conforming_strings (con off un \
+# escapa la ' en toda cadena), client_encoding y SET NAMES (otra codificación lee otros bytes como \ o '). Solo se lee
+# SET client_encoding = 'UTF8', que llevan los archivos de db/.
+CLIENT_ENCODING_UTF8 = re.compile(r"set(?: session)? client_encoding (?:=|to) '([0-9]+)'(?: ;)?")
+AJUSTE_DE_LECTURA = re.compile(r'(?<![^ ])(?:"?(?:standard_conforming_strings|client_encoding)"?|'
+                               r'set(?: session| local)? names|(?:reset|discard) all)(?![^ ])')
+# El mapeo se escribe con INSERT o UPDATE, en cualquier sentencia y en el cuerpo de cualquier $tag$. DELETE, MERGE,
+# COPY y un TRUNCATE con el mapeo en su lista de tablas (no un trigger BEFORE TRUNCATE ON ni un GRANT o REVOKE TRUNCATE
+# ON) no se leen.
+MAPEO_F = r'(?:scoring_rule_framework_mappings|"scoring_rule_framework_mappings")(?![^ ])'
+ESCRIBE_MAPEO = re.compile(r"(?<![^ ])(insert into|update(?: only)?) (?:[^ ]+ \. )*" + MAPEO_F)
+BORRADO_MAPEO = re.compile(r"(?<![^ ])(?:(?:delete from|merge into)(?: only)? |copy )(?:[^ ]+ \. )*" + MAPEO_F +
+                           r"|(?<![^ ])truncate (?!on |or |, )[^;]*?(?<![^ ])" + MAPEO_F)
 COLUMNAS_MAPEO = ('rule_code', 'attack_version', 'attack_technique_id', 'attack_technique_name', 'attack_source_url',
                   'attack_unmapped_reason', 'iso_version', 'iso_control_id', 'iso_control_name', 'iso_source_url',
                   'cis_version', 'cis_safeguard_id', 'cis_safeguard_name', 'cis_source_url')
-# Una fila de mapeo entera, aunque vaya en la misma línea que otra: el código y los otros 13 valores, en ese orden.
-FILA_MAPEO = re.compile(r"\(\s*'([a-z][a-z0-9_]+)'\s*,\s*" + r"\s*,\s*".join([r"(NULL|%s)" % CADENA_SQL] * 13) +
-                        r"\s*\)")
-INICIO_DE_MAPEO = re.compile(r"\(\s*'")
+# Un INSERT del mapeo se lee si es INSERT INTO [public.]scoring_rule_framework_mappings con sus 14 columnas en orden,
+# VALUES con filas de cadenas '...' o NULL y, si acaso, ON CONFLICT (rule_code) DO NOTHING.
+INSERT_MAPEO = re.compile(r"insert into (?:(?:public|\"public\") \. )?%s \( (.*?) \) (.*)" % MAPEO_F)
+VALOR_F = r"(?:'[0-9]+'|null)"
+FILA_F = r"\( '[0-9]+'" + r" , %s" % VALOR_F * 13 + r" \)"
+FORMA_INSERT = re.compile(r"values %s(?: , %s)*(?: on conflict \( (?:rule_code|\"rule_code\") \) do nothing)?(?: ;)?"
+                          % (FILA_F, FILA_F))
+FILA_LEIDA = re.compile(r"\( '([0-9]+)'" + r" , (%s)" % VALOR_F * 13 + r" \)")
+# Corrección de un mapeo ya aplicado: un UPDATE por código con WHERE rule_code = '...', que pone updated_at = now().
+UPDATE_MAPEO = re.compile(r"update (?:only )?(?:(?:public|\"public\") \. )?%s set (.*) "
+                          r"where (?:rule_code|\"rule_code\") = '([0-9]+)'(?: ;)?" % MAPEO_F)
+ASIGNACION = re.compile(r"(?:([a-z_][a-z0-9_$]*)|\"([a-z_][a-z0-9_$]*)\") = ('[0-9]+'|null|now \( \))")
 # Las versiones de los marcos que dicen el DBML y db/README para todas las reglas.
 VERSIONES_MAPEO = {'attack_version': 'Enterprise v19', 'iso_version': 'ISO/IEC 27001:2022',
                    'cis_version': 'CIS Controls v8.1'}
 NULOS_MAPEO = ('attack_technique_id', 'attack_technique_name', 'attack_unmapped_reason')  # las únicas sin NOT NULL
+# Los CHECK de la 011, que la base revisa en cada INSERT y en cada UPDATE del mapeo: btrim(x) <> '', x ~ '^...$' y
+# x LIKE 'https://%', más la técnica de ATT&CK con id y nombre o, sin ellos, con su motivo.
+NO_VACIAS_MAPEO = ('attack_version', 'iso_version', 'iso_control_name', 'cis_version', 'cis_safeguard_name')
+FORMATOS_MAPEO = {'attack_technique_id': re.compile(r'T[0-9]{4}(?:\.[0-9]{3})?'),
+                  'iso_control_id': re.compile(r'A\.[5-8]\.[0-9]{1,2}'),
+                  'cis_safeguard_id': re.compile(r'(?:[1-9]|1[0-8])\.[0-9]{1,2}')}
+FUENTES_MAPEO = ('attack_source_url', 'iso_source_url', 'cis_source_url')
 MIGRACION_011 = 'db/migraciones/011_mapeo_marcos.sql'
 FILA_TEXTO = re.compile(r"\(\s*'([a-z0-9_]+)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)")
 # Corrección de un texto ya aplicado (docs/codigos_reglas.md): un UPDATE por código con WHERE code = '...'.
@@ -104,7 +139,8 @@ CAMPO_TEXTO = re.compile(r"\b(title|meaning|recommendation)\s*=\s*'([^']*)'")
 OTRO_CAMPO = re.compile(r"\b(reviewed_by\s*=\s*(?:'[^']*'|NULL)|updated_at\s*=\s*now\(\))")
 REVISOR = re.compile(r"\breviewed_by\s*=\s*(?:'([^']*)'|NULL)")
 # Filas con que la 005 revisa los textos antes de cambiarlos: código, md5 de antes, md5 de después y revisor.
-HUELLA = re.compile(r"^\s*\('([a-z0-9_]+)', '([0-9a-f]{32})', '([0-9a-f]{32})', (?:'([^']*)'|NULL)\),?$", re.MULTILINE)
+HUELLA = re.compile(r"^\s*\('([a-z0-9_]+)', '([0-9a-f]{32})', '([0-9a-f]{32})', (?:'([^']*)'|NULL)\),?[ \t]*$",
+                    re.MULTILINE)
 # Comentario de la columna reviewed_by en las migraciones y su nota en el DBML (la 007 corrige el de la 003).
 COMENTARIO_REVISOR = re.compile(r"COMMENT ON COLUMN scoring_rule_texts\.reviewed_by IS '([^']*)'\s*;")
 NOTA_REVISOR = re.compile(r"^Table scoring_rule_texts\b.*?^\s*reviewed_by\s+text\s+\[note:\s*'([^']*)'\]",
@@ -129,158 +165,310 @@ def _relativa(ruta):
     return ruta.relative_to(RAIZ).as_posix()
 
 
-def _de_nombre(c):
-    return c.isalnum() or c in '_$'
+def _linea(sql, posicion):
+    return sql.count('\n', 0, posicion) + 1
+
+
+def _de_escapes(texto):
+    """El valor de una cadena E'...': \\b, \\f, \\n, \\r, \\t, \\uXXXX y \\UXXXXXXXX, bytes de UTF8 con \\ooo y
+    \\xhh, '' como ' y cualquier otro carácter tal cual después de \\."""
+    valor, i = bytearray(), 0
+    for m in ESCAPE_E.finditer(texto):
+        valor += texto[i:m.start()].encode('utf-8', 'surrogatepass')
+        e, i = m.group(1), m.end()
+        if e is None:
+            valor += b"'"
+        elif e[0] == 'x' and len(e) > 1 or e[0] in '01234567':
+            valor.append(int(e[1:], 16) if e[0] == 'x' else int(e, 8) & 0xFF)
+        elif e[0] in 'uU' and len(e) > 1:
+            valor += chr(min(int(e[1:], 16), 0xFFFD)).encode('utf-8', 'surrogatepass')
+        else:
+            valor += ESCAPES_E.get(e, e).encode('utf-8', 'surrogatepass')
+    valor += texto[i:].encode('utf-8', 'surrogatepass')
+    return valor.decode('utf-8', 'replace')
+
+
+def _motivo_eco(argumentos):
+    """Por qué psql no se limita a escribir los argumentos de un \\echo, \\qecho o \\warn, o None."""
+    for m in ARGUMENTO_PSQL.finditer(argumentos):
+        if m.group(1) == '`':
+            return 'corre un comando del sistema (comillas invertidas)'
+        if m.group(1) == '\\':
+            return 'lleva otro \\ fuera de comillas, que empieza otro meta-comando o vuelve al SQL en la misma línea'
+        if m.group(1) == ':' and VARIABLE_PSQL.match(argumentos, m.start()):
+            return 'usa una variable de psql'
+    return None
+
+
+class _Lexico:
+    """Lee un archivo de db/ en tokens como psql y Postgres. Deja en sin_comentarios el texto sin comentarios ni
+    meta-comandos, del mismo largo para que las posiciones coincidan, y en problemas lo que la prueba no lee. El cuerpo
+    de un $tag$ se lee como SQL, porque el de un DO corre, y lo que quede abierto en él termina con él."""
+
+    def __init__(self, sql):
+        self.sql, self.sin_comentarios, self.problemas = sql, list(sql), []
+
+    def problema(self, posicion, texto):
+        self.problemas.append('línea %d: %s' % (_linea(self.sql, posicion), texto))
+
+    def blanco(self, i, j):
+        for k in range(i, j):
+            if self.sql[k] != '\n':
+                self.sin_comentarios[k] = ' '
+
+    def leer(self, i, fin, cuerpo=False):
+        """Los tokens de sql[i:fin]. En el cuerpo de un $tag$ un \\ o un :nombre son SQL, no de psql."""
+        sql, tokens = self.sql, []
+        while i < fin:
+            c, j, tipo, dentro = sql[i], i + 1, None, ()
+            if c in ' \t\n\r\f\v':
+                j = ESPACIOS.match(sql, i, fin).end()
+            elif sql.startswith('--', i, fin):
+                j = HASTA_SALTO.match(sql, i, fin).end()
+                self.blanco(i, j)
+            elif sql.startswith('/*', i, fin):
+                j = self.comentario(i, fin, cuerpo)
+                self.blanco(i, j)
+            elif c == '\\' and not cuerpo:
+                j = HASTA_FIN_DE_LINEA.match(sql, i, fin).end()
+                self.metacomando(i, sql[i:j])
+                self.blanco(i, j)
+            elif c in '\'"':
+                tipo = 'cadena' if c == "'" else 'nombre'
+                j, valor = self.cadena(tipo, i, fin, cuerpo)
+            elif (m := PALABRA.match(sql, i, fin)):
+                j, prefijo = m.end(), m.group().lower()
+                if prefijo in PREFIJO_DE_CADENA and sql.startswith("'", j, fin):
+                    tipo = PREFIJO_DE_CADENA[prefijo]
+                    j, valor = self.cadena(tipo, j, fin, cuerpo)
+                elif prefijo == 'u' and sql.startswith(("&'", '&"'), j) and j + 1 < fin:
+                    tipo = 'cadena_u' if sql[j + 1] == "'" else 'nombre_u'
+                    j, valor = self.cadena(tipo, j + 1, fin, cuerpo)
+                    self.problema(i, "U&'...' o U&\"...\" con escapes Unicode, que la prueba no lee")
+                else:
+                    tipo, valor = 'palabra', m.group().translate(MINUSCULAS_ASCII)
+            elif c == '$' and (m := ETIQUETA.match(sql, i, fin)):
+                k = sql.find(m.group(), m.end(), fin)
+                if k < 0 and not cuerpo:
+                    self.problema(i, 'cadena %s sin cerrar' % m.group())
+                k = fin if k < 0 else k
+                tipo, valor, dentro = 'dolar', sql[m.end():k], tuple(self.leer(m.end(), k, True))
+                j = min(k + len(m.group()), fin)
+            elif c in '0123456789' or c == '.' and sql[i + 1:i + 2].isdigit():
+                tipo, j = 'numero', NUMERO.match(sql, i, fin).end()
+                valor = sql[i:j]
+            elif c == ':':
+                j = i + 2 if sql.startswith(('::', ':='), i) and i + 1 < fin else i + 1
+                if not cuerpo and j == i + 1 and VARIABLE_PSQL.match(sql, i, fin):
+                    self.problema(i, 'variable de psql (:nombre, :\'nombre\', :"nombre" o :{?nombre}) en el SQL, '
+                                     'que psql cambia por su valor')
+                tipo, valor = 'simbolo', sql[i:j]
+            elif c in OPERADORES:
+                while j < fin and sql[j] in OPERADORES and not sql.startswith(('--', '/*'), j):
+                    j += 1
+                tipo, valor = 'operador', sql[i:j]
+            else:
+                if c == '$' and (m := PARAMETRO.match(sql, i, fin)):
+                    j = m.end()
+                tipo, valor = 'simbolo' if c in SIMBOLOS else 'otro', sql[i:j]
+            if tipo:
+                tokens.append(Token(tipo, i, j, valor, dentro))
+            i = j
+        return tokens
+
+    def comentario(self, i, fin, cuerpo):
+        """El fin del comentario /* */ que abre en i, con los de adentro (Postgres los anida)."""
+        nivel, j = 1, i + 2
+        while nivel and (m := MARCA_DE_COMENTARIO.search(self.sql, j, fin)):
+            nivel, j = nivel + (1 if m.group() == '/*' else -1), m.end()
+        if nivel and not cuerpo:
+            self.problema(i, 'comentario /* sin cerrar')
+        return fin if nivel else j
+
+    def cadena(self, tipo, j, fin, cuerpo):
+        """El fin y el valor de la cadena o el nombre entre comillas cuya comilla abre en j, con las cadenas que lo
+        siguen después de un salto de línea (Postgres: quotecontinue, solo con espacios y comentarios -- en medio)."""
+        sql, comilla, partes = self.sql, self.sql[j], []
+        while True:
+            k = DENTRO[tipo].match(sql, j + 1, fin).end()
+            partes.append(sql[j + 1:k])
+            if k >= fin or sql[k] != comilla:
+                if not cuerpo:
+                    self.problema(j, ('cadena %s sin cerrar' if comilla == "'" else 'nombre %s sin cerrar')
+                                  % sql[j:j + 20].split('\n')[0])
+                return fin, self.valor(tipo, partes)
+            j = self.continuacion(k + 1, fin) if comilla == "'" else None
+            if j is None:
+                return k + 1, self.valor(tipo, partes)
+
+    def continuacion(self, j, fin):
+        """Dónde abre la cadena que sigue a la que cierra antes de j, o None."""
+        sql, salto = self.sql, False
+        while j < fin:
+            if sql[j] in ' \t\n\r\f\v':
+                salto, j = salto or sql[j] in '\n\r', j + 1
+            elif sql.startswith('--', j, fin):
+                k = HASTA_SALTO.match(sql, j, fin).end()
+                self.blanco(j, k)
+                j = k
+            else:
+                return j if salto and sql[j] == "'" else None
+        return None
+
+    @staticmethod
+    def valor(tipo, partes):
+        texto = ''.join(partes)
+        if tipo == 'cadena_e':
+            return _de_escapes(texto)
+        return texto.replace('""', '"') if tipo.startswith('nombre') else texto.replace("''", "'")
+
+    def metacomando(self, i, texto):
+        """Revisa un meta-comando de psql (del \\ al fin de la línea) contra la lista blanca."""
+        nombre = NOMBRE_METACOMANDO.match(texto).group()
+        if ON_ERROR_STOP.fullmatch(texto):
+            return
+        if nombre in ECOS_PSQL:
+            motivo = _motivo_eco(texto[len(nombre):])
+        else:
+            motivo = 'la prueba solo lee \\echo, \\qecho y \\warn con texto fijo y \\set ON_ERROR_STOP on'
+        if motivo:
+            self.problema(i, 'meta-comando de psql %r: %s' % (texto.strip(), motivo))
 
 
 @functools.lru_cache(maxsize=None)
 def _sql(ruta):
-    """Un archivo de db/ en tres copias del mismo largo, así las posiciones coinciden: sin comentarios ni meta-comandos
-    de psql, además sin lo que va entre comillas (quedan las comillas de las cadenas, y los identificadores entre
-    comillas quedan sin ellas) y además sin el cuerpo de los $tag$...$tag$, para ver las sentencias de primer nivel. El
-    cuerpo de un $tag$ se lee como SQL, porque el de un DO corre, y lo que quede abierto en él termina con él. Da
-    también los meta-comandos de primer nivel (psql no los busca dentro de un $tag$)."""
-    sql = ruta.read_text(encoding='utf-8')
-    copias, metacomandos = [list(sql), list(sql), list(sql)], []
+    """Un archivo de db/ leído como lo leen psql y Postgres (_Lexico): el texto sin comentarios ni meta-comandos, del
+    mismo largo, sus tokens de primer nivel y lo que la prueba no lee, con su línea. Un \\r sin \\n después no se lee:
+    Postgres lo toma como fin de un comentario -- y psql no como fin de línea."""
+    sql = ruta.read_bytes().decode('utf-8').replace('\r\n', '\n')
+    lexico = _Lexico(sql)
+    for m in re.finditer(r'\r', sql):
+        lexico.problema(m.start(), '\\r sin \\n después, y psql corta las líneas solo en \\n')
+    tokens = lexico.leer(0, len(sql))
+    return ''.join(lexico.sin_comentarios), tuple(tokens), tuple(lexico.problemas)
 
-    def blanco(desde, i, j):
-        for copia in copias[desde:]:
-            for k in range(i, j):
-                if sql[k] != '\n':
-                    copia[k] = ' '
 
-    def recorrer(i, fin, cuerpo=False):
-        while (m := ESPECIAL_SQL.search(sql, i, fin)):
-            i, j = m.start(), m.end()
-            if m.group() == '\\' and not cuerpo:
-                j = sql.find('\n', i, fin)
-                j = fin if j < 0 else j
-                metacomandos.append(sql[i:j])
-                blanco(0, i, j)
-            elif m.group() == '--':
-                j = sql.find('\n', i, fin)
-                j = fin if j < 0 else j
-                blanco(0, i, j)
-            elif m.group() == '/*':
-                nivel = 1
-                while nivel and j < fin:
-                    if sql.startswith('/*', j, fin):
-                        nivel, j = nivel + 1, j + 2
-                    elif sql.startswith('*/', j, fin):
-                        nivel, j = nivel - 1, j + 2
-                    else:
-                        j += 1
-                blanco(0, i, j)
-            elif m.group() == "'":
-                con_escape = i > 0 and sql[i - 1] in 'eE' and (i < 2 or not _de_nombre(sql[i - 2]))
-                while j < fin and sql[j] != "'" or sql.startswith("''", j, fin):
-                    j += 2 if (con_escape and sql[j] == '\\') or sql.startswith("''", j, fin) else 1
-                j = min(j, fin)
-                blanco(1, i + 1, j)
-                if con_escape:
-                    blanco(1, i - 1, i)
-                j += 1
-            elif m.group() == '"':
-                while j < fin and sql[j] != '"' or sql.startswith('""', j, fin):
-                    j += 2 if sql.startswith('""', j, fin) else 1
-                j = min(j + 1, fin)
-                for k in range(i, j):
-                    if not _de_nombre(sql[k]) and sql[k] != '\n':
-                        copias[1][k] = copias[2][k] = ' '
-            elif m.group() == '\\' or i > 0 and _de_nombre(sql[i - 1]) or not (d := DOLAR_SQL.match(sql, i, fin)):
-                j = i + 1
-            else:
-                k = sql.find(d.group(), d.end(), fin)
-                k = fin if k < 0 else k
-                recorrer(d.end(), k, True)
-                blanco(2, d.end(), k)
-                j = k + len(d.group())
-            i = j
+def _forma(tokens):
+    """Una lista de tokens en forma pareja, para leerla con regex: separados por un espacio, las palabras en minúsculas,
+    cada cadena '...' o E'...' como 'n' con su valor en valores[n], un nombre entre comillas como "nombre" (o "?" si
+    lleva mayúsculas u otros caracteres) y las otras cadenas como $$, b'', x'', u&'' y u&""."""
+    partes, valores = [], []
+    for t in tokens:
+        if t.tipo in ('cadena', 'cadena_e'):
+            partes.append("'%d'" % len(valores))
+            valores.append(t.valor)
+        elif t.tipo == 'nombre':
+            partes.append('"%s"' % (t.valor if NOMBRE_SIMPLE.fullmatch(t.valor) else '?'))
+        else:
+            partes.append({'dolar': '$$', 'cadena_b': "b''", 'cadena_x': "x''", 'cadena_u': "u&''",
+                           'nombre_u': 'u&""'}.get(t.tipo, t.valor))
+    return ' '.join(partes), tuple(valores)
 
-    recorrer(0, len(sql))
-    return tuple(''.join(c) for c in copias) + (tuple(metacomandos),)
+
+def _cuerpos(tokens):
+    """(token, tokens de su cuerpo) de cada $tag$, también los que van dentro de otro."""
+    for t in tokens:
+        if t.tipo == 'dolar':
+            yield t, t.cuerpo
+            yield from _cuerpos(t.cuerpo)
+
+
+Sentencia = namedtuple('Sentencia', 'inicio fin transaccion confirmada forma valores')
 
 
 @functools.lru_cache(maxsize=None)
 def _sentencias(ruta):
-    """Los fines de las sentencias de primer nivel, cada sentencia con (inicio, fin, transacción, se confirma) y lo que
-    la prueba no entiende de las transacciones. Las de un BEGIN ... COMMIT comparten transacción y cada una de las de
-    fuera lleva la suya, porque psql la confirma al terminarla. COMMIT AND CHAIN abre otra enseguida. No se confirma lo
-    que deshace un ROLLBACK, un ROLLBACK TO o el final del archivo con el BEGIN abierto."""
-    primer_nivel = _sql(ruta)[2]
-    cortes, inicio, palabras, parentesis, bloques = [], 0, [], 0, 0
-    for m in PALABRA_SQL.finditer(primer_nivel):
-        palabra = m.group().lower()
-        if palabra == '(':
+    """Los fines de las sentencias de primer nivel, las Sentencia y lo que la prueba no entiende de cómo psql las
+    corta o deja la transacción. psql corta en cada ; fuera de paréntesis y, en un CREATE FUNCTION o PROCEDURE, fuera de
+    su BEGIN ATOMIC ... END (cuenta BEGIN y CASE, que también cierra con END). Un BEGIN que no es ATOMIC junta
+    sentencias. Las de un BEGIN ... COMMIT comparten transacción y cada una de las de fuera lleva la suya, porque psql
+    la confirma al terminarla. COMMIT AND CHAIN abre otra enseguida. No se confirma lo que deshace un ROLLBACK, un ROLLBACK TO o el
+    final del archivo con el BEGIN abierto."""
+    sql, tokens, _ = _sql(ruta)
+    grupos, actual, palabras, parentesis, bloques, no_entendidas = [], [], [], 0, 0, []
+    for k, t in enumerate(tokens):
+        actual.append(t)
+        if t.tipo == 'simbolo' and t.valor == '(':
             parentesis += 1
-        elif palabra == ')':
+        elif t.tipo == 'simbolo' and t.valor == ')':
             parentesis = max(parentesis - 1, 0)
-        elif palabra == ';':
-            if not parentesis and not bloques:
-                cortes.append((inicio, m.end()))
-                inicio, palabras = m.end(), []
-        else:
-            palabras.append(palabra)
-            if palabra in ('begin', 'case', 'end') and not parentesis and CREA_FUNCION.match(' '.join(palabras[:4])):
-                if palabra == 'begin' or palabra == 'case' and bloques:
+        elif t.tipo == 'simbolo' and t.valor == ';' and not parentesis and not bloques:
+            grupos.append(actual)
+            actual, palabras = [], []
+        elif t.tipo == 'palabra':
+            palabras.append(t.valor)
+            if t.valor in ('begin', 'case', 'end') and not parentesis and CREA_FUNCION.match(' '.join(palabras[:4])):
+                siguiente = tokens[k + 1] if k + 1 < len(tokens) else None
+                if t.valor == 'begin':
                     bloques += 1
-                elif palabra == 'end' and bloques:
+                    if not siguiente or (siguiente.tipo, siguiente.valor) != ('palabra', 'atomic'):
+                        no_entendidas.append('línea %d: CREATE FUNCTION o PROCEDURE con un BEGIN que no es BEGIN '
+                                             'ATOMIC, y psql junta las sentencias que siguen hasta un END'
+                                             % _linea(sql, t.inicio))
+                elif t.valor == 'case' and bloques:
+                    bloques += 1
+                elif t.valor == 'end' and bloques:
                     bloques -= 1
-    if primer_nivel[inicio:].strip():
-        cortes.append((inicio, len(primer_nivel)))  # psql corre lo que quede al final del archivo
-    sentencias, no_entendidas, confirma, deshechas, puntos, n, abierta = [], [], {}, set(), [], 0, False
-    for k, (i, j) in enumerate(cortes):
-        texto = primer_nivel[i:j]
+    if actual:
+        grupos.append(actual)  # psql corre lo que quede al final del archivo
+    sentencias, confirma, deshechas, puntos, n, abierta = [], {}, set(), [], 0, False
+    for k, grupo in enumerate(grupos):
+        inicio, fin = grupo[0].inicio, grupo[-1].fin
+        forma, valores = _forma(grupo)
         if not abierta:
             n += 1
-        sentencias.append((i, j, n))
-        cierre, punto = CIERRA_TRANSACCION.fullmatch(texto), PUNTO_DE_RETORNO.fullmatch(texto)
-        if ABRE_TRANSACCION.match(texto):
+        sentencias.append((inicio, fin, n, forma, valores))
+        cierre, punto = CIERRA_TRANSACCION.fullmatch(forma), PUNTO_DE_RETORNO.fullmatch(forma)
+        no_entendida = 'línea %d: %r, y la prueba no sabe cómo deja la transacción' % (
+            _linea(sql, inicio), ' '.join(sql[inicio:fin].split()))
+        if ABRE_TRANSACCION.match(forma):
             abierta = True
         elif cierre:
-            confirma[n], puntos = cierre.group(1).upper() in ('COMMIT', 'END'), []
+            confirma[n], puntos = cierre.group(1) in ('commit', 'end'), []
             if cierre.group(2) and not cierre.group(3) and abierta:
                 n += 1
             elif cierre.group(2) and not cierre.group(3):
-                no_entendidas.append(' '.join(texto.split()))  # AND CHAIN fuera de un BEGIN da error
+                no_entendidas.append(no_entendida)  # AND CHAIN fuera de un BEGIN da error
             else:
                 abierta = False
+        elif punto and punto.group(4).startswith('"'):
+            no_entendidas.append(no_entendida + ' (un SAVEPOINT se lee solo con el nombre sin comillas)')
         elif punto and abierta:
-            orden, nombre = (punto.group(1) or punto.group(2) or punto.group(3)).upper(), punto.group(4).lower()
+            orden, nombre = punto.group(1) or punto.group(2) or punto.group(3), punto.group(4)
             previos = [x for x, (p, _) in enumerate(puntos) if p == nombre]
-            if orden == 'SAVEPOINT':
+            if orden == 'savepoint':
                 puntos.append((nombre, k))
             elif not previos:
-                no_entendidas.append(' '.join(texto.split()))
-            elif orden == 'ROLLBACK':
+                no_entendidas.append(no_entendida)
+            elif orden == 'rollback':
                 deshechas.update(range(puntos[previos[-1]][1] + 1, k))
                 del puntos[previos[-1] + 1:]
             else:
                 del puntos[previos[-1]:]
-        elif punto or OTRO_CIERRE.match(texto):
-            no_entendidas.append(' '.join(texto.split()))
+        elif punto or OTRO_CIERRE.match(forma):
+            no_entendidas.append(no_entendida)
         if not abierta:
             confirma.setdefault(n, True)
     if abierta:
         confirma[n] = False
-    sentencias = [(i, j, t, confirma[t] and k not in deshechas) for k, (i, j, t) in enumerate(sentencias)]
-    return [s[1] for s in sentencias], sentencias, no_entendidas
+    sentencias = [Sentencia(i, j, t, confirma[t] and k not in deshechas, forma, valores)
+                  for k, (i, j, t, forma, valores) in enumerate(sentencias)]
+    return [s.fin for s in sentencias], sentencias, no_entendidas
 
 
 def _sentencia(ruta, posicion):
-    """(inicio, fin, transacción, se confirma) de la sentencia de primer nivel en que cae la posición."""
+    """La Sentencia de primer nivel en que cae la posición."""
     fines, sentencias, _ = _sentencias(ruta)
     k = bisect.bisect_right(fines, posicion)
-    return sentencias[k] if k < len(sentencias) else (posicion, posicion, None, False)
+    return sentencias[k] if k < len(sentencias) else Sentencia(posicion, posicion, None, False, '', ())
 
 
 def _aplicada(ruta, posicion):
     """Si en la posición empieza una sentencia de primer nivel que se confirma, o sea que corre y queda. No lo es la que
     va en el cuerpo de un $tag$ (una función, un DO o una cadena), dentro de otra sentencia (un WITH, un CREATE RULE o
     una función con BEGIN ATOMIC) ni la que deshace un ROLLBACK."""
-    primer_nivel = _sql(ruta)[2]
-    inicio, _, _, confirmada = _sentencia(ruta, posicion)
-    return confirmada and not primer_nivel[inicio:posicion].strip() and not primer_nivel[posicion].isspace()
+    sentencia = _sentencia(ruta, posicion)
+    return sentencia.confirmada and sentencia.inicio == posicion
 
 
 def _filas(bloque, fila):
@@ -347,78 +535,102 @@ def _valor(v):
     return None if v == 'NULL' else v[1:-1].replace("''", "'")
 
 
-def _asignaciones(texto):
-    """{columna: valor como va en el SQL} de un SET con col = 'x', col = NULL o col = now(), o None si no se lee."""
-    pares, i = [], 0
-    while (a := ASIGNACION_MAPEO.match(texto, i)):
-        pares.append(a.group(1, 2))
-        i = a.end()
-        if not a.group(3):
-            return dict(pares) if i == len(texto) and len(dict(pares)) == len(pares) else None
-    return None
+def _literal(v, valores):
+    """Un valor de la forma pareja ('n', null o now ( )) como va en el SQL: '...', NULL o now()."""
+    if v.startswith("'"):
+        return "'%s'" % valores[int(v[1:-1])].replace("'", "''")
+    return 'NULL' if v == 'null' else 'now()'
+
+
+def _incumple_011(fila):
+    """Las restricciones de la 011 que no cumple una fila del mapeo, {columna: valor o None}. Un CHECK con NULL pasa."""
+    malas = ['%s NOT NULL' % c for c in COLUMNAS_MAPEO if c not in NULOS_MAPEO and fila[c] is None]
+    malas += ["btrim(%s) <> ''" % c for c in NO_VACIAS_MAPEO if fila[c] is not None and not fila[c].strip(' ')]
+    malas += ["%s ~ '^%s$'" % (c, r.pattern) for c, r in FORMATOS_MAPEO.items()
+              if fila[c] is not None and not r.fullmatch(fila[c])]
+    malas += ["%s LIKE 'https://%%'" % c for c in FUENTES_MAPEO
+              if fila[c] is not None and not fila[c].startswith('https://')]
+    tecnica, nombre, motivo = (fila[c] for c in NULOS_MAPEO)
+    if not (tecnica is not None and nombre is not None and nombre.strip(' ') and motivo is None or
+            tecnica is None and nombre is None and motivo is not None and motivo.strip(' ')):
+        malas.append('técnica de ATT&CK con id y nombre, o sin ellos y con su motivo')
+    return malas
 
 
 def leer_mapeos():
     """Los (archivo, orden, posición, transacción, code, {columna: valor}) de los INSERT INTO
     scoring_rule_framework_mappings de todo db/ (la 011 y las migraciones que vengan, porque la 011 ya no se edita),
     los (archivo, orden, posición, code, {columna: valor como va en el SQL}) de sus UPDATE, con orden el del archivo en
-    ARCHIVOS_SQL, y lo que no se pudo leer. También van en lo que no se pudo leer un DELETE, TRUNCATE, MERGE o COPY del
-    mapeo, un INSERT o UPDATE del mapeo que no es una sentencia de primer nivel que se confirma, y en cualquier archivo
-    un meta-comando de psql fuera de METACOMANDOS_LEIDOS, una variable de psql o un cierre de transacción que la prueba
-    no entiende."""
+    ARCHIVOS_SQL y posición el inicio de la sentencia, y lo que no se pudo leer. Solo se leen el INSERT y el UPDATE que
+    son sentencias de primer nivel que se confirman (_sentencias). También van en lo que no se pudo leer un INSERT o un
+    UPDATE del mapeo en otro lado, un DELETE, TRUNCATE, MERGE o COPY del mapeo y, en cualquier archivo, lo que _sql y
+    _sentencias no leen o lo que cambia cómo se leen las cadenas (AJUSTE_DE_LECTURA)."""
     mapeos, cambios, mal_leidos = [], [], []
     for orden, ruta in enumerate(ARCHIVOS_SQL):
-        archivo, (sql, sin_cadenas, primer_nivel, metacomandos) = _relativa(ruta), _sql(ruta)
-        for texto in metacomandos:
-            partes = texto.split()
-            if partes[0] not in METACOMANDOS_LEIDOS or '\\' in texto[1:] or partes[1:2] == ['AUTOCOMMIT']:
-                mal_leidos.append('%s: meta-comando de psql %r, y la prueba solo lee %s (sin \\set AUTOCOMMIT)'
-                                  % (archivo, texto, ', '.join(METACOMANDOS_LEIDOS)))
-        if any(INICIO_DE_VARIABLE.match(sql, v.end()) for v in VARIABLE_PSQL.finditer(primer_nivel)):
-            mal_leidos.append('%s: variable de psql (:nombre) en el SQL, que la prueba no lee' % archivo)
-        for texto in _sentencias(ruta)[2]:
-            mal_leidos.append('%s: %r, y la prueba no sabe cómo deja la transacción' % (archivo, texto))
-        if BORRADO_MAPEO.search(sin_cadenas):
-            mal_leidos.append('%s: DELETE, TRUNCATE, MERGE o COPY de scoring_rule_framework_mappings, que la prueba no '
-                              'lee' % archivo)
-        for m in (*INSERT_MAPEO.finditer(sin_cadenas), *UPDATE_MAPEO.finditer(sin_cadenas)):
-            if not _aplicada(ruta, m.start()):
-                mal_leidos.append('%s: INSERT o UPDATE de scoring_rule_framework_mappings que no es una sentencia de '
-                                  'primer nivel que se confirma (va en un $tag$, dentro de otra sentencia o en lo que '
-                                  'deshace un ROLLBACK), y la prueba no sabe si corre' % archivo)
-        updates = list(UPDATE_MAPEO_LEIDO.finditer(sin_cadenas))
-        if len(updates) != len(UPDATE_MAPEO.findall(sin_cadenas)):
-            mal_leidos.append('%s: UPDATE scoring_rule_framework_mappings que la prueba no pudo leer' % archivo)
-        for u in updates:
-            code = CODIGO_MAPEO.fullmatch(sql[u.start(2):u.end(2)])
-            asignaciones = _asignaciones(sql[u.start(1):u.end(1)])
-            if not code or asignaciones is None:
-                mal_leidos.append('%s: UPDATE del mapeo con un SET o un WHERE que la prueba no pudo leer' % archivo)
+        archivo, (sql, tokens, problemas) = _relativa(ruta), _sql(ruta)
+        _, sentencias, no_entendidas = _sentencias(ruta)
+        mal_leidos += ['%s: %s' % (archivo, p) for p in problemas + tuple(no_entendidas)]
+        formas = [(s.inicio, s, s.forma, s.valores) for s in sentencias]
+        formas += [(t.inicio, None) + _forma(cuerpo) for t, cuerpo in _cuerpos(tokens)]
+        for posicion, s, forma, valores in formas:
+            donde = '%s: línea %d:' % (archivo, _linea(sql, posicion))
+            utf8 = CLIENT_ENCODING_UTF8.fullmatch(forma)
+            if not (utf8 and valores[int(utf8.group(1))] == 'UTF8') and (
+                    AJUSTE_DE_LECTURA.search(forma) or
+                    {v.strip().lower() for v in valores} & {'standard_conforming_strings', 'client_encoding'}):
+                mal_leidos.append("%s cambia standard_conforming_strings o client_encoding (SET, set_config, SET "
+                                  "NAMES, RESET ALL o DISCARD ALL), y la prueba solo lee SET client_encoding = 'UTF8'"
+                                  % donde)
+            if BORRADO_MAPEO.search(forma):
+                mal_leidos.append('%s DELETE, TRUNCATE, MERGE o COPY de scoring_rule_framework_mappings, que la prueba '
+                                  'no lee' % donde)
+            escrituras = list(ESCRIBE_MAPEO.finditer(forma))
+            for m in escrituras:
+                if s is None:
+                    motivo = 'va en el cuerpo de un $tag$ (una función, un DO o una cadena)'
+                elif m.start():
+                    motivo = ('va dentro de otra sentencia (un WITH, un EXPLAIN, un CREATE RULE o una función con '
+                              'BEGIN ATOMIC)')
+                elif not s.confirmada:
+                    motivo = ('va en lo que deshace un ROLLBACK, un ROLLBACK TO o el final del archivo con el BEGIN '
+                              'abierto')
+                else:
+                    continue
+                mal_leidos.append('%s %s de scoring_rule_framework_mappings que %s, y la prueba no sabe si corre'
+                                  % (donde, m.group(1).upper(), motivo))
+            if s is None or not escrituras or escrituras[0].start() or not s.confirmada:
                 continue
-            cambios.append((archivo, orden, u.start(), code.group(1), asignaciones))
-        # Los bloques se buscan sin cadenas, así una comilla dentro de una cadena no los corta, y se leen con ellas.
-        bloques = list(BLOQUE_MAPEOS.finditer(sin_cadenas))
-        if len(bloques) != len(INSERT_MAPEO.findall(sin_cadenas)):
-            mal_leidos.append('%s: INSERT INTO scoring_rule_framework_mappings que la prueba no pudo leer' % archivo)
-        for m in bloques:
-            columnas = tuple(c.strip() for c in m.group(1).split(','))
-            if columnas != COLUMNAS_MAPEO:
-                mal_leidos.append('%s: INSERT del mapeo con las columnas %s' % (archivo, ', '.join(columnas)))
+            if escrituras[0].group(1) == 'insert into':
+                m = INSERT_MAPEO.fullmatch(forma)
+                if not m:
+                    mal_leidos.append('%s INSERT INTO scoring_rule_framework_mappings que la prueba no pudo leer (con '
+                                      'otro esquema, un alias o sin la lista de columnas)' % donde)
+                    continue
+                columnas = tuple(c.strip('"') for c in m.group(1).split(' , '))
+                if columnas != COLUMNAS_MAPEO:
+                    mal_leidos.append('%s INSERT del mapeo con las columnas %s' % (donde, ', '.join(columnas)))
+                elif not FORMA_INSERT.fullmatch(m.group(2)):
+                    mal_leidos.append("%s INSERT del mapeo que no es VALUES con filas de cadenas '...' o NULL y, si "
+                                      'acaso, ON CONFLICT (rule_code) DO NOTHING (un upsert con DO UPDATE, un INSERT '
+                                      '... SELECT o un valor con $tag$ u otra expresión no se leen)' % donde)
+                else:
+                    for f in FILA_LEIDA.finditer(m.group(2)):
+                        fila = [valores[int(f.group(1))]] + [None if v == 'null' else valores[int(v[1:-1])]
+                                                             for v in f.groups()[1:]]
+                        mapeos.append((archivo, orden, s.inicio, s.transaccion, fila[0],
+                                       dict(zip(COLUMNAS_MAPEO, fila))))
                 continue
-            filas = list(FILA_MAPEO.finditer(sql, m.start(2), m.end(2)))
-            esperadas = len(INICIO_DE_MAPEO.findall(m.group(2)))
-            if len(filas) != esperadas:
-                mal_leidos.append('%s: %d filas de mapeo y se leyeron %d' % (archivo, esperadas, len(filas)))
-            forma, i = '', m.start(2)
-            for f in filas:
-                forma, i = forma + sql[i:f.start()] + '\0', f.end()
-            if not FORMA_MAPEO.fullmatch(forma + sql[i:m.end(2)]):
-                mal_leidos.append('%s: INSERT del mapeo que no es VALUES con sus filas y, si acaso, ON CONFLICT '
-                                  '(rule_code) DO NOTHING (un upsert con DO UPDATE o un INSERT ... SELECT no se leen)'
-                                  % archivo)
-            for f in filas:
-                valores = dict(zip(COLUMNAS_MAPEO, (f.group(1),) + tuple(_valor(v) for v in f.groups()[1:])))
-                mapeos.append((archivo, orden, f.start(), _sentencia(ruta, f.start())[2], f.group(1), valores))
+            m = UPDATE_MAPEO.fullmatch(forma)
+            asignaciones = [ASIGNACION.fullmatch(a) for a in m.group(1).split(' , ')] if m else [None]
+            if not all(asignaciones):
+                mal_leidos.append("%s UPDATE del mapeo que no es SET columna = '...', NULL o now() con WHERE rule_code "
+                                  "= '...', y la prueba no lo pudo leer" % donde)
+                continue
+            pares = [(a.group(1) or a.group(2), _literal(a.group(3), valores)) for a in asignaciones]
+            if len(dict(pares)) != len(pares):
+                mal_leidos.append('%s UPDATE del mapeo que pone dos veces la misma columna' % donde)
+                continue
+            cambios.append((archivo, orden, s.inicio, valores[int(m.group(2))], dict(pares)))
     return mapeos, cambios, mal_leidos
 
 
@@ -501,9 +713,12 @@ class Reglas(unittest.TestCase):
         # textos de antes de la 011 tienen su mapeo en la 011. Un mapeo se corrige en una migración posterior con un
         # UPDATE por código que pone updated_at = now() (comentario de la columna en la 012), y no se borra. Solo se
         # leen el INSERT y el UPDATE que son sentencias de primer nivel que se confirman: lo que va en un $tag$, en otra
-        # sentencia o en lo que deshace un ROLLBACK hace fallar la prueba, porque no se sabe si corre.
-        self.assertEqual(MAPEOS_MAL_LEIDOS, [], 'INSERT, UPDATE, DELETE o TRUNCATE de scoring_rule_framework_mappings, '
-                                                'meta-comandos de psql o transacciones que la prueba no pudo leer')
+        # sentencia o en lo que deshace un ROLLBACK hace fallar la prueba, porque no se sabe si corre. El SQL se lee
+        # como psql y Postgres (_Lexico), y lo que la prueba no imita (meta-comandos y variables de psql, U&'...', un \r
+        # suelto, SAVEPOINT con comillas o standard_conforming_strings) la hace fallar con su motivo.
+        self.assertEqual(MAPEOS_MAL_LEIDOS, [], 'lo que la prueba no pudo leer en db/: INSERT, UPDATE, DELETE o '
+                                                'TRUNCATE de scoring_rule_framework_mappings, meta-comandos o '
+                                                'variables de psql, transacciones o cadenas sin cerrar')
         codigos = [m[4] for m in MAPEOS]
         repetidos = sorted(c for c, n in Counter(codigos).items() if n > 1)
         self.assertEqual(repetidos, [], 'hay mapeos insertados dos veces (una corrección va con UPDATE ... SET ..., '
@@ -527,7 +742,11 @@ class Reglas(unittest.TestCase):
                 self.assertEqual(transaccion, transaccion_texto, '%s: el texto y el mapeo de %r van en transacciones '
                                  'distintas (sin BEGIN o con un COMMIT entre ellos), y la FK de la 012 se revisa en el '
                                  'COMMIT del texto' % (archivo, code))
-        # Las versiones se revisan como quedan después de los UPDATE, en el orden en que corren.
+        # Los CHECK y los NOT NULL de la 011 se revisan en cada INSERT y en cada UPDATE, como en la base, y las
+        # versiones como quedan después de los UPDATE, en el orden en que corren.
+        for archivo, _, _, _, code, valores in MAPEOS:
+            self.assertEqual(_incumple_011(valores), [], '%s: el mapeo de %r no cumple estas restricciones de la 011'
+                             % (archivo, code))
         insertados = {m[4]: (m[1], m[2]) for m in MAPEOS}
         finales = {m[4]: dict(m[5]) for m in MAPEOS}
         for archivo, orden, posicion, code, asignaciones in sorted(CAMBIOS_MAPEO, key=lambda c: c[1:3]):
@@ -543,13 +762,12 @@ class Reglas(unittest.TestCase):
                 self.assertTrue(columna in COLUMNAS_MAPEO[1:] and valor != 'now()',
                                 '%s: el UPDATE del mapeo de %r pone %s = %s' % (archivo, code, columna, valor))
                 finales[code][columna] = _valor(valor)
+            self.assertEqual(_incumple_011(finales[code]), [], '%s: después del UPDATE el mapeo de %r no cumple estas '
+                             'restricciones de la 011' % (archivo, code))
         for code, valores in sorted(finales.items()):
             for columna, version in VERSIONES_MAPEO.items():
                 self.assertEqual(valores[columna], version, 'el mapeo de %r queda con %s = %r'
                                  % (code, columna, valores[columna]))
-            for columna in COLUMNAS_MAPEO:
-                self.assertTrue(columna in NULOS_MAPEO or valores[columna] is not None, 'el mapeo de %r queda con %s '
-                                'en NULL, y en la 011 la columna es NOT NULL' % (code, columna))
 
     def test_5_textos_simples(self):
         for code, title, meaning, recommendation in TEXTOS_POR_CODIGO.values():
@@ -632,10 +850,10 @@ class Reglas(unittest.TestCase):
         # backlog.md fila 30: los textos de las reglas OSINT (#14 a #20) los revisa Ernesto. Quién firma el resto no se
         # revisa, y ErnestoDL también puede firmarlo (decisión de Ernesto del 26 oct).
         # Un UPDATE que cambia un texto dice en reviewed_by quién revisó el nuevo, o NULL si nadie: sin reviewed_by la
-        # fila conservaría la firma del texto anterior
+        # fila conservaría la firma del texto anterior. Se lee sin comentarios, como corre
         revisor, sin_firma = {}, []
         for ruta in ARCHIVOS_SQL:
-            for asignaciones, code in UPDATE_TEXTO.findall(ruta.read_text(encoding='utf-8')):
+            for asignaciones, code in UPDATE_TEXTO.findall(_sql(ruta)[0]):
                 m = REVISOR.search(asignaciones)
                 if m:
                     revisor[code] = m.group(1)
@@ -663,7 +881,7 @@ class Reglas(unittest.TestCase):
         insertados, _ = _filas(BLOQUE_TEXTOS, FILA_TEXTO)
         textos, con_huellas = {}, 0
         for ruta in ARCHIVOS_SQL:
-            sql, nombre = ruta.read_text(encoding='utf-8'), _relativa(ruta)
+            sql, nombre = _sql(ruta)[0], _relativa(ruta)  # sin comentarios, como corre
             for _, code, *campos in (f for f in insertados if f[0] == nombre):
                 textos.setdefault(code, dict(zip(CAMPOS_TEXTO, campos)))
             antes = {code: huella(t) for code, t in textos.items()}
