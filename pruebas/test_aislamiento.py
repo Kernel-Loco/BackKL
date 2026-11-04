@@ -9,8 +9,10 @@ biblioteca estándar de Python:
 Cada intento de escritura corre dentro de una transacción que se deshace, así
 que la base queda igual después de las pruebas.
 """
+import re
 import subprocess
 import unittest
+from pathlib import Path
 
 CONTAINER = 'cirdan-pg16'
 ACME = '20000000-0000-4000-8000-000000000001'
@@ -191,23 +193,25 @@ class MapeoMarcos(unittest.TestCase):
              " cis_safeguard_id, cis_safeguard_name, cis_source_url) VALUES ('prueba_mapeo', 'Enterprise v19',"
              " 'https://attack.mitre.org/', 'Prueba', 'ISO/IEC 27001:2022', 'A.8.8', 'Prueba', 'https://www.iso.org/',"
              " 'CIS Controls v8.1', '7.1', 'Prueba', 'https://www.cisecurity.org/');")
-    # Los CHECK de la 011 como los escribe pg_get_constraintdef en Postgres 16.
+    # Los CHECK de la 011 como están en la migración. La prueba 15 los pone en una tabla temporal igual al mapeo y
+    # compara lo que escribe pg_get_constraintdef de las dos, así no depende de cómo los escribe cada versión de
+    # Postgres.
     CHECKS_011 = (
-        "CHECK ((attack_source_url ~~ 'https://%'::text))",
-        "CHECK ((((attack_technique_id IS NOT NULL) AND (attack_technique_name IS NOT NULL)"
-        " AND (btrim(attack_technique_name) <> ''::text) AND (attack_unmapped_reason IS NULL))"
-        " OR ((attack_technique_id IS NULL) AND (attack_technique_name IS NULL)"
-        " AND (attack_unmapped_reason IS NOT NULL) AND (btrim(attack_unmapped_reason) <> ''::text))))",
-        "CHECK (((attack_technique_id IS NULL) OR (attack_technique_id ~ '^T[0-9]{4}(\\.[0-9]{3})?$'::text)))",
-        "CHECK ((btrim(attack_version) <> ''::text))",
-        "CHECK ((btrim(cis_safeguard_name) <> ''::text))",
-        "CHECK ((btrim(cis_version) <> ''::text))",
-        "CHECK ((btrim(iso_control_name) <> ''::text))",
-        "CHECK ((btrim(iso_version) <> ''::text))",
-        "CHECK ((cis_safeguard_id ~ '^(?:[1-9]|1[0-8])\\.[0-9]{1,2}$'::text))",
-        "CHECK ((cis_source_url ~~ 'https://%'::text))",
-        "CHECK ((iso_control_id ~ '^A\\.[5-8]\\.[0-9]{1,2}$'::text))",
-        "CHECK ((iso_source_url ~~ 'https://%'::text))",
+        "btrim(attack_version) <> ''",
+        "attack_technique_id IS NULL OR attack_technique_id ~ '^T[0-9]{4}(\\.[0-9]{3})?$'",
+        "attack_source_url LIKE 'https://%'",
+        "btrim(iso_version) <> ''",
+        "iso_control_id ~ '^A\\.[5-8]\\.[0-9]{1,2}$'",
+        "btrim(iso_control_name) <> ''",
+        "iso_source_url LIKE 'https://%'",
+        "btrim(cis_version) <> ''",
+        "cis_safeguard_id ~ '^(?:[1-9]|1[0-8])\\.[0-9]{1,2}$'",
+        "btrim(cis_safeguard_name) <> ''",
+        "cis_source_url LIKE 'https://%'",
+        "(attack_technique_id IS NOT NULL AND attack_technique_name IS NOT NULL"
+        " AND btrim(attack_technique_name) <> '' AND attack_unmapped_reason IS NULL)"
+        " OR (attack_technique_id IS NULL AND attack_technique_name IS NULL"
+        " AND attack_unmapped_reason IS NOT NULL AND btrim(attack_unmapped_reason) <> '')",
     )
 
     def test_14_un_texto_de_regla_no_entra_ni_queda_sin_su_mapeo(self):
@@ -248,27 +252,44 @@ class MapeoMarcos(unittest.TestCase):
                                " LEFT JOIN scoring_rule_framework_mappings m ON m.rule_code = r.code"
                                " WHERE m.rule_code IS NULL ORDER BY 1;"), [],
                          'códigos con texto y sin mapeo, con mapeo y sin texto, o reglas sin mapeo')
+        # Las 25 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
+        # como quedan después de todos los UPDATE. test_10 de pruebas/test_catalogo_reglas.py lo lee del SQL sin saber
+        # qué corre.
+        doc = (Path(__file__).resolve().parent.parent / 'docs' / 'codigos_reglas.md').read_text(encoding='utf-8')
+        filas_doc = re.findall(r'^\|\s*\d{2}\s*\|\s*`([a-z0-9_]+)`\s*\|(?:[^|\n]*\|){3}\s*#(\d+)', doc, re.MULTILINE)
+        osint = [code for code, recolector in filas_doc if 14 <= int(recolector) <= 20]
+        self.assertEqual(len(osint), 25, 'docs/codigos_reglas.md ya no tiene 25 reglas de #14 a #20')
+        self.assertEqual(filas("SELECT unnest(ARRAY[%s]) EXCEPT SELECT code FROM scoring_rule_texts"
+                               " WHERE reviewed_by = 'ErnestoDL' ORDER BY 1;" % ', '.join("'%s'" % c for c in osint)),
+                         [], 'reglas OSINT sin texto o con un texto que no firmó ErnestoDL')
         # Las versiones de los marcos de cada fila, como quedan después de todos los INSERT y UPDATE.
         self.assertEqual(filas("SELECT rule_code || ': ' || attack_version || ', ' || iso_version || ', '"
                                " || cis_version FROM scoring_rule_framework_mappings"
                                " WHERE (attack_version, iso_version, cis_version) IS DISTINCT FROM ('Enterprise v19', 'ISO/IEC 27001:2022', 'CIS Controls v8.1')"
                                " ORDER BY 1;"), [], 'mapeos con otra versión de los marcos')
-        # Los CHECK y los NOT NULL de la 011, validados, y la FK diferida de la 012.
+        # Los CHECK y los NOT NULL de la 011, validados, y la FK diferida de la 012. Los NOT NULL incluyen created_at
+        # y updated_at de la 012, así ninguna fila queda sin ellos.
+        esperados = filas("BEGIN; CREATE TEMP TABLE checks_011 (LIKE scoring_rule_framework_mappings);"
+                          + ''.join(" ALTER TABLE checks_011 ADD CHECK (%s);" % c for c in self.CHECKS_011)
+                          + " SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+                            " WHERE contype = 'c' AND conrelid = 'checks_011'::regclass; ROLLBACK;")
+        self.assertEqual(len(set(esperados)), len(self.CHECKS_011))
         checks = filas("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE contype = 'c' AND convalidated"
                        " AND conrelid = 'scoring_rule_framework_mappings'::regclass;")
-        self.assertEqual(sorted(set(self.CHECKS_011) - set(checks)), [], 'faltan CHECK de la 011 en el mapeo')
-        self.assertEqual(filas("SELECT attname FROM pg_attribute"
-                               " WHERE attrelid = 'scoring_rule_framework_mappings'::regclass AND attnum > 0"
-                               " AND NOT attisdropped AND NOT attnotnull ORDER BY 1;"),
-                         ['attack_technique_id', 'attack_technique_name', 'attack_unmapped_reason'],
-                         'columnas del mapeo sin NOT NULL')
+        self.assertEqual(sorted(set(esperados) - set(checks)), [], 'faltan CHECK de la 011 en el mapeo')
+        nulas = ('attack_technique_id', 'attack_technique_name', 'attack_unmapped_reason')
+        columnas = nulas + ('rule_code', 'attack_version', 'attack_source_url', 'iso_version', 'iso_control_id',
+                            'iso_control_name', 'iso_source_url', 'cis_version', 'cis_safeguard_id',
+                            'cis_safeguard_name', 'cis_source_url', 'created_at', 'updated_at')
+        self.assertEqual(sorted(filas("SELECT attname || ' ' || attnotnull FROM pg_attribute"
+                                      " WHERE attrelid = 'scoring_rule_framework_mappings'::regclass AND attnum > 0"
+                                      " AND NOT attisdropped;")),
+                         sorted('%s %s' % (c, 'false' if c in nulas else 'true') for c in columnas),
+                         'columnas del mapeo o sus NOT NULL')
         self.assertEqual(filas("SELECT conrelid::regclass || ' ' || pg_get_constraintdef(oid) || ' ' || convalidated"
                                " FROM pg_constraint WHERE conname = 'scoring_rule_texts_mapping_fk';"),
                          ['scoring_rule_texts FOREIGN KEY (code) REFERENCES scoring_rule_framework_mappings(rule_code)'
                           ' DEFERRABLE INITIALLY DEFERRED true'], 'la FK de la 012 no está o no es diferida')
-        # created_at y updated_at de la 012, llenos en todas las filas.
-        self.assertEqual(scalar("SELECT count(*) FROM scoring_rule_framework_mappings"
-                                " WHERE created_at IS NULL OR updated_at IS NULL;", user='postgres'), '0')
 
 
 if __name__ == '__main__':
