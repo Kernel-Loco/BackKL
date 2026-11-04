@@ -48,9 +48,6 @@ COLUMNAS_MAPEO = ('rule_code', 'attack_version', 'attack_technique_id', 'attack_
                   'cis_version', 'cis_safeguard_id', 'cis_safeguard_name', 'cis_source_url')
 # Una fila del mapeo: el código y sus otras 13 columnas, cada una '...' (con '') o NULL.
 FILA_MAPEO = re.compile(r"\(\s*('[a-z0-9_]+')" + r"\s*,\s*('(?:[^']|'')*'|NULL)" * 13 + r"\s*\)")
-# Las versiones de los marcos que dicen el DBML y db/README para todas las reglas.
-VERSIONES_MAPEO = {'attack_version': 'Enterprise v19', 'iso_version': 'ISO/IEC 27001:2022',
-                   'cis_version': 'CIS Controls v8.1'}
 # Lo mínimo para no leer los comentarios: se saltan las cadenas '...' y E'...', los nombres "..." y los $tag$...$tag$,
 # que pueden llevar -- o /* sin ser comentario.
 NO_COMENTARIO = re.compile(r"(?<![\w$])[Ee]'(?:[^'\\]|''|\\.)*'?|'(?:[^']|'')*'?|\"(?:[^\"]|\"\")*\"?"
@@ -255,10 +252,11 @@ class Reglas(unittest.TestCase):
             self.assertTrue(code in codigos, 'el texto de %r no tiene regla' % code)
 
     def test_4b_toda_regla_tiene_mapeo_a_marcos(self):
-        # Sin base: los mismos códigos en los textos y en los mapeos de todo db/, sin repetidos, y las versiones de los
-        # marcos en cada fila. No lee el SQL como Postgres (transacciones, orden, UPDATE ni ON CONFLICT DO UPDATE): lo
-        # que de verdad queda en la base lo revisan la FK diferida de la 012 al cargarla y la prueba 15 de
-        # pruebas/test_aislamiento.py.
+        # Sin base: los mismos códigos en los textos y en los mapeos de todo db/, sin repetidos. No revisa las versiones
+        # de los marcos ni lee el SQL como Postgres (transacciones, orden, UPDATE ni ON CONFLICT DO UPDATE): lo que de
+        # verdad queda en la base, con la versión vigente de cada marco, lo revisan la FK diferida de la 012 al cargarla
+        # y la prueba 15 de pruebas/test_aislamiento.py. Un cambio de versión de los marcos va en una migración nueva
+        # con UPDATE y cambia el trío de versiones que espera la prueba 15.
         self.assertEqual(MAPEOS_MAL_LEIDOS, [], 'INSERT de scoring_rule_framework_mappings que la prueba no pudo leer')
         codigos = [code for _, code, _ in MAPEOS]
         repetidos = sorted(c for c, n in Counter(codigos).items() if n > 1)
@@ -266,10 +264,6 @@ class Reglas(unittest.TestCase):
                                         "updated_at = now() WHERE rule_code = '...'): %s" % repetidos)
         self.assertEqual(set(codigos), set(TEXTOS_POR_CODIGO),
                          'los mapeos no cubren exactamente las reglas del catálogo')
-        for archivo, code, fila in MAPEOS:
-            for columna, version in VERSIONES_MAPEO.items():
-                self.assertEqual(fila[columna], version, '%s: el mapeo de %r tiene %s = %r'
-                                 % (archivo, code, columna, fila[columna]))
 
     def test_5_textos_simples(self):
         for code, title, meaning, recommendation in TEXTOS_POR_CODIGO.values():
