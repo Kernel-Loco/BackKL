@@ -136,7 +136,7 @@ HUELLAS_DB = {
     'db/migraciones/007_comentario_revisor.sql': '3d63a98a4a990be2004e58d4371bd967965ce9ec22ba9d50bf9a5d1fe6e521b9',
     'db/migraciones/008_limite_diario_fuentes.sql': '82393a2be6a9f5c31c9b260b4d86cbd27c4c22a7bf9a3ef043af5539c6799689',
     'db/migraciones/011_mapeo_marcos.sql': '16e9af658a85a93917810750618222980b1bfc2af8a9250702b0a4abb5c7a243',
-    'db/migraciones/012_garantia_mapeo_marcos.sql': '63d748a45b5d5c3a8f9894dc7a1969be27ef90a570ecb3383a1d3d3371099936',
+    'db/migraciones/012_garantia_mapeo_marcos.sql': 'e1373bdef581e7268dbb8335d04ee6d9f239a4e5ee7a85bc3b540adda68858bb',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
 }
@@ -354,7 +354,7 @@ class Reglas(unittest.TestCase):
     def test_4b_toda_regla_tiene_mapeo_a_marcos(self):
         # Sin base: los mismos códigos en los textos y en los mapeos de todo db/, sin repetidos. No revisa las versiones
         # de los marcos ni lee el SQL como Postgres (transacciones, orden, UPDATE ni ON CONFLICT DO UPDATE): lo que de
-        # verdad queda en la base, con la versión vigente de cada marco, lo revisan la base al cargarla (los CHECK de la
+        # verdad queda en la base, con la versión que espera de cada marco, lo revisan la base al cargarla (los CHECK de la
         # 011 y la FK diferida de la 012) y la prueba 15 de pruebas/test_aislamiento.py. Para no perderlo sin base, el
         # aviso de HUELLAS_DB falla si un archivo de db/ que puede cambiar el catálogo es nuevo o cambió y no tiene la
         # huella con que pasó la prueba 15. Un cambio de versión de los marcos sigue la receta de db/README.md.

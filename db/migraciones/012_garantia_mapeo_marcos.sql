@@ -34,10 +34,14 @@
 --      versión que dice attack_version y no la vigente del sitio.
 --    - ISO y CIS: el control que corresponde a lo que pide el texto de la
 --      regla en 9 reglas (certificados, correos, dominio por vencer,
---      dominio parecido y clave en una imagen de contenedor).
+--      dominio parecido y clave en una imagen de contenedor), con 10
+--      cambios: 2 de ISO y 8 de CIS.
 --    - El comentario de la tabla dice lo que de verdad guarda.
---    Si se vuelve a correr, el UPDATE no encuentra nada distinto y no mueve
---    updated_at.
+--    Cada UPDATE solo toca las filas que siguen con el valor de la 011: en
+--    ATT&CK, las que tienen un enlace sin /versions/, y en ISO y CIS, las
+--    que tienen el control de la 011. Si se vuelve a correr no encuentra
+--    ninguna y no mueve updated_at, y tampoco deshace una migración
+--    posterior que cambie el mapeo (por ejemplo, la que pase a la v20).
 -- Necesita la 011. No agrega tablas, índices, triggers ni políticas:
 -- solo una FK (60 en total).
 -- Corre en una sola transacción y se puede correr otra vez sin error y
@@ -175,30 +179,39 @@ UPDATE scoring_rule_framework_mappings m
      'Ninguna técnica de ATT&CK nombra una documentación de API que no declara su autenticación.')
   ) AS v (code, tecnica, nombre, enlace, razon)
  WHERE m.rule_code = v.code
-   AND (m.attack_technique_id, m.attack_technique_name, m.attack_source_url, m.attack_unmapped_reason)
-       IS DISTINCT FROM (v.tecnica, v.nombre, v.enlace, v.razon);
+   -- Solo las filas que siguen con el enlace de la 011, que no lleva /versions/.
+   AND m.attack_source_url NOT LIKE 'https://attack.mitre.org/versions/%';
 
 -- ISO y CIS: el control que corresponde a lo que pide el texto de la regla.
+-- Cada UPDATE solo toca las filas que siguen con el control de la 011
+-- (columnas _011 de VALUES).
 UPDATE scoring_rule_framework_mappings m
    SET iso_control_id = v.iso,
-       iso_control_name = v.iso_nombre,
-       cis_safeguard_id = v.cis,
-       cis_safeguard_name = v.cis_nombre,
+       iso_control_name = v.nombre,
        updated_at = now()
   FROM (VALUES
-    ('cert_expired', 'A.8.24', 'Protección criptográfica', '3.10', 'Cifrado de datos en tránsito'),
-    ('cert_expiring_soon', 'A.8.24', 'Protección criptográfica', '3.10', 'Cifrado de datos en tránsito'),
-    ('lookalike_domain', 'A.5.7', 'Inteligencia de amenazas', '17.4', 'Proceso de respuesta a incidentes'),
-    ('domain_expiring_soon', 'A.5.9', 'Inventario de activos', '15.1', 'Inventario de proveedores de servicios'),
-    ('email_in_public_commits', 'A.5.34', 'Protección de datos personales', '14.2', 'Capacitación contra la ingeniería social'),
-    ('breach_exposure_no_passwords', 'A.5.34', 'Protección de datos personales', '14.2', 'Capacitación contra la ingeniería social'),
-    ('personal_email_exposed', 'A.5.34', 'Protección de datos personales', '14.2', 'Capacitación contra la ingeniería social'),
-    ('email_pattern_exposed', 'A.5.34', 'Protección de datos personales', '14.2', 'Capacitación contra la ingeniería social'),
-    ('secret_in_container_image', 'A.5.17', 'Protección de credenciales', '16.12', 'Revisiones de seguridad en el código')
-  ) AS v (code, iso, iso_nombre, cis, cis_nombre)
+    ('domain_expiring_soon', 'A.8.21', 'Seguridad de servicios de red', 'A.5.9', 'Inventario de activos'),
+    ('secret_in_container_image', 'A.8.4', 'Protección del código fuente', 'A.5.17', 'Protección de credenciales')
+  ) AS v (code, iso_011, nombre_011, iso, nombre)
  WHERE m.rule_code = v.code
-   AND (m.iso_control_id, m.iso_control_name, m.cis_safeguard_id, m.cis_safeguard_name)
-       IS DISTINCT FROM (v.iso, v.iso_nombre, v.cis, v.cis_nombre);
+   AND (m.iso_control_id, m.iso_control_name) = (v.iso_011, v.nombre_011);
+
+UPDATE scoring_rule_framework_mappings m
+   SET cis_safeguard_id = v.cis,
+       cis_safeguard_name = v.nombre,
+       updated_at = now()
+  FROM (VALUES
+    ('cert_expired', '12.6', 'Comunicaciones seguras', '3.10', 'Cifrado de datos en tránsito'),
+    ('cert_expiring_soon', '12.6', 'Comunicaciones seguras', '3.10', 'Cifrado de datos en tránsito'),
+    ('lookalike_domain', '7.1', 'Proceso de gestión de vulnerabilidades', '17.4', 'Proceso de respuesta a incidentes'),
+    ('domain_expiring_soon', '1.1', 'Inventario de activos de la empresa', '15.1', 'Inventario de proveedores de servicios'),
+    ('email_in_public_commits', '3.3', 'Restricción de acceso a datos', '14.2', 'Capacitación contra la ingeniería social'),
+    ('breach_exposure_no_passwords', '3.3', 'Restricción de acceso a datos', '14.2', 'Capacitación contra la ingeniería social'),
+    ('personal_email_exposed', '3.3', 'Restricción de acceso a datos', '14.2', 'Capacitación contra la ingeniería social'),
+    ('email_pattern_exposed', '3.3', 'Restricción de acceso a datos', '14.2', 'Capacitación contra la ingeniería social')
+  ) AS v (code, cis_011, nombre_011, cis, nombre)
+ WHERE m.rule_code = v.code
+   AND (m.cis_safeguard_id, m.cis_safeguard_name) = (v.cis_011, v.nombre_011);
 
 COMMENT ON TABLE scoring_rule_framework_mappings IS
   'Mapeo global por código de regla a ATT&CK, ISO/IEC 27001 y CIS Controls. Guarda identificadores, un nombre breve en español (algunos coinciden con el título traducido) y la fuente, no la descripción ni el texto de ISO, CIS ni MITRE. El uso comercial de CIS Controls requiere permiso de CIS.';

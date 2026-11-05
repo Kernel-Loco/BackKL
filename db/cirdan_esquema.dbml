@@ -242,7 +242,7 @@ Table scoring_rule_framework_mappings [note: 'Mapeo de cada regla a MITRE ATT&CK
   attack_version text [not null, note: 'Versión de ATT&CK, hoy Enterprise v19. CHECK no vacío']
   attack_technique_id text [note: 'ID de técnica o subtécnica (T1234 o T1234.001). NULL si la descripción de ninguna técnica de esa versión nombra lo que detecta la regla']
   attack_technique_name text [note: 'Nombre breve de la técnica. NULL junto con attack_technique_id']
-  attack_source_url text [not null, note: 'Enlace fijo a la versión: /versions/v19/techniques/T1234/001/, o /techniques/enterprise/ sin técnica. CHECK https y prueba 15']
+  attack_source_url text [not null, note: 'Enlace fijo a la versión: /versions/v19/techniques/T1234/001/, o /versions/v19/techniques/enterprise/ sin técnica. CHECK https y prueba 15']
   attack_unmapped_reason text [note: 'Por qué no hay técnica. CHECK: va lleno solo si attack_technique_id es NULL']
   iso_version text [not null, note: 'ISO/IEC 27001:2022']
   iso_control_id text [not null, note: 'Control del Anexo A. CHECK con el formato A.5.1 a A.8.99']
