@@ -69,7 +69,7 @@ from cirdan.recolectores.contrato import (MARCA, NOMBRE_VALIDO, SIN_GRABACION, A
 
 FUENTE = 'ct_logs'
 URL = 'https://crt.sh/'
-AGENTE = 'cirdan-osint/0.1 (+https://github.com/Kernel-Loco)'
+AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'crtsh'
 
 DIAS_POR_VENCER = 30         # vence en menos de esto = hallazgo...

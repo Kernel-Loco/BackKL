@@ -23,7 +23,7 @@ from cirdan.config import config
 from cirdan.db import transaction
 
 app = FastAPI(
-    title='Cirdan API',
+    title='LowTide API',
     version='0.2.0',
     description='Inicio de sesión con MFA y endpoints de solo lectura sobre la base cirdan (PostgreSQL 16). '
                 'La empresa sale de la sesión y el aislamiento lo aplica Row-Level Security en la base. '

@@ -2,7 +2,7 @@
 
 Tarjeta #6 (RC-36). La política de seguridad y privacidad de la tarjeta #78 integrará estas reglas.
 
-LowTide es el nombre comercial del servicio. Cirdan es su nombre clave y se queda en los identificadores técnicos, como el prefijo del TXT `cirdan-verification=`, el User-Agent `cirdan-osint`, el prefijo `CIRDAN_FAKE_` de los tokens falsos y los nombres del paquete, la base, los contenedores, las variables de entorno y los archivos.
+LowTide es el nombre comercial del servicio. Cirdan es su nombre clave y se queda en los identificadores técnicos, como el prefijo del TXT `cirdan-verification=`, el prefijo `CIRDAN_FAKE_` de los tokens falsos y los nombres del paquete, la base, los contenedores, las variables de entorno y los archivos. Las peticiones de LowTide salen con el User-Agent `lowtide-osint`.
 
 Aplica al equipo Kernel Loco, a quien contribuya a los repositorios de LowTide y a las empresas que usen el servicio, que la aceptan en la sección 10 de su carta. Va junto con la [plantilla de carta de autorización](plantilla_carta_autorizacion.md). Es un documento académico, no una opinión jurídica.
 
