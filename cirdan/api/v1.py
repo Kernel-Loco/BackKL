@@ -17,7 +17,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from psycopg.types.json import Jsonb
 
-from cirdan import orquestador
+from cirdan import orquestador, siem
 from cirdan.auth.deps import Session, current_session, in_scope, require_roles, session_or_api_key
 from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
@@ -586,6 +586,71 @@ def export_action_plan(fqdn: str, formato: str = Query(default='json'),
         content=plan_accion.exportar_json(data),
         media_type='application/json; charset=utf-8',
         headers={'Content-Disposition': 'attachment; filename="%s-plan.json"' % fqdn},
+    )
+
+
+# ---------------------------------------------------------------- salida a SIEM (#98, RC-212)
+# Consultas propias y no las del portal: no leen la evidencia, y el valor de un activo de tipo email no sale de la base.
+
+SIEM_FINDINGS_SQL = '''
+SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
+       coalesce(sc_score.severity, f.severity) AS severity, f.status, f.cve_id, c.cvss_base_score AS cvss,
+       CASE WHEN a.asset_type = 'email' THEN NULL ELSE a.value END AS asset, a.asset_type,
+       fm.attack_technique_id, s.code AS data_source, f.detected_at, f.last_scan_id::text,
+       sc.finished_at AS scan_finished_at
+  FROM findings f
+  JOIN domains d       ON d.id = f.domain_id
+  JOIN assets a        ON a.id = f.asset_id
+  JOIN scoring_rules r ON r.id = f.rule_id
+  JOIN scoring_rule_texts t ON t.code = r.code
+  JOIN data_sources s  ON s.id = f.source_id
+  LEFT JOIN scoring_rule_framework_mappings fm ON fm.rule_code = r.code
+  LEFT JOIN scans sc   ON sc.id = f.last_scan_id
+  LEFT JOIN cves c     ON c.cve_id = f.cve_id
+  LEFT JOIN LATERAL (SELECT x.severity FROM domain_scores ds
+                       JOIN score_contributions x ON x.score_id = ds.id AND x.finding_id = f.id
+                      WHERE ds.domain_id = f.domain_id ORDER BY ds.computed_at DESC LIMIT 1) sc_score ON true
+ WHERE d.fqdn = %s AND f.status = 'open'
+ ORDER BY array_position(ARRAY['critical','high','medium','low'], coalesce(sc_score.severity, f.severity)),
+          f.detected_at DESC, f.id
+'''
+SIEM_SCAN_SQL = '''
+SELECT s.id::text, s.status, s.trigger_type AS trigger, s.queued_at, s.finished_at, s.stats,
+       coalesce((SELECT jsonb_agg(jsonb_build_object('data_source', ds.code, 'status', r.status) ORDER BY ds.code)
+                   FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id WHERE r.scan_id = s.id), '[]') AS sources
+  FROM scans s JOIN domains d ON d.id = s.domain_id
+ WHERE d.fqdn = %s AND s.finished_at IS NOT NULL
+ ORDER BY s.finished_at DESC LIMIT 1
+'''
+SIEM_SCORE_SQL = '''
+SELECT ds.id::text, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.model_version, ds.reason,
+       ds.partial_coverage, ds.computed_at, rs.version AS rule_set_version
+  FROM domain_scores ds
+  JOIN domains d ON d.id = ds.domain_id
+  JOIN scoring_rule_sets rs ON rs.id = ds.rule_set_id
+ WHERE d.fqdn = %s
+ ORDER BY ds.computed_at DESC LIMIT 1
+'''
+
+
+@router.get('/domains/{fqdn}/export/siem',
+            summary='Descarga en NDJSON para el HEC de Splunk los hallazgos abiertos, el último escaneo y el último score')
+def export_siem(fqdn: str, session: Session = Depends(current_session)):
+    with transaction(session.org_id) as conn:
+        plan = conn.execute('SELECT p.api_and_siem FROM organizations o JOIN plans p ON p.id = o.plan_id').fetchone()
+        if not plan or not plan['api_and_siem']:
+            raise HTTPException(403, 'El plan de la empresa no incluye la salida a SIEM')
+        dominio = conn.execute('SELECT fqdn::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
+        if not dominio:
+            raise HTTPException(404, 'Dominio no encontrado para esta organización')
+        hallazgos = conn.execute(SIEM_FINDINGS_SQL, (fqdn,)).fetchall()
+        escaneo = conn.execute(SIEM_SCAN_SQL, (fqdn,)).fetchone()
+        score = conn.execute(SIEM_SCORE_SQL, (fqdn,)).fetchone()
+    fqdn = dominio['fqdn']
+    return Response(
+        content=siem.ndjson(fqdn, hallazgos, escaneo, score),
+        media_type='application/x-ndjson; charset=utf-8',
+        headers={'Content-Disposition': 'attachment; filename="%s-siem.ndjson"' % fqdn},
     )
 
 

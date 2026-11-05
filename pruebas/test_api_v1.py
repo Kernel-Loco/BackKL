@@ -391,6 +391,29 @@ class ApiV1(unittest.TestCase):
         self.assertEqual(self.get(self.beta, '/api/v1/domains/beta-corp.mx/findings/export')['domain'], 'beta-corp.mx')
         self.assertEqual(sesion.Client().get('/api/v1/domains/acme-demo.mx/findings/export')[0], 401)
 
+    def test_10_salida_siem_con_plan_y_sin_evidencia(self):
+        url = '%s/api/v1/domains/beta-corp.mx/export/siem' % sesion.BASE
+        with self.beta.opener.open(url, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+            self.assertTrue(r.headers['Content-Type'].startswith('application/x-ndjson'))
+            self.assertIn('beta-corp.mx-siem.ndjson', r.headers['Content-Disposition'])
+            texto = r.read().decode('utf-8')
+        eventos = [json.loads(x) for x in texto.splitlines()]
+        # beta-corp.mx tiene un hallazgo abierto y ningún escaneo ni score en la semilla 001.
+        self.assertEqual([e['sourcetype'] for e in eventos], ['lowtide:finding'])
+        ev = eventos[0]['event']
+        self.assertEqual((ev['finding_id'], ev['signature_id'], ev['dest'], ev['domain'], ev['vendor_product']),
+                         ('80000000-0000-4000-8000-000000000011', 'exposed_rdp', '192.0.2.50:3389/tcp',
+                          'beta-corp.mx', 'LowTide'))
+        self.assertTrue(ev['signature'])
+        self.assertNotIn('evidence', texto)
+        self.assertNotIn('Remote Desktop (RDP) exposed', texto)  # el título de la evidencia tampoco sale
+        # Acme tiene el plan starter, sin API ni SIEM. Un dominio de otra empresa responde 404 y sin sesión, 401.
+        self.assertEqual(self.acme.get('/api/v1/domains/acme-demo.mx/export/siem')[0], 403)
+        for fqdn in ('acme-demo.mx', 'olmardo.com'):
+            self.assertEqual(self.beta.get('/api/v1/domains/%s/export/siem' % fqdn)[0], 404, fqdn)
+        self.assertEqual(sesion.Client().get('/api/v1/domains/beta-corp.mx/export/siem')[0], 401)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
