@@ -22,6 +22,22 @@
 -- 2. created_at y updated_at en el mapeo, como en las demás tablas
 --    (convención 10 de db/README.md). En las 30 filas de la 011 quedan con
 --    la hora en que se aplica esta migración, no con la de la 011.
+-- 3. Correcciones del mapeo de la 011, con UPDATE por código y
+--    updated_at = now(), sin tocar rule_code ni created_at ni las versiones:
+--    - ATT&CK: una técnica va solo cuando la relación es directa, es decir,
+--      cuando la descripción de la técnica en ATT&CK Enterprise v19 nombra
+--      lo que detecta la regla como lo que un adversario busca, adquiere o
+--      usa. Si no, va sin técnica y la razón dice que ninguna la nombra.
+--      Quedan 20 reglas con técnica y 10 sin ella.
+--    - Los enlaces de ATT&CK van fijos a la v19 (/versions/v19/), a la
+--      técnica o a la lista de técnicas de Enterprise, así muestran la
+--      versión que dice attack_version y no la vigente del sitio.
+--    - ISO y CIS: el control que corresponde a lo que pide el texto de la
+--      regla en 9 reglas (certificados, correos, dominio por vencer,
+--      dominio parecido y clave en una imagen de contenedor).
+--    - El comentario de la tabla dice lo que de verdad guarda.
+--    Si se vuelve a correr, el UPDATE no encuentra nada distinto y no mueve
+--    updated_at.
 -- Necesita la 011. No agrega tablas, índices, triggers ni políticas:
 -- solo una FK (60 en total).
 -- Corre en una sola transacción y se puede correr otra vez sin error y
@@ -86,5 +102,105 @@ COMMENT ON COLUMN scoring_rule_framework_mappings.created_at IS
   'Cuándo entró el mapeo. En las 30 filas de la 011 es la hora en que se aplicó la 012.';
 COMMENT ON COLUMN scoring_rule_framework_mappings.updated_at IS
   'Cuándo cambió el mapeo por última vez. La migración que lo corrija pone updated_at = now().';
+
+-- 3. Correcciones del mapeo de la 011. ATT&CK de las 30 reglas: técnica solo
+-- si su descripción en Enterprise v19 nombra lo que detecta la regla, y el
+-- enlace fijo a la v19.
+UPDATE scoring_rule_framework_mappings m
+   SET attack_technique_id = v.tecnica,
+       attack_technique_name = v.nombre,
+       attack_source_url = v.enlace,
+       attack_unmapped_reason = v.razon,
+       updated_at = now()
+  FROM (VALUES
+    ('breach_exposure', 'T1589.001', 'Recopilar credenciales de la víctima',
+     'https://attack.mitre.org/versions/v19/techniques/T1589/001/', NULL),
+    ('breach_exposure_old', 'T1589.001', 'Recopilar credenciales de la víctima',
+     'https://attack.mitre.org/versions/v19/techniques/T1589/001/', NULL),
+    ('breach_exposure_no_passwords', 'T1589.002', 'Recopilar correos de la víctima',
+     'https://attack.mitre.org/versions/v19/techniques/T1589/002/', NULL),
+    ('email_in_public_commits', 'T1589.002', 'Recopilar correos de la víctima',
+     'https://attack.mitre.org/versions/v19/techniques/T1589/002/', NULL),
+    ('personal_email_exposed', 'T1589.002', 'Recopilar correos de la víctima',
+     'https://attack.mitre.org/versions/v19/techniques/T1589/002/', NULL),
+    ('email_pattern_exposed', 'T1589.003', 'Recopilar nombres de empleados',
+     'https://attack.mitre.org/versions/v19/techniques/T1589/003/', NULL),
+    ('secret_in_public_repo', 'T1593.003', 'Buscar en repositorios de código públicos',
+     'https://attack.mitre.org/versions/v19/techniques/T1593/003/', NULL),
+    ('secret_in_container_image', 'T1552.001', 'Credenciales en archivos',
+     'https://attack.mitre.org/versions/v19/techniques/T1552/001/', NULL),
+    ('lookalike_domain', 'T1583.001', 'Adquirir dominios',
+     'https://attack.mitre.org/versions/v19/techniques/T1583/001/', NULL),
+    ('domain_expiring_soon', 'T1583.001', 'Adquirir dominios',
+     'https://attack.mitre.org/versions/v19/techniques/T1583/001/', NULL),
+    ('subdomain_takeover_risk', 'T1584.001', 'Tomar dominios o subdominios',
+     'https://attack.mitre.org/versions/v19/techniques/T1584/001/', NULL),
+    ('dmarc_missing', 'T1684.002', 'Suplantación de correo',
+     'https://attack.mitre.org/versions/v19/techniques/T1684/002/', NULL),
+    ('dmarc_policy_none', 'T1684.002', 'Suplantación de correo',
+     'https://attack.mitre.org/versions/v19/techniques/T1684/002/', NULL),
+    ('spf_missing', 'T1684.002', 'Suplantación de correo',
+     'https://attack.mitre.org/versions/v19/techniques/T1684/002/', NULL),
+    ('spf_allow_all', 'T1684.002', 'Suplantación de correo',
+     'https://attack.mitre.org/versions/v19/techniques/T1684/002/', NULL),
+    ('exposed_rdp', 'T1133', 'Servicios remotos externos',
+     'https://attack.mitre.org/versions/v19/techniques/T1133/', NULL),
+    ('exposed_remote_admin', 'T1133', 'Servicios remotos externos',
+     'https://attack.mitre.org/versions/v19/techniques/T1133/', NULL),
+    ('known_vulnerability', 'T1190', 'Explotar una aplicación expuesta a internet',
+     'https://attack.mitre.org/versions/v19/techniques/T1190/', NULL),
+    ('server_version_disclosed', 'T1592.002', 'Recopilar el software de la víctima',
+     'https://attack.mitre.org/versions/v19/techniques/T1592/002/', NULL),
+    ('public_bucket', 'T1530', 'Datos en almacenamiento en la nube',
+     'https://attack.mitre.org/versions/v19/techniques/T1530/', NULL),
+    ('cert_expired', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'Ninguna técnica de ATT&CK nombra un certificado vencido del sitio como algo que un adversario busca o usa.'),
+    ('cert_expiring_soon', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'Ninguna técnica de ATT&CK nombra un certificado por vencer como algo que un adversario busca o usa.'),
+    ('outdated_software', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'Ninguna técnica de ATT&CK nombra el software sin soporte. La explotación de una aplicación expuesta pide una falla conocida, y esa es otra regla.'),
+    ('exposed_file_sharing', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'Ninguna técnica de ATT&CK nombra un servicio de archivos expuesto. La de servicios remotos externos trata del acceso remoto a la red.'),
+    ('exposed_database', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'Ninguna técnica de ATT&CK nombra una base de datos abierta a internet como algo que un adversario busca o usa.'),
+    ('exposed_ot_device', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'La matriz Enterprise de ATT&CK no trata los equipos OT. Van en la matriz ICS, que este mapeo no usa.'),
+    ('exposed_iot_device', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'Ninguna técnica de ATT&CK Enterprise nombra un dispositivo conectado abierto a internet como algo que un adversario busca o usa.'),
+    ('exposed_service', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'Ninguna técnica de ATT&CK nombra un servicio expuesto en general, solo los de acceso remoto y las aplicaciones con una falla, que son otras reglas.'),
+    ('exposed_api_docs', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'Ninguna técnica de ATT&CK nombra la documentación pública de una API como algo que un adversario busca o usa.'),
+    ('api_auth_not_declared', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
+     'Ninguna técnica de ATT&CK nombra una documentación de API que no declara su autenticación.')
+  ) AS v (code, tecnica, nombre, enlace, razon)
+ WHERE m.rule_code = v.code
+   AND (m.attack_technique_id, m.attack_technique_name, m.attack_source_url, m.attack_unmapped_reason)
+       IS DISTINCT FROM (v.tecnica, v.nombre, v.enlace, v.razon);
+
+-- ISO y CIS: el control que corresponde a lo que pide el texto de la regla.
+UPDATE scoring_rule_framework_mappings m
+   SET iso_control_id = v.iso,
+       iso_control_name = v.iso_nombre,
+       cis_safeguard_id = v.cis,
+       cis_safeguard_name = v.cis_nombre,
+       updated_at = now()
+  FROM (VALUES
+    ('cert_expired', 'A.8.24', 'Protección criptográfica', '3.10', 'Cifrado de datos en tránsito'),
+    ('cert_expiring_soon', 'A.8.24', 'Protección criptográfica', '3.10', 'Cifrado de datos en tránsito'),
+    ('lookalike_domain', 'A.5.7', 'Inteligencia de amenazas', '17.4', 'Proceso de respuesta a incidentes'),
+    ('domain_expiring_soon', 'A.5.9', 'Inventario de activos', '15.1', 'Inventario de proveedores de servicios'),
+    ('email_in_public_commits', 'A.5.34', 'Protección de datos personales', '14.2', 'Capacitación contra la ingeniería social'),
+    ('breach_exposure_no_passwords', 'A.5.34', 'Protección de datos personales', '14.2', 'Capacitación contra la ingeniería social'),
+    ('personal_email_exposed', 'A.5.34', 'Protección de datos personales', '14.2', 'Capacitación contra la ingeniería social'),
+    ('email_pattern_exposed', 'A.5.34', 'Protección de datos personales', '14.2', 'Capacitación contra la ingeniería social'),
+    ('secret_in_container_image', 'A.5.17', 'Protección de credenciales', '16.12', 'Revisiones de seguridad en el código')
+  ) AS v (code, iso, iso_nombre, cis, cis_nombre)
+ WHERE m.rule_code = v.code
+   AND (m.iso_control_id, m.iso_control_name, m.cis_safeguard_id, m.cis_safeguard_name)
+       IS DISTINCT FROM (v.iso, v.iso_nombre, v.cis, v.cis_nombre);
+
+COMMENT ON TABLE scoring_rule_framework_mappings IS
+  'Mapeo global por código de regla a ATT&CK, ISO/IEC 27001 y CIS Controls. Guarda identificadores, un nombre breve en español (algunos coinciden con el título traducido) y la fuente, no la descripción ni el texto de ISO, CIS ni MITRE. El uso comercial de CIS Controls requiere permiso de CIS.';
 
 COMMIT;

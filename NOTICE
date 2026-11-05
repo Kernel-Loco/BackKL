@@ -24,6 +24,27 @@ DB-IP
   de las IP. Van en datos/geo/, fuera del repositorio y dentro de la imagen
   de la API. Cada activo ip guarda en base_geo qué mes de cada base se usó.
 
+CIS Controls
+  CIS Controls v8.1 (https://www.cisecurity.org/controls/), © Center for
+  Internet Security, Inc., bajo la licencia Creative Commons
+  Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0):
+  https://creativecommons.org/licenses/by-nc-nd/4.0/
+  Cirdan guarda de cada regla solo el número de la salvaguarda, un nombre
+  breve en español y el enlace (tabla scoring_rule_framework_mappings), no el
+  texto de CIS. El uso comercial de CIS Controls requiere permiso previo de
+  CIS.
+
+MITRE ATT&CK
+  © 2026 The MITRE Corporation. This work is reproduced and distributed with
+  the permission of The MITRE Corporation.
+  MITRE concede una licencia no exclusiva y sin regalías para usar ATT&CK en
+  investigación, desarrollo y fines comerciales. Toda copia lleva este aviso
+  de derechos y la licencia. Términos:
+  https://attack.mitre.org/resources/legal-and-branding/terms-of-use/
+  MITRE ATT&CK and ATT&CK are registered trademarks of The MITRE Corporation.
+  Cirdan guarda de cada regla solo el ID de la técnica de Enterprise v19, un
+  nombre breve en español y el enlace (tabla scoring_rule_framework_mappings).
+
 Software de terceros incluido en la imagen
 ------------------------------------------
 

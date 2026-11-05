@@ -237,20 +237,20 @@ Table scoring_rule_texts [note: 'Textos de cada regla para el portal y la API: t
   reviewed_by text [note: 'Quién revisó el texto (en las reglas OSINT, Ernesto, y en el resto alguien de otra área o Ernesto). NULL mientras no se revise']
 }
 
-Table scoring_rule_framework_mappings [note: 'Mapeo de cada regla a MITRE ATT&CK, ISO/IEC 27001:2022 y CIS Controls v8.1: identificadores, nombres breves y enlaces a la fuente. Una fila por code, 1 a 1 con scoring_rule_texts: la FK de la migración 011 va del mapeo al texto (ON DELETE RESTRICT) y la de la 012 del texto al mapeo, diferida, así una regla nueva trae su texto y su mapeo en la misma transacción. Catálogo global sin RLS: cirdan_app solo tiene SELECT. La API lo devuelve como frameworks en los hallazgos y la explicación. Hoy en dev la 011 (#68) trae el mapeo de las 30 reglas del juego v1.'] {
+Table scoring_rule_framework_mappings [note: 'Mapeo de cada regla a MITRE ATT&CK, ISO/IEC 27001:2022 y CIS Controls v8.1: identificadores, nombres breves en español y enlaces a la fuente, sin la descripción ni el texto de ISO, CIS ni MITRE (atribuciones en NOTICE). Una fila por code, 1 a 1 con scoring_rule_texts: la FK de la migración 011 va del mapeo al texto (ON DELETE RESTRICT) y la de la 012 del texto al mapeo, diferida, así una regla nueva trae su texto y su mapeo en la misma transacción. Catálogo global sin RLS: cirdan_app solo tiene SELECT. La API lo devuelve como frameworks en los hallazgos y la explicación. La 011 (#68) trae el mapeo de las 30 reglas del juego v1 y la 012 lo corrige.'] {
   rule_code text [pk, ref: - scoring_rule_texts.code, note: 'Mismo code de scoring_rule_texts']
   attack_version text [not null, note: 'Versión de ATT&CK, hoy Enterprise v19. CHECK no vacío']
-  attack_technique_id text [note: 'ID de técnica o subtécnica (T1234 o T1234.001). NULL si el hallazgo no demuestra una técnica']
+  attack_technique_id text [note: 'ID de técnica o subtécnica (T1234 o T1234.001). NULL si la descripción de ninguna técnica de esa versión nombra lo que detecta la regla']
   attack_technique_name text [note: 'Nombre breve de la técnica. NULL junto con attack_technique_id']
-  attack_source_url text [not null, note: 'Enlace a la técnica o a la matriz. CHECK https']
+  attack_source_url text [not null, note: 'Enlace fijo a la versión: /versions/v19/techniques/T1234/001/, o /techniques/enterprise/ sin técnica. CHECK https y prueba 15']
   attack_unmapped_reason text [note: 'Por qué no hay técnica. CHECK: va lleno solo si attack_technique_id es NULL']
   iso_version text [not null, note: 'ISO/IEC 27001:2022']
   iso_control_id text [not null, note: 'Control del Anexo A. CHECK con el formato A.5.1 a A.8.99']
-  iso_control_name text [not null, note: 'Nombre breve del control. CHECK no vacío']
+  iso_control_name text [not null, note: 'Nombre breve en español del control, que puede coincidir con su título traducido. CHECK no vacío']
   iso_source_url text [not null, note: 'CHECK https']
   cis_version text [not null, note: 'CIS Controls v8.1. El uso comercial requiere permiso de CIS']
   cis_safeguard_id text [not null, note: 'Safeguard 1.1 a 18.99. CHECK con ese formato']
-  cis_safeguard_name text [not null, note: 'Nombre breve del safeguard. CHECK no vacío']
+  cis_safeguard_name text [not null, note: 'Nombre breve en español del safeguard, que puede coincidir con su título traducido. CHECK no vacío']
   cis_source_url text [not null, note: 'CHECK https']
 }
 

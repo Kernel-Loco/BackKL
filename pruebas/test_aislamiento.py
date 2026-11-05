@@ -267,6 +267,13 @@ class MapeoMarcos(unittest.TestCase):
                                " || cis_version FROM scoring_rule_framework_mappings"
                                " WHERE (attack_version, iso_version, cis_version) IS DISTINCT FROM ('Enterprise v19', 'ISO/IEC 27001:2022', 'CIS Controls v8.1')"
                                " ORDER BY 1;"), [], 'mapeos con otra versión de los marcos')
+        # Cada enlace de ATT&CK va fijo a la versión de su fila: a su técnica o, si no tiene, a la lista de técnicas
+        # de Enterprise. Un cambio de versión cambia también los enlaces.
+        self.assertEqual(filas("SELECT rule_code || ': ' || attack_source_url FROM scoring_rule_framework_mappings"
+                               " WHERE attack_source_url IS DISTINCT FROM 'https://attack.mitre.org/versions/v'"
+                               " || substring(attack_version FROM '^Enterprise v([0-9]+)$') || '/techniques/'"
+                               " || coalesce(replace(attack_technique_id, '.', '/'), 'enterprise') || '/'"
+                               " ORDER BY 1;"), [], 'enlaces de ATT&CK que no van a la versión o a la técnica de su fila')
         # Los CHECK y los NOT NULL de la 011, validados, y la FK diferida de la 012. Los NOT NULL incluyen created_at
         # y updated_at de la 012, así ninguna fila queda sin ellos.
         esperados = filas("BEGIN; CREATE TEMP TABLE checks_011 (LIKE scoring_rule_framework_mappings);"
