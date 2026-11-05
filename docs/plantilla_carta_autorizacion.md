@@ -76,7 +76,7 @@ Los resultados son información sensible de seguridad. Solo los ve el equipo. No
 
 - Empresa, para avisos y para suspender el análisis: [nombre], [correo], [teléfono].
 - Equipo: [nombre], [papel en el equipo], [correo].
-- Las peticiones de LowTide salen de la IP [IP de salida] y se identifican con el User-Agent [User-Agent de LowTide], para que la empresa las reconozca y no las bloquee ni las reporte como ataque. Si la empresa ve tráfico que no corresponde a esta carta, avisa al contacto del equipo, que detiene el análisis y lo revisa.
+- Las peticiones de LowTide salen de la IP [IP de salida] y se identifican con el User-Agent `lowtide-osint/0.1 (+https://github.com/Kernel-Loco)`, para que la empresa las reconozca y no las bloquee ni las reporte como ataque. Si la empresa ve tráfico que no corresponde a esta carta, avisa al contacto del equipo, que detiene el análisis y lo revisa.
 - Los hallazgos, incluidos los críticos, se ven en el portal en cuanto termina cada análisis. El servicio es académico y no tiene un horario de atención garantizado.
 
 ## 10. Declaraciones de la empresa

@@ -107,7 +107,7 @@ NOMBRE_RDAP = 'RDAP'         # atribución: va en los atributos y la evidencia
 NOMBRE_WHOIS = 'WHOIS'       # atribución cuando el registro salió del puerto 43
 IANA_WHOIS = 'whois.iana.org'   # da el servidor WHOIS de cada TLD (línea 'whois:'), sin tabla fija
 PUERTO_WHOIS = 43
-AGENTE = 'cirdan-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
+AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
 NO_DISPONIBLE = 'No disponible'
 
 DIAS_POR_VENCER = 30         # vence en menos de esto = hallazgo (texto de la regla, migración 003)
