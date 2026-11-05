@@ -40,14 +40,17 @@
 --      dominio parecido, subdominio que otra persona podría tomar y clave en
 --      una imagen de contenedor), con 11 cambios: 2 de ISO y 9 de CIS.
 --    - El comentario de la tabla dice lo que de verdad guarda.
---    Cada UPDATE solo toca las filas que siguen con el valor de la 011: en
---    ATT&CK, las que tienen un enlace sin /versions/ (y las 5 de puertos
---    abiertos que una 012 anterior dejó sin técnica en la v19), y en ISO y
---    CIS, las que tienen el control y la edición de la 011. Si se vuelve a
---    correr no encuentra ninguna y no mueve updated_at. Tampoco deshace el
---    mapeo de una migración posterior (por ejemplo, la que pase a la v20),
---    salvo que esa migración vuelva a poner el valor exacto de la 011. Los
---    COMMENT sí se escriben otra vez en cada corrida.
+--    Cada UPDATE solo toca las filas que siguen como las dejó la 011 o una
+--    012 anterior: en ATT&CK, las que tienen un enlace sin /versions/ (y las
+--    5 de puertos abiertos que una 012 anterior dejó sin técnica en la v19,
+--    con su razón), y en ISO y CIS, las que tienen el control y la edición
+--    de la 011. Si se vuelve a correr no encuentra ninguna y no mueve
+--    updated_at. Tampoco deshace el mapeo de una migración posterior (por
+--    ejemplo, la que pase a la v20), salvo que esa migración vuelva a poner
+--    el valor exacto de la 011 o de una 012 anterior. Los COMMENT sí se
+--    escriben otra vez en cada corrida y pisarían los de una migración
+--    posterior, así que con una migración posterior ya aplicada la 012 no
+--    se vuelve a correr.
 -- Necesita la 011. No agrega tablas, índices, triggers ni políticas:
 -- solo una FK (60 en total).
 -- Corre en una sola transacción y se puede correr otra vez sin error y
@@ -186,10 +189,22 @@ UPDATE scoring_rule_framework_mappings m
   ) AS v (code, tecnica, nombre, enlace, razon)
  WHERE m.rule_code = v.code
    -- Solo las filas que siguen con el enlace de la 011, que no lleva /versions/,
-   -- y las 5 de puertos abiertos que una 012 anterior dejó sin técnica en la v19.
+   -- y las 5 de puertos abiertos que una 012 anterior dejó sin técnica en la v19,
+   -- con la razón que les puso.
    AND (m.attack_source_url NOT LIKE 'https://attack.mitre.org/versions/%'
-        OR (v.tecnica = 'T1596.005' AND m.attack_technique_id IS NULL
-            AND m.attack_source_url = 'https://attack.mitre.org/versions/v19/techniques/enterprise/'));
+        OR (m.attack_technique_id IS NULL
+            AND m.attack_source_url = 'https://attack.mitre.org/versions/v19/techniques/enterprise/'
+            AND (m.rule_code, m.attack_unmapped_reason) IN (VALUES
+              ('exposed_file_sharing',
+               'Ninguna técnica de ATT&CK nombra un servicio de archivos expuesto. La de servicios remotos externos trata del acceso remoto a la red.'),
+              ('exposed_database',
+               'Ninguna técnica de ATT&CK nombra una base de datos abierta a internet como algo que un adversario busca o usa.'),
+              ('exposed_ot_device',
+               'La matriz Enterprise de ATT&CK no trata los equipos OT. Van en la matriz ICS, que este mapeo no usa.'),
+              ('exposed_iot_device',
+               'Ninguna técnica de ATT&CK Enterprise nombra un dispositivo conectado abierto a internet como algo que un adversario busca o usa.'),
+              ('exposed_service',
+               'Ninguna técnica de ATT&CK nombra un servicio expuesto en general, solo los de acceso remoto y las aplicaciones con una falla, que son otras reglas.'))));
 
 -- ISO y CIS: el control que corresponde a lo que pide el texto de la regla.
 -- Cada UPDATE solo toca las filas que siguen con el control de la 011
