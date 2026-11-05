@@ -136,7 +136,7 @@ HUELLAS_DB = {
     'db/migraciones/007_comentario_revisor.sql': '3d63a98a4a990be2004e58d4371bd967965ce9ec22ba9d50bf9a5d1fe6e521b9',
     'db/migraciones/008_limite_diario_fuentes.sql': '82393a2be6a9f5c31c9b260b4d86cbd27c4c22a7bf9a3ef043af5539c6799689',
     'db/migraciones/011_mapeo_marcos.sql': '16e9af658a85a93917810750618222980b1bfc2af8a9250702b0a4abb5c7a243',
-    'db/migraciones/012_garantia_mapeo_marcos.sql': 'a54d841e5295c74d165e1c488ac9dbe2a7943d102cba1d048dd013f83ff2fa02',
+    'db/migraciones/012_garantia_mapeo_marcos.sql': 'dc99fa6a5a2e9ee5443c5ba30637c1ea1ace98d4278ff019ce34ef09c672c823',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
 }

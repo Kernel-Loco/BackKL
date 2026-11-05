@@ -41,10 +41,13 @@
 --      una imagen de contenedor), con 11 cambios: 2 de ISO y 9 de CIS.
 --    - El comentario de la tabla dice lo que de verdad guarda.
 --    Cada UPDATE solo toca las filas que siguen con el valor de la 011: en
---    ATT&CK, las que tienen un enlace sin /versions/, y en ISO y CIS, las
---    que tienen el control de la 011. Si se vuelve a correr no encuentra
---    ninguna y no mueve updated_at, y tampoco deshace una migración
---    posterior que cambie el mapeo (por ejemplo, la que pase a la v20).
+--    ATT&CK, las que tienen un enlace sin /versions/ (y las 5 de puertos
+--    abiertos que una 012 anterior dejó sin técnica en la v19), y en ISO y
+--    CIS, las que tienen el control y la edición de la 011. Si se vuelve a
+--    correr no encuentra ninguna y no mueve updated_at. Tampoco deshace el
+--    mapeo de una migración posterior (por ejemplo, la que pase a la v20),
+--    salvo que esa migración vuelva a poner el valor exacto de la 011. Los
+--    COMMENT sí se escriben otra vez en cada corrida.
 -- Necesita la 011. No agrega tablas, índices, triggers ni políticas:
 -- solo una FK (60 en total).
 -- Corre en una sola transacción y se puede correr otra vez sin error y
@@ -182,12 +185,15 @@ UPDATE scoring_rule_framework_mappings m
      'Ninguna técnica de ATT&CK nombra una documentación de API que no declara su autenticación.')
   ) AS v (code, tecnica, nombre, enlace, razon)
  WHERE m.rule_code = v.code
-   -- Solo las filas que siguen con el enlace de la 011, que no lleva /versions/.
-   AND m.attack_source_url NOT LIKE 'https://attack.mitre.org/versions/%';
+   -- Solo las filas que siguen con el enlace de la 011, que no lleva /versions/,
+   -- y las 5 de puertos abiertos que una 012 anterior dejó sin técnica en la v19.
+   AND (m.attack_source_url NOT LIKE 'https://attack.mitre.org/versions/%'
+        OR (v.tecnica = 'T1596.005' AND m.attack_technique_id IS NULL
+            AND m.attack_source_url = 'https://attack.mitre.org/versions/v19/techniques/enterprise/'));
 
 -- ISO y CIS: el control que corresponde a lo que pide el texto de la regla.
 -- Cada UPDATE solo toca las filas que siguen con el control de la 011
--- (columnas _011 de VALUES).
+-- (columnas _011 de VALUES) y con su edición.
 UPDATE scoring_rule_framework_mappings m
    SET iso_control_id = v.iso,
        iso_control_name = v.nombre,
@@ -197,6 +203,7 @@ UPDATE scoring_rule_framework_mappings m
     ('secret_in_container_image', 'A.8.4', 'Protección del código fuente', 'A.5.17', 'Protección de credenciales')
   ) AS v (code, iso_011, nombre_011, iso, nombre)
  WHERE m.rule_code = v.code
+   AND m.iso_version = 'ISO/IEC 27001:2022'
    AND (m.iso_control_id, m.iso_control_name) = (v.iso_011, v.nombre_011);
 
 UPDATE scoring_rule_framework_mappings m
@@ -215,6 +222,7 @@ UPDATE scoring_rule_framework_mappings m
     ('subdomain_takeover_risk', '1.1', 'Inventario de activos de la empresa', '12.3', 'Gestión segura de la infraestructura de red')
   ) AS v (code, cis_011, nombre_011, cis, nombre)
  WHERE m.rule_code = v.code
+   AND m.cis_version = 'CIS Controls v8.1'
    AND (m.cis_safeguard_id, m.cis_safeguard_name) = (v.cis_011, v.nombre_011);
 
 COMMENT ON TABLE scoring_rule_framework_mappings IS
