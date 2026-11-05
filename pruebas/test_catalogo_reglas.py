@@ -1,12 +1,17 @@
 """Pruebas del catálogo de reglas del score (#30, RC-66), sin base de datos ni red.
 
-Leen con regex las reglas y los textos de todas las migraciones y semillas de db/, la tabla de docs/codigos_reglas.md
-y docs/api_v1/pesos.json y explicacion.json, y revisan que digan lo mismo entre sí y con los CODIGOS de cada
-recolector. Fallan si un recolector declara en CODIGOS un código sin regla o con otra severidad, si una regla no tiene
-texto o si un texto no cumple las reglas de redacción. Lo que un recolector emite de verdad solo se revisa en ejemplo.
+Leen con regex las reglas, los textos y los mapeos a marcos de todas las migraciones y semillas de db/, sin sus
+comentarios (también los de los cuerpos $tag$ de DO, FUNCTION y PROCEDURE), la tabla de docs/codigos_reglas.md y
+docs/api_v1/pesos.json y explicacion.json, y revisan que digan lo mismo entre sí y con los CODIGOS de cada recolector.
+No leen las transacciones ni si un DO o una función corre: eso lo revisan la base al cargarse y la prueba 15 de
+pruebas/test_aislamiento.py. Fallan si un recolector declara en CODIGOS un código sin regla o con otra severidad, si
+una regla no tiene texto o mapeo, si un texto no cumple las reglas de redacción o si un archivo de db/ que puede cambiar
+el catálogo es nuevo o cambió y no tiene su huella en HUELLAS_DB (test_4b). Lo que un recolector emite de verdad solo se
+revisa en ejemplo. test_13 revisa que NOTICE atribuya los marcos del mapeo y que el README lo diga.
 
     python -m unittest -v pruebas/test_catalogo_reglas.py
 """
+import functools
 import hashlib
 import json
 import re
@@ -35,10 +40,28 @@ UUID = r"'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'"
 BLOQUE_REGLAS = re.compile(r"INSERT INTO scoring_rules\s*\(.*?;[ \t]*$", re.DOTALL | re.MULTILINE)
 BLOQUE_TEXTOS = re.compile(r"INSERT INTO scoring_rule_texts\s*\(.*?(?:^\s*ON CONFLICT|;[ \t]*$)",
                            re.DOTALL | re.MULTILINE)
-INICIO_DE_FILA = re.compile(r"^\s*\(\s*'", re.MULTILINE)
+# Inicio de una fila: después de VALUES, de la coma que la separa de la anterior o al principio de una línea. Se cuenta
+# con las cadenas vaciadas (CADENA), así un '), (' dentro de un valor no cuenta como fila.
+INICIO_DE_FILA = re.compile(r"(?:\bVALUES|,|^)\s*\(\s*'", re.IGNORECASE | re.MULTILINE)
+CADENA = re.compile(r"'(?:[^']|'')*'")
 FILA_REGLA = re.compile(r"\(\s*%s\s*,\s*%s\s*,\s*'([a-z0-9_]+)'\s*,\s*'([a-z_]+)'\s*,\s*'([a-z]+)'\s*,"
                         r"\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)" % (UUID, UUID))
-FILA_MAPEO = re.compile(r"^\s*\('([a-z][a-z0-9_]+)',", re.MULTILINE)
+BLOQUE_MAPEOS = re.compile(r"INSERT INTO scoring_rule_framework_mappings\s*\(.*?(?:^\s*ON CONFLICT|;[ \t]*$)",
+                           re.DOTALL | re.MULTILINE)
+COLUMNAS_INSERT_MAPEO = re.compile(r"INSERT INTO scoring_rule_framework_mappings\s*\(([^)]*)\)")
+COLUMNAS_MAPEO = ('rule_code', 'attack_version', 'attack_technique_id', 'attack_technique_name', 'attack_source_url',
+                  'attack_unmapped_reason', 'iso_version', 'iso_control_id', 'iso_control_name', 'iso_source_url',
+                  'cis_version', 'cis_safeguard_id', 'cis_safeguard_name', 'cis_source_url')
+# Una fila del mapeo: el código y sus otras 13 columnas, cada una '...' (con '') o NULL.
+FILA_MAPEO = re.compile(r"\(\s*('[a-z0-9_]+')" + r"\s*,\s*('(?:[^']|'')*'|NULL)" * 13 + r"\s*\)")
+# Lo mínimo para no leer los comentarios: se saltan las cadenas '...' y E'...' (su \ escapa también un salto de línea),
+# los nombres "..." y los $tag$...$tag$, que pueden llevar -- o /* sin ser comentario. Como en Postgres, la etiqueta de
+# un $tag$ y lo que va antes de E' o de $ pueden llevar letras que no son ASCII.
+LETRA = 'A-Za-z_\x80-\U0010ffff'
+NO_COMENTARIO = re.compile(r"(?<![%s0-9$])[Ee]'(?:[^'\\]|''|\\[\s\S])*'?|'(?:[^']|'')*'?|\"(?:[^\"]|\"\")*\"?"
+                           r"|(?<![%s0-9$])(\$(?:[%s][%s0-9]*)?\$)[\s\S]*?(?:\1|\Z)|--[^\n]*|/\*"
+                           % (LETRA, LETRA, LETRA, LETRA))
+MARCA_DE_COMENTARIO = re.compile(r"/\*|\*/")
 FILA_TEXTO = re.compile(r"\(\s*'([a-z0-9_]+)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)")
 # Corrección de un texto ya aplicado (docs/codigos_reglas.md): un UPDATE por código con WHERE code = '...'.
 UPDATE_TEXTO = re.compile(r"UPDATE scoring_rule_texts\s+SET\s+(.*?)\s+WHERE\s+code\s*=\s*'([a-z0-9_]+)'\s*;",
@@ -48,7 +71,8 @@ CAMPO_TEXTO = re.compile(r"\b(title|meaning|recommendation)\s*=\s*'([^']*)'")
 OTRO_CAMPO = re.compile(r"\b(reviewed_by\s*=\s*(?:'[^']*'|NULL)|updated_at\s*=\s*now\(\))")
 REVISOR = re.compile(r"\breviewed_by\s*=\s*(?:'([^']*)'|NULL)")
 # Filas con que la 005 revisa los textos antes de cambiarlos: código, md5 de antes, md5 de después y revisor.
-HUELLA = re.compile(r"^\s*\('([a-z0-9_]+)', '([0-9a-f]{32})', '([0-9a-f]{32})', (?:'([^']*)'|NULL)\),?$", re.MULTILINE)
+HUELLA = re.compile(r"^\s*\('([a-z0-9_]+)', '([0-9a-f]{32})', '([0-9a-f]{32})', (?:'([^']*)'|NULL)\),?[ \t]*$",
+                    re.MULTILINE)
 # Comentario de la columna reviewed_by en las migraciones y su nota en el DBML (la 007 corrige el de la 003).
 COMENTARIO_REVISOR = re.compile(r"COMMENT ON COLUMN scoring_rule_texts\.reviewed_by IS '([^']*)'\s*;")
 NOTA_REVISOR = re.compile(r"^Table scoring_rule_texts\b.*?^\s*reviewed_by\s+text\s+\[note:\s*'([^']*)'\]",
@@ -68,19 +92,142 @@ FIN_DE_FRASE = re.compile(r'[.!?…](\s|$)')
 PROHIBIDO = (';', '"', "'", '«', '»', '“', '”', '‘', '’', '—', '–', '_', '=', '…', '...')
 CLIENTES = ('acme', 'olmardo', 'beta')
 
+# Aviso sin base de test_4b. Lo que estas pruebas no leen del SQL (transacciones, UPDATE, DELETE, DO o funciones que
+# corren o no) lo revisa la prueba 15 de pruebas/test_aislamiento.py en una base recién cargada. Por eso cada archivo de
+# db/ que puede cambiar el catálogo guarda en HUELLAS_DB el SHA-256 que tenía cuando pasó esa prueba, y uno nuevo o
+# cambiado hace fallar test_4b hasta que se pruebe y se ponga su huella. El aviso no lee el SQL ni decide si está bien.
+# Entran los archivos de db/init/, que deciden qué se carga y cómo, y las migraciones y semillas que:
+# - nombran el mapeo, los textos o las reglas (NOMBRES_DB). Se busca en el texto crudo, con los comentarios y las
+#   cadenas, también entre comillas y sin distinguir mayúsculas;
+# - nombran un objeto que crea o renombra un archivo que nombra el mapeo o los textos (CREA_NOMBRE: una función, una
+#   vista, una tabla...). Se busca en el SQL sin comentarios, y una función solo como llamada (ver _aviso);
+# - traen algo que arma SQL que no se ve o cambia cómo corre (MARCAS_DB), aunque no nombren las tablas.
+NOMBRES_DB = re.compile(r'scoring_rule(?:_framework_mappings|_texts|s)', re.IGNORECASE)
+MAPEO_O_TEXTOS = re.compile(r'scoring_rule_(?:framework_mappings|texts)', re.IGNORECASE)
+CREA_NOMBRE = re.compile(r'''
+    \bCREATE\s+(?:OR\s+REPLACE\s+)?(?P<modos>(?:(?:TEMP|TEMPORARY|UNLOGGED|MATERIALIZED|RECURSIVE)\s+)*)
+    (?P<tipo>TABLE|VIEW|FUNCTION|PROCEDURE|SEQUENCE|TYPE|DOMAIN|AGGREGATE)\s+(?:IF\s+NOT\s+EXISTS\s+)?
+    (?:(?:"[^"]+"|\w[\w$]*)\s*\.\s*)?(?P<nombre>"[^"]+"|\w[\w$]*)
+  | \bRENAME\s+TO\s+(?P<nuevo>"[^"]+"|\w[\w$]*)''', re.IGNORECASE | re.VERBOSE)
+MARCAS_DB = re.compile(r'''
+    \bEXECUTE\b(?!\s+ON\b)                                  # SQL dinámico o un PREPARE (GRANT EXECUTE ON no)
+  | \bformat\s*\( | \bU&\s*['"]
+  | \bDO\s+(?:LANGUAGE\s+\w+\s+)?(?:E|U&)?'                 # DO con el cuerpo en una cadena '...'
+  | \bset_config\s*\( | \bsearch_path\b | \bsession_replication_role\b
+  | \bstandard_conforming_strings\b | \bSET\s+NAMES\b
+  | \bclient_encoding\b(?!\s*(?:=|TO)\s*'?UTF-?8'?\s*;)     # otra codificación cambia cómo se leen ' y \ (UTF8 no)
+  | \bCREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+|EVENT\s+)?(?:TRIGGER|RULE)\b
+  | \bALTER\s+TABLE\b[^;]*\bUSING\b                         # ALTER COLUMN ... TYPE ... USING calcula cada fila
+  | \bCOPY\b | \bCALL\b | \bCASCADE\b | \bdblink\w*\s*\(
+  | \b(?:DROP|ALTER)\s+SCHEMA\b | \b(?:DROP|REASSIGN)\s+OWNED\b
+  | \b(?:UPDATE|DELETE\s+FROM|INSERT\s+INTO)\s+(?:pg_catalog\s*\.\s*)?pg_\w+   # escribe en el catálogo de Postgres
+  | \\[A-Za-z!?]                                            # meta-comando de psql (\i, \set, \gexec, \copy, \!...)
+''', re.IGNORECASE | re.VERBOSE)
+# Los archivos del aviso que ya pasaron la prueba 15 en una base recién cargada, con su SHA-256 (los \r\n se cuentan
+# como \n, como los guarda git, así la huella es la misma en Windows y en el CI). Cómo se agrega uno: db/README.md.
+HUELLAS_DB = {
+    'db/init/cargar_cirdan.sh': 'f2ced66729f048f0d9d7c75e4aea764341c9b253ad98dcd05c6e65dd3c698684',
+    'db/migraciones/001_esquema_inicial.sql': '94a5eecc28b57eb1d2d275f9f40bf7e562ddbe7a65bf724c3b4d94f21cead8d4',
+    'db/migraciones/002_login.sql': 'a2e4900b8a00aa496e8d95acb97a1e1232ed75aa265e5af449032bba4a1518ee',
+    'db/migraciones/003_textos_reglas.sql': '1301a671fe7bf650033d378a36eacf8a9b792a78c1ac4173f76e6c8a84875b9e',
+    'db/migraciones/004_login_lookup_seguro.sql': '3cf7c31fc21f88bbb4d0ac06950e665787e202b62d6772391c2e95c951ca1fe3',
+    'db/migraciones/005_textos_revisados.sql': '095a7e92fedb26c08909a50919ba2ecd6e22a54be952aa15346195837fb545b8',
+    'db/migraciones/006_firma_reglas_extras.sql': 'd2ba0ef5ffec27877db9664e0f771914197e63fa107ec0d8d1ed8dab974186bd',
+    'db/migraciones/007_comentario_revisor.sql': '3d63a98a4a990be2004e58d4371bd967965ce9ec22ba9d50bf9a5d1fe6e521b9',
+    'db/migraciones/008_limite_diario_fuentes.sql': '82393a2be6a9f5c31c9b260b4d86cbd27c4c22a7bf9a3ef043af5539c6799689',
+    'db/migraciones/011_mapeo_marcos.sql': '16e9af658a85a93917810750618222980b1bfc2af8a9250702b0a4abb5c7a243',
+    'db/migraciones/012_garantia_mapeo_marcos.sql': 'e22b8ca49dd1527b54a399386197b27c7f0f73175a1e6f3c403215ebf6e856b8',
+    'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
+    'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
+}
+
 
 def _relativa(ruta):
     return ruta.relative_to(RAIZ).as_posix()
+
+
+def _huella(ruta):
+    return hashlib.sha256(ruta.read_bytes().replace(b'\r\n', b'\n')).hexdigest()
+
+
+def _aviso():
+    """{archivo: motivo} de los archivos de db/ que entran en el aviso de test_4b, con lo que los hizo entrar."""
+    crudos = {_relativa(r): r.read_text(encoding='utf-8') for r in ARCHIVOS_SQL}
+    codigo = {archivo: _sin_comentarios(sql) for archivo, sql in crudos.items()}
+    aviso = {_relativa(r): 'está en db/init/' for r in sorted(RAIZ.glob('db/init/*')) if r.is_file()}
+    # Lo que crea o renombra un archivo que nombra el mapeo o los textos cuenta como ellos. Esos nombres se buscan en el
+    # SQL sin comentarios, y los de funciones solo como llamada (nombre o "nombre" con su paréntesis), así una función
+    # llamada begin o uno no hace entrar cada BEGIN ni cada comentario. Una llamada armada en una cadena entra por
+    # MARCAS_DB. Lo TEMP no cuenta: cargar_cirdan.sh corre cada archivo en su propio psql y se borra al terminar.
+    nombres, derivados = {}, None
+    while True:
+        nuevos = {}
+        for archivo, sql in codigo.items():
+            if MAPEO_O_TEXTOS.search(crudos[archivo]) or (derivados and derivados.search(sql)):
+                for m in CREA_NOMBRE.finditer(sql):
+                    if 'TEMP' in (m.group('modos') or '').upper():
+                        continue
+                    nombre = (m.group('nombre') or m.group('nuevo')).strip('"').lower()
+                    funcion = (m.group('tipo') or '').upper() in ('FUNCTION', 'PROCEDURE', 'AGGREGATE')
+                    nuevos[nombre] = nuevos.get(nombre, True) and funcion
+        nuevos = {n: f for n, f in nuevos.items() if n not in nombres or (nombres[n] and not f)}
+        if not nuevos:
+            break
+        nombres.update(nuevos)
+        derivados = re.compile('|'.join(r'(?<![\w$])%s%s' % (re.escape(n), r'"?\s*\(' if f else r'(?![\w$])')
+                                        for n, f in sorted(nombres.items())), re.IGNORECASE)
+    for archivo, sql in crudos.items():
+        nombre = (MAPEO_O_TEXTOS.search(sql) or NOMBRES_DB.search(sql)
+                  or (derivados and derivados.search(codigo[archivo])))
+        marca = MARCAS_DB.search(sql)
+        if nombre or marca:
+            aviso[archivo] = 'nombra %r' % nombre.group(0).strip() if nombre else 'trae %r' % marca.group(0).strip()
+    return aviso
+
+
+def _sin_comentarios(sql):
+    """El SQL con sus comentarios -- y /* */ (anidados, como en Postgres) cambiados por espacios, del mismo largo y con
+    sus saltos de línea. No mira dentro de las cadenas ni de los nombres entre comillas. En el cuerpo de un $tag$, que
+    en un DO, una FUNCTION o un PROCEDURE es SQL, también quita los comentarios."""
+    partes, i = [], 0
+    for m in iter(lambda: NO_COMENTARIO.search(sql, i), None):
+        fin = m.end()
+        if m.group(0) == '/*':
+            nivel = 1
+            while nivel:
+                marca = MARCA_DE_COMENTARIO.search(sql, fin)
+                if not marca:
+                    fin = len(sql)
+                    break
+                nivel += 1 if marca.group(0) == '/*' else -1
+                fin = marca.end()
+        if m.group(0).startswith(('/*', '--')):
+            partes.append(sql[i:m.start()] + re.sub(r'[^\n]', ' ', sql[m.start():fin]))
+        elif m.group(1):
+            etiqueta = m.group(1)
+            cerrado = len(m.group(0)) >= 2 * len(etiqueta) and m.group(0).endswith(etiqueta)
+            cuerpo = sql[m.start() + len(etiqueta):fin - len(etiqueta) if cerrado else fin]
+            partes.append(sql[i:m.start()] + etiqueta + _sin_comentarios(cuerpo) + (etiqueta if cerrado else ''))
+        else:
+            partes.append(sql[i:fin])
+        i = fin
+    return ''.join(partes) + sql[i:]
+
+
+@functools.lru_cache(maxsize=None)
+def _sql(ruta):
+    """Un archivo de db/ sin comentarios, también los de los cuerpos $tag$."""
+    return _sin_comentarios(ruta.read_text(encoding='utf-8'))
 
 
 def _filas(bloque, fila):
     """Las filas de todos los INSERT de una tabla en todos los archivos de db/, más los INSERT con filas sin leer."""
     filas, mal_leidos = [], []
     for ruta in ARCHIVOS_SQL:
-        sql = ruta.read_text(encoding='utf-8')
+        sql = _sql(ruta)
         for m in bloque.finditer(sql):
             leidas = fila.findall(m.group(0))
-            esperadas = len(INICIO_DE_FILA.findall(m.group(0)))
+            esperadas = len(INICIO_DE_FILA.findall(CADENA.sub("''", m.group(0))))
             if len(leidas) != esperadas:
                 mal_leidos.append('%s: %d filas y se leyeron %d' % (_relativa(ruta), esperadas, len(leidas)))
             filas += [(_relativa(ruta),) + f for f in leidas]
@@ -104,7 +251,7 @@ def leer_textos():
     for code, *campos in insertados:
         finales.setdefault(code, dict(zip(CAMPOS_TEXTO, campos)))
     for ruta in ARCHIVOS_SQL:
-        sql = ruta.read_text(encoding='utf-8')
+        sql = _sql(ruta)
         cambios = UPDATE_TEXTO.findall(sql)
         if len(cambios) != len(re.findall(r'UPDATE scoring_rule_texts\b', sql)):
             mal_leidos.append('%s: UPDATE scoring_rule_texts que la prueba no pudo leer' % _relativa(ruta))
@@ -119,6 +266,19 @@ def leer_textos():
     return insertados, finales, mal_leidos
 
 
+def leer_mapeos():
+    """Los (archivo, code) de las filas de los INSERT INTO scoring_rule_framework_mappings de todo db/ (la 011 y las
+    migraciones que vengan, porque la 011 ya no se edita) y lo que no se pudo leer: un INSERT con otras columnas o en
+    otro orden que COLUMNAS_MAPEO, o con filas que no son el código y 13 valores '...' o NULL. Los valores no se revisan
+    sin base: los revisan los CHECK de la 011 al cargarla y la prueba 15 de pruebas/test_aislamiento.py."""
+    filas, mal_leidos = _filas(BLOQUE_MAPEOS, FILA_MAPEO)
+    for ruta in ARCHIVOS_SQL:
+        for columnas in COLUMNAS_INSERT_MAPEO.findall(_sql(ruta)):
+            if tuple(c.strip() for c in columnas.split(',')) != COLUMNAS_MAPEO:
+                mal_leidos.append('%s: INSERT del mapeo con otras columnas o en otro orden' % _relativa(ruta))
+    return [(archivo, code[1:-1]) for archivo, code, *_ in filas], mal_leidos
+
+
 def leer_doc():
     return (RAIZ / 'docs' / 'codigos_reglas.md').read_text(encoding='utf-8')
 
@@ -131,6 +291,7 @@ REGLAS, REGLAS_MAL_LEIDAS = leer_reglas()
 REGLAS_V1 = sorted((r for r in REGLAS if r[2] == JUEGO_V1), key=lambda r: r[1])
 POR_CODIGO = {r[3]: r for r in REGLAS_V1}
 TEXTOS, TEXTOS_POR_CODIGO, TEXTOS_MAL_LEIDOS = leer_textos()
+MAPEOS, MAPEOS_MAL_LEIDOS = leer_mapeos()
 FILAS_DOC = FILA_DOC.findall(leer_doc())
 
 
@@ -191,15 +352,43 @@ class Reglas(unittest.TestCase):
             self.assertTrue(code in codigos, 'el texto de %r no tiene regla' % code)
 
     def test_4b_toda_regla_tiene_mapeo_a_marcos(self):
-        archivo = RAIZ / 'db' / 'migraciones' / '011_mapeo_marcos.sql'
-        sql = archivo.read_text(encoding='utf-8')
-        codigos = FILA_MAPEO.findall(sql)
-        self.assertEqual(len(codigos), len(set(codigos)), 'hay códigos repetidos en los mapeos')
-        self.assertEqual(set(codigos), set(TEXTOS_POR_CODIGO),
-                         'los mapeos no cubren exactamente las reglas del catálogo')
-        self.assertIn('CIS Controls v8.1', sql)
-        self.assertIn('ISO/IEC 27001:2022', sql)
-        self.assertIn('Enterprise v19', sql)
+        # Sin base: los mismos códigos en los textos y en los mapeos de todo db/, sin repetidos. No revisa las versiones
+        # de los marcos ni lee el SQL como Postgres (transacciones, orden, UPDATE ni ON CONFLICT DO UPDATE): lo que de
+        # verdad queda en la base, con la versión que espera de cada marco, lo revisan la base al cargarla (los CHECK de la
+        # 011 y la FK diferida de la 012) y la prueba 15 de pruebas/test_aislamiento.py. Para no perderlo sin base, el
+        # aviso de HUELLAS_DB falla si un archivo de db/ que puede cambiar el catálogo es nuevo o cambió y no tiene la
+        # huella con que pasó la prueba 15. Un cambio de versión de los marcos sigue la receta de db/README.md.
+        with self.subTest('códigos de los mapeos'):
+            self.assertEqual(MAPEOS_MAL_LEIDOS, [],
+                             'INSERT de scoring_rule_framework_mappings que la prueba no pudo leer')
+            codigos = [code for _, code in MAPEOS]
+            repetidos = sorted(c for c, n in Counter(codigos).items() if n > 1)
+            self.assertEqual(repetidos, [], 'hay mapeos insertados dos veces (una corrección va con UPDATE ... '
+                                            "SET ..., updated_at = now() WHERE rule_code = '...'): %s" % repetidos)
+            self.assertEqual(set(codigos), set(TEXTOS_POR_CODIGO),
+                             'los mapeos no cubren exactamente las reglas del catálogo')
+        with self.subTest('huellas de db/'):
+            problemas, lineas = [], []
+            for archivo, motivo in sorted(_aviso().items()):
+                huella = _huella(RAIZ / archivo)
+                if HUELLAS_DB.get(archivo) != huella:
+                    estado = 'cambió' if archivo in HUELLAS_DB else 'es nuevo'
+                    problemas.append('%s %s y %s' % (archivo, estado, motivo))
+                    lineas.append("    '%s': '%s'," % (archivo, huella))
+            for archivo in sorted(set(HUELLAS_DB) - set(_aviso())):
+                ruta = RAIZ / archivo
+                if not ruta.is_file():
+                    problemas.append('%s está en HUELLAS_DB y ya no existe (si ya no va, quítalo)' % archivo)
+                elif _huella(ruta) != HUELLAS_DB[archivo]:
+                    problemas.append('%s está en HUELLAS_DB y cambió' % archivo)
+                    lineas.append("    '%s': '%s'," % (archivo, _huella(ruta)))
+            if problemas:
+                self.fail('archivos de db/ que pueden cambiar el catálogo y no pasaron la prueba 15 así:\n  %s\n'
+                          'Carga una base desde cero con todo db/ y corre en ella la prueba 15 de '
+                          'pruebas/test_aislamiento.py. El CI lo hace en cada PR antes de esta prueba. No la cargues '
+                          'sobre la base con la que trabajas (db/README.md, Huellas de db/). Si pasa, pon en '
+                          'HUELLAS_DB de pruebas/test_catalogo_reglas.py:'
+                          '\n%s' % ('\n  '.join(problemas), '\n'.join(lineas)))
 
     def test_5_textos_simples(self):
         for code, title, meaning, recommendation in TEXTOS_POR_CODIGO.values():
@@ -282,10 +471,11 @@ class Reglas(unittest.TestCase):
         # backlog.md fila 30: los textos de las reglas OSINT (#14 a #20) los revisa Ernesto. Quién firma el resto no se
         # revisa, y ErnestoDL también puede firmarlo (decisión de Ernesto del 26 oct).
         # Un UPDATE que cambia un texto dice en reviewed_by quién revisó el nuevo, o NULL si nadie: sin reviewed_by la
-        # fila conservaría la firma del texto anterior
+        # fila conservaría la firma del texto anterior. Se lee sin comentarios, también los de los cuerpos $tag$, pero
+        # no sabe si un UPDATE corre: uno dentro de un DO o una función cuenta aunque no se llame
         revisor, sin_firma = {}, []
         for ruta in ARCHIVOS_SQL:
-            for asignaciones, code in UPDATE_TEXTO.findall(ruta.read_text(encoding='utf-8')):
+            for asignaciones, code in UPDATE_TEXTO.findall(_sql(ruta)):
                 m = REVISOR.search(asignaciones)
                 if m:
                     revisor[code] = m.group(1)
@@ -313,7 +503,7 @@ class Reglas(unittest.TestCase):
         insertados, _ = _filas(BLOQUE_TEXTOS, FILA_TEXTO)
         textos, con_huellas = {}, 0
         for ruta in ARCHIVOS_SQL:
-            sql, nombre = ruta.read_text(encoding='utf-8'), _relativa(ruta)
+            sql, nombre = _sql(ruta), _relativa(ruta)  # sin comentarios, también los de los cuerpos $tag$
             for _, code, *campos in (f for f in insertados if f[0] == nombre):
                 textos.setdefault(code, dict(zip(CAMPOS_TEXTO, campos)))
             antes = {code: huella(t) for code, t in textos.items()}
@@ -346,6 +536,26 @@ class Reglas(unittest.TestCase):
         self.assertIsNotNone(nota, 'db/cirdan_esquema.dbml no trae la nota de reviewed_by en scoring_rule_texts')
         self.assertEqual(comentarios[-1].rstrip('.'), nota.group(1).rstrip('.'),
                          'el último COMMENT de reviewed_by en db/migraciones/ no dice lo mismo que el DBML')
+
+    def test_13_notice_atribuye_los_marcos_del_mapeo(self):
+        # La tarjeta #68 (RC-131) pide que el repo anote que el uso comercial de CIS requiere su permiso, y los
+        # términos de MITRE piden su aviso de derechos y la licencia en cada copia. Se compara sin saltos de línea.
+        aviso = ' '.join((RAIZ / 'NOTICE').read_text(encoding='utf-8').split())
+        for texto in ('CIS Controls v8.1',
+                      'Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0)',
+                      'El uso comercial de CIS Controls requiere permiso previo de CIS.',
+                      'The MITRE Corporation. This work is reproduced and distributed with the permission of '
+                      'The MITRE Corporation.',
+                      'hereby grants you a non-exclusive, royalty-free license to use ATT&CK®',
+                      "provided that you reproduce MITRE's copyright designation and this license in any such copy."):
+            self.assertIn(texto, aviso, 'NOTICE ya no trae este texto de la atribución de los marcos')
+        # Sin fijar el año del aviso de MITRE, que puede cambiar cuando NOTICE pase a otra versión de ATT&CK.
+        self.assertRegex(aviso, r'© \d{4} The MITRE Corporation\. This work is reproduced')
+        filas = [linea for linea in (RAIZ / 'README.md').read_text(encoding='utf-8').splitlines()
+                 if linea.startswith('| `LICENSE`, `NOTICE` |')]
+        self.assertEqual(len(filas), 1, 'el README debe tener una sola fila de NOTICE en su tabla de archivos')
+        for nombre in ('CIS Controls', 'MITRE ATT&CK'):
+            self.assertIn(nombre, filas[0], 'la fila de NOTICE del README no nombra %s' % nombre)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 # Servicios externos de LowTide: cuentas, llaves, costos y plan B (#8, RC-40)
 
-**Al 3 nov 2026.** Una fila por servicio externo que LowTide usa o va a usar, con la cuenta del equipo y su dueño, el plan, el costo, el límite, el vencimiento de la llave y el plan B. Los límites y el uso real salen del código de `cirdan/recolectores/` y de las semillas de `db/semillas/`. Las cuentas, los precios y los pagos salen de Jira: RC-37, RC-38 y RC-40, y la tarjeta de cada servicio. Las licencias y los precios de los planes de pago salen de la revisión del 13 oct de las páginas de precios y términos de cada fuente (sección Licencias y planes de pago). Las cuentas de GitHub y Azure salen de `gh` y `az` con la cuenta de Ernesto (3 nov). Los precios, límites y términos de Shodan, Docker Hub, los proveedores de IA y Teams salen de sus páginas oficiales, leídas el 3 nov. Lo que no está en ninguna de esas fuentes va como **por confirmar**, con su pregunta numerada al final.
+**Al 3 nov 2026, y al 5 nov las filas de CIS Controls y MITRE ATT&CK.** Una fila por servicio externo que LowTide usa o va a usar, con la cuenta del equipo y su dueño, el plan, el costo, el límite, el vencimiento de la llave y el plan B. Los límites y el uso real salen del código de `cirdan/recolectores/` y de las semillas de `db/semillas/`. Las cuentas, los precios y los pagos salen de Jira: RC-37, RC-38 y RC-40, y la tarjeta de cada servicio. Las licencias y los precios de los planes de pago salen de la revisión del 13 oct de las páginas de precios y términos de cada fuente (sección Licencias y planes de pago), salvo las filas de CIS Controls y MITRE ATT&CK, que salen de la guía de CIS Controls v8.1 y de los términos de uso de MITRE ATT&CK, leídos el 5 nov. Las cuentas de GitHub y Azure salen de `gh` y `az` con la cuenta de Ernesto (3 nov). Los precios, límites y términos de Shodan, Docker Hub, los proveedores de IA y Teams salen de sus páginas oficiales, leídas el 3 nov. Lo que no está en ninguna de esas fuentes va como **por confirmar**, con su pregunta numerada al final.
 
 Aquí nunca va una llave, un token, una contraseña ni un código de respaldo. De cada llave solo se nombra su variable de `.env`. Si la variable todavía no existe en el código, se marca como propuesta.
 
@@ -10,7 +10,7 @@ Aquí nunca va una llave, un token, una contraseña ni un código de respaldo. D
 - **Gasto real al 3 nov: 9.08 USD**, el dominio de prueba olmardo.com, que pagó Ernesto el 13 oct. El presupuesto en efectivo del Gantt V3 es de 23.45 USD.
 - **Crédito de Azure:** al crédito de Azure for Students de Ernesto le quedan unos 56 USD al 3 nov. Un Azure Bastion Standard que se creó el 29 oct en el grupo de la siembra gastaba 6.96 USD al día y lo habría acabado entre el 10 y el 11 nov, antes de S14. Con el límite de gasto activo, la suscripción se habría deshabilitado y las VM de la siembra se habrían apagado. Se borró el 3 nov con su IP pública, y sin él la siembra gasta unos 0.46 USD al día.
 - **Cuello de botella de las demos:** Cert Spotter sin llave da unas 10 consultas por hora, y cada escaneo en vivo le hace unas 4 (2 de `ct_logs` y 2 de `shodan`). Con 2 o 3 escaneos en vivo se acaba el cupo de esa hora. No se ensaya en la hora anterior a una demo. La cuenta gratis de SSLMate da las mismas 10 por hora, así que una llave gratis no ayuda. Solo el plan Medium (50 USD al mes) sube a 100.
-- **Licencias:** para el semestre con olmardo.com alcanzan los planes gratis y el más bajo de HIBP. Dar servicio a empresas pide planes de pago en HIBP, Shodan, InternetDB y Docker Hub, y Censys queda fuera por sus términos (sección Licencias y planes de pago).
+- **Licencias:** para el semestre con olmardo.com alcanzan los planes gratis y el más bajo de HIBP. Dar servicio a empresas pide planes de pago en HIBP, Shodan, InternetDB y Docker Hub y el permiso de CIS para el mapeo a CIS Controls, y Censys queda fuera por sus términos (sección Licencias y planes de pago).
 
 ## Tabla
 
@@ -47,7 +47,7 @@ No están en la lista de la tarjeta, pero son de terceros y van aquí para que #
 
 ## Licencias y planes de pago
 
-Revisión del 13 oct en las páginas de precios y términos de cada fuente, la misma que usa el modelo de costos de #52. Antes de comprar se revisa el precio otra vez.
+Revisión del 13 oct en las páginas de precios y términos de cada fuente, la misma que usa el modelo de costos de #52. Las filas de CIS Controls y MITRE ATT&CK salen de la guía de CIS Controls v8.1 y de los términos de uso de MITRE ATT&CK, leídos el 5 nov. Antes de comprar se revisa el precio otra vez.
 
 | Servicio | Semestre, con olmardo.com | Producto, para dar servicio a empresas | Nota |
 |---|---|---|---|
@@ -56,6 +56,8 @@ Revisión del 13 oct en las páginas de precios y términos de cada fuente, la m
 | InternetDB (Shodan) | Gratis, sin llave | Al menos Corporate, 1,099 USD al mes | Sin ese plan no se usa comercialmente (RC-87) |
 | Cert Spotter (SSLMate) | Sin llave, unas 10 consultas por hora. La cuenta gratis da las mismas 10 consultas de dominio completo por hora | Medium, 50 USD al mes, da 100 por hora | Una llave gratis no sube el cupo |
 | Docker Hub | Gratis, sin `docker login` | Pro, 9 USD al mes con pago anual. El plan gratis no permite uso comercial | #64 solo lee el manifiesto y el JSON de configuración de la etiqueta `latest`, nunca las capas, y no guarda copias espejo |
+| CIS Controls v8.1 | Uso académico sin fines comerciales, que permite su licencia CC BY-NC-ND 4.0 | Requiere permiso previo de CIS, que se pide antes de dar servicio a empresas | La tabla `scoring_rule_framework_mappings` (migraciones 011 y 012) guarda solo el número de la salvaguarda, un nombre breve y el enlace. La atribución va en `NOTICE` |
+| MITRE ATT&CK | Gratis, con la atribución de `NOTICE` | Gratis: sus términos permiten el uso comercial si cada copia lleva su aviso de derechos y la licencia | La misma tabla guarda solo el ID de la técnica de Enterprise v19, un nombre breve y el enlace |
 | Censys | No se usa | No se usa | Sus términos del 21 sep 2026 prohíben dar sus datos a terceros, también en reportes, y usarlos como entrada de IA. La fuente `censys` va deshabilitada, 'en evaluación' (`db/semillas/001_datos_demo.sql:25`). No se habilita ni se le pone llave de Censys a subfinder (#14b) |
 
 ## Gasto real y tope (para #52)

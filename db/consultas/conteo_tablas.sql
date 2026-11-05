@@ -1,6 +1,6 @@
 -- =====================================================================
 -- Cirdan · db/consultas/conteo_tablas.sql
--- Las 24 tablas por grupo del DBML, con filas y estado de RLS, y un
+-- Las 25 tablas por grupo del DBML, con filas y estado de RLS, y un
 -- resumen de objetos. Corre como postgres (superusuario, ve todo).
 -- =====================================================================
 \echo '== Tablas de la base cirdan (filas reales, como postgres) =='
@@ -27,13 +27,14 @@ SELECT g.grupo AS "Grupo", c.relname AS "Tabla",
                (15, 'inteligencia_y_score',     'scoring_rule_sets'),
                (16, 'inteligencia_y_score',     'scoring_rules'),
                (17, 'inteligencia_y_score',     'scoring_rule_texts'),
-               (18, 'inteligencia_y_score',     'domain_scores'),
-               (19, 'inteligencia_y_score',     'score_contributions'),
-               (20, 'entrega_e_integraciones',  'integrations'),
-               (21, 'entrega_e_integraciones',  'alerts'),
-               (22, 'entrega_e_integraciones',  'deliveries'),
-               (23, 'entrega_e_integraciones',  'reports'),
-               (24, 'auditoria',                'audit_log')) AS g(ord, grupo, tabla)
+               (18, 'inteligencia_y_score',     'scoring_rule_framework_mappings'),
+               (19, 'inteligencia_y_score',     'domain_scores'),
+               (20, 'inteligencia_y_score',     'score_contributions'),
+               (21, 'entrega_e_integraciones',  'integrations'),
+               (22, 'entrega_e_integraciones',  'alerts'),
+               (23, 'entrega_e_integraciones',  'deliveries'),
+               (24, 'entrega_e_integraciones',  'reports'),
+               (25, 'auditoria',                'audit_log')) AS g(ord, grupo, tabla)
     ON g.tabla = c.relname
  WHERE c.relkind = 'r'
  ORDER BY g.ord;
