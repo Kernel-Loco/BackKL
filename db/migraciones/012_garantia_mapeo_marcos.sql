@@ -28,14 +28,17 @@
 --      cuando la descripción de la técnica en ATT&CK Enterprise v19 nombra
 --      lo que detecta la regla como lo que un adversario busca, adquiere o
 --      usa. Si no, va sin técnica y la razón dice que ninguna la nombra.
---      Quedan 20 reglas con técnica y 10 sin ella.
+--      Quedan 25 reglas con técnica y 5 sin ella. Las 5 de puertos abiertos
+--      (servicios, bases de datos, archivos compartidos y equipos IoT y OT)
+--      van con T1596.005, que nombra los puertos abiertos y los banners que
+--      un adversario busca en las bases de escaneos públicas.
 --    - Los enlaces de ATT&CK van fijos a la v19 (/versions/v19/), a la
 --      técnica o a la lista de técnicas de Enterprise, así muestran la
 --      versión que dice attack_version y no la vigente del sitio.
 --    - ISO y CIS: el control que corresponde a lo que pide el texto de la
---      regla en 9 reglas (certificados, correos, dominio por vencer,
---      dominio parecido y clave en una imagen de contenedor), con 10
---      cambios: 2 de ISO y 8 de CIS.
+--      regla en 10 reglas (certificados, correos, dominio por vencer,
+--      dominio parecido, subdominio que otra persona podría tomar y clave en
+--      una imagen de contenedor), con 11 cambios: 2 de ISO y 9 de CIS.
 --    - El comentario de la tabla dice lo que de verdad guarda.
 --    Cada UPDATE solo toca las filas que siguen con el valor de la 011: en
 --    ATT&CK, las que tienen un enlace sin /versions/, y en ISO y CIS, las
@@ -163,16 +166,16 @@ UPDATE scoring_rule_framework_mappings m
      'Ninguna técnica de ATT&CK nombra un certificado por vencer como algo que un adversario busca o usa.'),
     ('outdated_software', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
      'Ninguna técnica de ATT&CK nombra el software sin soporte. La explotación de una aplicación expuesta pide una falla conocida, y esa es otra regla.'),
-    ('exposed_file_sharing', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
-     'Ninguna técnica de ATT&CK nombra un servicio de archivos expuesto. La de servicios remotos externos trata del acceso remoto a la red.'),
-    ('exposed_database', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
-     'Ninguna técnica de ATT&CK nombra una base de datos abierta a internet como algo que un adversario busca o usa.'),
-    ('exposed_ot_device', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
-     'La matriz Enterprise de ATT&CK no trata los equipos OT. Van en la matriz ICS, que este mapeo no usa.'),
-    ('exposed_iot_device', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
-     'Ninguna técnica de ATT&CK Enterprise nombra un dispositivo conectado abierto a internet como algo que un adversario busca o usa.'),
-    ('exposed_service', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
-     'Ninguna técnica de ATT&CK nombra un servicio expuesto en general, solo los de acceso remoto y las aplicaciones con una falla, que son otras reglas.'),
+    ('exposed_file_sharing', 'T1596.005', 'Buscar en bases de datos de escaneos',
+     'https://attack.mitre.org/versions/v19/techniques/T1596/005/', NULL),
+    ('exposed_database', 'T1596.005', 'Buscar en bases de datos de escaneos',
+     'https://attack.mitre.org/versions/v19/techniques/T1596/005/', NULL),
+    ('exposed_ot_device', 'T1596.005', 'Buscar en bases de datos de escaneos',
+     'https://attack.mitre.org/versions/v19/techniques/T1596/005/', NULL),
+    ('exposed_iot_device', 'T1596.005', 'Buscar en bases de datos de escaneos',
+     'https://attack.mitre.org/versions/v19/techniques/T1596/005/', NULL),
+    ('exposed_service', 'T1596.005', 'Buscar en bases de datos de escaneos',
+     'https://attack.mitre.org/versions/v19/techniques/T1596/005/', NULL),
     ('exposed_api_docs', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
      'Ninguna técnica de ATT&CK nombra la documentación pública de una API como algo que un adversario busca o usa.'),
     ('api_auth_not_declared', NULL, NULL, 'https://attack.mitre.org/versions/v19/techniques/enterprise/',
@@ -208,7 +211,8 @@ UPDATE scoring_rule_framework_mappings m
     ('email_in_public_commits', '3.3', 'Restricción de acceso a datos', '14.2', 'Capacitación contra la ingeniería social'),
     ('breach_exposure_no_passwords', '3.3', 'Restricción de acceso a datos', '14.2', 'Capacitación contra la ingeniería social'),
     ('personal_email_exposed', '3.3', 'Restricción de acceso a datos', '14.2', 'Capacitación contra la ingeniería social'),
-    ('email_pattern_exposed', '3.3', 'Restricción de acceso a datos', '14.2', 'Capacitación contra la ingeniería social')
+    ('email_pattern_exposed', '3.3', 'Restricción de acceso a datos', '14.2', 'Capacitación contra la ingeniería social'),
+    ('subdomain_takeover_risk', '1.1', 'Inventario de activos de la empresa', '12.3', 'Gestión segura de la infraestructura de red')
   ) AS v (code, cis_011, nombre_011, cis, nombre)
  WHERE m.rule_code = v.code
    AND (m.cis_safeguard_id, m.cis_safeguard_name) = (v.cis_011, v.nombre_011);
