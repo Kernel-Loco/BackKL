@@ -132,7 +132,7 @@ SIN_LLAVE = ('exposed_iot_device', 'exposed_ot_device', 'outdated_software')
 
 URL_INTERNETDB = 'https://internetdb.shodan.io/'
 NOMBRE_INTERNETDB = 'Shodan InternetDB'          # atribución: va en los atributos y la evidencia
-AGENTE = 'cirdan-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
+AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
 ORIGEN = 'cert_spotter_a'                        # de dónde salió la IP: un nombre de Cert Spotter y su A
 RESOLVEDORES = ('1.1.1.1', '8.8.8.8')            # públicos y fijos, como registros_dns.py. Nunca el DNS del sistema
 

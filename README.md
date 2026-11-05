@@ -1,6 +1,6 @@
-# Cirdan · Backend (BackKL)
+# LowTide · Backend (BackKL)
 
-Backend de Cirdan, la plataforma de gestión de la superficie de ataque externa con OSINT pasivo del reto IKUSI VELATIA: la base de datos, la API, los recolectores OSINT y el criterio de criticidad. El portal web (Next.js) está en [FrontKL](https://github.com/Kernel-Loco/FrontKL). Desde el 14 y 15 oct 2026 inicia sesión con esta API (#25) y lee sus datos de la API v1 con esa sesión. Siguen simulados en el portal el alta de dominios y la verificación TXT (#26), los reportes, usuarios, llaves de API, webhooks, alertas y bitácora.
+Backend de LowTide (nombre clave Cirdan, que sigue en el paquete, la base y los contenedores), la plataforma de gestión de la superficie de ataque externa con OSINT pasivo del reto IKUSI VELATIA: la base de datos, la API, los recolectores OSINT y el criterio de criticidad. El portal web (Next.js) está en [FrontKL](https://github.com/Kernel-Loco/FrontKL). Desde el 14 y 15 oct 2026 inicia sesión con esta API (#25) y lee sus datos de la API v1 con esa sesión. Siguen simulados en el portal el alta de dominios y la verificación TXT (#26), los reportes, usuarios, llaves de API, webhooks, alertas y bitácora.
 
 ## Carpetas
 

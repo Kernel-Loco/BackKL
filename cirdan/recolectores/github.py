@@ -112,7 +112,7 @@ NINGUNA = 'ninguna'                            # la empresa declaró que no tien
 
 API = 'https://api.github.com'
 CLON = 'https://github.com/%s/%s.git'
-AGENTE = 'cirdan-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
+AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
 VERSION_API = '2022-11-28'
 TIMEOUT_HTTP = 30                # segundos por petición a la API
 INTENTOS = 3                     # intentos por petición a la API dentro de una corrida
