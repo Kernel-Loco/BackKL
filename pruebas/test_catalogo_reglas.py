@@ -7,7 +7,7 @@ No leen las transacciones ni si un DO o una función corre: eso lo revisan la ba
 pruebas/test_aislamiento.py. Fallan si un recolector declara en CODIGOS un código sin regla o con otra severidad, si
 una regla no tiene texto o mapeo, si un texto no cumple las reglas de redacción o si un archivo de db/ que puede cambiar
 el catálogo es nuevo o cambió y no tiene su huella en HUELLAS_DB (test_4b). Lo que un recolector emite de verdad solo se
-revisa en ejemplo.
+revisa en ejemplo. test_13 revisa que NOTICE atribuya los marcos del mapeo y que el README lo diga.
 
     python -m unittest -v pruebas/test_catalogo_reglas.py
 """
@@ -536,6 +536,26 @@ class Reglas(unittest.TestCase):
         self.assertIsNotNone(nota, 'db/cirdan_esquema.dbml no trae la nota de reviewed_by en scoring_rule_texts')
         self.assertEqual(comentarios[-1].rstrip('.'), nota.group(1).rstrip('.'),
                          'el último COMMENT de reviewed_by en db/migraciones/ no dice lo mismo que el DBML')
+
+    def test_13_notice_atribuye_los_marcos_del_mapeo(self):
+        # La tarjeta #68 (RC-131) pide que el repo anote que el uso comercial de CIS requiere su permiso, y los
+        # términos de MITRE piden su aviso de derechos y la licencia en cada copia. Se compara sin saltos de línea.
+        aviso = ' '.join((RAIZ / 'NOTICE').read_text(encoding='utf-8').split())
+        for texto in ('CIS Controls v8.1',
+                      'Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0)',
+                      'El uso comercial de CIS Controls requiere permiso previo de CIS.',
+                      'The MITRE Corporation. This work is reproduced and distributed with the permission of '
+                      'The MITRE Corporation.',
+                      'hereby grants you a non-exclusive, royalty-free license to use ATT&CK®',
+                      "provided that you reproduce MITRE's copyright designation and this license in any such copy."):
+            self.assertIn(texto, aviso, 'NOTICE ya no trae este texto de la atribución de los marcos')
+        # Sin fijar el año del aviso de MITRE, que puede cambiar cuando NOTICE pase a otra versión de ATT&CK.
+        self.assertRegex(aviso, r'© \d{4} The MITRE Corporation\. This work is reproduced')
+        filas = [linea for linea in (RAIZ / 'README.md').read_text(encoding='utf-8').splitlines()
+                 if linea.startswith('| `LICENSE`, `NOTICE` |')]
+        self.assertEqual(len(filas), 1, 'el README debe tener una sola fila de NOTICE en su tabla de archivos')
+        for nombre in ('CIS Controls', 'MITRE ATT&CK'):
+            self.assertIn(nombre, filas[0], 'la fila de NOTICE del README no nombra %s' % nombre)
 
 
 if __name__ == '__main__':
