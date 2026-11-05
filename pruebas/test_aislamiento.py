@@ -46,10 +46,10 @@ class AislamientoPorCliente(unittest.TestCase):
         self.assertEqual(scalar("SELECT rolsuper || ',' || rolbypassrls FROM pg_roles WHERE rolname = current_user;"),
                          'false,false')
 
-    def test_2_rls_forzado_en_las_18_tablas_por_cliente(self):
+    def test_2_rls_forzado_en_las_20_tablas_por_cliente_y_configuracion(self):
         n = scalar("SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace"
                    " AND relkind = 'r' AND relrowsecurity AND relforcerowsecurity;", user='postgres')
-        self.assertEqual(n, '18')
+        self.assertEqual(n, '20')
 
     def test_3_acme_ve_solo_sus_datos(self):
         self.assertEqual(scalar(COUNTS, org=ACME), '5,4,3')
@@ -67,6 +67,28 @@ class AislamientoPorCliente(unittest.TestCase):
                           org=ACME)
         self.assertFalse(ok)
         self.assertIn('row-level security', err)
+
+    def test_7_juego_de_pesos_y_reglas_solo_visibles_para_su_organizacion(self):
+        sql = """BEGIN;
+    INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, activated_at)
+    SELECT app_current_org(), coalesce(max(version), 0) + 1,
+           '{"infrastructure":0.25,"digital_identity":0.25,"configuration":0.25,"data_leaks":0.25}',
+           false, 'prueba RLS', now()
+    FROM scoring_rule_sets WHERE organization_id IS NULL OR organization_id = app_current_org();
+    INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty)
+    SELECT id, 'spf_missing', 'configuration', 'medium', 1, 40 FROM scoring_rule_sets
+    WHERE organization_id = app_current_org() AND validated_by = 'prueba RLS';
+SELECT count(*) FROM scoring_rule_sets WHERE organization_id = app_current_org();
+SELECT count(*) FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id
+  WHERE s.organization_id = app_current_org();
+SET LOCAL app.current_org = '%s';
+SELECT count(*) FROM scoring_rule_sets WHERE organization_id = '%s';
+SELECT count(*) FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id
+  WHERE s.organization_id = '%s';
+ROLLBACK;""" % (BETA, ACME, ACME)
+        ok, out, err = psql(sql, org=ACME)
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines(), ['1', '1', '0', '0'])
 
 
 class ReglasDeNegocio(unittest.TestCase):

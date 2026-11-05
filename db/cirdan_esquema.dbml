@@ -210,11 +210,12 @@ Table cves [note: 'Inteligencia de vulnerabilidades local: CVSS de NVD, EPSS de 
   intel_updated_at timestamptz [note: 'Última carga diaria que tocó la fila. NULL = stub sin inteligencia todavía. Al completarlo se recalculará con reason \'intel_update\' (plan, #69, RC-127). Nunca se borra un CVE, aunque NVD lo marque REJECTED']
 }
 
-Table scoring_rule_sets [note: 'Versión completa del juego de reglas y pesos de las 4 categorías del score, validada con el socio formador. Un cambio de cualquier peso crea un juego nuevo. Inmutable una vez activado. Desviación: el juego v1 se completó con las 30 reglas de #14 a #20 y de #62 a #64 antes de #31 (RC-60), con la semilla 004, y desde #31 cualquier cambio de reglas o pesos crea v2 (db/README.md, desviación 15).'] {
+Table scoring_rule_sets [note: 'Versión completa del juego de reglas y pesos de las 4 categorías del score. organization_id NULL identifica la plantilla global v1; los cambios crean juegos activos por organización, versionados e inmutables (migración 013, #32). Un juego nuevo copia todas las reglas de su plantilla anterior y recalcula scores con reason rules_change.'] {
   id uuid [pk]
-  version smallint [not null, unique, note: '1, 2, 3... Es lo que muestra el portal junto al score']
+  organization_id uuid [ref: > organizations.id, note: 'NULL solo para la plantilla global; los juegos configurables pertenecen a una organización y tienen RLS']
+  version smallint [not null, note: '1, 2, 3... único globalmente en la plantilla o por organización en los overrides']
   category_weights jsonb [not null, note: 'Ej. {\'infrastructure\': 0.30, \'digital_identity\': 0.20, \'configuration\': 0.20, \'data_leaks\': 0.30} (juego v1). Suma 1. Hoy en dev lo revisa pruebas/test_contrato_api.py sobre docs/api_v1/pesos.json, sin CI todavía (#11, RC-43). Score global = el mayor entre la suma de nota de categoría x peso y el piso de #29']
-  is_active boolean [not null, note: 'Índice único parcial ((true)) WHERE is_active: un solo juego activo']
+  is_active boolean [not null, note: 'Un solo juego activo global y un juego activo por organización (índices parciales de migración 013)']
   validated_by text [note: 'Quién validó los pesos (decisión 2 del deck del 25 sep)']
   activated_at timestamptz
 }
