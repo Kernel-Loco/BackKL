@@ -1,0 +1,20 @@
+{
+  "nota": "Respuesta armada a mano para las pruebas, no grabada de ningún dominio. Valores falsos.",
+  "descripcion": "Bloqueo del firewall de Sucuri, sin la cabecera x-sucuri-block",
+  "estado": 403,
+  "cabeceras": [
+    [
+      "Content-Type",
+      "text/html; charset=UTF-8"
+    ],
+    [
+      "Server",
+      "Sucuri/Cloudproxy"
+    ],
+    [
+      "X-Sucuri-ID",
+      "00000"
+    ]
+  ],
+  "cuerpo": "<html><head><title>Sucuri WebSite Firewall - Access Denied</title></head><body>Access Denied</body></html>"
+}
