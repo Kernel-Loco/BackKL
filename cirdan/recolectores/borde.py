@@ -52,6 +52,7 @@ import ipaddress
 import re
 
 from cirdan.recolectores import geoip, shodan
+from cirdan.recolectores.contrato import NOMBRE_VALIDO
 
 # Código -> nombre visible. Los códigos son los de shodan.SUFIJOS_CDN y geoip.CDN_POR_ASN cuando coinciden.
 PROVEEDORES = {'akamai': 'Akamai', 'aws_waf': 'AWS WAF', 'azure_cdn': 'Azure CDN',
@@ -116,14 +117,13 @@ MOTIVO_PAGINA = 'página de reto o bloqueo'
 MOTIVO_LIMITE = 'límite de peticiones'
 MAX_CUERPO = 64 * 1024       # caracteres del cuerpo que se revisan, como el bloque de transporte.descargar
 MAX_VALOR = 8 * 1024         # caracteres del valor de una cabecera que se comparan con su patrón (no se guardan)
-MAX_COOKIES = 64 * 1024      # lo mismo en set-cookie, que puede juntar varias: el tope de una línea en http.client
+MAX_COOKIES = 64 * 1024      # lo mismo en set-cookie, pero entre todas las de la respuesta: el tope de una línea en
+                             # http.client. Por cada Set-Cookie, 99 de 64 KiB tomaban más de 1 s
 MAX_CNAMES = shodan.MAX_SALTOS_CNAME
 MAX_IPS = 64                 # IP y ASN que se miran: de más solo se pierde una señal
 
 _FIRMAS = {c: [(p, re.compile(v, re.I | re.A) if v else None) for p, v in f] for c, f in FIRMAS.items()}
 _RETOS = {c: (p, re.compile(v, re.I | re.A)) for c, (p, v) in RETO_POR_CABECERA.items()}
-# Un nombre DNS: letras, dígitos y guion en cada etiqueta, separadas por punto, con o sin el punto final.
-_NOMBRE = re.compile(r'[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?', re.I | re.A)
 _MINUSCULAS = {c: c + 32 for c in range(ord('A'), ord('Z') + 1)}   # para str.translate: solo de A a Z
 # Valores sueltos que no se recorren: una red de ipaddress se recorrería dirección por dirección.
 _UNO = (str, bytes, int, ipaddress.IPv4Address, ipaddress.IPv6Address, ipaddress.IPv4Network, ipaddress.IPv6Network)
@@ -131,44 +131,53 @@ _UNO = (str, bytes, int, ipaddress.IPv4Address, ipaddress.IPv6Address, ipaddress
 
 def _varios(x, tope=None):
     """Una lista con lo que llegó: None da [], un solo texto, número, IP o red da [x] y cualquier otra cosa que no se
-    pueda recorrer da []. Con `tope` se leen a lo más esos: un generador como red.hosts() no se recorre entero."""
+    pueda recorrer, o que lanza TypeError al recorrerla (como map(int, ['1', None])), da []. Con `tope` se leen
+    exactamente esos, ni uno más: un generador como red.hosts() no se recorre entero."""
     if x is None:
         return []
     if isinstance(x, _UNO):
         return [x]
+    salida = []
     try:
         iterador = iter(x)
+        while tope is None or len(salida) < tope:
+            salida.append(next(iterador))
+    except StopIteration:
+        pass
     except TypeError:
         return []
-    salida = []
-    for valor in iterador:
-        if tope is not None and len(salida) >= tope:
-            break
-        salida.append(valor)
     return salida
 
 
 def _pares(cabeceras):
     """[(nombre en minúsculas, valor)] de un dict, un http.client.HTTPMessage (que repite set-cookie) o una lista de
-    pares. Lo que no es texto, o un nombre que no es ASCII, se salta."""
+    pares. Lo que no es texto, o un nombre que no es ASCII, se salta. Cada valor se corta a MAX_VALOR, y los de
+    set-cookie, entre todos, a MAX_COOKIES: lo que pase de ahí llega vacío."""
     if cabeceras is None:
         return []
     pares = _varios(cabeceras.items() if hasattr(cabeceras, 'items') else cabeceras)
     salida = []
+    resto = MAX_COOKIES   # de toda la respuesta, no de cada Set-Cookie
     for par in pares:
         if not isinstance(par, (list, tuple)) or len(par) != 2:
             continue
         nombre, valor = par
         if isinstance(nombre, str) and isinstance(valor, str) and nombre.isascii():
             nombre = nombre.strip().lower()
-            salida.append((nombre, valor.strip()[:MAX_COOKIES if nombre == 'set-cookie' else MAX_VALOR]))
+            if nombre == 'set-cookie':
+                valor = valor.strip()[:resto]
+                resto -= len(valor)
+            else:
+                valor = valor.strip()[:MAX_VALOR]
+            salida.append((nombre, valor))
     return salida
 
 
 def por_cabeceras(cabeceras):
     """{proveedor: [nombres de cabecera]} con las firmas de FIRMAS. Una cookie va como 'set-cookie:<parte fija de su
     nombre>', que sale de la firma y no del servidor. Se ven todas las cookies de los primeros MAX_COOKIES caracteres
-    de cada Set-Cookie, también si llegan juntadas con ', ', y de las demás cabeceras se miran MAX_VALOR."""
+    de todas las Set-Cookie de la respuesta, también si llegan juntadas con ', ', y de cada una de las demás cabeceras
+    se miran MAX_VALOR."""
     vistos = {}
     for nombre, valor in _pares(cabeceras):
         for proveedor, patron in _FIRMAS.get(nombre, ()):
@@ -184,9 +193,15 @@ def por_cabeceras(cabeceras):
 
 
 def _limpio(nombre):
-    """Un nombre DNS en minúsculas y sin el punto final, o '' si no es un nombre DNS: solo letras ASCII, dígitos,
-    guion y punto (un IDN va en punycode). Un espacio, un NUL, una URL o un puerto dan ''."""
-    return nombre.lower().rstrip('.') if isinstance(nombre, str) and _NOMBRE.fullmatch(nombre) else ''
+    """Un nombre DNS en minúsculas y sin el punto final, o '' si no lo es. Es el de contrato.NOMBRE_VALIDO: al menos
+    dos etiquetas de 1 a 63 letras ASCII, dígitos o guion, sin guion al inicio ni al final, la última solo de letras,
+    y hasta 253 caracteres sin el punto final (un IDN va en punycode). Un espacio, un NUL, una URL, un puerto, una
+    sola etiqueta o dos puntos al final dan ''."""
+    if not isinstance(nombre, str):
+        return ''
+    nombre = nombre.translate(_MINUSCULAS)
+    nombre = nombre[:-1] if nombre.endswith('.') else nombre
+    return nombre if NOMBRE_VALIDO.fullmatch(nombre) else ''
 
 
 def por_cname(cnames):
@@ -308,15 +323,21 @@ def _sitios(x):
     return sitios, any(not _limpio(s) for s in x)
 
 
+def _formas(sitios):
+    """Cada sitio en todas las formas en que llegó, en la de _limpio() y en esa con el punto final, sin repetir."""
+    return [f for k in sorted(sitios) for f in dict.fromkeys(sitios[k] + [k, k + '.'])]
+
+
 def cobertura(revisados, sin_revisar, codigos):
     """(revisados, sin_revisar, sin_cobertura) del Resultado de la visita web, con los sitios (sus nombres) como partes
     (#23). Un sitio con reto, o que no se pudo visitar, va en sin_revisar, y si también está en revisados gana
-    sin_revisar. Los nombres se comparan en minúsculas y sin el punto final, porque el orquestador compara las partes
-    tal cual. En revisados sale la primera forma en que llegó cada sitio, para que calce con las partes de los
-    hallazgos de la misma visita. En sin_revisar salen todas las formas en que llegó y la de _limpio(), así ningún
-    hallazgo de ese sitio se cierra sin revisarlo por venir en otra forma. Solo cuentan los nombres DNS (_limpio). En
-    revisados, lo que no es un nombre se salta. En sin_revisar no: si algo no se puede leer, no se sabe qué sitio quedó
-    sin revisar y ninguno cuenta como revisado. `codigos` son los de la fuente, y sin ninguno lanza ValueError.
+    sin_revisar. Los nombres se comparan en minúsculas y sin el punto final, y solo cuentan los nombres DNS (_limpio).
+    En revisados, lo que no es un nombre se salta. En sin_revisar no: si algo no se puede leer, no se sabe qué sitio
+    quedó sin revisar y ninguno cuenta como revisado. `codigos` son los de la fuente, y sin ninguno lanza ValueError.
+    En revisados y en sin_revisar cada sitio sale en todas las formas en que llegó, en la de _limpio() y en esa con el
+    punto final (_formas). El orquestador compara las partes tal cual: un hallazgo con su sitio en una de esas formas
+    calza, y en la forma de _limpio() calza siempre. Uno guardado en otra corrida con otras mayúsculas no calza: si su
+    sitio va en sin_revisar se cierra sin revisarlo, y con sin_revisar None se queda abierto aunque se haya revisado.
     - sin_revisar vacío: (None, None, []), revisó todo. Es lo único que lo dice.
     - sin_revisar None, que no sabe cuáles quedaron sin revisar (contrato.Resultado): con revisados,
       (revisados, None, []), una corrida parcial en la que el orquestador cierra solo lo de revisados. Sin revisados,
@@ -329,11 +350,11 @@ def cobertura(revisados, sin_revisar, codigos):
     falta, ilegible = _sitios(sin_revisar)
     if ilegible:
         return None, None, codigos
-    hechos = [s[0] for k, s in sorted(_sitios(revisados)[0].items()) if k not in falta]
+    hechos = {k: s for k, s in _sitios(revisados)[0].items() if k not in falta}
     if sin_revisar is None:
-        return (hechos, None, []) if hechos else (None, None, codigos)
+        return (_formas(hechos), None, []) if hechos else (None, None, codigos)
     if not falta:
         return None, None, []
     if not hechos:
         return None, None, codigos
-    return hechos, [f for k in sorted(falta) for f in dict.fromkeys(falta[k] + [k])], []
+    return _formas(hechos), _formas(falta), []

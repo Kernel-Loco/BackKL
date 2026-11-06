@@ -38,6 +38,11 @@ def borde_de(nombre, **otras):
     return borde.detectar(cabeceras=respuesta(nombre)['cabeceras'], **otras)
 
 
+def y_punto(*nombres):
+    """Lo que cobertura() da de cada nombre ya limpio: él y él con el punto final."""
+    return [f for n in nombres for f in (n, n + '.')]
+
+
 def se_cierra(partes, revisados, sin_revisar):
     """Si el orquestador cierra un hallazgo abierto que no volvió a salir, por sus partes (#23,
     cirdan/orquestador/__init__.py:415, sin sin_cobertura): las compara tal cual."""
@@ -169,6 +174,18 @@ class Senales(unittest.TestCase):
         lejos = 'c=CIRDAN_FAKE_' + 'x' * borde.MAX_COOKIES + ', __cf_bm=CIRDAN_FAKE_a'
         self.assertEqual(borde.por_cabeceras({'Set-Cookie': lejos}), {})
         self.assertEqual(borde.por_cabeceras({'Via': '1.1 ' + 'x' * borde.MAX_VALOR + ' (CloudFront)'}), {})
+
+    def test_13_el_tope_de_set_cookie_es_de_toda_la_respuesta(self):
+        # Con un tope por cada Set-Cookie, 99 de 64 KiB tomaban más de 1 s. MAX_COOKIES es entre todas.
+        cf = ('Set-Cookie', '__cf_bm=CIRDAN_FAKE_a; path=/')
+        llena = ('Set-Cookie', 'c=CIRDAN_FAKE_' + 'x' * borde.MAX_COOKIES)
+        self.assertEqual(borde.por_cabeceras([llena, cf]), {})
+        self.assertEqual(borde.por_cabeceras([cf, llena]), {'cloudflare': ['set-cookie:__cf_bm']})
+        media = ('Set-Cookie', 'c=CIRDAN_FAKE_' + 'x' * (borde.MAX_COOKIES // 2))
+        self.assertEqual(borde.por_cabeceras([media, cf]), {'cloudflare': ['set-cookie:__cf_bm']})
+        self.assertEqual(borde.por_cabeceras([media, media, cf]), {})
+        # Las demás cabeceras siguen con MAX_VALOR cada una.
+        self.assertEqual(borde.por_cabeceras([llena, ('cf-ray', 'x' * borde.MAX_VALOR)]), {'cloudflare': ['cf-ray']})
 
 
 class Detectar(unittest.TestCase):
@@ -350,7 +367,7 @@ class Cobertura(unittest.TestCase):
 
     def test_3_cobertura_parcial_por_sitio(self):
         revisados, sin_revisar, sin_cobertura = borde.cobertura([SITIO, OTRO, ''], [OTRO], CODIGOS)
-        self.assertEqual((revisados, sin_revisar, sin_cobertura), ([SITIO], [OTRO], []))
+        self.assertEqual((revisados, sin_revisar, sin_cobertura), (y_punto(SITIO), y_punto(OTRO), []))
         res = Resultado(DOMINIO, 'prueba', revisados=revisados, sin_revisar=sin_revisar,
                         activos=[Activo('subdomain', SITIO)], hallazgos=[hallazgo(partes=[SITIO])])
         self.assertEqual(validar(res, codigos=CODIGOS), [])
@@ -370,8 +387,10 @@ class Cobertura(unittest.TestCase):
                          (None, None, CODIGOS))
         # Salen como llegaron, para que calcen con las partes de los hallazgos de la misma visita.
         tienda = 'Tienda.Acme-Demo.mx'
-        self.assertEqual(borde.cobertura([SITIO, tienda.upper()], [tienda], CODIGOS), ([SITIO], [tienda, OTRO], []))
-        self.assertEqual(borde.cobertura([SITIO.upper(), SITIO], [OTRO], CODIGOS), ([SITIO.upper()], [OTRO], []))
+        self.assertEqual(borde.cobertura([SITIO, tienda.upper()], [tienda], CODIGOS),
+                         (y_punto(SITIO), [tienda] + y_punto(OTRO), []))
+        self.assertEqual(borde.cobertura([SITIO.upper(), SITIO], [OTRO], CODIGOS),
+                         ([SITIO.upper()] + y_punto(SITIO), y_punto(OTRO), []))
 
     def test_6_un_sin_revisar_que_no_se_puede_leer_no_cuenta_como_revisado(self):
         # Si no se sabe qué sitio quedó sin revisar, ninguno cuenta como revisado: nunca 'revisó todo'.
@@ -382,11 +401,16 @@ class Cobertura(unittest.TestCase):
     def test_7_sin_revisar_none_es_que_no_las_sabe(self):
         # contrato.Resultado: sin_revisar None es 'no las sabe', nunca 'revisó todo'. Con revisados es una corrida
         # parcial en la que el orquestador cierra solo lo de revisados.
-        for nada in (None, [], [7, ''], 'no es lista'):
+        for nada in (None, [], [7, ''], 'no es un nombre'):
             self.assertEqual(borde.cobertura(nada, None, CODIGOS), (None, None, CODIGOS), nada)
+        # Un texto es un sitio, pero lo que no es lista, tupla o conjunto no se lee aunque traiga un sitio.
+        self.assertEqual(borde.cobertura(SITIO, None, CODIGOS), (y_punto(SITIO), None, []))
+        for no_es_lista in (iter([SITIO]), {SITIO: True}):
+            self.assertEqual(borde.cobertura(no_es_lista, None, CODIGOS), (None, None, CODIGOS), no_es_lista)
         blog = 'blog.' + DOMINIO
         revisados, sin_revisar, sin_cobertura = borde.cobertura([SITIO, OTRO, SITIO.upper()], None, CODIGOS)
-        self.assertEqual((revisados, sin_revisar, sin_cobertura), ([OTRO, SITIO], None, []))
+        self.assertEqual((revisados, sin_revisar, sin_cobertura), (y_punto(OTRO) + [SITIO, SITIO.upper(), SITIO + '.'],
+                                                                   None, []))
         self.assertTrue(se_cierra([SITIO], revisados, sin_revisar))
         self.assertFalse(se_cierra([blog], revisados, sin_revisar))
         res = Resultado(DOMINIO, 'prueba', revisados=revisados, sin_revisar=sin_revisar,
@@ -398,24 +422,65 @@ class Cobertura(unittest.TestCase):
         # revisar su sitio.
         tienda = 'Tienda.Acme-Demo.mx'
         revisados, sin_revisar, _ = borde.cobertura([SITIO], [tienda, OTRO + '.', tienda], CODIGOS)
-        self.assertEqual((revisados, sin_revisar), ([SITIO], [tienda, OTRO + '.', OTRO]))
+        self.assertEqual((revisados, sin_revisar), (y_punto(SITIO), [tienda, OTRO + '.', OTRO]))
         for partes in ([tienda], [OTRO], [OTRO + '.'], [SITIO, OTRO]):
             self.assertFalse(se_cierra(partes, revisados, sin_revisar), partes)
         self.assertTrue(se_cierra([SITIO], revisados, sin_revisar))
         res = Resultado(DOMINIO, 'prueba', revisados=revisados, sin_revisar=sin_revisar,
                         activos=[Activo('subdomain', SITIO)], hallazgos=[hallazgo(partes=[SITIO])])
         self.assertEqual(validar(res, codigos=CODIGOS), [])
+        # Con el sitio en una sola forma también sale con el punto final: un hallazgo guardado así no se cierra.
+        revisados, sin_revisar, _ = borde.cobertura([SITIO], [OTRO.upper()], CODIGOS)
+        self.assertEqual(sin_revisar, [OTRO.upper()] + y_punto(OTRO))
+        for partes in ([OTRO.upper()], [OTRO], [OTRO + '.']):
+            self.assertFalse(se_cierra(partes, revisados, sin_revisar), partes)
 
     def test_9_solo_nombres_dns(self):
         # Un NUL haría que validar rechace el resultado, y una URL o un puerto nunca calzan con las partes.
+        # Como contrato.NOMBRE_VALIDO: etiquetas de 1 a 63 sin guion al inicio ni al final, al menos dos, la última
+        # solo de letras, y hasta 253 caracteres sin el punto final.
+        largo = ('a' * 63 + '.') * 3 + 'b' * 58 + '.mx'
         for raro in (OTRO + '\x00', 'https://' + OTRO + '/', OTRO + ':443', OTRO + '/', ' ' + OTRO, OTRO + '\n',
-                     'tienda acme', '.' + OTRO, 'tienda..' + DOMINIO, 'tienda_1.' + DOMINIO, '.'):
+                     'tienda acme', '.' + OTRO, 'tienda..' + DOMINIO, 'tienda_1.' + DOMINIO, '.', '-', 'tienda',
+                     '-tienda.' + DOMINIO, 'tienda-.' + DOMINIO, 'a' * 64 + '.' + DOMINIO, 'b' + largo, OTRO + '..',
+                     'tienda.acme-demo.123'):
             self.assertEqual(borde.cobertura([SITIO, OTRO], [raro], CODIGOS), (None, None, CODIGOS), ascii(raro))
-            self.assertEqual(borde.cobertura([SITIO, raro], [OTRO], CODIGOS), ([SITIO], [OTRO], []), ascii(raro))
-            self.assertEqual(borde.por_cname([raro.replace(OTRO, 'acme.b-cdn.net')]), {}, ascii(raro))
-        # Mayúsculas, punto final y punycode sí son nombres.
+            self.assertEqual(borde.cobertura([SITIO, raro], [OTRO], CODIGOS), (y_punto(SITIO), y_punto(OTRO), []),
+                             ascii(raro))
+        self.assertEqual(borde.cobertura(['-'], ['a.mx'], CODIGOS), (None, None, CODIGOS))
+        # En la cadena CNAME, cada uno terminaría en un sufijo de Bunny si no se exigiera un nombre DNS.
+        for raro in (' acme.b-cdn.net', 'acme.b-cdn.net\n', '.acme.b-cdn.net', 'acme acme.b-cdn.net',
+                     '\x00acme.b-cdn.net', 'https://acme.b-cdn.net', 'acme..b-cdn.net', 'acme_1.b-cdn.net',
+                     'acme.b-cdn.net..', '-acme.b-cdn.net', 'acme-.b-cdn.net', 'a' * 64 + '.b-cdn.net',
+                     ('a' * 63 + '.') * 4 + 'b-cdn.net'):
+            self.assertEqual(borde.por_cname([raro]), {}, ascii(raro))
+        # Mayúsculas, punto final, punycode y los topes justos sí son nombres.
         self.assertEqual(borde.cobertura([SITIO], ['TIENDA.acme-demo.mx.', 'xn--tienda-9za.' + DOMINIO], CODIGOS),
-                         ([SITIO], ['TIENDA.acme-demo.mx.', OTRO, 'xn--tienda-9za.' + DOMINIO], []))
+                         (y_punto(SITIO), ['TIENDA.acme-demo.mx.',] + y_punto(OTRO) +
+                          y_punto('xn--tienda-9za.' + DOMINIO), []))
+        self.assertEqual(len(largo), 253)
+        self.assertEqual(borde.cobertura([SITIO], [largo + '.'], CODIGOS), (y_punto(SITIO), [largo + '.', largo], []))
+        self.assertEqual(borde.por_cname(['ACME.b-cdn.net.', 'a' * 63 + '.b-cdn.net']),
+                         {'bunny': ['a' * 63 + '.b-cdn.net', 'acme.b-cdn.net']})
+
+    def test_10_con_sin_revisar_none_revisados_lleva_todas_las_formas(self):
+        # Con sin_revisar None el orquestador cierra solo lo que tiene todas sus partes en revisados: un hallazgo
+        # arreglado y guardado con otra forma del nombre de su sitio también se cierra.
+        revisados, sin_revisar, _ = borde.cobertura([SITIO.upper()], None, CODIGOS)
+        self.assertEqual((revisados, sin_revisar), ([SITIO.upper()] + y_punto(SITIO), None))
+        for partes in ([SITIO.upper()], [SITIO], [SITIO + '.']):
+            self.assertTrue(se_cierra(partes, revisados, sin_revisar), partes)
+        self.assertFalse(se_cierra([OTRO], revisados, sin_revisar))
+        res = Resultado(DOMINIO, 'prueba', revisados=revisados, sin_revisar=sin_revisar,
+                        activos=[Activo('subdomain', SITIO)], hallazgos=[hallazgo(partes=[SITIO + '.'])])
+        self.assertEqual(validar(res, codigos=CODIGOS), [])
+        # Las llaves de revisados y sin_revisar no se cruzan, así que sus formas tampoco.
+        revisados, sin_revisar, _ = borde.cobertura([SITIO, OTRO + '.', SITIO.upper()], [OTRO.upper()], CODIGOS)
+        self.assertEqual((revisados, sin_revisar),
+                         ([SITIO, SITIO.upper(), SITIO + '.'], [OTRO.upper()] + y_punto(OTRO)))
+        res = Resultado(DOMINIO, 'prueba', revisados=revisados, sin_revisar=sin_revisar,
+                        activos=[Activo('subdomain', SITIO)], hallazgos=[hallazgo(partes=[SITIO])])
+        self.assertEqual(validar(res, codigos=CODIGOS), [])
 
 
 class Entradas(unittest.TestCase):
@@ -434,6 +499,20 @@ class Entradas(unittest.TestCase):
         for raro in (7, 3.5, object(), b'\xff', {'a': 1}):
             self.assertIsNone(borde.detectar(cnames=raro, ips=raro, asns=raro, cabeceras=raro), raro)
             self.assertIsNone(borde.reto(403, raro, raro), raro)
+
+    def test_3_un_iterador_que_falla_o_es_largo(self):
+        # Un TypeError al recorrer da [], como lo que no se puede recorrer.
+        self.assertIsNone(borde.detectar(asns=map(int, ['13335', None])))
+        self.assertIsNone(borde.detectar(ips=map(str.strip, ['104.16.0.1', 7])))
+        self.assertIsNone(borde.reto(403, map(tuple, [7])))
+        self.assertIsNone(borde.reto(200, map(tuple, [('cf-mitigated', 'challenge'), 7])))
+        # Con el tope se leen exactamente esos, ni uno más.
+        ips = iter(['104.16.0.%d' % i for i in range(1, 101)])
+        self.assertEqual(len(borde.por_rangos(ips)['cloudflare']), borde.MAX_IPS)
+        self.assertEqual(next(ips), '104.16.0.%d' % (borde.MAX_IPS + 1))
+        cnames = iter(['n%d.b-cdn.net' % i for i in range(borde.MAX_CNAMES + 5)])
+        self.assertEqual(len(borde.por_cname(cnames)['bunny']), borde.MAX_CNAMES)
+        self.assertEqual(next(cnames), 'n%d.b-cdn.net' % borde.MAX_CNAMES)
 
 
 class Datos(unittest.TestCase):
@@ -459,7 +538,8 @@ class Datos(unittest.TestCase):
                 importados |= {a.name for a in nodo.names}
             elif isinstance(nodo, ast.ImportFrom):
                 importados |= {'%s.%s' % (nodo.module, a.name) for a in nodo.names}
-        self.assertEqual(importados, {'ipaddress', 're', 'cirdan.recolectores.geoip', 'cirdan.recolectores.shodan'})
+        self.assertEqual(importados, {'ipaddress', 're', 'cirdan.recolectores.geoip', 'cirdan.recolectores.shodan',
+                                      'cirdan.recolectores.contrato.NOMBRE_VALIDO'})
 
     def test_4_respuestas_armadas_con_valores_falsos(self):
         archivos = sorted(FIXTURES.glob('*.json'))
