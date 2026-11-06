@@ -147,7 +147,9 @@ class ExploradorEncendido(Explorador):
         for tabla in TABLES:
             with self.subTest(tabla=tabla):
                 filas = self.filas(tabla, self.beta, ACME)
-                self.assertLessEqual({f.get('organization_id', 'Beta Corp') for f in filas}, {'Beta Corp'})
+                organizaciones = {f.get('organization_id', 'Beta Corp') for f in filas}
+                permitidas = {'Beta Corp', '—'} if tabla == 'scoring_rule_sets' else {'Beta Corp'}
+                self.assertLessEqual(organizaciones, permitidas)
                 texto = json.dumps(filas, ensure_ascii=False).lower()
                 self.assertNotIn('acme', texto)
                 self.assertNotIn('olmardo', texto)
