@@ -25,6 +25,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/010_motivo_correccion_score.sql` | Agrega `correction` a los motivos de `domain_scores.reason`, para una fila que corrige un score guardado mal sin escaneo ni cambio de reglas (RC-72) |
 | `migraciones/011_mapeo_marcos.sql` | Tabla `scoring_rule_framework_mappings` con el mapeo de las 30 reglas a MITRE ATT&CK (Enterprise v19), ISO/IEC 27001:2022 y CIS Controls v8.1 (identificadores, nombres breves y enlaces), con la FK de cada mapeo a su texto de `scoring_rule_texts` (#68, RC-131). Catálogo global sin RLS, `cirdan_app` solo lee. No se puede correr dos veces: la segunda falla en el CREATE TABLE y se deshace sin cambiar nada |
 | `migraciones/012_garantia_mapeo_marcos.sql` | FK diferida de `scoring_rule_texts.code` al mapeo de la 011, para que todo texto (y toda regla) tenga su mapeo siempre y no solo al aplicar la 011, y `created_at` y `updated_at` en el mapeo. Corrige el mapeo de la 011: técnica de ATT&CK solo con relación directa, enlaces fijos a la v19, 11 controles de ISO y CIS en 10 reglas y el comentario de la tabla (#68, RC-131). Necesita la 011 |
+| `migraciones/013_pesos_por_organizacion.sql` | Conserva v1 como plantilla global y habilita juegos versionados de pesos/reglas por organización con RLS (#32) |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -89,6 +90,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/010_motivo_correccion_score.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/011_mapeo_marcos.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/012_garantia_mapeo_marcos.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/013_pesos_por_organizacion.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -231,7 +233,7 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT column_name FROM
 
 Debe devolver ambas columnas. En una base nueva, `cargar_cirdan.sh` aplica 009 junto con las migraciones anteriores.
 
-Para que el score guardado de los dominios de Acme sea el que dan sus hallazgos (RC-72) van la migración 010 y las semillas 009 y 010. No cambian la API, así que el orden con la API no importa. La 010 agrega `correction` a los motivos de `domain_scores.reason`. La 009 agrega el score que da el motor con `reason = correction`, porque `domain_scores` y `score_contributions` no aceptan UPDATE. La semilla 010 corrige las filas de la primera versión de la 009, que decían `rules_change`, `artefacto_ml_no_disponible` y una hora del 28 oct que no eran ciertos. Apaga el trigger de solo inserción de toda la tabla dentro de su transacción, y su UPDATE solo toca esas tres filas, con los valores viejos exactos en el WHERE. Deja en `audit_log` una fila `score.corrected` por cada una con lo que decía antes y falla si alguna queda sin corregir (desviación 16):
+Para que el score guardado de los dominios de Acme sea el que dan sus hallazgos (RC-72) van la migración 010 y las semillas 009 y 010. No cambian la API, así que el orden con la API no importa. La 013 agrega `correction` a los motivos de `domain_scores.reason`. La 009 agrega el score que da el motor con `reason = correction`, porque `domain_scores` y `score_contributions` no aceptan UPDATE. La semilla 010 corrige las filas de la primera versión de la 009, que decían `rules_change`, `artefacto_ml_no_disponible` y una hora del 28 oct que no eran ciertos. Apaga el trigger de solo inserción de toda la tabla dentro de su transacción, y su UPDATE solo toca esas tres filas, con los valores viejos exactos en el WHERE. Deja en `audit_log` una fila `score.corrected` por cada una con lo que decía antes y falla si alguna queda sin corregir (desviación 16):
 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/010_motivo_correccion_score.sql
@@ -291,7 +293,13 @@ Cómo se agrega una huella:
 3. Si lo pruebas antes en tu PC, que sea en una base que puedas perder: cargar `db/` desde cero en `cirdan-pg16` pide `docker compose down -v`, que borra tu base.
 
 La huella no dice que el SQL esté bien, solo que con ese archivo la base cargó y pasó la prueba 15. Lo que la prueba 15 no ve lo revisa quien revisa el PR: un texto mal escrito, un dato del mapeo equivocado que cumple los CHECK (un control de ISO o una salvaguarda de CIS que no existe en su edición, o una técnica cuya descripción no nombra lo que detecta la regla), un UPDATE que toca más filas de las que debía, un `updated_at` que no se movió, un `created_at` cambiado, un UPDATE del mapeo o el texto o el mapeo de una regla nueva en una semilla en vez de una migración, y un meta-comando de `psql` o una sentencia (un UPDATE, un COPY) que no cambió nada. Una función que otro objeto usa sin llamarla con paréntesis (un `CREATE OPERATOR` o un `CREATE AGGREGATE`) no hace entrar al archivo que usa ese objeto. Lo cubre la prueba 15 del CI. Un archivo que solo llama a una función de otro entra si esa función se creó en un archivo que nombra los textos o el mapeo. Si se creó en uno que solo trae SQL dinámico, ese archivo entra y el que la llama no, y lo cubre la prueba 15 del CI.
+Para #32, la migración 013 conserva el juego v1 como plantilla global de solo lectura y permite juegos activos por organización. Debe aplicarse antes de desplegar el `PUT /api/v1/scoring/weights`; en bases existentes:
 
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/013_pesos_por_organizacion.sql
+```
+
+La 013 agrega `organization_id` nullable a `scoring_rule_sets`, aplica RLS a los juegos y sus reglas, crea índices únicos para versiones/activo por scope y da a `cirdan_app` solo INSERT de versiones/reglas y UPDATE de `is_active`. Los scores históricos no se modifican. Para verificar: `SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r' AND relrowsecurity AND relforcerowsecurity;` debe dar 20; `SELECT count(*) FROM pg_policies WHERE schemaname = 'public';` debe dar 20. En una base nueva, `cargar_cirdan.sh` aplica 013 en orden.
 ## Decisiones y desviaciones respecto al DBML
 
 Las desviaciones 1, 2 y 3 se pasaron al DBML el 9 oct, así que hoy la base y el DBML ya coinciden en esos tres puntos. Se dejan en la lista para explicar por qué cambió el modelo.

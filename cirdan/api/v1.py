@@ -8,12 +8,13 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import Response
+from psycopg.types.json import Jsonb
 
 from cirdan import orquestador
 from cirdan.auth.deps import Session, current_session, require_roles
 from cirdan.orquestador.txt import esperado as txt_esperado
-from cirdan.db import transaction
-from cirdan.score import criterio, motor, plan as plan_accion
+from cirdan.db import audit, transaction
+from cirdan.score import configuracion, criterio, motor, plan as plan_accion
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
@@ -324,7 +325,7 @@ def _contexto_plan(session, fqdn):
         if score:
             rule_set_id, method, parcial = score['rule_set_id'], score['method'], score['partial_coverage']
         else:
-            active = conn.execute('SELECT id::text FROM scoring_rule_sets WHERE is_active').fetchone()
+            active = configuracion.juego_activo(conn, session.org_id)
             if not active:
                 raise HTTPException(409, 'El dominio aún no tiene un juego de reglas activo')
             rule_set_id, method, parcial = active['id'], 'rules', False
@@ -472,7 +473,7 @@ def finding_explanation(finding_id: str, session: Session = Depends(current_sess
 @router.get('/scoring/weights', summary='Juego de reglas activo: pesos, bandas, piso, umbral y reglas')
 def scoring_weights(session: Session = Depends(current_session)):
     with transaction(session.org_id) as conn:
-        rs = conn.execute('SELECT id, version, category_weights, activated_at, validated_by FROM scoring_rule_sets WHERE is_active').fetchone()
+        rs = configuracion.juego_activo(conn, session.org_id)
         rules = conn.execute('SELECT r.code, r.category, r.base_severity, r.weight, r.max_penalty, '
                              't.title, t.meaning, t.recommendation FROM scoring_rules r '
                              'JOIN scoring_rule_texts t ON t.code = r.code '
@@ -485,6 +486,63 @@ def scoring_weights(session: Session = Depends(current_session)):
                   'counts_statuses': list(criterio.ESTADOS_VIGENTES)},
         'alert_threshold_default': criterio.UMBRAL_ALERTA,
         'rules': [{**r, 'weight': float(r['weight']), 'max_penalty': float(r['max_penalty'])} for r in rules],
+    }
+
+
+@router.put('/scoring/weights', summary='Crea una nueva versión de pesos para la organización y recalcula sus scores')
+def update_scoring_weights(payload: dict[str, object] = Body(...),
+                           session: Session = Depends(require_roles('admin'))):
+    try:
+        pesos = configuracion.validar_pesos(payload.get('category_weights'))
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
+    with transaction(session.org_id) as conn:
+        conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 32))', (str(session.org_id),))
+        anterior = configuracion.juego_activo(conn, session.org_id)
+        if not anterior:
+            raise HTTPException(409, 'No hay un juego de reglas global para usar como plantilla')
+        pesos_anteriores = {categoria: float(valor)
+                            for categoria, valor in anterior['category_weights'].items()}
+        if pesos == pesos_anteriores:
+            return {
+                'rule_set_version': anterior['version'],
+                'category_weights': pesos_anteriores,
+                'recalculated_domains': 0,
+                'unchanged': True,
+            }
+
+        version_local = conn.execute(
+            'SELECT COALESCE(MAX(version), 0) AS version FROM scoring_rule_sets WHERE organization_id = %s',
+            (session.org_id,),
+        ).fetchone()['version']
+        version = max(int(anterior['version']), int(version_local)) + 1
+        conn.execute('UPDATE scoring_rule_sets SET is_active = false '
+                     'WHERE organization_id = %s AND is_active', (session.org_id,))
+        nuevo = conn.execute(
+            'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, activated_at) '
+            'VALUES (%s, %s, %s, true, %s, now()) RETURNING id::text',
+            (session.org_id, version, Jsonb(pesos), session.email),
+        ).fetchone()['id']
+        conn.execute(
+            'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
+            'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
+            (nuevo, anterior['id']),
+        )
+        try:
+            recalculados = configuracion.recalcular_scores(conn, session.org_id, nuevo, pesos)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        audit(conn, session.org_id, 'scoring.weights_changed', user_id=session.user_id,
+              entity_type='scoring_rule_set', entity_id=nuevo,
+              details={'version': version, 'previous_version': anterior['version'],
+                       'category_weights': pesos, 'recalculated_domains': recalculados})
+
+    return {
+        'rule_set_version': version,
+        'category_weights': pesos,
+        'recalculated_domains': recalculados,
+        'unchanged': False,
     }
 
 

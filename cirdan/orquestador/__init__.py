@@ -38,7 +38,7 @@ from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar
 from cirdan.recolectores.contrato import Resultado, ejecutar, siguiente_estado
-from cirdan.score import motor
+from cirdan.score import configuracion, motor
 
 log = logging.getLogger(__name__)
 
@@ -597,7 +597,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         domain = c.execute('SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
         if not domain:
             raise ValueError('dominio no encontrado para el escaneo: %s' % fqdn)
-        rule_set = c.execute('SELECT id::text, category_weights FROM scoring_rule_sets WHERE is_active').fetchone()
+        rule_set = configuracion.juego_activo(c, org)
         if not rule_set:
             raise RuntimeError('no hay un juego de reglas activo')
         reglas = {r['code']: r for r in c.execute(
