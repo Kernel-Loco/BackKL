@@ -1,0 +1,28 @@
+{
+  "nota": "Respuesta armada a mano para las pruebas, no grabada de ningún dominio. Valores falsos.",
+  "descripcion": "Página normal servida por CloudFront",
+  "estado": 200,
+  "cabeceras": [
+    [
+      "Content-Type",
+      "text/html; charset=UTF-8"
+    ],
+    [
+      "X-Cache",
+      "Hit from cloudfront"
+    ],
+    [
+      "Via",
+      "1.1 0000000000000000.cloudfront.net (CloudFront)"
+    ],
+    [
+      "X-Amz-Cf-Pop",
+      "QRO50-C1"
+    ],
+    [
+      "X-Amz-Cf-Id",
+      "CIRDAN_FAKE_id=="
+    ]
+  ],
+  "cuerpo": "<html><head><title>Inicio</title></head><body>Hola</body></html>"
+}

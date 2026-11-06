@@ -1,0 +1,20 @@
+{
+  "nota": "Respuesta armada a mano para las pruebas, no grabada de ningún dominio. Valores falsos.",
+  "descripcion": "Bloqueo de Cloudflare sin cabecera de reto, solo con su página",
+  "estado": 403,
+  "cabeceras": [
+    [
+      "Content-Type",
+      "text/html; charset=UTF-8"
+    ],
+    [
+      "Server",
+      "cloudflare"
+    ],
+    [
+      "CF-RAY",
+      "0000000000000001-QRO"
+    ]
+  ],
+  "cuerpo": "<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head><body><div id=\"cf-error-details\"><h1>Sorry, you have been blocked</h1></div></body></html>"
+}
