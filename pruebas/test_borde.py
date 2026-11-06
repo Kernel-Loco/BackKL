@@ -38,6 +38,18 @@ def borde_de(nombre, **otras):
     return borde.detectar(cabeceras=respuesta(nombre)['cabeceras'], **otras)
 
 
+def se_cierra(partes, revisados, sin_revisar):
+    """Si el orquestador cierra un hallazgo abierto que no volvió a salir, por sus partes (#23,
+    cirdan/orquestador/__init__.py:415, sin sin_cobertura): las compara tal cual."""
+    if revisados is None:
+        return True
+    if not partes:
+        return False
+    if sin_revisar is None:
+        return set(partes) <= set(revisados)
+    return not set(partes) & set(sin_revisar)
+
+
 def hallazgo(codigo='server_version_disclosed', partes=()):
     titulo = 'Versión del servidor a la vista'
     return Hallazgo(codigo, 'low', SITIO, titulo, {'title': titulo},
@@ -143,6 +155,20 @@ class Senales(unittest.TestCase):
                          {'akamai': ['x-akamai-transformed'], 'imperva': ['x-cdn']})
         self.assertEqual(borde.reto(200, {'x-amzn-waf-action': 'BLOCK'})['proveedor'], 'aws_waf')
         self.assertEqual(borde.por_cname(['e0000.a.aKamaiedge.net']), {})
+        # En el cuerpo tampoco: str.lower() pasaría la K de Kelvin (U+212A) a 'k'.
+        self.assertIsNone(borde.reto(403, {}, '<title>Vercel Security ChecKpoint</title>'))
+        self.assertEqual(borde.reto(403, {}, '<title>VERCEL SECURITY CHECKPOINT</title>')['proveedor'], 'vercel')
+
+    def test_12_cookies_juntas_despues_de_8_kib(self):
+        # Un dict de requests junta todas las Set-Cookie: la del borde puede llegar después de MAX_VALOR caracteres.
+        relleno = ', '.join('c%d=CIRDAN_FAKE_%s; path=/' % (i, 'x' * 100) for i in range(100))
+        self.assertGreater(len(relleno), borde.MAX_VALOR)
+        juntas = relleno + ', __cf_bm=CIRDAN_FAKE_a; path=/'
+        self.assertEqual(borde.por_cabeceras({'Set-Cookie': juntas}), {'cloudflare': ['set-cookie:__cf_bm']})
+        # Más allá de MAX_COOKIES ya no se mira, como dice el docstring, y las demás cabeceras siguen con MAX_VALOR.
+        lejos = 'c=CIRDAN_FAKE_' + 'x' * borde.MAX_COOKIES + ', __cf_bm=CIRDAN_FAKE_a'
+        self.assertEqual(borde.por_cabeceras({'Set-Cookie': lejos}), {})
+        self.assertEqual(borde.por_cabeceras({'Via': '1.1 ' + 'x' * borde.MAX_VALOR + ' (CloudFront)'}), {})
 
 
 class Detectar(unittest.TestCase):
@@ -192,7 +218,7 @@ class Detectar(unittest.TestCase):
     def test_6_el_reto_tambien_marca_el_borde(self):
         for nombre, proveedor in (('cloudflare_reto_403', 'cloudflare'), ('sucuri_bloqueo_403', 'sucuri'),
                                   ('imperva_bloqueo_403', 'imperva'), ('akamai_bloqueo_403', 'akamai'),
-                                  ('aws_waf_reto_202', 'aws_waf')):
+                                  ('aws_waf_reto_202', 'aws_waf'), ('vercel_reto_429', 'vercel')):
             self.assertEqual(borde_de(nombre)['proveedores'][0]['codigo'], proveedor, nombre)
 
 
@@ -205,6 +231,7 @@ class Retos(unittest.TestCase):
                  'imperva_bloqueo_403': ('imperva', 403, 'página de reto o bloqueo'),
                  'akamai_bloqueo_403': ('akamai', 403, 'página de reto o bloqueo'),
                  'aws_waf_reto_202': ('aws_waf', 202, 'cabecera x-amzn-waf-action'),
+                 'vercel_reto_429': ('vercel', 429, 'cabecera x-vercel-mitigated'),
                  'limite_429': (None, 429, 'límite de peticiones'),
                  'sucuri_limite_429': (None, 429, 'límite de peticiones')}   # sus cabeceras no dicen de quién es
         for nombre, (proveedor, estado, motivo) in casos.items():
@@ -266,6 +293,12 @@ class Retos(unittest.TestCase):
         for nada in (None, {}, 'reto'):
             self.assertEqual(borde.aviso('web', SITIO, nada), 'web: www.acme-demo.mx respondió con un reto o bloqueo: '
                                                               'sus tecnologías quedan sin cobertura, no 0', nada)
+        # Un proveedor que no es texto no lanza TypeError.
+        for raro in ([], {}, 7):
+            datos = {'proveedor': raro, 'estado': 403, 'motivo': borde.MOTIVO_PAGINA}
+            self.assertEqual(borde.aviso('web', SITIO, datos),
+                             'web: www.acme-demo.mx respondió con un reto o bloqueo (403, página de reto o bloqueo): '
+                             'sus tecnologías quedan sin cobertura, no 0', raro)
 
     def test_8_un_429_es_un_limite_y_las_cabeceras_del_cdn_no_dicen_de_quien(self):
         # Las cabeceras del CDN vienen en toda respuesta que pasa por él, también en un 429 del propio sitio.
@@ -273,13 +306,38 @@ class Retos(unittest.TestCase):
             self.assertEqual(borde.reto(429, cabeceras, 'Too Many Requests'),
                              {'proveedor': None, 'estado': 429, 'motivo': borde.MOTIVO_LIMITE}, cabeceras)
         self.assertEqual(borde.reto(429, {'cf-mitigated': 'challenge'}),
-                         {'proveedor': 'cloudflare', 'estado': 429, 'motivo': borde.MOTIVO_LIMITE})
+                         {'proveedor': 'cloudflare', 'estado': 429, 'motivo': 'cabecera cf-mitigated'})
+
+    def test_9_un_script_que_va_en_cualquier_pagina_no_es_marca(self):
+        # Imperva mete /_Incapsula_Resource en las páginas del sitio y AwsWafIntegration es el SDK dentro de la
+        # aplicación: un 403 o un 503 del propio sitio con ellos no es un reto.
+        self.assertEqual({m for _, m in borde.MARCAS} & {'_incapsula_resource', 'awswafintegration'}, set())
+        for script in ('<script src="/_Incapsula_Resource?SWJIYLWA=0000"></script>',
+                       '<script>AwsWafIntegration.getToken()</script>'):
+            pagina = '<html><head><title>Sin permiso</title>%s</head><body>No</body></html>' % script
+            for estado in (403, 503):
+                self.assertIsNone(borde.reto(estado, {'Server': 'nginx'}, pagina), (estado, script))
+
+    def test_10_con_un_429_gana_la_cabecera_de_reto(self):
+        datos = reto_de('vercel_reto_429')
+        self.assertEqual(borde.aviso('web', SITIO, datos),
+                         'web: www.acme-demo.mx respondió con un reto o bloqueo de Vercel (429, cabecera '
+                         'x-vercel-mitigated): sus tecnologías quedan sin cobertura, no 0')
+        # Sin la cabecera de reto sigue como límite de peticiones, y el proveedor solo sale por una marca.
+        r = respuesta('vercel_reto_429')
+        sin = [(n, v) for n, v in r['cabeceras'] if n.lower() != 'x-vercel-mitigated']
+        self.assertEqual(borde.reto(429, sin, r['cuerpo']),
+                         {'proveedor': 'vercel', 'estado': 429, 'motivo': borde.MOTIVO_LIMITE})
+        self.assertEqual(borde.reto(429, sin, 'Too Many Requests'),
+                         {'proveedor': None, 'estado': 429, 'motivo': borde.MOTIVO_LIMITE})
 
 
 class Cobertura(unittest.TestCase):
-    def test_1_todo_revisado(self):
+    def test_1_todo_revisado_solo_con_sin_revisar_vacio(self):
         self.assertEqual(borde.cobertura([SITIO, OTRO], [], CODIGOS), (None, None, []))
-        self.assertEqual(borde.cobertura([], None, CODIGOS), (None, None, []))
+        self.assertEqual(borde.cobertura([], [], CODIGOS), (None, None, []))   # la visita no tenía sitios
+        self.assertEqual(borde.cobertura(None, (), CODIGOS), (None, None, []))
+        self.assertEqual(borde.cobertura([], None, CODIGOS), (None, None, CODIGOS))   # no sabe cuáles: test_7
 
     def test_2_todo_con_reto_es_sin_cobertura_y_no_0_tecnologias(self):
         revisados, sin_revisar, sin_cobertura = borde.cobertura([], [SITIO], CODIGOS)
@@ -312,7 +370,7 @@ class Cobertura(unittest.TestCase):
                          (None, None, CODIGOS))
         # Salen como llegaron, para que calcen con las partes de los hallazgos de la misma visita.
         tienda = 'Tienda.Acme-Demo.mx'
-        self.assertEqual(borde.cobertura([SITIO, tienda.upper()], [tienda], CODIGOS), ([SITIO], [tienda], []))
+        self.assertEqual(borde.cobertura([SITIO, tienda.upper()], [tienda], CODIGOS), ([SITIO], [tienda, OTRO], []))
         self.assertEqual(borde.cobertura([SITIO.upper(), SITIO], [OTRO], CODIGOS), ([SITIO.upper()], [OTRO], []))
 
     def test_6_un_sin_revisar_que_no_se_puede_leer_no_cuenta_como_revisado(self):
@@ -320,6 +378,44 @@ class Cobertura(unittest.TestCase):
         for raro in ([OTRO, None], [7], [''], [Activo('subdomain', OTRO)], Activo('subdomain', OTRO),
                      b'tienda.acme-demo.mx', iter([OTRO]), ['tienda.acme-demо.mx']):
             self.assertEqual(borde.cobertura([SITIO, OTRO], raro, CODIGOS), (None, None, CODIGOS), ascii(raro))
+
+    def test_7_sin_revisar_none_es_que_no_las_sabe(self):
+        # contrato.Resultado: sin_revisar None es 'no las sabe', nunca 'revisó todo'. Con revisados es una corrida
+        # parcial en la que el orquestador cierra solo lo de revisados.
+        for nada in (None, [], [7, ''], 'no es lista'):
+            self.assertEqual(borde.cobertura(nada, None, CODIGOS), (None, None, CODIGOS), nada)
+        blog = 'blog.' + DOMINIO
+        revisados, sin_revisar, sin_cobertura = borde.cobertura([SITIO, OTRO, SITIO.upper()], None, CODIGOS)
+        self.assertEqual((revisados, sin_revisar, sin_cobertura), ([OTRO, SITIO], None, []))
+        self.assertTrue(se_cierra([SITIO], revisados, sin_revisar))
+        self.assertFalse(se_cierra([blog], revisados, sin_revisar))
+        res = Resultado(DOMINIO, 'prueba', revisados=revisados, sin_revisar=sin_revisar,
+                        activos=[Activo('subdomain', SITIO)], hallazgos=[hallazgo(partes=[SITIO])])
+        self.assertEqual(validar(res, codigos=CODIGOS), [])
+
+    def test_8_sin_revisar_lleva_todas_las_formas_del_sitio(self):
+        # El orquestador compara las partes tal cual: un hallazgo guardado con otra forma del nombre no se cierra sin
+        # revisar su sitio.
+        tienda = 'Tienda.Acme-Demo.mx'
+        revisados, sin_revisar, _ = borde.cobertura([SITIO], [tienda, OTRO + '.', tienda], CODIGOS)
+        self.assertEqual((revisados, sin_revisar), ([SITIO], [tienda, OTRO + '.', OTRO]))
+        for partes in ([tienda], [OTRO], [OTRO + '.'], [SITIO, OTRO]):
+            self.assertFalse(se_cierra(partes, revisados, sin_revisar), partes)
+        self.assertTrue(se_cierra([SITIO], revisados, sin_revisar))
+        res = Resultado(DOMINIO, 'prueba', revisados=revisados, sin_revisar=sin_revisar,
+                        activos=[Activo('subdomain', SITIO)], hallazgos=[hallazgo(partes=[SITIO])])
+        self.assertEqual(validar(res, codigos=CODIGOS), [])
+
+    def test_9_solo_nombres_dns(self):
+        # Un NUL haría que validar rechace el resultado, y una URL o un puerto nunca calzan con las partes.
+        for raro in (OTRO + '\x00', 'https://' + OTRO + '/', OTRO + ':443', OTRO + '/', ' ' + OTRO, OTRO + '\n',
+                     'tienda acme', '.' + OTRO, 'tienda..' + DOMINIO, 'tienda_1.' + DOMINIO, '.'):
+            self.assertEqual(borde.cobertura([SITIO, OTRO], [raro], CODIGOS), (None, None, CODIGOS), ascii(raro))
+            self.assertEqual(borde.cobertura([SITIO, raro], [OTRO], CODIGOS), ([SITIO], [OTRO], []), ascii(raro))
+            self.assertEqual(borde.por_cname([raro.replace(OTRO, 'acme.b-cdn.net')]), {}, ascii(raro))
+        # Mayúsculas, punto final y punycode sí son nombres.
+        self.assertEqual(borde.cobertura([SITIO], ['TIENDA.acme-demo.mx.', 'xn--tienda-9za.' + DOMINIO], CODIGOS),
+                         ([SITIO], ['TIENDA.acme-demo.mx.', OTRO, 'xn--tienda-9za.' + DOMINIO], []))
 
 
 class Entradas(unittest.TestCase):
@@ -330,6 +426,9 @@ class Entradas(unittest.TestCase):
         ip = ipaddress.ip_address('104.16.0.1')
         self.assertEqual(borde.detectar(ips=ip)['proveedores'][0]['ips'], ['104.16.0.1'])
         self.assertIsNone(borde.detectar(ips=ipaddress.ip_network('104.16.0.0/13')))   # una red no se recorre
+        # Un generador o un rango grande se leen hasta el tope, no enteros.
+        datos = borde.detectar(ips=ipaddress.ip_network('104.16.0.0/13').hosts(), asns=range(10 ** 12))
+        self.assertEqual(len(datos['proveedores'][0]['ips']), borde.MAX_IPS)
 
     def test_2_tipos_que_no_se_pueden_leer_no_lanzan(self):
         for raro in (7, 3.5, object(), b'\xff', {'a': 1}):
@@ -364,7 +463,7 @@ class Datos(unittest.TestCase):
 
     def test_4_respuestas_armadas_con_valores_falsos(self):
         archivos = sorted(FIXTURES.glob('*.json'))
-        self.assertEqual(len(archivos), 15)
+        self.assertEqual(len(archivos), 16)
         for archivo in archivos:
             datos = respuesta(archivo.stem)
             self.assertEqual(set(datos), {'nota', 'descripcion', 'estado', 'cabeceras', 'cuerpo'}, archivo.name)
