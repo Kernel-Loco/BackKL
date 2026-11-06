@@ -60,6 +60,7 @@ class JuegoActivo(unittest.TestCase):
     def test_busca_set_del_tenant_con_fallback_global(self):
         conn = ConexionSimulada()
         self.assertEqual(configuracion.juego_activo(conn, 'org-1'), 'resultado')
+        self.assertIn('activated_at', conn.sql)
         self.assertIn('organization_id = %s OR organization_id IS NULL', conn.sql)
         self.assertIn('ORDER BY CASE WHEN organization_id = %s THEN 0 ELSE 1 END', conn.sql)
         self.assertEqual(conn.parametros, ('org-1', 'org-1'))

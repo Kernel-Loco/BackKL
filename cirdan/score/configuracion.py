@@ -32,7 +32,7 @@ def validar_pesos(pesos):
 def juego_activo(conn, org):
     """Prefiere el set de la organización y usa el global como plantilla si aún no tiene uno."""
     return conn.execute(
-        'SELECT id::text, version, category_weights, validated_by, organization_id::text '
+        'SELECT id::text, version, category_weights, activated_at, validated_by, organization_id::text '
         'FROM scoring_rule_sets WHERE is_active AND (organization_id = %s OR organization_id IS NULL) '
         'ORDER BY CASE WHEN organization_id = %s THEN 0 ELSE 1 END, version DESC LIMIT 1',
         (org, org),
