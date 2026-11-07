@@ -1,4 +1,5 @@
-"""HTTPS con un plazo absoluto por petición y sin redirecciones, para rdap.py y shodan.py (#15b, RC-166).
+"""HTTPS con un plazo absoluto por petición y sin redirecciones, para rdap.py y shodan.py (#15b, RC-166) y para el
+TXT de verificación por DNS sobre HTTPS de orquestador/txt.py (#119, RC-236).
 
 urllib solo pone un timeout a cada operación del socket: getaddrinfo no tiene, y el connect de cada dirección, el
 handshake TLS, el envío y cada lectura de las cabeceras o del cuerpo tienen el timeout entero. Un servidor que contesta
@@ -170,18 +171,21 @@ def abrir(req, plazo, cronometro):
                                        _Https(plazo, cronometro)).open(req)
 
 
-def descargar(req, plazo, tope, cronometro=None):
+def descargar(req, plazo, tope, cronometro=None, tipo=None):
     """El cuerpo de la respuesta a `req`, que tiene que ser https, de a lo más `tope` bytes y todo antes de `plazo`.
 
     Lee por bloques (read1, una lectura del socket a la vez) y revisa el plazo antes de cada uno. Lanza PlazoVencido si
     se pasa, también cuando un timeout del socket llega con el plazo ya vencido, Redirigida con un 3xx y ValueError si
-    la respuesta pasa de `tope`. El HTTPError de un 4xx o un 5xx y el OSError de la red salen tal cual."""
+    la respuesta pasa de `tope` o si, con `tipo`, su Content-Type (sin parámetros) es otro. El HTTPError de un 4xx o un
+    5xx y el OSError de la red salen tal cual."""
     cronometro = cronometro or time.monotonic
     if req.type != 'https':
         raise ValueError('solo se pide por https: %s' % req.full_url)
     partes, total = [], 0
     try:
         with abrir(req, plazo, cronometro) as r:
+            if tipo is not None and r.headers.get_content_type() != tipo:
+                raise ValueError('respuesta de tipo %s, no %s' % (r.headers.get_content_type(), tipo))
             leer = r.read1 if hasattr(r, 'read1') else r.read
             while True:
                 if cronometro() > plazo:

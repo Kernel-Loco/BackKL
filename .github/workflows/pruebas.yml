@@ -77,11 +77,11 @@ jobs:
       # Transporte de test_rdap.py hace su certificado con cryptography, que el runner no trae: allí se salta y aquí
       # prueba el transporte, TLS incluido, con el OpenSSL de la imagen. TRANSPORTE_TLS=1 hace que falle si a la
       # imagen le falta (RC-166).
-      - name: Pruebas del orquestador, el explorador, el modelo ML, gitleaks y TLS (dentro del contenedor)
+      - name: Pruebas del orquestador, el explorador, el modelo ML, el TXT, gitleaks y TLS (dentro del contenedor)
         run: >-
           docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -v "$PWD/pruebas:/app/pruebas:ro"
           -v "$PWD/datos/ml:/app/datos/ml:ro" -v "$PWD/db:/app/db:ro" -v "$PWD/docs:/app/docs:ro" api python -m unittest
-          pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py
+          pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_txt.py
           pruebas.test_github.Integracion pruebas.test_rdap.Transporte
 
       - name: Pruebas sin base ni red
