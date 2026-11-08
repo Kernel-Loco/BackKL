@@ -459,10 +459,10 @@ python -m unittest -v pruebas/test_contrato_api.py   # 24 pruebas, sin base ni r
 
 ## Política de seguridad y privacidad (#78)
 
-[`docs/politica_seguridad_privacidad.md`](docs/politica_seguridad_privacidad.md) integra la política de uso ético de #6 con la metodología de ISO/IEC 27001:2022, los controles del Anexo A que aplican y el aviso de privacidad conforme a la LFPDPPP 2025. La prueba revisa su Hecho cuando: los 93 controles del Anexo A nombrados, las 6 fracciones del artículo 15 en el aviso, retención, derechos ARCO, validez legal, pros y contras, el proveedor de IA de #38 y que cada sección citada exista.
+[`docs/politica_seguridad_privacidad.md`](docs/politica_seguridad_privacidad.md) integra la política de uso ético de #6 con la metodología de ISO/IEC 27001:2022, los controles del Anexo A que aplican y el aviso de privacidad conforme a la LFPDPPP 2025. La prueba revisa su Hecho cuando: los 93 controles del Anexo A nombrados, las 6 fracciones del artículo 15 en el aviso, retención, derechos ARCO, validez legal, pros y contras, el proveedor de IA de #38 y que cada sección propia o de #6 que cita, sola o en lista, exista, igual que cada punto citado de una sección propia. Las citas a la carta no se revisan. Desde #96g (RC-207) trae también los términos de uso del portal en 1 página, la matriz de responsable y encargado, el responsable provisional del aviso y el buzón arco@lowtidesec.com, y la prueba los revisa.
 
 ```bash
-python -m unittest -v pruebas/test_politica_seguridad.py   # 9 pruebas, sin base ni red
+python -m unittest -v pruebas/test_politica_seguridad.py   # 10 pruebas, sin base ni red
 ```
 
 ## Contrato de plugin (#13)
