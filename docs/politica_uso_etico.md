@@ -1,6 +1,6 @@
 # Política de uso ético y alcance de LowTide
 
-Tarjeta #6 (RC-36). La política de seguridad y privacidad de la tarjeta #78 integrará estas reglas.
+Tarjeta #6 (RC-36). La [política de seguridad y privacidad](politica_seguridad_privacidad.md) de la tarjeta #78 (RC-39) integra estas reglas con los controles de ISO/IEC 27001 y el aviso de privacidad.
 
 LowTide es el nombre comercial del servicio. Cirdan es su nombre clave y se queda en los identificadores técnicos, como el prefijo del TXT `cirdan-verification=`, el prefijo `CIRDAN_FAKE_` de los tokens falsos y los nombres del paquete, la base, los contenedores, las variables de entorno y los archivos. Las peticiones de LowTide salen con el User-Agent `lowtide-osint`.
 
@@ -51,7 +51,7 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 4. La base rechaza guardar en `scan_source_runs.raw_payload` la respuesta cruda de Have I Been Pwned, y el recolector tampoco la copia en la evidencia de un hallazgo ni en los atributos de un activo. Toda fuente que pueda traer secretos, correos o datos de brechas se da de alta en `data_sources` con `keep_raw_payload = false`.
 5. Todo token falso que se siembra o se usa en pruebas lleva el prefijo `CIRDAN_FAKE_` y solo vive en `pruebas/fixtures/` o en el repositorio sembrado de la organización de GitHub del dominio de prueba (tarjeta #10b).
 6. Nunca se sube al repositorio un `.env`, una contraseña, una llave ni un token. Los repositorios son públicos. Se nombran las variables, nunca sus valores.
-7. Los papeles de cada parte ante la LFPDPPP (la empresa como responsable y el equipo como encargado), la retención y el borrado los fijan la carta de autorización y la política de privacidad de la tarjeta #78.
+7. Los papeles de cada parte ante la LFPDPPP (la empresa como responsable y el equipo como encargado), la retención y el borrado los fijan la carta de autorización y la [política de seguridad y privacidad](politica_seguridad_privacidad.md) de la tarjeta #78.
 8. Si una vulneración de seguridad de LowTide (la máquina virtual, la base o un respaldo) afecta datos de una empresa, el equipo le avisa en el plazo de la sección 6 de su carta para que ella informe a las personas afectadas, y avisa al profesor.
 
 ## 5. Datos de terceros

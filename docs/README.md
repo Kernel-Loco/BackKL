@@ -9,6 +9,7 @@
 | [`dataset_ml.md`](dataset_ml.md) | Dataset semisintético del ML: plantillas, rúbrica de sensibilidad, reparto a ciegas y acuerdo entre etiquetadores | #33 |
 | [`cuentas_de_prueba.md`](cuentas_de_prueba.md) | **Cuentas de prueba del portal y cómo pasar el MFA** (para todo el equipo) | #25 |
 | [`politica_uso_etico.md`](politica_uso_etico.md) | Política de uso ético y alcance de LowTide: solo dominios autorizados, solo observación, datos personales, uso aceptable y cómo se cumple en el código | #6 |
+| [`politica_seguridad_privacidad.md`](politica_seguridad_privacidad.md) | Política de seguridad y privacidad de LowTide: metodología de ISO/IEC 27001, controles del Anexo A que aplican, aviso de privacidad conforme a la LFPDPPP 2025, retención, derechos ARCO, validez legal y pendientes | #78 |
 | [`plantilla_carta_autorizacion.md`](plantilla_carta_autorizacion.md) | Plantilla de la carta de autorización que firma quien controla cada dominio: alcance, vigencia, datos personales, firmas y Anexo A de actividades | #6 |
 | [`hallazgos_esperados.md`](hallazgos_esperados.md) | Hallazgos esperados del dominio de prueba olmardo.com, por fuente, con código, severidad, fecha y estado | #10b |
 | [`servicios_externos.md`](servicios_externos.md) | Servicios externos: cuenta y dueño, plan, costo, límite, vencimiento de la llave y plan B de cada uno, las licencias y el gasto real | #8 |

@@ -457,6 +457,14 @@ Lo que devuelve la API v1 (`/api/v1`): dominios, hallazgos, score, histórico, e
 python -m unittest -v pruebas/test_contrato_api.py   # 24 pruebas, sin base ni red
 ```
 
+## Política de seguridad y privacidad (#78)
+
+[`docs/politica_seguridad_privacidad.md`](docs/politica_seguridad_privacidad.md) integra la política de uso ético de #6 con la metodología de ISO/IEC 27001:2022, los controles del Anexo A que aplican y el aviso de privacidad conforme a la LFPDPPP 2025. La prueba revisa su Hecho cuando: los 93 controles del Anexo A nombrados, las 6 fracciones del artículo 15 en el aviso, retención, derechos ARCO, validez legal, pros y contras, el proveedor de IA de #38 y que cada sección citada exista.
+
+```bash
+python -m unittest -v pruebas/test_politica_seguridad.py   # 9 pruebas, sin base ni red
+```
+
 ## Contrato de plugin (#13)
 
 Todos los recolectores cumplen `cirdan/recolectores/contrato.py`:
