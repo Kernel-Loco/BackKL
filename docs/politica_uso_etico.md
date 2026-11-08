@@ -63,7 +63,7 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 
 ## 6. Confidencialidad, demostraciones y cartas
 
-1. Los resultados de una empresa solo los ven el equipo y esa empresa. Los terceros de la sección 6 de la carta solo reciben lo que ahí se dice, como el proveedor de IA, que recibe el título, la categoría y la severidad de los hallazgos, sin correos. Un integrador solo los ve si la carta de la empresa lo nombra.
+1. Los resultados de una empresa solo los ven el equipo y esa empresa. Los terceros de la sección 6 de la carta solo reciben lo que ahí se dice, como el proveedor de IA, que recibe el título, la categoría y la severidad de los hallazgos, sin correos, y la pregunta que escribe el usuario. Un integrador solo los ve si la carta de la empresa lo nombra.
 2. Las demostraciones, las láminas y los repositorios solo usan datos de empresas ficticias (Acme Demo, Beta Corp y Grupo Olmardo) o datos de un cliente anonimizados y con su permiso por escrito.
 3. Las respuestas reales grabadas de un dominio que no sea del equipo nunca se suben a un repositorio. Las respuestas inventadas para pruebas, como la del recolector `ejemplo`, sí se pueden subir.
 4. Los nombres que se siembran en certificados del dominio de prueba quedan para siempre en registros públicos. No llevan nombres de personas reales, de terceros ni el nombre comercial del producto.
