@@ -4,6 +4,7 @@
 """
 import csv
 import io
+import re
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -52,6 +53,25 @@ class Escape(unittest.TestCase):
         self.assertEqual(filas[1], ['\'=HYPERLINK("http://x","clic")', '2026-11-07T12:00:00+00:00',
                                     '{"banner": "-cmd"}', '-3'])
         self.assertEqual(filas[2], ["'\tTab, con coma", '', '[]', '0'])
+
+    def test_4b_punto_y_coma_y_tabulador(self):
+        # Excel con separador ';' (es-ES, es-CO, es-AR) o LibreOffice con ';' o tab parten la celda ahí.
+        self.assertEqual(exportar.escapar_formula("x;=cmd|' /C calc'!A0"), "x;'=cmd|' /C calc'!A0")
+        self.assertEqual(exportar.escapar_formula('a\t+1;-2\n@3'), "a\t'+1;'-2\n'@3")
+        self.assertEqual(exportar.escapar_formula(';\t=x'), ";'\t'=x")
+        self.assertEqual(exportar.escapar_formula('a; b;c'), 'a; b;c')
+        self.assertEqual(exportar.escapar_formula('x;"=cmd'), 'x;\'"=cmd')
+        self.assertEqual(exportar.escapar_formula('x;""+1'), 'x;\'""+1')
+        texto = exportar.csv_con_bom(('titulo', 'n'), [("x;=cmd|' /C calc'!A0", 1), ('a\tb', 2), ('simple', 3),
+                                                       ('x;"=cmd|\' /C calc\'!A0', 4)])
+        lineas = texto.removeprefix('﻿').split('\r\n')
+        self.assertEqual(lineas[1], "\"x;'=cmd|' /C calc'!A0\",1")
+        self.assertEqual(lineas[2], '"a\tb",2')
+        self.assertEqual(lineas[3], 'simple,3')
+        # Ningún pedazo partido en ';' o tab empieza con un inicio de fórmula.
+        for pedazo in re.split(r'[;\t]', texto.removeprefix('﻿')):
+            self.assertFalse(pedazo.lstrip('"').startswith(('=', '+', '-', '@')), repr(pedazo))
+        self.assertEqual(leer_csv(texto)[1], ["x;'=cmd|' /C calc'!A0", '1'])
 
     def test_5_el_plan_usa_el_mismo_escape(self):
         self.assertIs(plan.escapar_formula, exportar.escapar_formula)

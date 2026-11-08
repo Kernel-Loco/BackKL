@@ -384,7 +384,7 @@ SELECT x.score_id::text, f.id::text AS finding_id, x.severity, x.penalty,
        a.value AS asset, a.asset_type, f.status
   FROM score_contributions x
   JOIN domain_scores ds ON ds.id = x.score_id
-  JOIN findings f       ON f.id = x.finding_id AND f.domain_id = ds.domain_id
+  JOIN findings f       ON f.id = x.finding_id  -- sin f.domain_id: el upsert por huella puede haberlo movido
   JOIN assets a         ON a.id = f.asset_id
   JOIN scoring_rules r  ON r.id = x.rule_id
  WHERE ds.domain_id = %s AND x.score_id = ANY(%s::uuid[])

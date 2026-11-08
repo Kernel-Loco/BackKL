@@ -244,6 +244,36 @@ class ApiV1(unittest.TestCase):
             ok, _, err = psql("DELETE FROM findings WHERE id = '%s';" % hallazgo, user='postgres')
             self.assertTrue(ok, err)
 
+    def test_9e_comparacion_con_hallazgo_que_cambio_de_dominio(self):
+        # El upsert por huella puede mover domain_id (orquestador/__init__.py). El aporte guardado en el score sigue
+        # siendo del dominio del score, así que la comparación lo cuenta igual. Se regresa al terminar.
+        url = ('/api/v1/domains/acme-demo.mx/score/compare?desde=a0000000-0000-4000-8000-000000000001'
+               '&hasta=a0000000-0000-4000-8000-000000000004')
+        antes = self.get(self.acme, url)
+        movido = next(i['finding_id'] for i in antes['items'] if i['change'] == 'new')
+        ok, activo, err = psql("SELECT asset_id FROM findings WHERE id = '%s';" % movido, user='postgres')
+        self.assertTrue(ok and activo, err)
+        # La llave (organization_id, domain_id, asset_id) pide un activo del otro dominio, y la semilla no trae
+        # activos de acme-tienda.mx: se crea uno de prueba y se borra al terminar.
+        temporal = '70000000-0000-4000-8000-0000000005f7'
+        ok, _, err = psql('''
+            INSERT INTO assets (id, organization_id, domain_id, asset_type, value, attributes, first_seen_at, last_seen_at)
+            SELECT '%s', d.organization_id, d.id, 'domain', 'rc57-prueba.acme-tienda.mx', '{}', now(), now()
+              FROM domains d WHERE d.fqdn = 'acme-tienda.mx' ON CONFLICT (id) DO NOTHING;
+            UPDATE findings f SET domain_id = a.domain_id, asset_id = a.id FROM assets a
+             WHERE a.id = '%s' AND f.id = '%s';
+        ''' % (temporal, temporal, movido), user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            despues = self.get(self.acme, url)
+            self.assertEqual((despues['summary'], despues['total']), (antes['summary'], antes['total']))
+            self.assertIn(movido, [i['finding_id'] for i in despues['items']])
+        finally:
+            ok, _, err = psql("UPDATE findings SET domain_id = (SELECT id FROM domains WHERE fqdn = 'acme-demo.mx'), "
+                              "asset_id = '%s' WHERE id = '%s'; DELETE FROM assets WHERE id = '%s';"
+                              % (activo, movido, temporal), user='postgres')
+            self.assertTrue(ok, err)
+
     def test_9d_403_sin_autorizacion_vigente_y_404_de_otra_empresa(self):
         # old-example.net es de Acme y su autorización venció el 15 ago 2026.
         for url in ('/api/v1/domains/old-example.net/findings/export?formato=csv',
