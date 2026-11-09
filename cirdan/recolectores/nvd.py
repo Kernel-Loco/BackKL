@@ -23,11 +23,12 @@ Cómo decide:
 description, cvss_base_score, cvss_vector y published_at), sin EPSS ni KEV, que son del cargador diario (#69,
 RC-127). published_at lleva su zona: la NVD da la hora en UTC sin zona y aquí se le pone '+00:00', porque
 cves.published_at es timestamptz y cirdan/db.py fija la zona de México en cada transacción (sin zona quedaría 6 h
-corrida). Si la NVD ya trae zona, se respeta. La métrica de CVSS que se usó (cvss_metrica) va solo en la evidencia
-del hallazgo. Guardarlas en cves y llenar findings.cve_id lo hace el orquestador cuando se conecte la visita web, no
-este módulo.
+corrida). Si la NVD ya trae zona, se respeta. Una fecha que no existe o una zona de más de 14 h dan None
+(_publicada). La métrica de CVSS que se usó (cvss_metrica) va solo en la evidencia del hallazgo. Guardarlas en cves
+y llenar findings.cve_id lo hace el orquestador cuando se conecte la visita web, no este módulo.
 """
 import re
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 from cirdan.recolectores import shodan
@@ -51,9 +52,10 @@ COLUMNAS_CVES = ('cve_id', 'description', 'cvss_base_score', 'cvss_vector', 'pub
 _PARTE = r'(?:\*|-|(?:\?+|\*)?(?:[a-z0-9._-]|\\[!-/:-@\[-`{-~])+(?:\?+|\*)?)'
 _CPE = re.compile(r'cpe:2\.3:[aho](?::%s){10}' % _PARTE, re.I | re.A)
 _VERSION = re.compile(r'[0-9][0-9a-z._-]{0,30}', re.I | re.A)
-# La fecha de la NVD, con su zona si la trae (grupo 2).
-_FECHA = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)(Z|[+-][0-9]{2}:[0-9]{2})?',
+# La fecha de la NVD, con su zona si la trae (grupo 2). Que sea una fecha y hora que existe lo revisa _publicada.
+_FECHA = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)(Z|[+-][0-9]{2}:[0-5][0-9])?',
                     re.A)
+MAX_ZONA = timedelta(hours=14)   # las zonas que existen van de -12:00 a +14:00
 
 
 def cpe_con_version(cpe, version):
@@ -107,11 +109,18 @@ def _descripcion(descripciones):
 
 
 def _publicada(x):
-    """La fecha de publicación con su zona, o None: sin zona es UTC y lleva '+00:00'."""
+    """La fecha de publicación con su zona, o None: sin zona es UTC y lleva '+00:00'. Solo una fecha y hora que
+    existe (datetime.fromisoformat sin error: '2021-02-30T25:61:00' no) y con la zona entre -14:00 y +14:00, las que
+    existen ('+99:99' no): Postgres rechaza una fecha imposible en cves.published_at, y con ella todo el lote."""
     m = _FECHA.fullmatch(x) if isinstance(x, str) else None
     if not m:
         return None
-    return m.group(0) if m.group(2) else m.group(1) + '+00:00'
+    salida = m.group(0) if m.group(2) else m.group(1) + '+00:00'
+    try:
+        fecha = datetime.fromisoformat(salida)
+    except ValueError:
+        return None
+    return salida if abs(fecha.utcoffset()) <= MAX_ZONA else None
 
 
 def leer(respuesta):

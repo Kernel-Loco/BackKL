@@ -133,8 +133,10 @@ def _varios(x, tope=None):
     """Una lista con lo que llegó: None da [], un solo texto, número, IP o red da [x] y cualquier otra cosa que no se
     pueda recorrer (iter() lanza TypeError) da []. Un error al recorrerla, como el TypeError de map(int, ['1', None]),
     sí sale: con [] se perdería lo ya leído y la visita lo tomaría por un negativo (sin reto, sin borde), cuando el
-    sitio debe quedar sin cobertura. Con `tope` se leen exactamente esos, ni uno más: un generador como red.hosts()
-    no se recorre entero."""
+    sitio debe quedar sin cobertura. Ese error sale también de quien llama a _varios (_pares, por_cabeceras, reto,
+    detectar, cobertura, y huellas.entradas y huellas.analizar): la visita debe atraparlo por sitio y dejar ese sitio
+    sin cobertura (en sin_revisar de cobertura), no tumbar toda la fuente. Con `tope` se leen exactamente esos, ni
+    uno más: un generador como red.hosts() no se recorre entero."""
     if x is None:
         return []
     if isinstance(x, _UNO):
@@ -155,7 +157,9 @@ def _varios(x, tope=None):
 def _pares(cabeceras):
     """[(nombre en minúsculas, valor)] de un dict, un http.client.HTTPMessage (que repite set-cookie) o una lista de
     pares. Lo que no es texto, o un nombre que no es ASCII, se salta. Cada valor se corta a MAX_VALOR, y los de
-    set-cookie, entre todos, a MAX_COOKIES: lo que pase de ahí llega vacío."""
+    set-cookie, entre todos, a MAX_COOKIES: lo que pase de ahí llega vacío. Un error al recorrer las cabeceras (un
+    generador que lanza) sale de aquí, como en _varios: la visita debe atraparlo por sitio y dejar ese sitio sin
+    cobertura."""
     if cabeceras is None:
         return []
     pares = _varios(cabeceras.items() if hasattr(cabeceras, 'items') else cabeceras)
@@ -252,7 +256,11 @@ def detectar(cnames=(), ips=(), asns=(), cabeceras=None):
     geoip.ubicar) y `cabeceras` las de la respuesta de la visita web, si hubo.
 
     {'texto': 'Protegido por Cloudflare', 'proveedores': [{'codigo', 'nombre', 'senales', y por cada señal lo que la
-    dio: 'cabeceras' (nombres), 'cnames', 'ips' (de los rangos) y 'asns'}]}. Primero el proveedor con más señales."""
+    dio: 'cabeceras' (nombres), 'cnames', 'ips' (de los rangos) y 'asns'}]}. Primero el proveedor con más señales.
+
+    Un error al recorrer `cnames`, `ips`, `asns` o `cabeceras` (como el TypeError de map(int, ['13335', None])) sale
+    de aquí (_varios), nunca un None que diría que no se vio ningún CDN: la visita debe atraparlo por sitio y dejar
+    ese sitio sin cobertura."""
     por_senal = {'asn': por_asn(asns), 'cabeceras': por_cabeceras(cabeceras), 'cname': por_cname(cnames),
                  'rangos': por_rangos(ips)}
     campo = {'asn': 'asns', 'cabeceras': 'cabeceras', 'cname': 'cnames', 'rangos': 'ips'}
