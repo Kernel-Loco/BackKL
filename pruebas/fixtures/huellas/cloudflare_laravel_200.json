@@ -1,0 +1,10 @@
+{
+  "_nota": "Respuesta armada a mano: un sitio de Laravel y Vue.js detrás de Cloudflare, con las dos Set-Cookie juntadas con ', '. No es una grabación de ningún dominio y las cookies son falsas.",
+  "estado": 200,
+  "cabeceras": [
+    ["Server", "cloudflare"],
+    ["CF-RAY", "0000000000000000-QRO"],
+    ["Set-Cookie", "__cf_bm=CIRDAN_FAKE_bm; path=/; HttpOnly, laravel_session=CIRDAN_FAKE_laravel; expires=Thu, 05-Nov-2026 20:00:00 GMT; Max-Age=7200; path=/; httponly"]
+  ],
+  "cuerpo": "<html><head><script src=\"/js/vue-2.6.14.min.js\"></script></head><body><div id=\"app\"></div></body></html>"
+}

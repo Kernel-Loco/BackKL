@@ -1,0 +1,15 @@
+{
+  "_nota": "Armada a mano con la forma de la API v1 de endoflife.date (/api/v1/products/nginx/). Ciclos y fechas de ejemplo, no consultados.",
+  "schema_version": "1.0.0",
+  "result": {
+    "name": "nginx",
+    "releases": [
+      {"name": "1.27", "isEol": false, "eolFrom": null, "latest": {"name": "1.27.4"}},
+      {"name": "1.26", "isEol": false, "eolFrom": "2026-11-07", "latest": {"name": "1.26.3"}},
+      {"name": "1.24", "isEol": true, "eolFrom": "2024-04-23", "latest": {"name": "1.24.0"}},
+      {"name": "1.18", "isEol": true, "eolFrom": "2021-04-20", "latest": {"name": "1.18.0"}},
+      {"name": "1.1", "isEol": true, "eolFrom": "2013-01-01", "latest": {"name": "1.1.19"}},
+      {"name": "1.x-sin-numero", "isEol": true, "eolFrom": "2013-01-01"}
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "_nota": "Respuesta armada a mano: Apache de CentOS con PHP en x-powered-by sin sufijo de la distribución. No es una grabación de ningún dominio.",
+  "estado": 200,
+  "cabeceras": [
+    ["Server", "Apache/2.4.6 (CentOS) OpenSSL/1.0.2k-fips PHP/5.4.16"],
+    ["X-Powered-By", "PHP/5.4.16"]
+  ],
+  "cuerpo": "<html><body>Acme demo</body></html>"
+}
