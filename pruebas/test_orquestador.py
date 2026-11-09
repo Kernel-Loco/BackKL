@@ -525,7 +525,7 @@ class Orquestador(unittest.TestCase):
                                   filas[cve]['cvss_vector']),
                                  (completas[cve]['description'], completas[cve]['cvss_base_score'],
                                   completas[cve]['cvss_vector']))
-                self.assertIsNotNone(filas[cve]['published_at'])
+                self.assertEqual(filas[cve]['published_at'] is None, completas[cve].get('published_at') is None)
             guardadas = self.conn.execute('SELECT evidence->>%s AS cve, cve_id FROM findings WHERE fingerprint = ANY(%s)',
                                           ('cve', [bytes.fromhex(h.huella) for h in web.hallazgos])).fetchall()
             self.assertEqual(sorted((f['cve'], f['cve_id']) for f in guardadas), [(c, c) for c in ids])
