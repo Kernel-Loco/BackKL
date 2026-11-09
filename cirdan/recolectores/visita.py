@@ -262,19 +262,26 @@ class ClienteWeb(shodan.ClienteShodan):
         super().__init__(modo=modo, carpeta=carpeta, **otros)
         self.visitar = visitar
         self.pedidas = 0       # peticiones a sitios de esta corrida, para el ritmo fijo
+        self.vistas = {}       # consulta -> visita de esta corrida: ninguna URL se pide dos veces
 
     def _transporte(self, url, timeout):
         return _descargar_api(url, timeout)
 
     def sitio(self, url):
         """La visita a `url` ya limpia (limpiar_visita). Antes de cada petición, salvo la primera, espera PAUSA_SITIO.
-        Lanza SinTiempo si a la corrida ya no le alcanza para la petición y SinGrabacion al reproducir sin ella."""
+        Una URL que ya se pidió en esta corrida (el salto intermedio de otra redirección) da la misma visita, sin
+        otra petición. Lanza SinTiempo si a la corrida ya no le alcanza para la petición, también si la petición
+        empezó con menos de TIMEOUT_SITIO porque se acababa la corrida y no terminó, y SinGrabacion al reproducir
+        sin ella."""
         consulta = 'sitio:%s:%s' % (urllib.parse.urlsplit(url).hostname or '',
                                     hashlib.sha256(url.encode('utf-8')).hexdigest()[:16])
+        if consulta in self.vistas:
+            return self.vistas[consulta]
         try:
             del_disco, datos = self._de_disco(consulta)
             if del_disco:
-                return limpiar_visita(datos)
+                self.vistas[consulta] = limpiar_visita(datos)
+                return self.vistas[consulta]
         except (ValueError, KeyError, TypeError, AttributeError):   # una grabación truncada o editada
             raise FuenteNoResponde('web: la grabación de %s no se puede leer' % url) from None
         if self.pedidas:
@@ -285,9 +292,13 @@ class ClienteWeb(shodan.ClienteShodan):
         self.pedidas += 1
         self.consultas += 1
         datos = limpiar_visita((self.visitar or _visitar)(url, limite))
+        if datos.get('sin_respuesta') == 'tiempo' and limite < TIMEOUT_SITIO:
+            # No tuvo sus TIMEOUT_SITIO segundos: lo que se acabó fue la corrida, no es que el sitio no responda
+            raise SinTiempo('web: se acabó el tiempo de la corrida mientras se visitaba %s' % url)
         if datos.get('sin_respuesta') in FALLAS_DE_RED:
             self.fallas += 1
         self._grabar(consulta, datos)
+        self.vistas[consulta] = datos
         return datos
 
     def api(self, consulta, url, que, pausa=0, reducir=None, limite_403=False):

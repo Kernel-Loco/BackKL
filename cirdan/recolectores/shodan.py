@@ -505,8 +505,13 @@ class ClienteShodan:
 
     def _de_disco(self, consulta):
         """(True, datos) si sale de la grabación. Una corrida con fallas ya no se graba, pero una grabación de antes o
-        editada a mano puede traer una falla: se lanza otra vez, con su clase y su texto, y no se lee como datos."""
-        del_disco, datos = self.grabadora.de_disco(consulta)
+        editada a mano puede traer una falla: se lanza otra vez, con su clase y su texto, y no se lee como datos. Un
+        archivo truncado o que no es JSON es una consulta que no llegó (FuenteNoResponde), nunca un error que tumbe la
+        fuente: vale para toda consulta, también el A y las páginas de Cert Spotter."""
+        try:
+            del_disco, datos = self.grabadora.de_disco(consulta)
+        except (ValueError, KeyError, TypeError, AttributeError):   # SinGrabacion no es ninguna de estas
+            raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta) from None
         if del_disco and isinstance(datos, dict) and 'falla' in datos:
             raise FALLAS.get(datos.get('tipo'), FuenteNoResponde)(str(datos['falla'])[:300])
         return del_disco, datos

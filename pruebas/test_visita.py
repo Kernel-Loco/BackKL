@@ -565,6 +565,64 @@ class Arreglos(unittest.TestCase):
         self.assertTrue(contrato._errores_cves([fila]))
         self.assertEqual(contrato._errores_cves([dict(fila, published_at='2099-01-01T00:00:00+14:00')]), [])
 
+    def test_11_un_salto_intermedio_no_se_pide_dos_veces(self):
+        """red-5: la raíz manda a www y www a blog. Cuando le toca a www, su visita ya se hizo como salto."""
+        res, cliente, _ = correr(
+            {'https://%s/' % DOMINIO: {'redirige': 'https://%s/' % WWW, 'codigo': 301},
+             'https://%s/' % WWW: {'redirige': 'https://%s/' % BLOG, 'codigo': 301},
+             'https://%s/' % BLOG: SIMPLE},
+            zona={DOMINIO: a(IP), WWW: a(IP), BLOG: a(IP)}, apis=Apis(ct=paginas(BLOG, WWW)))
+        self.assertEqual(cliente.visitar.urls, ['https://%s/' % DOMINIO, 'https://%s/' % WWW, 'https://%s/' % BLOG])
+        self.assertEqual(activo(res, WWW).atributos['web']['redirige_a'], BLOG)
+        self.assertEqual(activo(res, BLOG).atributos['web']['estado'], 'visitado')
+        self.assertEqual((res.revisados, res.sin_revisar), (None, None))
+
+    def test_12_un_archivo_truncado_de_la_grabacion_no_tumba_la_fuente(self):
+        """cobertura-9: cualquier archivo de la grabación truncado (el A, una página de CT, un sitio, endoflife.date
+        o la NVD) deja la corrida parcial, nunca lanza."""
+        sitios = {'https://%s/' % DOMINIO: pagina_nginx(), 'https://%s/' % WWW: SIMPLE}
+        zona = {DOMINIO: a(IP), WWW: a(IP)}
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            correr(sitios, zona=zona, apis=Apis(ct=paginas(WWW)), modo='grabar', carpeta=carpeta)
+            archivos = sorted(carpeta.glob('*.json'))
+            self.assertGreaterEqual(len(archivos), 6)   # CT, dos A, dos sitios, endoflife.date y la NVD
+            completa, _, _ = correr({}, zona={}, modo='reproducir', carpeta=carpeta)
+            self.assertEqual((completa.revisados, len(completa.hallazgos)), (None, 4))
+            for archivo in archivos:
+                bueno = archivo.read_text(encoding='utf-8')
+                for roto in (bueno[:len(bueno) // 2], '{"datos": 5}', '"x"'):
+                    with self.subTest(archivo=archivo.name, roto=roto[:12]):
+                        archivo.write_text(roto, encoding='utf-8')
+                        try:
+                            res, _, _ = correr({}, zona={}, modo='reproducir', carpeta=carpeta)
+                        except contrato.FuenteNoResponde:
+                            continue   # la fuente no respondió: el orquestador lo sabe leer
+                        self.assertTrue(res.revisados is not None or res.sin_cobertura, 'quedó como completa')
+                archivo.write_text(bueno, encoding='utf-8')
+
+    def test_13_un_salto_que_empieza_sin_su_tiempo_es_el_fin_de_la_corrida(self):
+        """tiempos-6: al salto a www le queda 1.5 s de corrida y no termina. No es que www no responda a tiempo:
+        se acabó la corrida, no cuenta como falla del sitio y los dos quedan con 'sin_tiempo'."""
+        cliente = visita.ClienteWeb(modo='vivo', carpeta=visita.carpeta_de(DOMINIO), descargar=Apis(ct=paginas(WWW)),
+                                    visitar=Sitios({'https://%s/' % DOMINIO: {'redirige': 'https://%s/' % WWW,
+                                                                             'codigo': 301},
+                                                    'https://%s/' % WWW: {'sin_respuesta': 'tiempo'}}),
+                                    resolver=ResolvedorSimulado({DOMINIO: a(IP), WWW: a(IP)}),
+                                    cronometro=lambda: 0.0, dormir=lambda _: None)
+        restante = cliente.restante
+        cliente.restante = lambda: restante() if len(cliente.visitar.urls) < 1 else 1.5
+        with mock.patch.object(visita.geoip, 'bases_por_omision', return_value=bases_geo()):
+            res = visita.recolectar(DOMINIO, cliente, ahora=AHORA)
+        self.assertEqual(cliente.visitar.urls, ['https://%s/' % DOMINIO, 'https://%s/' % WWW])
+        self.assertEqual(cliente.fallas, 0)
+        for nombre in (DOMINIO, WWW):
+            self.assertEqual(activo(res, nombre).atributos['web']['sin_revisar'], visita.MOTIVOS['sin_tiempo'])
+        # Con sus TIMEOUT_SITIO segundos completos sí es el sitio el que no respondió a tiempo
+        res, cliente, _ = correr({'https://%s/' % DOMINIO: {'sin_respuesta': 'tiempo'}})
+        self.assertEqual(cliente.fallas, 1)
+        self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['tiempo'])
+
 
 if __name__ == '__main__':
     unittest.main()
