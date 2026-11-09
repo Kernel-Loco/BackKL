@@ -9,11 +9,22 @@ la NVD permite 5 peticiones cada 30 s: PAUSA_NVD entre una y otra.
 Cómo decide:
 - Solo tecnologías con CPE de las huellas, con versión de una huella que el sitio mostró (no implicada por otra) y
   confianza 100. Sin eso da 'sin_version'. Una versión que no cabe en un CPE (cpe_con_version) también.
-- Nunca una versión de una distribución, como 'nginx/1.24.0 (Ubuntu)' (huellas.py, 'distribucion'): la distribución
-  corrige las CVE en su propio paquete y la NVD no lo ve, así que todas saldrían aunque ya estén corregidas. Da
-  'distribucion' y ningún hallazgo, igual que soporte.py.
-- Una CVE por hallazgo, con la CVE como clave, como shodan.hallazgo_cve, normalizada con shodan._cve. Las rechazadas
-  (vulnStatus Rejected) no cuentan. Hasta MAX_CVE por tecnología, las más recientes por año y número; las demás van en
+- Solo una versión con al menos 3 partes numéricas (X.Y.Z), salvo los productos de DOS_PARTES, cuyas versiones
+  normales tienen 2 (WordPress 6.4, Drupal 7.98, Django 4.2, IIS 10.0, thttpd 2.29, Quick.CMS 6.7, Prototype 1.7,
+  Lift 2.6, GlassFish 4.1 y HP iLO 1.30). Con menos partes cpe_con_version() da None, así que url() nunca se
+  arma para ellas, y revisar() da 'sin_version': 'Drupal 7', 'Apache/2.4', 'PHP/7' o 'nginx/1' no dicen qué versión
+  es, y la NVD daría las CVE de un rango que calce con ese número o ninguna, y las dos cosas serían falsas.
+- Nunca una versión con marca de distribución, como 'nginx/1.24.0 (Ubuntu)' (huellas.py, 'distribucion'): la
+  distribución corrige las CVE en su propio paquete y la NVD no lo ve, así que todas saldrían aunque ya estén
+  corregidas. Da 'distribucion' y ningún hallazgo, igual que soporte.py. Una versión sin marca de un producto que
+  Debian o RHEL empaquetan sin marca, como 'nginx/1.18.0' (huellas.EMPAQUETAN_SIN_MARCA), sí da hallazgos, con
+  'origen_sin_confirmar' True en la evidencia: la cabecera no dice si es de la distribución, que pudo corregir la
+  CVE sin cambiar el número, o de una compilación propia (el texto revisado de known_vulnerability ya lo advierte).
+  El valor sale de huellas.origen_sin_confirmar().
+- Una CVE por hallazgo, normalizada con shodan._cve, con la clave 'CVE|vendor:producto' del CPE (clave(), por
+  ejemplo 'CVE-2020-11022|jquery:jquery'), estable entre corridas: dos tecnologías del mismo sitio con la misma CVE,
+  como Drupal y el jQuery que trae, son dos hallazgos y no chocan en contrato.validar. Las rechazadas (vulnStatus
+  Rejected) no cuentan. Hasta MAX_CVE por tecnología, las más recientes por año y número; las demás van en
   'omitidas' para el aviso y no se cierran. Si la NVD tiene más resultados que los de la página, 'completa' es False.
 - Sin una respuesta que se pueda leer da 'sin_dato': no se sabe, nunca 0 CVE. También sin ninguna CVE si la
   respuesta no está completa (más resultados que los de la página) o si se tiró alguna entrada que no se pudo leer
@@ -25,13 +36,15 @@ RC-127). published_at lleva su zona: la NVD da la hora en UTC sin zona y aquí s
 cves.published_at es timestamptz y cirdan/db.py fija la zona de México en cada transacción (sin zona quedaría 6 h
 corrida). Si la NVD ya trae zona, se respeta. Una fecha que no existe o una zona de más de 14 h dan None
 (_publicada). La métrica de CVSS que se usó (cvss_metrica) va solo en la evidencia del hallazgo. Guardarlas en cves
-y llenar findings.cve_id lo hace el orquestador cuando se conecte la visita web, no este módulo.
+y llenar findings.cve_id lo hace el orquestador cuando se conecte la visita web, no este módulo. Las filas de 'cves'
+de varias tecnologías del mismo sitio pueden repetirse (la misma CVE de Drupal y de jQuery): la visita las une por
+cve_id antes de guardarlas, porque cve_id es la llave de la tabla.
 """
 import re
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
-from cirdan.recolectores import shodan
+from cirdan.recolectores import huellas, shodan
 
 CODIGOS = {'known_vulnerability': 'medium'}   # la severidad del catálogo (semilla 004), la misma que shodan.py
 URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0?cpeName=%s&isVulnerable&noRejected'
@@ -56,6 +69,15 @@ _VERSION = re.compile(r'[0-9][0-9a-z._-]{0,30}', re.I | re.A)
 _FECHA = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)(Z|[+-][0-9]{2}:[0-5][0-9])?',
                     re.A)
 MAX_ZONA = timedelta(hours=14)   # se aceptan de -14:00 a +14:00: las que existen van de -12:00 a +14:00
+MIN_PARTES = 3                   # partes numéricas de la versión que se consulta (X.Y.Z)
+# vendor:producto del CPE -> las versiones de 2 partes que sí son una versión normal de ese producto. Drupal solo
+# hasta la 7 (7.98): desde la 8 son de 3 (10.2.3), y 'Drupal 10.2' es una rama.
+DOS_PARTES = {'acme:thttpd': r'\d+\.\d+', 'djangoproject:django': r'\d+\.\d+', 'drupal:drupal': r'[5-7]\.\d+',
+              'hp:integrated_lights-out': r'\d+\.\d+', 'liftweb:lift': r'\d+\.\d+',
+              'microsoft:internet_information_server': r'\d+\.\d+', 'opensolution:quick.cms': r'\d+\.\d+',
+              'oracle:glassfish_server': r'\d+\.\d+', 'prototypejs:prototype': r'\d+\.\d+',
+              'wordpress:wordpress': r'\d+\.\d+'}
+_NUMERICA = re.compile(r'[0-9]+(?:\.[0-9]+)*', re.A)   # la parte numérica de la versión: 1.18.0 de 1.18.0-beta
 
 
 def cpe_con_version(cpe, version):
@@ -65,7 +87,8 @@ def cpe_con_version(cpe, version):
     None, y uno con un ':' escapado tampoco tiene 13 partes. Los espacios de las orillas se quitan antes: el de GLPI
     en huellas_wappalyzer.json termina en un espacio. Con los datos de Wappalyzer 6.10.54 quedan sin CPE válido 3 de
     136, que nunca se consultan: Angular (14 partes), Erlang ('erlang%2fotp', con el '%' sin escapar) y Weblication
-    ('cms_core_&_grid', con el '&' sin escapar) (pruebas/test_huellas.py, CPE_INVALIDOS)."""
+    ('cms_core_&_grid', con el '&' sin escapar) (pruebas/test_huellas.py, CPE_INVALIDOS). Una versión sin precisión
+    (con_precision(), como 'Drupal 7' o 'nginx/1') también da None, así que url() nunca se arma para ella."""
     if isinstance(cpe, str):
         cpe = cpe.strip(' \t')
     if not (isinstance(cpe, str) and _CPE.fullmatch(cpe) and isinstance(version, str) and _VERSION.fullmatch(version)):
@@ -74,12 +97,35 @@ def cpe_con_version(cpe, version):
     if len(partes) != 13 or partes[5] != '*':
         return None
     partes[5] = version.lower()
-    return ':'.join(partes)
+    return ':'.join(partes) if con_precision(cpe, version) else None
+
+
+def _producto(cpe):
+    """'vendor:producto' de un CPE 2.3, en minúsculas."""
+    return ':'.join(cpe.split(':')[3:5]).lower()
+
+
+def con_precision(cpe, version):
+    """True si la versión tiene al menos MIN_PARTES partes numéricas, o 2 que DOS_PARTES acepta para el producto del
+    CPE: '1.18.0' y 'WordPress 6.4' sí, '2.4', '7' y 'Drupal 10.2' no."""
+    m = _NUMERICA.match(version) if isinstance(version, str) and isinstance(cpe, str) else None
+    if not m:
+        return False
+    partes = m.group(0).count('.') + 1
+    dos = DOS_PARTES.get(_producto(cpe))
+    return partes >= MIN_PARTES or (partes == 2 and dos is not None and re.fullmatch(dos, m.group(0), re.A) is not None)
+
+
+def clave(cve_id, cpe):
+    """La clave del hallazgo: la CVE y el producto del CPE, 'CVE-2020-11022|jquery:jquery'. No lleva la versión, así
+    que es la misma entre corridas aunque el sitio cambie de versión dentro de las afectadas."""
+    return '%s|%s' % (cve_id, _producto(cpe))
 
 
 def url(cpe):
-    """La URL de la API 2.0 de la NVD para un CPE con versión."""
-    return URL % quote(cpe, safe=':*.-_')
+    """La URL de la API 2.0 de la NVD para un CPE con versión, o None si el CPE no es una cadena (como el None de
+    cpe_con_version())."""
+    return URL % quote(cpe, safe=':*.-_') if isinstance(cpe, str) else None
 
 
 def _numero(x, tope):
@@ -182,9 +228,10 @@ def revisar(tecnologia, respuesta, host):
                      'version': t['version'], 'cvss': fila['cvss_base_score'],
                      'cvss_metrica': leidas['metricas'][fila['cve_id']],
                      'senales': list(t.get('senales') or []), 'deducida_por_version': True,
+                     'origen_sin_confirmar': huellas.origen_sin_confirmar(t),
                      'fuente_datos': NOMBRE_FUENTE, 'host': host}
         hallazgos.append({'codigo': 'known_vulnerability', 'severidad': CODIGOS['known_vulnerability'],
-                          'clave': fila['cve_id'], 'titulo': titulo, 'evidencia': evidencia})
+                          'clave': clave(fila['cve_id'], cpe), 'titulo': titulo, 'evidencia': evidencia})
     estado = 'con_cve' if hallazgos else 'sin_cve' if leidas['completa'] else 'sin_dato'
     return dict(salida, estado=estado, hallazgos=hallazgos,
                 omitidas=[f['cve_id'] for f in filas[MAX_CVE:]], cves=filas[:MAX_CVE], completa=leidas['completa'])

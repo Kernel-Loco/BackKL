@@ -38,14 +38,41 @@ como en Wappalyzer, y también {n,}, y el html se recorta donde las regex '<[^>]
 (_recortar_html). Todo tope que deja algo sin leer va en 'recortes', pero solo los de DEJAN_INCOMPLETO dejan
 'completo' en False (las reglas, en analizar()).
 Una respuesta armada para trabar las regex no pasa de TOPE_SEGUNDOS más una regex sobre un valor
-(pruebas/test_huellas.py).
+(pruebas/test_huellas.py). Lo que corre después del reloj tampoco crece con la respuesta: _elegir_version compara a lo
+más MAX_VERSIONES versiones distintas por tecnología.
 
 Reto. Si borde.reto() dice que la respuesta es un reto o un bloqueo del WAF, no se analiza: 'tecnologias' es None,
 que quiere decir sin cobertura, nunca 0 tecnologías, y la visita pone el sitio en sin_revisar con borde.aviso().
 
-Distribución. Una versión que trae la marca de una distribución en su pedazo de la cabecera, como 'nginx/1.24.0
-(Ubuntu)' o 'PHP/8.1.2-1ubuntu2.14', lleva 'distribucion': la distribución le sigue mandando parches que
-endoflife.date y la NVD no ven (_plan de RC-66, etica-1), así que soporte.py y nvd.py no la marcan. El pedazo es el
+Versión. Una tecnología con varias versiones se queda con la de la señal más directa (_elegir_version): cabecera,
+cookie o meta antes que el src de un <script>, y el src antes que el texto de los scripts o el html. Si las de la señal
+más directa no concuerdan entre sí (ninguna es prefijo por partes de la otra, como 3.7.1 y 1.19.5), la tecnología
+sale sin versión. Una de una señal menos directa solo cuenta si alarga la elegida (5.8 con 5.8.1 da 5.8.1). Antes
+ganaba la más larga, como en Wappalyzer. Para las tecnologías de ARCHIVOS_PROPIOS (jQuery, AngularJS, React y Vue.js)
+la versión de un src solo cuenta si el archivo es el de la propia tecnología (_es_propio): el último segmento de la
+ruta, cortado en ';', '?', '#' y '.js.pagespeed.' (o, sin ese corte, sin '.js', '.mjs' ni '.cjs'), en minúsculas,
+calza entero con _FORMA_PROPIA para uno de sus alias, con los sufijos de compilación de ese alias, sin sustituir
+nada. Así
+'/ajax/libs/jquery-validate/1.19.5/jquery.validate.min.js', 'jquery-migrate-3.4.1.min.js', 'jquery-1.12.4-ui.min.js',
+'jquery.browser.min.js' o 'vue-3d-model.umd.js' no dan la versión del plugin, y 'jquery-3.7.1.min.js',
+'jquery-3.6.0.min.5e3a1b2c.js', 'jquery.slim.min.js', 'jquery-1.2.6.pack.js' o '/3.7.1/jquery.min.js' sí. Una
+versión con prerelease en el nombre no es la del archivo propio: 'jquery-4.0.0-beta.2.js' no da 4.0.0 y
+'jquery-3.0.0-rc1.js' sale sin versión. La señal sigue contando para la tecnología, sin versión. Lo del archivo
+propio no vale para todas: GLPI saca su versión de 'common.min.js?v=10.0.7' y Underscore.js de
+'underscore.min.js?ver=1.13.1'. Lo que sí vale para todas: donde calzó el grupo del patrón que dio la versión, esta
+no lleva una letra ni un dígito pegados (_version_del_src_cuenta). Una 'v' pegada delante solo vale después de '-',
+'@', '_' o '.'. El '2' que el patrón de Vue.js saca de 'vue.2b14e45fceea.js' no cuenta, aunque el src o la página
+traigan un 'v2' en otra parte, y el 4.7.7 de 'handlebars-v4.7.7.js' sí. La 'v' de una carpeta tampoco vale:
+'/static/v1.10.0/jquery-ui.min.js' y 'polyfill.io/v3/' salen sin versión.
+
+Distribución. Nunca una versión con marca de distribución: la que trae esa marca en su pedazo de la cabecera, como
+'nginx/1.24.0 (Ubuntu)' o 'PHP/8.1.2-1ubuntu2.14', lleva 'distribucion': la distribución le sigue mandando parches que
+endoflife.date y la NVD no ven (_plan de RC-66, etica-1), así que soporte.py y nvd.py no la marcan. Una versión sin
+marca de un producto que Debian o RHEL empaquetan sin marca en la cabecera (EMPAQUETAN_SIN_MARCA: el nginx de Debian
+y RHEL, el PHP de RHEL, Python y Perl) lleva 'origen_sin_confirmar' True: puede ser de la distribución, que la sigue
+parchando, o de una compilación propia, y la cabecera no lo dice. Esa sí da hallazgos (el texto revisado de
+outdated_software y known_vulnerability ya dice que la distribución puede seguir parchando) y el aviso va en su
+evidencia. El Apache de Debian y RHEL sí marca, así que no está. Una de SIGUEN_UPSTREAM no lo lleva. El pedazo es el
 producto que calzó con los comentarios entre paréntesis que le siguen (_pedazo): en 'Apache/2.4.52 (Ubuntu)
 PHP/8.1.27' el '(Ubuntu)' es de Apache y no de PHP. La marca de las cabeceras server y x-powered-by de la respuesta,
 como 'Apache/2.4.6 (CentOS)' con 'X-Powered-By: PHP/5.4.16', solo la heredan los servidores web y los lenguajes
@@ -102,6 +129,8 @@ MAX_COSTO_HTML = 1000000     # pasos de las regex '<[^>]{1,250}...' en el html (
 TOPE_SEGUNDOS = 3.0          # para todo el análisis, revisado antes de cada valor de cada patrón
 CUANTIFICADOR = 250          # el tope de + y * de Wappalyzer (parsePattern)
 MAX_LARGO_VERSION = 15       # Wappalyzer descarta versiones más largas (resolve)
+MAX_VERSIONES = 8            # versiones distintas de una tecnología que se comparan: con más, sale sin versión
+MAX_ARCHIVO = 200            # caracteres del nombre de archivo de un src que se compara con ARCHIVOS_PROPIOS
 # Los recortes que dejan 'completo' en False: solo los alcanza una respuesta fuera de lo normal (analizar()).
 DEJAN_INCOMPLETO = ('MAX_CABECERAS', 'MAX_COSTO_HTML', 'MAX_VALOR')
 
@@ -118,13 +147,38 @@ HEREDAN = {22, 27}           # Web servers y Programming languages: las que here
 NO_HEREDAN = ('Jetty', 'OpenResty')
 # Repositorios que siguen las versiones oficiales: su marca no es de una distribución, aunque nombre una.
 SIGUEN_UPSTREAM = (r'deb\.sury\.org',)
+# Productos que Debian o RHEL empaquetan sin marca en la cabecera: sin marca, su versión lleva 'origen_sin_confirmar'.
+EMPAQUETAN_SIN_MARCA = ('Nginx', 'PHP', 'Perl', 'Python')
+
+# Qué tan directa es la señal de una versión (_elegir_version): cabecera, cookie o meta, luego el src y al final el
+# texto de los scripts y el html.
+DIRECTAS = {'headers': 0, 'cookies': 0, 'meta': 0, 'scriptSrc': 1}
+# Tecnología -> nombres de su propio archivo (_archivo): la versión de otro src, como el de un plugin, no cuenta.
+ARCHIVOS_PROPIOS = {'AngularJS': ('angular',), 'React': ('react', 'react-with-addons'), 'Vue.js': ('vue',),
+                    'jQuery': ('jquery',)}
 
 _DISTROS = [(n, re.compile(p, re.I | re.A)) for n, p in DISTRIBUCIONES]
+_EMPAQUETAN_MINUSCULAS = [n.translate(borde._MINUSCULAS) for n in EMPAQUETAN_SIN_MARCA]
 _UPSTREAM = re.compile('|'.join(SIGUEN_UPSTREAM), re.I | re.A)
 # Un producto de la cabecera ('Apache/2.4.52') con los comentarios que le siguen (' (Ubuntu)'), o un comentario suelto.
 _PEDAZO = re.compile(r'[^\s()]+(?:\s*\([^()]*\))*|\([^()]*\)', re.A)
 _COMENTARIO = re.compile(r'\([^()]*\)', re.A)   # '(Unix)' o '(Win64)' en el pedazo: el producto ya dice su origen
 _SEPARA_COOKIES = re.compile(r',\s*(?=[^;,=\s]+=)')   # Set-Cookie juntadas con ', ', sin partir un Expires
+_EXTENSION = re.compile(r'\.[cm]?js$', re.A)   # sobre el nombre ya en minúsculas
+# Sufijos de compilación del archivo propio (_FORMA_PROPIA): los de todos los alias y los que solo publica uno. Vue.js
+# publica 'vue.runtime.esm-browser.prod.js' o 'vue.common.js', y jQuery 'jquery.slim.min.js' y, de la 1.0 a la 1.2.6,
+# 'jquery-1.2.6.pack.js'. 'jquery.browser.min.js' o 'jquery.global.js' son plugins.
+SUFIJOS = ('min', 'production', 'development', 'prod', 'umd', 'self')   # '.self': Sprockets en modo de depuración
+SUFIJOS_DEL_ALIAS = {'vue': ('browser', 'common', 'global', 'runtime', 'esm', 'cjs'), 'jquery': ('slim', 'pack')}
+# El archivo propio de una tecnología (_es_propio): el alias entero, con su versión y '.custom' o sin ellos, sufijos de
+# compilación y una huella de caché hexadecimal al final. La versión va sin prerelease: 'jquery-4.0.0-beta.2' no da
+# 4.0.0, y 'jquery-3.0.0-rc1' tampoco da versión. Nada se sustituye: el nombre calza entero o no es propio.
+_VER_ARCHIVO = r'\d+(?:\.\d+){0,3}'
+_FORMA_PROPIA = (r'%s(?:[.-]' + _VER_ARCHIVO + r'(?:[.-]custom)?)?(?:[.-](?:%s))*(?:[.-][0-9a-f]{8,})?')
+_PROPIOS = {n: [re.compile(_FORMA_PROPIA % (re.escape(a), '|'.join(SUFIJOS + SUFIJOS_DEL_ALIAS.get(a, ()))), re.A)
+                for a in alias] for n, alias in ARCHIVOS_PROPIOS.items()}
+_PAGESPEED = '.js.pagespeed.'   # mod_pagespeed: 'jquery-1.7.2.min.js.pagespeed.jm.6CdKpKE3dq.js' (_archivo)
+_LETRA_O_DIGITO = frozenset('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')
 
 
 # ---------------------------------------------------------------- de JavaScript a Python
@@ -587,11 +641,12 @@ class _Reloj:
 
 
 def _buscar(tecnologias, datos, reloj, vistos):
-    """Las detecciones [(nombre, campo, llave, versión, confianza, valor, (inicio, fin) de lo que calzó)] de
-    `tecnologias` en `datos`. False si se acabó el tiempo. El reloj se revisa antes de cada patrón y antes de cada
-    valor, también entre el src resuelto y el crudo: una cabecera repetida muchas veces no pasa del tope por más de
-    una regex sobre un valor. Un src se compara resuelto y, si es otro, también como vino ('scriptSrc_crudo'): calza
-    con cualquiera y da una sola detección, así que su señal y su confianza no cuentan dos veces."""
+    """Las detecciones [(nombre, campo, llave, versión, confianza, valor, (inicio, fin) de lo que calzó, (inicio, fin)
+    de la versión (_lugar) o None)] de `tecnologias` en `datos`. False si se acabó el tiempo. El reloj se revisa
+    antes de cada patrón y antes de cada valor, también entre el src resuelto y el crudo: una cabecera repetida muchas
+    veces no pasa del tope por más de una regex sobre un valor. Un src se compara resuelto y, si es otro, también
+    como vino ('scriptSrc_crudo'): calza con cualquiera y da una sola detección, así que su señal y su confianza no
+    cuentan dos veces."""
     for nombre in tecnologias:
         t = datos['tecnologias'][nombre]
         for campo, patrones in t['patrones'].items():
@@ -615,8 +670,9 @@ def _buscar(tecnologias, datos, reloj, vistos):
                             return False
                         m = regex.search(forma)
                         if m:
-                            yield (nombre, campo, llave, resolver_version(version, regex, forma), confianza, forma,
-                                   m.span())
+                            resuelta = resolver_version(version, regex, forma)
+                            yield (nombre, campo, llave, resuelta, confianza, forma, m.span(),
+                                   _lugar(version, m, resuelta))
                             break
     return True
 
@@ -661,13 +717,125 @@ def _distribucion_de(nombre, campo, llave, valor, donde, de_la_respuesta, cats):
     return de_la_respuesta if hereda else None
 
 
+def _archivo(src):
+    """El nombre del archivo de un src, en minúsculas: el último segmento de la ruta (sin la consulta ni el fragmento),
+    cortado en el primer ';' (parámetros de ruta como ';jsessionid='), en el primer '.js.pagespeed.' (el nombre que
+    le pone mod_pagespeed, que ya se lleva el '.js') o, sin ese corte, sin '.js', '.mjs' ni '.cjs'. Con más de
+    MAX_ARCHIVO caracteres, ya sin la extensión ni la cola de mod_pagespeed, da None.
+    'https://code.jquery.com/jquery-3.7.1.slim.min.js?x=1' da 'jquery-3.7.1.slim.min', '/app;x=1/js/jquery.min.js',
+    'jquery.min', 'jquery-1.7.2.min.js.pagespeed.jm.6CdKpKE3dq.js', 'jquery-1.7.2.min', y
+    'jquery.cjs.js.pagespeed.jm.X.js', 'jquery.cjs', que no es propio."""
+    segmento = re.split(r'[?#]', src, maxsplit=1)[0].rsplit('/', 1)[-1].split(';', 1)[0].translate(borde._MINUSCULAS)
+    archivo = segmento.split(_PAGESPEED, 1)[0] if _PAGESPEED in segmento else _EXTENSION.sub('', segmento)
+    return archivo if len(archivo) <= MAX_ARCHIVO else None
+
+
+def _es_propio(nombre, src):
+    """True si el archivo del src es el de la tecnología: calza entero con _FORMA_PROPIA para alguno de sus alias de
+    ARCHIVOS_PROPIOS, con los SUFIJOS y los SUFIJOS_DEL_ALIAS de ese alias. 'jquery-3.7.1.slim.min',
+    'jquery.min.e3a1b2c4d6f5', 'jquery-1.2.6.pack' y 'vue-2.6.14.common' sí; 'jquery.validate.min', 'jquery-1.12.4-ui',
+    'vue-3d-model.umd', 'jquery.custom', 'jquery.browser.min' y 'jquery-4.0.0-beta.2' no."""
+    archivo = _archivo(src)
+    return archivo is not None and any(r.fullmatch(archivo) for r in _PROPIOS[nombre])
+
+
+def _lugar(plantilla, m, version):
+    """(inicio, fin) de la versión resuelta dentro del valor: la del grupo de `m` que la dio, en el orden en que la
+    plantilla los nombra ('\\1?\\1:\\2' prueba el 1 y luego el 2), o None si ningún grupo la da."""
+    for n in re.findall(r'\\(\d)', plantilla or ''):
+        n = int(n)
+        g = m.group(n) if version and n <= (m.re.groups or 0) else None
+        if g is not None and g.strip() == version:
+            inicio = m.start(n) + g.index(version)
+            return inicio, inicio + len(version)
+    return None
+
+
+def _suelta(texto, lugar):
+    """True si lo que hay en `lugar` (inicio, fin) de `texto` no lleva una letra ni un dígito pegados. Una 'v' o 'V'
+    pegada delante solo vale si antes de ella hay '-', '@', '_' o '.': 'handlebars-v4.7.7.js', 'hogan@v3.0.2' y
+    'jquery.fancybox.js?v=3.5.7' sí; '/static/v1.10.0/jquery-ui.min.js', 'polyfill.io/v3/', 'vue.2b14e45f.js',
+    'v=110.0.7' y 'dev4.7.7' no. Mira solo los dos caracteres de cada orilla: no crece con el src."""
+    if lugar is None:
+        return False
+    inicio, fin = lugar
+    antes = texto[inicio - 1:inicio] if inicio > 0 else ''
+    if antes in ('v', 'V'):
+        orilla = texto[inicio - 2:inicio - 1] if inicio >= 2 else ''
+        delante = orilla in ('-', '@', '_', '.')
+    else:
+        delante = antes not in _LETRA_O_DIGITO
+    return delante and texto[fin:fin + 1] not in _LETRA_O_DIGITO
+
+
+def _version_del_src_cuenta(nombre, src, lugar, propios=None):
+    """True si la versión que salió del src cuenta para la tecnología. `lugar` es donde calzó el grupo del patrón
+    que la dio (_lugar), y ahí no puede llevar una letra ni un dígito pegados (_suelta): el '2' que un patrón saca de
+    la huella de caché de 'vue.2b14e45fceea.js' no cuenta, aunque el src traiga un 'v2' o un '?v=2' en otra parte, y
+    el 4.7.7 de 'handlebars-v4.7.7.js' sí. Para las de ARCHIVOS_PROPIOS, además, el archivo tiene que ser el suyo
+    (_es_propio), no el de un plugin que vive en una ruta con su nombre. `propios` guarda _es_propio por tecnología y
+    src dentro de una llamada a analizar()."""
+    if not _suelta(src, lugar):
+        return False
+    if nombre not in _PROPIOS:
+        return True
+    if propios is None:
+        return _es_propio(nombre, src)
+    if (nombre, src) not in propios:
+        propios[(nombre, src)] = _es_propio(nombre, src)
+    return propios[(nombre, src)]
+
+
+def _partes(version):
+    return version.split('.')
+
+
+def _alarga(larga, corta):
+    """True si `corta` es prefijo por partes de `larga` (o la misma): 5.8 de 5.8.1 sí, 5.8 de 5.80 no."""
+    return _partes(larga)[:len(_partes(corta))] == _partes(corta)
+
+
+def _elegir_version(candidatas):
+    """La candidata (directa, versión, ...) que da la versión de una tecnología, o None si no se puede decir. Gana la
+    señal más directa (DIRECTAS: cabecera, cookie o meta, luego el src y al final scripts y html). Si las versiones de
+    esa señal no concuerdan entre sí (una no alarga a la otra, como 3.7.1 y 1.19.5), sale sin versión. Si concuerdan,
+    la más larga, y una de una señal menos directa solo la cambia si la alarga. Con empates queda la que salió
+    primero. Antes de comparar deja una candidata por señal y versión, la primera, y con más de MAX_VERSIONES
+    distintas sale sin versión: no se sabe cuál es y compararlas todas tomaría segundos."""
+    unicas = {}
+    for c in candidatas:
+        unicas.setdefault((c[0], c[1]), c)
+    if not unicas or len({c[1] for c in unicas.values()}) > MAX_VERSIONES:
+        return None
+    orden = sorted(unicas.values(), key=lambda c: c[0])   # estable: con la misma señal, en el orden en que salieron
+    primeras = [c for c in orden if c[0] == orden[0][0]]
+    if any(not (_alarga(a[1], b[1]) or _alarga(b[1], a[1])) for a in primeras for b in primeras):
+        return None
+    elegida = primeras[0]
+    for c in orden:
+        if len(_partes(c[1])) > len(_partes(elegida[1])) and _alarga(c[1], elegida[1]):
+            elegida = c
+    return elegida
+
+
+def origen_sin_confirmar(tecnologia):
+    """Lo que soporte.py y nvd.py ponen en 'origen_sin_confirmar' de la evidencia: el de huellas.analizar() o, si la
+    tecnología no lo trae (armada a mano), True para un producto de EMPAQUETAN_SIN_MARCA sin distribución."""
+    t = tecnologia if isinstance(tecnologia, dict) else {}
+    if isinstance(t.get('origen_sin_confirmar'), bool):
+        return t['origen_sin_confirmar']
+    nombre = t.get('nombre').translate(borde._MINUSCULAS) if isinstance(t.get('nombre'), str) else None
+    return nombre in _EMPAQUETAN_MINUSCULAS and not t.get('distribucion')
+
+
 def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=time.monotonic, url=None):
     """Las tecnologías del sitio en una respuesta de la visita web. `url` es la de la página, para resolver los src
     relativos de los <script> como el DOM (sin ella se comparan como vienen). Solo se resuelven con esa url: un
     <base href> del HTML no se lee.
 
     {'tecnologias': [{'nombre', 'version' (o None), 'categorias', 'cpe' (o None), 'confianza', 'senales'
-    ('campo:llave' de lo que calzó, nunca el valor), 'distribucion' (o None), 'implicada_por' (o None)}] o None,
+    ('campo:llave' de lo que calzó, nunca el valor), 'distribucion' (o None), 'origen_sin_confirmar' (True con una
+    versión sin marca de EMPAQUETAN_SIN_MARCA), 'implicada_por' (o None)}] o None,
     'reto': lo de borde.reto() o None, 'completo', 'recortes': los de entradas(), para el aviso, 'del_borde': las
     cabeceras que se quitaron por ser del CDN o WAF}. Con reto, 'tecnologias' es None: sin cobertura, nunca 0.
     Primero las de más confianza, luego por nombre.
@@ -709,19 +877,28 @@ def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=
             break
         hechas |= set(faltan)
         completo = _detectar(faltan, datos, vistos, tiempo, detecciones)
-    resueltas = {}
-    for nombre, campo, llave, version, confianza, valor, donde in detecciones:
+    resueltas, versiones, propios = {}, {}, {}
+    for nombre, campo, llave, version, confianza, valor, donde, lugar in detecciones:
         r = resueltas.setdefault(nombre, {'nombre': nombre, 'version': '', 'confianza': 0, 'senales': [],
-                                          'distribucion': None, 'implicada_por': None})
+                                          'distribucion': None, 'origen_sin_confirmar': False, 'implicada_por': None})
         r['confianza'] = min(100, r['confianza'] + confianza)
         senal = campo if llave is None else '%s:%s' % (campo, llave)
         if senal not in r['senales']:
             r['senales'].append(senal)
         numero = re.match(r'\d+', version)
-        if len(r['version']) < len(version) <= MAX_LARGO_VERSION and (int(numero.group()) if numero else 0) < 10000:
+        if 0 < len(version) <= MAX_LARGO_VERSION and (int(numero.group()) if numero else 0) < 10000 \
+                and (campo != 'scriptSrc' or _version_del_src_cuenta(nombre, valor, lugar, propios)):
+            versiones.setdefault(nombre, []).append((DIRECTAS.get(campo, 2), version, campo, llave, valor, donde))
+    for nombre, candidatas in versiones.items():
+        elegida = _elegir_version(candidatas)
+        if elegida:
+            _, version, campo, llave, valor, donde = elegida
+            r = resueltas[nombre]
             r['version'] = version
             r['distribucion'] = _distribucion_de(nombre, campo, llave, valor, donde, de_la_respuesta,
                                                  todas[nombre]['cats'])
+            upstream = campo == 'headers' and _UPSTREAM.search(_pedazo(valor, *donde))
+            r['origen_sin_confirmar'] = nombre in EMPAQUETAN_SIN_MARCA and not r['distribucion'] and not upstream
     for nombre in list(resueltas):   # excludes
         for excluida in todas[nombre]['excludes'] if nombre in resueltas else ():
             resueltas.pop(excluida, None)
@@ -733,7 +910,8 @@ def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=
                 if implicada in todas and implicada not in resueltas:
                     resueltas[implicada] = {'nombre': implicada, 'version': version,
                                             'confianza': min(r['confianza'], confianza), 'senales': [],
-                                            'distribucion': None, 'implicada_por': nombre}
+                                            'distribucion': None, 'origen_sin_confirmar': False,
+                                            'implicada_por': nombre}
                     cambio = True
     salida = []
     for r in resueltas.values():

@@ -9,11 +9,18 @@ Cómo decide:
   'sin_producto'.
 - Solo con versión, de una huella que el sitio mostró (no implicada por otra) y con confianza 100. Sin eso da
   'sin_version'.
-- Nunca una versión de una distribución, como 'nginx/1.24.0 (Ubuntu)' (huellas.py, 'distribucion'): la distribución le
-  sigue mandando parches que endoflife.date no ve. Da 'distribucion' y ningún hallazgo (_plan de RC-66, etica-1).
+- Nunca una versión con marca de distribución, como 'nginx/1.24.0 (Ubuntu)' (huellas.py, 'distribucion'): la
+  distribución le sigue mandando parches que endoflife.date no ve. Da 'distribucion' y ningún hallazgo (_plan de
+  RC-66, etica-1). Una versión sin marca de un producto que Debian o RHEL empaquetan sin marca, como 'nginx/1.18.0'
+  (huellas.EMPAQUETAN_SIN_MARCA), sí da hallazgo, con 'origen_sin_confirmar' True en la evidencia: la cabecera no
+  dice si es de la distribución, que la sigue parchando, o de una compilación propia (el texto revisado de
+  outdated_software ya lo advierte). El valor sale de huellas.origen_sin_confirmar().
 - El ciclo es el más largo de endoflife.date que es prefijo de la versión por partes: 1.24.0 cae en 1.24, 7.4.33 en
   7.4 y 3.6.0 en 3. Sin ciclo da 'sin_dato', igual que una respuesta que no se puede leer o un ciclo cuyo eol no se
   puede leer (no cae en un ciclo más corto): no se sabe, nunca 'con soporte'.
+- La versión necesita al menos tantas partes como el ciclo que le toca: si algún ciclo empieza con la versión y tiene
+  más partes que ella, no se sabe en cuál cae y da 'sin_dato'. 'Apache/2' con los ciclos 2.4 y 2.2 no tiene ciclo, y
+  'Drupal 10' con los ciclos 10.2, 10.3 y 10 tampoco, aunque 10 sea prefijo. 'Drupal 7' con el ciclo 7 sí cae en él.
 - Sin soporte si eol es true o si su fecha ya pasó (`hoy`). Con eol false o una fecha que no ha llegado da
   'con_soporte'.
 Lee las dos formas de la API: la v1 (/api/v1/products/<producto>/, con result.releases, isEol y eolFrom) y la de antes
@@ -25,6 +32,8 @@ activo, su huella y la rúbrica.
 """
 import re
 from datetime import date, datetime
+
+from cirdan.recolectores import huellas
 
 CODIGOS = {'outdated_software': 'high'}   # la severidad del catálogo (semilla 001)
 URL_V1 = 'https://endoflife.date/api/v1/products/%s/'
@@ -93,7 +102,8 @@ def ciclos(respuesta):
 
 
 def ciclo_de(version, lista):
-    """El ciclo más largo de `lista` que es prefijo de la versión por partes, o None."""
+    """El ciclo más largo de `lista` que es prefijo de la versión por partes, o None. También None si algún ciclo
+    empieza con la versión y tiene más partes que ella ('10' con el ciclo '10.2'): la versión no dice su ciclo."""
     m = _VERSION.match(version) if isinstance(version, str) else None
     if not m:
         return None
@@ -101,6 +111,8 @@ def ciclo_de(version, lista):
     mejor = None
     for c in lista or ():
         cp = c['ciclo'].split('.')
+        if len(cp) > len(partes) and cp[:len(partes)] == partes:
+            return None
         if partes[:len(cp)] == cp and (mejor is None or len(cp) > len(mejor['ciclo'].split('.'))):
             mejor = c
     return mejor
@@ -141,6 +153,7 @@ def revisar(tecnologia, respuesta, host, hoy=None):
     evidencia = {'title': titulo, 'tecnologia': t['nombre'], 'version': version, 'producto': producto,
                  'ciclo': ciclo['ciclo'], 'fin_de_soporte': eol.isoformat() if isinstance(eol, date) else None,
                  'ultima_del_ciclo': ciclo['ultima'], 'senales': list(t.get('senales') or []),
+                 'origen_sin_confirmar': huellas.origen_sin_confirmar(t),
                  'fuente_datos': NOMBRE_FUENTE, 'url_fuente': url(producto), 'host': host}
     salida['hallazgo'] = {'codigo': 'outdated_software', 'severidad': CODIGOS['outdated_software'],
                           'clave': producto, 'titulo': titulo, 'evidencia': evidencia}

@@ -136,9 +136,9 @@ class Datos(unittest.TestCase):
             for c in x.get('requiresCategory', []):
                 self.assertIn(int(c), huellas.CATEGORIAS, nombre)
             if 'cpe' in x and nombre not in CPE_INVALIDOS:
-                self.assertEqual(nvd.cpe_con_version(x['cpe'], '1.0').split(':')[5], '1.0', nombre)
+                self.assertEqual(nvd.cpe_con_version(x['cpe'], '1.0.0').split(':')[5], '1.0.0', nombre)
         # Los CPE de Wappalyzer 6.10.54 que no son una cadena de CPE 2.3: nvd.py no los arregla ni los consulta.
-        self.assertEqual({n for n, x in t.items() if 'cpe' in x and nvd.cpe_con_version(x['cpe'], '1.0') is None},
+        self.assertEqual({n for n, x in t.items() if 'cpe' in x and nvd.cpe_con_version(x['cpe'], '1.0.0') is None},
                          set(CPE_INVALIDOS))
         for nombre, por_que in CPE_INVALIDOS.items():
             self.assertIn(por_que, t[nombre]['cpe'], nombre)
@@ -651,6 +651,349 @@ class Motor(unittest.TestCase):
         e = huellas.entradas([('Set-Cookie', 'laravel_session=CIRDAN_FAKE_' + 'b' * 9000)])
         self.assertEqual((e['cookies'], e['headers'], e['recortes']), ({}, {}, ['MAX_VALOR']))
 
+    def test_24_la_version_de_un_plugin_no_es_la_de_jquery(self):
+        # El patrón '/(\d+\.\d+\.\d+)/jquery[/.-][^u]' de Wappalyzer calza con la ruta de cdnjs de un plugin: la
+        # versión es la del plugin. jQuery sigue saliendo (el plugin lo necesita), sin esa versión.
+        cdnjs = 'https://cdnjs.cloudflare.com/ajax/libs/'
+        validate = cdnjs + 'jquery-validate/1.19.5/jquery.validate.min.js'
+        mousewheel = cdnjs + 'jquery-mousewheel/3.1.13/jquery.mousewheel.js'
+        propio = 'https://code.jquery.com/jquery-3.7.1.min.js'
+        casos = {(validate,): None, (validate, propio): '3.7.1', (propio, validate): '3.7.1',
+                 (cdnjs + 'jquery-migrate/3.4.1/jquery-migrate.min.js',): None,
+                 ('/js/jquery-migrate-3.4.1.min.js',): None,
+                 (cdnjs + 'jquery.mask/1.14.16/jquery.mask.min.js',): None,
+                 (cdnjs + 'jquery-easing/1.4.1/jquery.easing.min.js',): None,
+                 # El de mousewheel tapaba un jQuery 2.2.4 real (3.1.13 es más larga).
+                 (mousewheel, 'https://code.jquery.com/jquery-2.2.4.min.js'): '2.2.4', (mousewheel,): None,
+                 # Los archivos de jQuery sí dan su versión.
+                 (cdnjs + 'jquery/3.7.1/jquery.min.js',): '3.7.1',
+                 (cdnjs + 'jquery/3.7.1/jquery.slim.min.js',): '3.7.1',
+                 ('/3.6.0/jquery.js',): '3.6.0', ('/js/jquery-1.12.4.min.js?v=2',): '1.12.4'}
+        for srcs, esperada in casos.items():
+            cuerpo = ''.join('<script src="%s"></script>' % s for s in srcs)
+            t = por_nombre(huellas.analizar(200, None, cuerpo, url='https://' + SITIO + '/'))
+            self.assertEqual((t['jQuery']['version'], t['jQuery']['confianza']), (esperada, 100), srcs)
+            if esperada is None:   # sin versión no hay hallazgo ni consulta
+                self.assertEqual(soporte.revisar(t['jQuery'], fixture('eol_jquery'), SITIO, HOY)['estado'],
+                                 'sin_version', srcs)
+                self.assertEqual(nvd.revisar(t['jQuery'], fixture('nvd_nginx_1.18.0'), SITIO)['estado'],
+                                 'sin_version', srcs)
+        for src, nombre, propio in (('https://code.jquery.com/jquery-3.7.1.slim.min.js?x=1#y', 'jQuery', True),
+                                    (validate, 'jQuery', False), ('jquery-migrate-3.4.1.min.js', 'jQuery', False),
+                                    ('/js/JQuery.Min.JS', 'jQuery', True),
+                                    ('/js/vue-2.6.14.runtime.min.js', 'Vue.js', True),
+                                    ('/lib/angular-1.0.0.js', 'AngularJS', True),
+                                    ('/lib/angular-1.0.0-rc.1.js', 'AngularJS', False),
+                                    ('/textAngular-1.5.16.min.js', 'AngularJS', False), ('/jquery/', 'jQuery', False)):
+            self.assertIs(huellas._es_propio(nombre, src), propio, src)
+        self.assertEqual(huellas._archivo('https://code.jquery.com/jquery-3.7.1.slim.min.js?x=1#y'),
+                         'jquery-3.7.1.slim.min')
+        # Lo mismo con React, Vue.js y AngularJS: un archivo de otro nombre con el suyo adentro no da su versión.
+        for src, nombre in (('/js/preact-10.5.13.min.js', 'React'), ('/js/bootstrap-vue-2.21.2.min.js', 'Vue.js'),
+                            ('/js/textAngular-1.5.16.min.js', 'AngularJS')):
+            t = por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % src))
+            self.assertIsNone(t[nombre]['version'], src)
+        for src, nombre, version in (('/js/react-16.14.0.min.js', 'React', '16.14.0'),
+                                     ('/js/vue-2.6.14.min.js', 'Vue.js', '2.6.14'),
+                                     ('/js/angular-1.8.2.min.js', 'AngularJS', '1.8.2')):
+            t = por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % src))
+            self.assertEqual(t[nombre]['version'], version, src)
+        # Una tecnología fuera de ARCHIVOS_PROPIOS sigue con la versión de cualquier src (GLPI, test_16).
+        self.assertNotIn('GLPI', huellas.ARCHIVOS_PROPIOS)
+
+    def test_25_gana_la_version_de_la_senal_mas_directa(self):
+        cabecera = ('x-prueba',) + huellas._patron('v([\\d.]+)\\;version:\\1')
+        html = (None,) + huellas._patron('prueba-([\\d.]+)\\;version:\\1')
+        datos = {'tecnologias': {'Prueba': {'cats': [1], 'cpe': None, 'implies': [], 'excludes': [], 'requires': [],
+                                            'requiresCategory': [],
+                                            'patrones': {'headers': [cabecera], 'html': [html]}}}}
+
+        def version(cabeceras, html=None):
+            return por_nombre(huellas.analizar(200, cabeceras, html, datos=datos))['Prueba']['version']
+        # La cabecera gana aunque la del html sea más larga (antes ganaba la más larga).
+        self.assertEqual(version([('X-Prueba', 'v2.0.1')], '<p>prueba-10.0.12</p>'), '2.0.1')
+        # Una de una señal menos directa solo cuenta si alarga la elegida.
+        self.assertEqual(version([('X-Prueba', 'v2.0')], '<p>prueba-2.0.1</p>'), '2.0.1')
+        self.assertEqual(version([('X-Prueba', 'v2.0')], '<p>prueba-2.01</p>'), '2.0')
+        self.assertEqual(version(None, '<p>prueba-2.0.1</p>'), '2.0.1')
+        # Dos de la misma señal que no concuerdan: sin versión. Si una alarga a la otra, la más larga.
+        self.assertIsNone(version([('X-Prueba', 'v2.0.1'), ('X-Prueba', 'v3.1.4')]))
+        self.assertEqual(version([('X-Prueba', 'v2.0'), ('X-Prueba', 'v2.0.1')]), '2.0.1')
+        # Dos archivos de jQuery con versiones distintas en la misma página: no se sabe cuál usa.
+        t = por_nombre(huellas.analizar(200, None, '<script src="https://code.jquery.com/jquery-1.12.4.min.js">'
+                                                   '</script><script src="/js/jquery-3.7.1.min.js"></script>'))
+        self.assertIsNone(t['jQuery']['version'])
+
+    def test_26_muchas_versiones_no_pasan_del_tope(self):
+        # Una Set-Cookie de menos de 64 KiB con 4000 ci_csrf_token juntadas con ',' (http.client la deja pasar) da
+        # 4000 veces el '2+' de CodeIgniter. Compararlas de dos en dos, después del reloj, tomaba casi 5 s.
+        crudo = 'Set-Cookie: %s\r\n\r\n' % ','.join(['ci_csrf_token=a'] * 4000)
+        mensaje = http.client.parse_headers(io.BytesIO(crudo.encode('latin-1')))
+        inicio = time.monotonic()
+        r = huellas.analizar(200, mensaje, '<p>hola</p>')
+        self.assertLess(time.monotonic() - inicio, huellas.TOPE_SEGUNDOS)
+        self.assertEqual((por_nombre(r)['CodeIgniter']['version'], r['completo']), ('2+', True))
+        # Con más de MAX_VERSIONES distintas sale sin versión, aunque concuerden. Las repetidas cuentan una vez y
+        # queda la primera.
+        cadena = ['1' + '.0' * i for i in range(huellas.MAX_VERSIONES + 1)]
+        candidatas = [(0, v, 'headers', 'x-prueba', 'v' + v, (0, 0)) for v in cadena]
+        self.assertIsNone(huellas._elegir_version(candidatas))
+        self.assertEqual(huellas._elegir_version(candidatas[:huellas.MAX_VERSIONES])[1], cadena[-2])
+        repetidas = [(0, '2.0.1', 'headers', 'x-prueba', 'v2.0.1-%d' % i, (0, 0)) for i in range(5000)]
+        self.assertEqual(huellas._elegir_version(repetidas)[4], 'v2.0.1-0')
+        self.assertEqual(huellas._elegir_version(repetidas + [(2, '2.0.1.4', 'html', None, '', (0, 0))])[1],
+                         '2.0.1.4')
+        # MAX_VERSIONES cuenta versiones distintas, no pares (señal, versión): 5 versiones en 9 pares no son muchas.
+        pares = [(0, '2.0', 'headers', 'server', 'x/2.0', (0, 5))]
+        pares += [(d, '1.%d' % i, 'scriptSrc' if d == 1 else 'html', None, 'v', (0, 1)) for d in (1, 2)
+                  for i in range(1, 5)]
+        self.assertEqual(huellas._elegir_version(pares)[1], '2.0')
+        cadena = [(d, '4' + '.0' * i, 'html', None, '', (0, 0)) for d in (0, 2) for i in range(5)]
+        self.assertEqual(huellas._elegir_version(cadena)[1], '4.0.0.0.0')   # 10 pares, 5 versiones
+
+    def test_27_archivos_de_jquery_con_huella_de_cache_y_sufijos(self):
+        # Nombres reales: huella de caché de Django y Rails, ';jsessionid=' de JSP y sufijos de compilación.
+        casos = {'jQuery': (('https://code.jquery.com/jquery-3.7.1.min.js', '3.7.1'),
+                            ('/static/js/jquery-3.6.0.min.5e3a1b2c4d6f.js', '3.6.0'),
+                            ('/static/js/jquery-3.6.0.min.0e3a1b2c4d6f.js', '3.6.0'),
+                            ('/assets/jquery-3.6.0.min-8f14e45fceea167a5a36dedd4bea2543.js', '3.6.0'),
+                            ('/js/jquery-1.12.4.min.js;jsessionid=CIRDAN_FAKE_X', '1.12.4'),
+                            ('/js/jquery-1.12.4.js;jsessionid=CIRDAN_FAKE_X?v=1', '1.12.4'),
+                            ('/js/jquery-3.5.1.custom.min.js', '3.5.1'), ('/js/jquery-1.11.3-min.js', '1.11.3'),
+                            ('/js/jquery-1.8.3_min.js', None), ('/js/jquery-3.6.0.min.js.gz', None),
+                            ('/vendor/jquery-3.7.1/jquery.min.js', '3.7.1'),
+                            ('/ajax/libs/jquery/3.7.1/jquery.min.js', '3.7.1'),
+                            ('/ajax/libs/jquery/3.7.1/jquery.slim.min.js', '3.7.1'),
+                            ('https://ajax.aspnetcdn.com/ajax/jQuery/jquery-3.7.1.min.js', '3.7.1'),
+                            ('/js/jquery-3.4.1.min.js%3Fv%3D1', None), ('/js/jQuery-3.4.1.MIN.JS', '3.4.1'),
+                            ('/js/jquery-3.4.1.min.cjs', '3.4.1'), ('/js/jquery-3.4.1.min.js/', None),
+                            ('/lib/jquery/3.4.1/jquery.js?ver=3.4.1', '3.4.1'),
+                            ('/js/jquery-2.2.4.min.js?ver=2.2.4#x', '2.2.4'), ('/js/jquery-3.6.0.bundle.js', None),
+                            ('/js/jquery-3.6.0.dev.js', None), ('/js/jquery-3.6.0.slim.js', '3.6.0'),
+                            ('/js/jquery-3.6.0-patched.min.js', None),
+                            ('/static/jquery-3.6.0.min.js?1699999999', '3.6.0'), ('/js/jquery-3.0.0-rc1.js', None),
+                            ('/js/jquery-3.0.0-beta1.js', None), ('/js/jquery-3.0.0.min.map.js', None)),
+                 'AngularJS': (('/js/angular-1.8.2.min.js', '1.8.2'), ('/js/angular-1.8.2.min.abcdef12.js', '1.8.2'),
+                               ('/1.8.2/angular.min.js', '1.8.2'), ('/js/angular-1.8.2.custom.js', '1.8.2')),
+                 'React': (('/js/react-15.6.1.min.js', '15.6.1'), ('/15.6.1/react.min.js', '15.6.1'),
+                           ('/js/react-16.14.0.production.min.js', '16.14.0'),
+                           ('/js/react-with-addons-15.6.1.min.js', '15.6.1')),
+                 'Vue.js': (('/js/vue-2.6.14.min.js', '2.6.14'), ('/2.6.14/vue.min.js', '2.6.14'),
+                            ('/js/vue-3.2.47.global.prod.js', '3.2.47'), ('/js/vue-2.6.14.runtime.min.js', '2.6.14'),
+                            ('/js/vue-2.6.14.common.js', '2.6.14'), ('/js/vue-2.7.14.esm.browser.min.js', '2.7.14'),
+                            ('/js/vue.2.6.14.js', '2.6.14'))}
+        for nombre, srcs in casos.items():
+            for src, version in srcs:
+                t = por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % src))
+                self.assertEqual(t[nombre]['version'], version, src)
+        # react-dom no es React.
+        self.assertNotIn('React', por_nombre(huellas.analizar(200, None, '<script src="/js/react-dom-16.14.0.min.js">'
+                                                                         '</script>')))
+        # Lo que la forma decidida deja fuera: un sufijo que no es de compilación (-patched, .dev, .bundle, .map) o
+        # una extensión que no es .js, .mjs ni .cjs.
+        for src in ('/js/jquery-3.6.0-patched.min.js', '/js/jquery-3.6.0.dev.js', '/js/jquery-3.6.0.bundle.js',
+                    '/js/jquery-3.0.0.min.map.js', '/js/jquery-3.6.0.min.js.gz'):
+            self.assertFalse(huellas._es_propio('jQuery', src), src)
+        # Cada sufijo de compilación, también sin versión en el nombre, solo en el alias que lo publica: los de Vue.js
+        # en un archivo de jQuery son de un plugin, y 'slim' o 'pack' en uno de Vue.js no son suyos.
+        de_vue, de_jquery = ('browser', 'common', 'global', 'runtime', 'esm', 'cjs'), ('slim', 'pack')
+        for sufijo in ('min', 'production', 'development', 'prod', 'umd', 'self') + de_vue + de_jquery:
+            for nombre, alias, suyos in (('Vue.js', 'vue', de_vue), ('jQuery', 'jquery', de_jquery)):
+                propio = sufijo not in de_vue + de_jquery or sufijo in suyos
+                src = '/2.6.14/%s.%s.min.js;x=1' % (alias, sufijo.upper())
+                self.assertIs(huellas._es_propio(nombre, src), propio, src)
+                src = '/js/%s-2.6.14.%s.js' % (alias, sufijo)   # el patrón de Vue.js no calza con el de arriba
+                version = por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % src))[nombre]
+                self.assertEqual(version['version'], '2.6.14' if propio else None, src)
+        self.assertEqual(huellas.SUFIJOS_DEL_ALIAS, {'vue': de_vue, 'jquery': de_jquery})
+
+    def test_28_el_archivo_propio_calza_entero(self):
+        # Plugins y archivos que empiezan con el nombre de la librería: no son suyos y no dan su versión.
+        for nombre, src in (('jQuery', '/js/jquery-1.12.4-plugin.js'), ('jQuery', '/js/jquery-1.12.4-ui.min.js'),
+                            ('AngularJS', '/js/angular-1.8.2-route.min.js'), ('React', '/js/react-16.14.0-dom.min.js'),
+                            ('Vue.js', '/js/vue-2.6.14-compat.min.js'), ('jQuery', '/js/jquery-1.12.4-wp.js'),
+                            ('Vue.js', '/js/vue-3d-model.umd.js'), ('AngularJS', '/js/angular-2-local-storage.js'),
+                            ('jQuery', '/ajax/libs/jquery.3d/3.0.1/jquery.3d.min.js'),
+                            ('jQuery', '/ajax/libs/jquery.3dflipbook/1.2.3/jquery.3dflipbook.min.js'),
+                            ('jQuery', '/static/2.1.0/jquery.custom.js'),
+                            ('jQuery', '/static/3.1.0/jquery.custom.min.js'),
+                            ('jQuery', '/1.12.4/jquery' + '.min' * 60 + '.js'),
+                            # Plugins con un sufijo que solo publica Vue.js.
+                            ('jQuery', '/ajax/libs/jquery-browser/0.1.0/jquery.browser.min.js'),
+                            ('jQuery', '/ajax/libs/jquery-browser-plugin/0.1.0/jquery-browser.min.js'),
+                            ('jQuery', '/static/2.1.0/jquery.common.js'),
+                            ('jQuery', '/ajax/libs/jquery-global/1.0.0/jquery.global.js'),
+                            # Una versión con prerelease no es la del archivo propio: ni 4.0.0 ni 3.0.0.
+                            ('jQuery', 'https://code.jquery.com/jquery-4.0.0-beta.2.js'),
+                            ('jQuery', 'https://code.jquery.com/jquery-3.0.0-rc1.js'),
+                            ('jQuery', 'https://code.jquery.com/jquery-3.0.0-alpha1.js'),
+                            ('AngularJS', '/js/angular-1.2.0-rc.3.min.js'),
+                            # Tras el corte de mod_pagespeed no se quita otra extensión: 'jquery.cjs' no es propio.
+                            ('jQuery', '/ajax/libs/jquery-cjs/2.0.1/jquery.cjs.js.pagespeed.jm.X.js'),
+                            ('jQuery', '/static/2.1.0/jquery.js.js.pagespeed.jm.X.js')):
+            self.assertFalse(huellas._es_propio(nombre, src), src)
+            t = por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % src))
+            self.assertIsNone(t.get(nombre, {}).get('version'), src)
+        # El plugin con sufijo de Vue.js ya no tapa el jQuery real de la página.
+        plugin = '/ajax/libs/jquery-browser/0.1.0/jquery.browser.min.js'
+        t = por_nombre(huellas.analizar(200, None, '<script src="%s"></script><script src="/js/jquery-3.7.1.min.js">'
+                                                   '</script>' % plugin))
+        self.assertEqual(t['jQuery']['version'], '3.7.1')
+        # Un ';' en una carpeta no corta el nombre, y la huella de caché puede empezar con letra. Los .pack de jQuery
+        # 1.0 a 1.2.6 y los nombres de mod_pagespeed ('.js.pagespeed.jm.' y '.js.pagespeed.ce.') también son suyos.
+        for src, version in (('/app;x=1/js/jquery-1.12.4.min.js', '1.12.4'),
+                             ('/static/vendor/jquery/3.6.0/jquery.min.e3a1b2c4d6f5.js', '3.6.0'),
+                             ('/assets/jquery-3.6.0.min.self-8f14e45f.js', '3.6.0'),
+                             ('/js/jquery-1.2.6.pack.js', '1.2.6'),
+                             ('/js/jquery-1.7.2.min.js.pagespeed.jm.6CdKpKE3dq.js', '1.7.2'),
+                             ('/wp-includes/js/jquery-1.12.4.min.js.pagespeed.ce.Xn4Q1u2b0c.js', '1.12.4'),
+                             ('/ajax/libs/jquery/3.6.0/jquery.min.js.pagespeed.jm.Q1w2E3r4T5.js', '3.6.0')):
+            self.assertTrue(huellas._es_propio('jQuery', src), src)
+            t = por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % src))
+            self.assertEqual(t['jQuery']['version'], version, src)
+        self.assertEqual(huellas._archivo('/js/JQuery-1.7.2.min.js.pagespeed.jm.X.js'), 'jquery-1.7.2.min')
+        # MAX_ARCHIVO se mide sin la extensión: 200 caracteres más '.js' sí se comparan, 201 no.
+        self.assertEqual(huellas._archivo('/js/' + 'a' * huellas.MAX_ARCHIVO + '.js'), 'a' * huellas.MAX_ARCHIVO)
+        self.assertIsNone(huellas._archivo('/js/' + 'a' * (huellas.MAX_ARCHIVO + 1)))
+        # Tampoco cuenta la cola de mod_pagespeed.
+        cola = '.js.pagespeed.jm.' + 'X' * 40 + '.js'
+        self.assertEqual(huellas._archivo('/js/' + 'a' * huellas.MAX_ARCHIVO + cola), 'a' * huellas.MAX_ARCHIVO)
+        self.assertIsNone(huellas._archivo('/js/' + 'a' * (huellas.MAX_ARCHIVO + 1) + cola))
+        self.assertEqual(huellas._archivo('/js/jquery.cjs.js.pagespeed.jm.X.js'), 'jquery.cjs')
+        largo = '/1.2.3/jquery-1.2.3' + '.min' * ((huellas.MAX_ARCHIVO - 12) // 4) + '.js'
+        self.assertEqual(len(huellas._archivo(largo)), huellas.MAX_ARCHIVO)
+        self.assertEqual(por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % largo))['jQuery']
+                         ['version'], '1.2.3')
+        # El plugin ya no tapa la versión real de la página, ni sale con la suya.
+        vue = {'schema_version': '1.0.0', 'result': {'name': 'vue', 'releases': [
+            {'name': '3', 'isEol': False, 'eolFrom': None, 'latest': {'name': '3.4.0'}},
+            {'name': '2', 'isEol': True, 'eolFrom': '2023-12-31', 'latest': {'name': '2.7.16'}}]}}
+        for nombre, srcs, version in (
+                ('Vue.js', ('https://cdnjs.cloudflare.com/ajax/libs/vue/2.6.14/vue.min.js',
+                            'https://unpkg.com/vue-3d-model@1.4.1/dist/vue-3d-model.umd.js'), '2.6.14'),
+                ('Vue.js', ('/js/vue-2.6.14.min.js', '/js/vue-3d-model.min.js'), '2.6.14'),
+                ('Vue.js', ('/js/vue-3d-model.min.js',), None),
+                ('jQuery', ('https://code.jquery.com/jquery-2.2.4.min.js', '/static/2.1.0/jquery.custom.js'), '2.2.4'),
+                ('jQuery', ('https://code.jquery.com/jquery-1.12.4.min.js',
+                            '/ajax/libs/jquery.3d/3.0.1/jquery.3d.min.js'), '1.12.4'),
+                ('jQuery', ('/static/3.1.0/jquery.custom.js',), None),
+                ('AngularJS', ('/ajax/libs/angular.js/1.8.2/angular.min.js', '/js/angular-2-local-storage.js'),
+                 '1.8.2')):
+            cuerpo = ''.join('<script src="%s"></script>' % x for x in srcs)
+            t = por_nombre(huellas.analizar(200, None, cuerpo))[nombre]
+            self.assertEqual(t['version'], version, srcs)
+            if nombre == 'Vue.js' and version is None:
+                self.assertEqual(soporte.revisar(t, vue, SITIO, HOY)['estado'], 'sin_version', srcs)
+
+    def test_29_la_version_de_un_src_no_sale_de_una_huella_de_cache(self):
+        # El patrón de Vue.js o AngularJS saca '2', '8' o '3' de los dígitos de la huella: no es una versión.
+        for nombre, src in (('Vue.js', '/static/js/vue.8f14e45fceea.js'), ('Vue.js', '/static/js/vue.2b14e45fceea.js'),
+                            ('Vue.js', '/js/vue-2b14e45f.js'),
+                            ('Vue.js', '/assets/vue-0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071.js'),
+                            ('AngularJS', '/static/js/angular.8f14e45fceea.js'),
+                            ('AngularJS', '/assets/angular-3f2a1b9c4d5e.js')):
+            t = por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % src))[nombre]
+            self.assertIsNone(t['version'], src)
+        t = por_nombre(huellas.analizar(200, None, '<script src="/static/js/vue.3b14e45fceea.js"></script>'
+                                                   '<script src="/js/vue-2.6.14.min.js"></script>'))
+        self.assertEqual(t['Vue.js']['version'], '2.6.14')
+        def en(src, version):   # el lugar de la última aparición, como el de un grupo del patrón
+            inicio = src.rindex(version)
+            return inicio, inicio + len(version)
+        self.assertFalse(huellas._version_del_src_cuenta('Vue.js', '/js/vue.2b14e45f.js', en('vue.2b', '2')))
+        self.assertTrue(huellas._version_del_src_cuenta('Vue.js', '/js/vue-2.6.14.min.js', (8, 14)))
+        self.assertFalse(huellas._version_del_src_cuenta('Vue.js', '/js/vue-2.6.14.min.js', None))
+        for src, cuenta in (('/js/common.min.js?v=10.0.7', True), ('/js/common.min.js?v=10.0.71', False),
+                            ('/js/common.min.js?v=110.0.7', False), ('/js/common.min.js?v=a10.0.7', False)):
+            self.assertIs(huellas._version_del_src_cuenta('GLPI', src, en(src[:src.index('10.0.7') + 6], '10.0.7')),
+                          cuenta, src)
+        # Se mira donde calzó el grupo del patrón, no en todo el src: un 'v2' o un '?v=2' en otra parte de la ruta, en
+        # el host o en la URL de la página no vuelven versión el '2' de la huella de caché.
+        for url, src in ((None, '/static/v2/js/vue.2b14e45fceea.js'), (None, '/assets-v2/js/vue.2b14e45fceea.js'),
+                         (None, '/js/vue.2b14e45fceea.js?v=2'), (None, '/js/vue.2b14e45fceea.js?v2'),
+                         ('https://v2.acme-demo.mx/', 'js/vue.2b14e45fceea.js'),
+                         ('https://www.acme-demo.mx/v2/inicio', 'static/vue.2b14e45fceea.js')):
+            t = por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % src, url=url))['Vue.js']
+            self.assertIsNone(t['version'], (url, src))
+            self.assertEqual(soporte.revisar(t, fixture('eol_jquery'), SITIO, HOY)['estado'], 'sin_version', src)
+        # Una 'v' pegada delante solo vale después de '-', '@', '_' o '.': la de una carpeta del sitio no.
+        for src, nombre, version in (('https://s3.amazonaws.com/builds.handlebarsjs.com/handlebars-v4.7.7.js',
+                                      'Handlebars', '4.7.7'),
+                                     ('/js/handlebars.runtime-v4.7.7.min.js', 'Handlebars', '4.7.7'),
+                                     ('/js/handlebars-V1.3.0.min.js', 'Handlebars', '1.3.0'),
+                                     ('https://cdn.jsdelivr.net/gh/foo/hogan@v3.0.2/hogan.min.js', 'Hogan.js', '3.0.2'),
+                                     ('/static/v1.10.0/jquery-ui.min.js', 'jQuery UI', None),
+                                     ('/build/v1.0.2/dojo/dojo.js', 'Dojo', None),
+                                     ('https://polyfill.io/v3/polyfill.min.js?features=default', 'Polyfill', None)):
+            t = por_nombre(huellas.analizar(200, None, '<script src="%s"></script>' % src))
+            self.assertEqual(t[nombre]['version'], version, src)
+        for texto, lugar, suelta in (('-v4.7.7', (2, 7), True), ('@v4.7.7/', (2, 7), True), ('_V4.7.7', (2, 7), True),
+                                     ('.v4.7.7', (2, 7), True), ('/v4.7.7/', (2, 7), False), ('v4.7.7', (1, 6), False),
+                                     ('dev4.7.7', (3, 8), False), ('-vv4.7.7', (3, 8), False),
+                                     ('-v4.7.71', (2, 7), False), ('4.7.7', (0, 5), True), ('/4.7.7', (1, 6), True),
+                                     ('a4.7.7', (1, 6), False), ('4.7.7a', (0, 5), False), ('4.7.7', None, False)):
+            self.assertIs(huellas._suelta(texto, lugar), suelta, (texto, lugar))
+        # El lugar es el del grupo que nombra la plantilla, en su orden ('\\1?\\1:\\2' de Modernizr), o None.
+        m = re.search(r'(?:x(\d))?-(\d)', '9-5')
+        self.assertEqual((huellas._lugar('\\1?\\1:\\2', m, '5'), huellas._lugar('\\1', m, '5')), ((2, 3), None))
+        m = re.search(r'x(\d)?-(\d)', 'x9-5')
+        self.assertEqual(huellas._lugar('\\1?\\1:\\2', m, '9'), (1, 2))
+        self.assertEqual(huellas._lugar('\\1?\\1:\\2', re.search(r'(\d)-(\d)', '5-5'), '5'), (0, 1))
+        self.assertIsNone(huellas._lugar('', m, '9'))
+
+    def test_30_lo_que_corre_despues_del_reloj_no_crece_con_la_respuesta(self):
+        # Se mide solo lo que corre después de la última vez que el análisis mira el reloj (las versiones, _es_propio
+        # y _version_del_src_cuenta), que no tiene tope de tiempo. Lo de antes ya lo cubre TOPE_SEGUNDOS. El tope de
+        # 0.3 s deja margen: aquí toma unos 0.03 s, compilar una regex por detección tomaba 0.7 s con el segundo html
+        # y buscar la versión en todo el src, 0.6 s con el tercero.
+        ultima = [0.0]
+
+        def reloj():
+            ultima[0] = time.monotonic()
+            return ultima[0]
+        # 126 src de 2 KiB que calzan con los patrones de las cuatro y cuyo archivo es 'jquery' con muchos '.min'.
+        cola = '?a=/jquery-1.2.3.js&b=angular-1.js&c=/1/angular.js&d=react-1.2.js&e=/1/react.js&f=vue-1.js&g=/1/vue.js'
+        src = '/1.2.3/jquery' + '.min' * ((huellas.MAX_SRC - len(cola) - 24) // 4) + 'x.js' + cola + '&h='
+        cuantos = min(huellas.MAX_SCRIPTS, (huellas.MAX_HTML - 100) // (len(src) + 25))
+        html = ''.join('<script src="%s%d"></script>' % (src, i) for i in range(cuantos))
+        r = huellas.analizar(200, None, html, reloj=reloj)
+        self.assertLess(time.monotonic() - ultima[0], 0.3)
+        self.assertTrue(r['completo'])
+        self.assertEqual({n: t['version'] for n, t in por_nombre(r).items() if n in huellas.ARCHIVOS_PROPIOS},
+                         dict.fromkeys(huellas.ARCHIVOS_PROPIOS))
+        # Src que calzan con unos 50 patrones de scriptSrc cada uno, con versiones distintas: unas 9000 versiones que
+        # revisar después del reloj.
+        trozos = ('unpkg.com/aos@{v}/dist/aos.js', '/axios@{v}/axios.min.js', '/clientjs@{v}/', 'clipboard-{v}.js',
+                  'darkmode-js@{v}/lib/darkmode-js.min.js', '{v}/dojo/dojo.js', 'jquery.fancybox.js?v={v}',
+                  'fingerprintjs2@{v}/', 'flickity/{v}/flickity.min.js', '/@glidejs/glide@{v}', '@{v}/glider.min.js',
+                  'handlebars-v{v}.js', 'hogan-.{v}.js', '{v}/hogan.min.js', 'howler@{v}/dist/howler.min.js',
+                  '/htmx.org@{v}', 'cdn.jsdelivr.net/npm/intersection-observer@{v}', '{v}/jsrender.min.js',
+                  '{v}/jsviews.js', 'koken.js?{v}', '@{v}/list.js', '/{v}/mobx.js?', 'photoswipe/{v}/photoswipe.min.js',
+                  'polyfill.io/v{v}', 'prototype-{v}.js', 'quicklink@{v}/dist/quicklink.js',
+                  '/react-redux@{v}/react-redux.js', '/react-router@{v}/react-router.js', '/redux@{v}/redux.js',
+                  '/{v}/slick.js', '/npm/sweetalert2@{v}', '/npm/swiffy-slider@{v}/', '/{v}/min/tiny-slider.js',
+                  '/tippy.js@{v}', 'xregexp-{v}.js', '/{v}/xregexp.js', '//unpkg.com/hyperscript.org@{v}',
+                  '@tarekraafat/autocomplete.js@{v}/', '/{v}/crypto-js.js', 'decimal-{v}.js', '/{v}/decimal.js',
+                  '/fullPage.js/{v}/', 'jquery-modal/{v}/jquery.modal.min.js', 'jquery-ui-{v}.js', '{v}/jquery-ui.js',
+                  '/{v}/libphonenumber.js', 'web-vitals@{v}/dist/web-vitals.js', 'jquery-migrate-{v}.js',
+                  'angular-{v}.js', 'react-{v}.js', 'vue-{v}.js', '/jquery-{v}.js')
+        srcs = ['/'.join(['/x%d' % i] + [f.format(v='%d.%d.7' % (i + 1, j + 1)) for j, f in enumerate(trozos)])
+                for i in range(huellas.MAX_SCRIPTS)]
+        cuantos = min(huellas.MAX_SCRIPTS, (huellas.MAX_HTML - 100) // (len(srcs[-1]) + 25))
+        html = ''.join('<script src="%s"></script>' % s for s in srcs[:cuantos])
+        r = huellas.analizar(200, None, html, reloj=reloj)
+        self.assertLess(time.monotonic() - ultima[0], 0.3)
+        self.assertEqual((r['completo'], cuantos, len(srcs[-1]) < huellas.MAX_SRC), (True, 186, True))
+        self.assertIsNone(por_nombre(r)['Handlebars']['version'])   # más de MAX_VERSIONES distintas
+        # Las mismas, todas con la versión '1', detrás de 'v1' repetido 500 veces: revisar cada aparición de la
+        # versión en todo el src tomaba 0.6 s después del reloj. Ahora se miran solo las orillas del grupo.
+        cola = '/'.join(f.format(v='1') for f in trozos)
+        srcs = [('/x%d%s/%s' % (i, 'v1' * 500, cola))[:huellas.MAX_SRC] for i in range(huellas.MAX_SCRIPTS)]
+        cuantos = min(huellas.MAX_SCRIPTS, (huellas.MAX_HTML - 100) // (len(srcs[-1]) + 25))
+        r = huellas.analizar(200, None, ''.join('<script src="%s"></script>' % s for s in srcs[:cuantos]), reloj=reloj)
+        self.assertLess(time.monotonic() - ultima[0], 0.3)
+        self.assertEqual((r['completo'], cuantos, por_nombre(r)['Handlebars']['version']), (True, 128, '1'))
+
 
 class Soporte(unittest.TestCase):
     def test_1_version_sin_soporte(self):
@@ -737,35 +1080,113 @@ class Soporte(unittest.TestCase):
             r = soporte.revisar(tecnologia('Drupal', '10.3.1'), respuesta, SITIO, HOY)
             self.assertEqual((r['estado'], r['ciclo']), ('con_soporte', '10'), respuesta)
 
+    def test_10_la_version_necesita_las_partes_de_su_ciclo(self):
+        def revisar(cabeceras, nombre, respuesta):
+            return soporte.revisar(por_nombre(huellas.analizar(200, cabeceras))[nombre], respuesta, SITIO, HOY)
+        # 'Drupal 7' cae en el ciclo 7: Drupal 7 sin soporte es un hallazgo correcto.
+        r = revisar([('X-Generator', 'Drupal 7 (https://www.drupal.org)')], 'Drupal', fixture('eol_drupal'))
+        self.assertEqual((r['estado'], r['ciclo']), ('sin_soporte', '7'))
+        # 'Drupal 10' no dice si es 10.2 o 10.3, aunque haya un ciclo 10.
+        r = revisar([('X-Generator', 'Drupal 10 (https://www.drupal.org)')], 'Drupal', fixture('eol_drupal'))
+        self.assertEqual((r['estado'], r['ciclo'], r['hallazgo']), ('sin_dato', None, None))
+        apache = [{'cycle': '2.4', 'eol': False}, {'cycle': '2.2', 'eol': '2017-07-11'}]
+        self.assertEqual(revisar([('Server', 'Apache/2.4')], 'Apache HTTP Server', apache)['estado'], 'con_soporte')
+        self.assertEqual(revisar([('Server', 'Apache/2')], 'Apache HTTP Server', apache)['estado'], 'sin_dato')
+        self.assertEqual(revisar([('X-Powered-By', 'PHP/7')], 'PHP', fixture('eol_php'))['estado'], 'sin_dato')
+        self.assertEqual(revisar([('Server', 'nginx/1')], 'Nginx', fixture('eol_nginx'))['estado'], 'sin_dato')
+        lista = [{'ciclo': '10.2', 'eol': False}, {'ciclo': '10', 'eol': False}, {'ciclo': '7', 'eol': True}]
+        self.assertIsNone(soporte.ciclo_de('10', lista))
+        self.assertEqual([soporte.ciclo_de(v, lista)['ciclo'] for v in ('10.2.3', '10.3.1', '7', '7.98')],
+                         ['10.2', '10', '7', '7'])
+
+    def test_11_origen_sin_confirmar_en_la_evidencia(self):
+        # nginx/1.18.0 sin marca (Debian 11 lo manda así): sí da hallazgos, con el aviso en la evidencia.
+        t = por_nombre(analizar('nginx_drupal_200'))
+        self.assertEqual((t['Nginx']['version'], t['Nginx']['distribucion'], t['Nginx']['origen_sin_confirmar']),
+                         ('1.18.0', None, True))
+        r = soporte.revisar(t['Nginx'], fixture('eol_nginx'), SITIO, HOY)
+        self.assertEqual((r['estado'], r['hallazgo']['evidencia']['origen_sin_confirmar']), ('sin_soporte', True))
+        r = nvd.revisar(t['Nginx'], fixture('nvd_nginx_1.18.0'), SITIO)
+        self.assertEqual(r['estado'], 'con_cve')
+        self.assertEqual({h['evidencia']['origen_sin_confirmar'] for h in r['hallazgos']}, {True})
+        # Drupal no lo empaqueta la distribución con esa cabecera.
+        self.assertFalse(t['Drupal']['origen_sin_confirmar'])
+        r = soporte.revisar(t['Drupal'], fixture('eol_drupal'), SITIO, HOY)
+        self.assertEqual((r['estado'], r['hallazgo']['evidencia']['origen_sin_confirmar']), ('sin_soporte', False))
+        # Con la marca sigue saliendo 'distribucion', sin hallazgos.
+        t = por_nombre(huellas.analizar(200, [('Server', 'nginx/1.18.0 (Ubuntu)')]))
+        self.assertEqual(soporte.revisar(t['Nginx'], fixture('eol_nginx'), SITIO, HOY)['estado'], 'distribucion')
+        self.assertEqual(nvd.revisar(t['Nginx'], fixture('nvd_nginx_1.18.0'), SITIO)['estado'], 'distribucion')
+        self.assertFalse(t['Nginx']['origen_sin_confirmar'])
+        # El PHP de deb.sury.org sigue la versión oficial, y el Apache con '(Unix)' no es de la lista.
+        t = por_nombre(huellas.analizar(200, [('Server', 'Apache/2.4.58 (Unix)'),
+                                              ('X-Powered-By', 'PHP/8.1.27-1+ubuntu22.04.1+deb.sury.org+1')]))
+        self.assertEqual((t['PHP']['origen_sin_confirmar'], t['Apache HTTP Server']['origen_sin_confirmar']),
+                         (False, False))
+        r = nvd.revisar(t['PHP'], fixture('nvd_nginx_1.18.0'), SITIO)
+        self.assertEqual({h['evidencia']['origen_sin_confirmar'] for h in r['hallazgos']}, {False})
+        # PHP de RHEL ('PHP/7.4.33', sin sufijo) junto a un nginx sin marca.
+        t = por_nombre(huellas.analizar(200, [('Server', 'nginx/1.20.1'), ('X-Powered-By', 'PHP/7.4.33')]))
+        self.assertEqual((t['PHP']['origen_sin_confirmar'], t['Nginx']['origen_sin_confirmar']), (True, True))
+        # Una tecnología armada a mano sin la llave: por el nombre.
+        self.assertTrue(huellas.origen_sin_confirmar(tecnologia('Nginx', '1.18.0')))
+        self.assertFalse(huellas.origen_sin_confirmar(tecnologia('Nginx', '1.18.0', distribucion='Debian')))
+        self.assertFalse(huellas.origen_sin_confirmar(tecnologia('Drupal', '7.98')))
+        self.assertEqual(huellas.EMPAQUETAN_SIN_MARCA, ('Nginx', 'PHP', 'Perl', 'Python'))
+        # El nombre armado a mano se compara sin distinguir mayúsculas.
+        for nombre in ('nginx', 'NGINX', 'php'):
+            t = dict(tecnologia('Nginx', '1.18.0'), nombre=nombre)
+            self.assertTrue(huellas.origen_sin_confirmar(t), nombre)
+            r = nvd.revisar(t, fixture('nvd_nginx_1.18.0'), SITIO)
+            self.assertEqual({h['evidencia']['origen_sin_confirmar'] for h in r['hallazgos']}, {True}, nombre)
+            self.assertFalse(huellas.origen_sin_confirmar(dict(t, distribucion='Debian')), nombre)
+        self.assertFalse(huellas.origen_sin_confirmar(dict(tecnologia('Nginx', '1.18.0'), nombre=None)))
+
+
 class Nvd(unittest.TestCase):
     def test_1_cpe_con_version(self):
         cpe = 'cpe:2.3:a:nginx:nginx:*:*:*:*:*:*:*:*'
         self.assertEqual(nvd.cpe_con_version(cpe, '1.18.0'), 'cpe:2.3:a:nginx:nginx:1.18.0:*:*:*:*:*:*:*')
         self.assertEqual(nvd.cpe_con_version(cpe, '2.4.0-Beta'), 'cpe:2.3:a:nginx:nginx:2.4.0-beta:*:*:*:*:*:*:*')
-        for version in ('', None, 'v1', '1.0 (Ubuntu)', '1:0', '1*', '1.0/x', '1' * 40):
+        for version in ('', None, 'v1.0.0', ' 1.0.0'):
+            self.assertIsNone(nvd.cpe_con_version(cpe, version), version)
+        # Versiones de 3 partes, que con_precision sí acepta: las rechaza _VERSION.
+        for version in ('1.0.0 (Ubuntu)', '1.0.0:0', '1.0.0*', '1.0.0/x', '1.0.0?', '1.0.0\\-1', '1.0.0+1',
+                        '1.0.0~rc1', '1.0.0%2f', '1.0.0ñ', '1.0.0\n', '1.0.0' + '1' * 40):
+            self.assertTrue(nvd.con_precision(cpe, version), version)
             self.assertIsNone(nvd.cpe_con_version(cpe, version), version)
         for malo in ('cpe:2.3:a:nginx:nginx:1.0:*:*:*:*:*:*:*', 'cpe:/a:nginx:nginx', 'cpe:2.3:a:nginx', None,
                      'cpe:2.3:a:x\\:y:nginx:*:*:*:*:*:*:*:*'):
-            self.assertIsNone(nvd.cpe_con_version(malo, '1.0'), malo)
+            self.assertIsNone(nvd.cpe_con_version(malo, '1.0.0'), malo)
         self.assertEqual(nvd.url('cpe:2.3:a:nginx:nginx:1.18.0:*:*:*:*:*:*:*'),
                          'https://services.nvd.nist.gov/rest/json/cves/2.0'
                          '?cpeName=cpe:2.3:a:nginx:nginx:1.18.0:*:*:*:*:*:*:*&isVulnerable&noRejected')
+        for malo in (None, 1, b'cpe:2.3:a:nginx:nginx:1.18.0:*:*:*:*:*:*:*'):   # sin CPE con versión, sin URL
+            self.assertIsNone(nvd.url(malo), malo)
         # Solo cadenas de CPE 2.3: un espacio adentro, un signo sin escapar o algo que no es ASCII no pasan.
         for malo in ('cpe:2.3:a:glpi project:glpi:*:*:*:*:*:*:*:*',
                      'cpe:2.3:a:weblication:cms_core_&_grid:*:*:*:*:*:*:*:*',
                      'cpe:2.3:a:erlang:erlang%2fotp:*:*:*:*:*:*:*:*', 'cpe:2.3:a:x:y z:*:*:*:*:*:*:*:*',
                      'cpe:2.3:a:x:ñandú:*:*:*:*:*:*:*:*', 'cpe:2.3:a:x::*:*:*:*:*:*:*:*',
                      'cpe:2.3:a:x:a*b:*:*:*:*:*:*:*:*'):
-            self.assertIsNone(nvd.cpe_con_version(malo, '1.0'), malo)
-        self.assertEqual(nvd.cpe_con_version('cpe:2.3:a:weblication:cms_core_\\&_grid:*:*:*:*:*:*:*:*', '5.3'),
-                         'cpe:2.3:a:weblication:cms_core_\\&_grid:5.3:*:*:*:*:*:*:*')
-        self.assertEqual(nvd.cpe_con_version('cpe:2.3:a:erlang:erlang\\/otp:*:*:*:*:*:*:*:*', '26.1'),
-                         'cpe:2.3:a:erlang:erlang\\/otp:26.1:*:*:*:*:*:*:*')
+            self.assertIsNone(nvd.cpe_con_version(malo, '1.0.0'), malo)
+        self.assertEqual(nvd.cpe_con_version('cpe:2.3:a:weblication:cms_core_\\&_grid:*:*:*:*:*:*:*:*', '5.3.1'),
+                         'cpe:2.3:a:weblication:cms_core_\\&_grid:5.3.1:*:*:*:*:*:*:*')
+        self.assertEqual(nvd.cpe_con_version('cpe:2.3:a:erlang:erlang\\/otp:*:*:*:*:*:*:*:*', '26.1.2'),
+                         'cpe:2.3:a:erlang:erlang\\/otp:26.1.2:*:*:*:*:*:*:*')
+        # Sin precisión (con_precision) no hay CPE con versión, así que url() nunca se arma para 'nginx/1'.
+        drupal = 'cpe:2.3:a:drupal:drupal:*:*:*:*:*:*:*:*'
+        for c, version in ((cpe, '1'), (cpe, '1.18'), (cpe, '2.4-beta'), (drupal, '7'), (drupal, '10.2')):
+            self.assertIsNone(nvd.cpe_con_version(c, version), version)
+        self.assertEqual(nvd.cpe_con_version(drupal, '7.98'), 'cpe:2.3:a:drupal:drupal:7.98:*:*:*:*:*:*:*')
 
     def test_2_una_cve_por_hallazgo(self):
         r = nvd.revisar(tecnologia('Nginx', '1.18.0'), fixture('nvd_nginx_1.18.0'), SITIO)
         self.assertEqual((r['estado'], r['completa'], r['omitidas']), ('con_cve', True, []))
-        self.assertEqual([h['clave'] for h in r['hallazgos']], ['CVE-2099-0102', 'CVE-2099-0101', 'CVE-2098-12345'])
+        self.assertEqual([h['clave'] for h in r['hallazgos']],
+                         ['CVE-2099-0102|nginx:nginx', 'CVE-2099-0101|nginx:nginx', 'CVE-2098-12345|nginx:nginx'])
+        self.assertEqual([h['evidencia']['cve'] for h in r['hallazgos']],
+                         ['CVE-2099-0102', 'CVE-2099-0101', 'CVE-2098-12345'])
         h = r['hallazgos'][1]
         self.assertEqual((h['codigo'], h['severidad']), ('known_vulnerability', 'medium'))
         self.assertEqual(h['titulo'], 'Vulnerabilidad conocida CVE-2099-0101 por la versión de Nginx 1.18.0 en '
@@ -834,7 +1255,7 @@ class Nvd(unittest.TestCase):
                      'vulnerabilities': [{'cve': {'id': 'CVE-2099-%04d' % (1000 + i)}} for i in range(30)]}
         r = nvd.revisar(tecnologia('Nginx', '1.18.0'), respuesta, SITIO)
         self.assertEqual(len(r['hallazgos']), nvd.MAX_CVE)
-        self.assertEqual(r['hallazgos'][0]['clave'], 'CVE-2099-1029')
+        self.assertEqual(r['hallazgos'][0]['clave'], 'CVE-2099-1029|nginx:nginx')
         self.assertEqual(r['omitidas'], ['CVE-2099-%04d' % (1000 + i) for i in range(4, -1, -1)])
         self.assertFalse(r['completa'])
 
@@ -857,7 +1278,7 @@ class Nvd(unittest.TestCase):
                      'vulnerabilities': ilegibles + [{'cve': {'id': 'CVE-2099-0101'}}]}
         r = nvd.revisar(tecnologia('Nginx', '1.18.0'), respuesta, SITIO)
         self.assertEqual((r['estado'], r['completa'], [h['clave'] for h in r['hallazgos']]),
-                         ('con_cve', False, ['CVE-2099-0101']))
+                         ('con_cve', False, ['CVE-2099-0101|nginx:nginx']))
         self.assertEqual(nvd.leer(respuesta)['descartadas'], 3)
         # Una rechazada no es ilegible: la respuesta sigue completa.
         r = nvd.revisar(tecnologia('Nginx', '1.18.0'), {'totalResults': 1, 'startIndex': 0, 'vulnerabilities': [
@@ -876,6 +1297,78 @@ class Nvd(unittest.TestCase):
                         hallazgos=[como_hallazgo(h, ahora) for h in r['hallazgos']])
         self.assertEqual(validar(res, codigos=list(soporte.CODIGOS) + list(nvd.CODIGOS)), [])
         self.assertEqual(len({h.huella for h in res.hallazgos}), len(res.hallazgos))
+
+    def test_7_la_misma_cve_en_dos_tecnologias_del_sitio(self):
+        # Drupal y el jQuery que trae con la misma CVE: dos hallazgos que no chocan en contrato.validar.
+        cuerpo = ('<meta name="generator" content="Drupal 7.98 (https://www.drupal.org)">'
+                  '<script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>')
+        t = por_nombre(huellas.analizar(200, None, cuerpo))
+        respuesta = {'totalResults': 1, 'startIndex': 0, 'vulnerabilities': [
+            {'cve': {'id': 'CVE-2020-11022', 'published': '2020-04-29T22:15:11.903'}}]}
+        ahora = datetime(2026, 11, 9, tzinfo=timezone.utc)
+        hallazgos, filas = [], []
+        for nombre in ('Drupal', 'jQuery'):
+            r = nvd.revisar(t[nombre], respuesta, SITIO)
+            self.assertEqual(r['estado'], 'con_cve', nombre)
+            hallazgos += [como_hallazgo(h, ahora) for h in r['hallazgos']]
+            filas += r['cves']
+        res = Resultado('acme-demo.mx', 'web', activos=[Activo('subdomain', SITIO)], hallazgos=hallazgos)
+        self.assertEqual(validar(res, codigos=list(soporte.CODIGOS) + list(nvd.CODIGOS)), [])
+        self.assertEqual([h.clave for h in hallazgos], ['CVE-2020-11022|drupal:drupal', 'CVE-2020-11022|jquery:jquery'])
+        # Las filas de cves sí se repiten: la visita las une por cve_id.
+        self.assertEqual([f['cve_id'] for f in filas], ['CVE-2020-11022', 'CVE-2020-11022'])
+        # La clave no lleva la versión: es la misma entre corridas.
+        otra = nvd.revisar(tecnologia('jQuery', '3.4.0'), respuesta, SITIO)
+        self.assertEqual(otra['hallazgos'][0]['clave'], 'CVE-2020-11022|jquery:jquery')
+        self.assertEqual(nvd.clave('CVE-2021-23017', 'cpe:2.3:a:nginx:nginx:1.18.0:*:*:*:*:*:*:*'),
+                         'CVE-2021-23017|nginx:nginx')
+
+    def test_8_solo_versiones_con_precision(self):
+        respuesta = {'totalResults': 1, 'startIndex': 0, 'vulnerabilities': [{'cve': {'id': 'CVE-2018-7600'}}]}
+
+        def revisar(cabeceras, nombre, cuerpo=None):
+            return nvd.revisar(por_nombre(huellas.analizar(200, cabeceras, cuerpo))[nombre], respuesta, SITIO)
+        for cabeceras, nombre in (([('X-Generator', 'Drupal 7 (https://www.drupal.org)')], 'Drupal'),
+                                  ([('X-Generator', 'Drupal 10.2 (https://www.drupal.org)')], 'Drupal'),
+                                  ([('Server', 'Apache/2.4')], 'Apache HTTP Server'),
+                                  ([('X-Powered-By', 'PHP/7')], 'PHP'), ([('Server', 'nginx/1')], 'Nginx'),
+                                  ([('Server', 'nginx/1.18')], 'Nginx')):
+            r = revisar(cabeceras, nombre)
+            self.assertEqual((r['estado'], r['cpe'], r['hallazgos']), ('sin_version', None, []), cabeceras)
+        # Los de DOS_PARTES sí se consultan con 2 partes, y con 3 o más se consulta todo.
+        for cabeceras, nombre, cuerpo in (
+                ([('X-Generator', 'Drupal 7.98 (https://www.drupal.org)')], 'Drupal', None),
+                (None, 'WordPress', '<meta name="generator" content="WordPress 6.4">'),
+                ([('Server', 'Microsoft-IIS/10.0')], 'IIS', None),
+                ([('Server', 'Apache/2.4.58')], 'Apache HTTP Server', None),
+                ([('Server', 'nginx/1.18.0')], 'Nginx', None),
+                ([('X-AspNet-Version', '4.0.30319')], 'Microsoft ASP.NET', None)):
+            self.assertEqual(revisar(cabeceras, nombre, cuerpo)['estado'], 'con_cve', (cabeceras, cuerpo))
+        self.assertEqual(revisar(None, 'WordPress', '<meta name="generator" content="WordPress 6">')['estado'],
+                         'sin_version')
+        cpe = 'cpe:2.3:a:drupal:drupal:*:*:*:*:*:*:*:*'
+        self.assertEqual([nvd.con_precision(cpe, v) for v in ('7.98', '6.38', '10.2', '10.2.3', '7', None)],
+                         [True, True, False, True, False, False])
+        self.assertTrue(nvd.con_precision('cpe:2.3:a:nginx:nginx:*:*:*:*:*:*:*:*', '2.4.0-beta'))
+        self.assertFalse(nvd.con_precision('cpe:2.3:a:nginx:nginx:*:*:*:*:*:*:*:*', '2.4-beta'))
+
+    def test_9_productos_de_dos_partes(self):
+        # Sus patrones del JSON dan 2 partes en el formato normal: 'Quick.Cms v6.7', 'prototype-1.7.js',
+        # 'X-Lift-Version: 2.6', 'GlassFish Server Open Source Edition 4.1' y 'HP-iLO-Server/1.30'.
+        respuesta = {'totalResults': 1, 'startIndex': 0, 'vulnerabilities': [{'cve': {'id': 'CVE-2018-7600'}}]}
+        for cabeceras, cuerpo, nombre, version in (
+                (None, '<meta name="generator" content="Quick.Cms v6.7">', 'Quick.CMS', '6.7'),
+                (None, '<script src="/js/prototype-1.7.js"></script>', 'Prototype', '1.7'),
+                ([('X-Lift-Version', '2.6')], None, 'Lift', '2.6'),
+                ([('Server', 'GlassFish Server Open Source Edition 4.1')], None, 'GlassFish', '4.1'),
+                ([('Server', 'HP-iLO-Server/1.30')], None, 'HP iLO', '1.30')):
+            t = por_nombre(huellas.analizar(200, cabeceras, cuerpo))[nombre]
+            self.assertEqual((t['version'], t['confianza']), (version, 100), nombre)
+            self.assertTrue(nvd.con_precision(t['cpe'], version), nombre)
+            self.assertEqual(nvd.revisar(t, respuesta, SITIO)['estado'], 'con_cve', nombre)
+            self.assertFalse(nvd.con_precision(t['cpe'], version.split('.')[0]), nombre)
+        t = por_nombre(huellas.analizar(200, None, '<meta name="generator" content="Quick.Cms v6">'))['Quick.CMS']
+        self.assertEqual(nvd.revisar(t, respuesta, SITIO)['estado'], 'sin_version')
 
 
 class Textos(unittest.TestCase):
