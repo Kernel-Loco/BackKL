@@ -29,7 +29,16 @@ GROUPS = [
     ('Auditoría', ['audit_log']),
 ]
 TABLES = [t for _, ts in GROUPS for t in ts]
+# cves no tiene RLS y la llenan los escaneos de todas las empresas (#18, RC-46): una CVE que solo vio el escaneo de otra
+# empresa diría qué software tiene. El explorador da solo las que nombran los hallazgos de la empresa de la sesión
+# (findings sí tiene RLS).
+FILTERS = {'cves': sql.SQL(' WHERE cve_id IN (SELECT cve_id FROM findings WHERE cve_id IS NOT NULL)')}
 HIDDEN = ('hash', 'secret', '_enc', 'token', 'password', 'raw_payload')
+
+
+def _source(table):
+    """La tabla con su filtro de FILTERS, para un FROM."""
+    return sql.Identifier(table) + FILTERS.get(table, sql.SQL(''))
 
 
 def _short(v):
@@ -59,7 +68,7 @@ def db_tables(session: Session = Depends(require_roles('admin'))):
         out = []
         for group, tables in GROUPS:
             for t in tables:
-                n = conn.execute(sql.SQL('SELECT count(*) AS n FROM {}').format(sql.Identifier(t))).fetchone()['n']
+                n = conn.execute(sql.SQL('SELECT count(*) AS n FROM {}').format(_source(t))).fetchone()['n']
                 out.append({'group': group, 'table': t, 'rls': bool(rls.get(t)), 'rows': n})
         role = conn.execute('SELECT current_user AS u').fetchone()['u']
     return {'organization': name['name'] if name else None, 'role': role, 'tables': out}
@@ -77,6 +86,6 @@ def db_rows(table: str, session: Session = Depends(require_roles('admin'))):
             if not any(h in r['column_name'] for h in HIDDEN) and r['column_name'] != 'id'][:7]
         orgs = {r['id']: r['name'] for r in conn.execute('SELECT id, name FROM organizations')}
         rows = conn.execute(sql.SQL('SELECT {} FROM {} LIMIT 8').format(
-            sql.SQL(', ').join(map(sql.Identifier, cols)), sql.Identifier(table))).fetchall()
+            sql.SQL(', ').join(map(sql.Identifier, cols)), _source(table))).fetchall()
     show = lambda c, v: orgs.get(v, _short(v)) if c == 'organization_id' else _short(v)
     return {'table': table, 'columns': cols, 'rows': [[show(c, r[c]) for c in cols] for r in rows]}
