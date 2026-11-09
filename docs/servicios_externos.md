@@ -143,5 +143,5 @@ Al 3 nov las preguntas de GitHub ya están contestadas en la tabla. La de IA se 
 8. **lowtidesec.com (#96d):** comprado por Ernesto en Spaceship el 7 nov por 9.68 USD sin IVA, con PayPal. Vence el 8 nov 2027 a las 03:48 UTC, sin renovación automática. DNS en Cloudflare Free, en la cuenta @tec.mx de Ernesto. Detalle en la fila del dominio y en Gasto real (RC-40, comentario 10377).
 
 9. **Tope de gasto:** 24.05 USD en efectivo, acordado por los cuatro en Teams el 8 nov. Son los 18.76 gastados más un mes de HIBP Core 1 (5.29). Detalle en Gasto real y tope.
-10. **HIBP:** la compra Ernesto con su cuenta, porque la búsqueda por dominio pide verificar olmardo.com y ese DNS lo administra él (acordado por los cuatro en Teams el 8 nov). Se compra después de la revisión legal que #19 espera (sección 9 de la [política de seguridad y privacidad](politica_seguridad_privacidad.md)) y no antes del 15 nov, para que el mes llegue al 15 dic. Se cancela al cierre.
+10. **HIBP:** la compra Ernesto con su cuenta, porque la búsqueda por dominio pide verificar olmardo.com y ese DNS lo administra él (acordado por los cuatro en Teams el 8 nov). No se compra antes de la revisión legal que #19 espera (sección 9 de la [política de seguridad y privacidad](politica_seguridad_privacidad.md)) ni antes del 15 nov, para que el mes llegue al 15 dic. Se cancela al cierre.
 
