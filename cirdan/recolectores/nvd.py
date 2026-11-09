@@ -55,7 +55,7 @@ _VERSION = re.compile(r'[0-9][0-9a-z._-]{0,30}', re.I | re.A)
 # La fecha de la NVD, con su zona si la trae (grupo 2). Que sea una fecha y hora que existe lo revisa _publicada.
 _FECHA = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)(Z|[+-][0-9]{2}:[0-5][0-9])?',
                     re.A)
-MAX_ZONA = timedelta(hours=14)   # las zonas que existen van de -12:00 a +14:00
+MAX_ZONA = timedelta(hours=14)   # se aceptan de -14:00 a +14:00: las que existen van de -12:00 a +14:00
 
 
 def cpe_con_version(cpe, version):

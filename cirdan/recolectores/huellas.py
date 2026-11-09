@@ -32,10 +32,11 @@ comparan solo en ASCII (re.ASCII, como borde.py) y un patrón que Python no comp
 Topes: MAX_HTML del cuerpo, MAX_VALOR por cabecera (el de borde._pares) y MAX_CABECERAS entre todas las que no son
 Set-Cookie (las Set-Cookie ya llevan borde.MAX_COOKIES entre todas), MAX_SCRIPTS, MAX_SRC, MAX_ETIQUETA, MAX_SCRIPT y
 MAX_TEXTO_SCRIPTS, y TOPE_SEGUNDOS para todo el análisis. re de Python no corta una regex a la mitad: el tope de
-tiempo se revisa antes de cada valor que se compara con cada patrón, y si se pasa el análisis queda incompleto
-('completo': False) con lo que ya salió. Por eso + y * llevan tope de 250, como en Wappalyzer, y también {n,}, y el
-html se recorta donde las regex '<[^>]{1,250}' pasarían de MAX_COSTO_HTML (_recortar_html). Todo tope que deja algo
-sin leer va en 'recortes', pero solo los de DEJAN_INCOMPLETO dejan 'completo' en False (las reglas, en analizar()).
+tiempo se revisa antes de cada valor que se compara con cada patrón (el src resuelto y el crudo cuentan como dos), y
+si se pasa el análisis queda incompleto ('completo': False) con lo que ya salió. Por eso + y * llevan tope de 250,
+como en Wappalyzer, y también {n,}, y el html se recorta donde las regex '<[^>]{1,250}' pasarían de MAX_COSTO_HTML
+(_recortar_html). Todo tope que deja algo sin leer va en 'recortes', pero solo los de DEJAN_INCOMPLETO dejan
+'completo' en False (las reglas, en analizar()).
 Una respuesta armada para trabar las regex no pasa de TOPE_SEGUNDOS más una regex sobre un valor
 (pruebas/test_huellas.py).
 
@@ -49,7 +50,9 @@ producto que calzó con los comentarios entre paréntesis que le siguen (_pedazo
 PHP/8.1.27' el '(Ubuntu)' es de Apache y no de PHP. La marca de las cabeceras server y x-powered-by de la respuesta,
 como 'Apache/2.4.6 (CentOS)' con 'X-Powered-By: PHP/5.4.16', solo la heredan los servidores web y los lenguajes
 (HEREDAN, todas sus categorías) sin marca propia, que son lo que la distribución empaqueta: un framework como Next.js
-detrás de 'nginx (Ubuntu)' no la lleva. Una versión con la marca de un repositorio que sigue las versiones oficiales
+detrás de 'nginx (Ubuntu)' no la lleva. Tampoco la heredan un producto que la distribución no empaqueta con esa
+cabecera (NO_HEREDAN, como OpenResty) ni uno cuyo pedazo trae otro comentario, como 'Apache/2.4.58 (Unix)' o
+'(Win64)': se compiló aparte. Una versión con la marca de un repositorio que sigue las versiones oficiales
 (SIGUEN_UPSTREAM, como el PPA de PHP de deb.sury.org en 'PHP/8.1.27-1+ubuntu22.04.1+deb.sury.org+1') no lleva
 distribución ni la hereda: ahí el número sí dice qué parches tiene. Esa cabecera sí dice la distribución del
 servidor ('ubuntu22.04'), y las demás versiones de la respuesta la heredan como de cualquier otra cabecera: un
@@ -88,7 +91,7 @@ RELACIONES = ('excludes', 'implies', 'requires', 'requiresCategory')
 CON_LLAVE = ('cookies', 'headers', 'meta')                                  # {nombre: patrones}
 
 MAX_HTML = 256 * 1024        # caracteres del cuerpo que se analizan
-MAX_VALOR = borde.MAX_VALOR  # de cada cabecera, ya cortada en borde._pares
+MAX_VALOR = borde.MAX_VALOR  # de cada cabecera: borde._pares la corta ahí, así que una de ese largo no se lee
 MAX_CABECERAS = 64 * 1024    # entre todas las cabeceras que no son Set-Cookie: 99 de 8 KiB tomaban más de 5 s
 MAX_SCRIPTS = 200            # <script src> y <meta> que se leen del HTML
 MAX_SRC = 2 * 1024           # caracteres de cada src y de cada content de <meta>
@@ -100,7 +103,7 @@ TOPE_SEGUNDOS = 3.0          # para todo el análisis, revisado antes de cada va
 CUANTIFICADOR = 250          # el tope de + y * de Wappalyzer (parsePattern)
 MAX_LARGO_VERSION = 15       # Wappalyzer descarta versiones más largas (resolve)
 # Los recortes que dejan 'completo' en False: solo los alcanza una respuesta fuera de lo normal (analizar()).
-DEJAN_INCOMPLETO = ('MAX_CABECERAS', 'MAX_COSTO_HTML')
+DEJAN_INCOMPLETO = ('MAX_CABECERAS', 'MAX_COSTO_HTML', 'MAX_VALOR')
 
 # Marca de una distribución en el valor de una cabecera: entre paréntesis o en el sufijo de la versión del paquete.
 DISTRIBUCIONES = (('Ubuntu', r'ubuntu'), ('Debian', r'debian|[+~.-]deb\d'), ('CentOS', r'centos'),
@@ -111,6 +114,8 @@ DISTRIBUCIONES = (('Ubuntu', r'ubuntu'), ('Debian', r'debian|[+~.-]deb\d'), ('Ce
                   ('Enterprise Linux', r'[.-]el\d+(?:_\d+)?\b'))
 CABECERAS_DEL_SERVIDOR = ('server', 'x-powered-by')
 HEREDAN = {22, 27}           # Web servers y Programming languages: las que heredan la marca de la otra cabecera
+# Productos de esas categorías que la distribución no empaqueta con esa cabecera: los trae su propio proveedor.
+NO_HEREDAN = ('Jetty', 'OpenResty')
 # Repositorios que siguen las versiones oficiales: su marca no es de una distribución, aunque nombre una.
 SIGUEN_UPSTREAM = (r'deb\.sury\.org',)
 
@@ -118,6 +123,7 @@ _DISTROS = [(n, re.compile(p, re.I | re.A)) for n, p in DISTRIBUCIONES]
 _UPSTREAM = re.compile('|'.join(SIGUEN_UPSTREAM), re.I | re.A)
 # Un producto de la cabecera ('Apache/2.4.52') con los comentarios que le siguen (' (Ubuntu)'), o un comentario suelto.
 _PEDAZO = re.compile(r'[^\s()]+(?:\s*\([^()]*\))*|\([^()]*\)', re.A)
+_COMENTARIO = re.compile(r'\([^()]*\)', re.A)   # '(Unix)' o '(Win64)' en el pedazo: el producto ya dice su origen
 _SEPARA_COOKIES = re.compile(r',\s*(?=[^;,=\s]+=)')   # Set-Cookie juntadas con ', ', sin partir un Expires
 
 
@@ -484,9 +490,10 @@ def entradas(cabeceras=None, cuerpo=None, scripts=(), url=None):
     de la página, para resolver los src relativos.
 
     'recortes' lista, ordenados, los topes que dejaron algo sin leer: MAX_HTML, MAX_CABECERAS (un valor que ya no cabe
-    entero se salta, nunca se corta, porque 'nginx/1.2' de 'nginx/1.24.0' sería otra versión), MAX_VALOR (un valor
-    que llega con MAX_VALOR caracteres o más, que borde._pares ya cortó o que llegó con ese largo justo, y una
-    Set-Cookie de más), MAX_COOKIES (las Set-Cookie llegan con borde.MAX_COOKIES entre todas), MAX_ETIQUETA (un
+    entero se salta, nunca se corta, porque 'nginx/1.2' de 'nginx/1.24.0' sería otra versión), MAX_VALOR (lo mismo
+    con un valor que llega con MAX_VALOR caracteres o más, que borde._pares ya cortó o que llegó con ese largo justo,
+    y con una Set-Cookie de más: se saltan enteros), MAX_COOKIES (las Set-Cookie llegan con borde.MAX_COOKIES entre
+    todas), MAX_ETIQUETA (un
     <script> o <meta> sin '>' en MAX_ETIQUETA caracteres, que no se lee), MAX_SRC, MAX_SCRIPTS, MAX_SCRIPT,
     MAX_TEXTO_SCRIPTS y MAX_COSTO_HTML (_recortar_html). Cuáles dejan el análisis incompleto lo dice analizar().
 
@@ -503,11 +510,12 @@ def entradas(cabeceras=None, cuerpo=None, scripts=(), url=None):
         if nombre == 'set-cookie':
             set_cookie.append(valor)
         elif nombre not in fuera:
+            if len(valor) >= MAX_VALOR:   # puede venir cortado por borde._pares: tampoco se lee, ni su nombre
+                recortes.add('MAX_VALOR')
+                continue
             if len(valor) > resto:   # lo que no cabe entero no se lee, ni su nombre: cortarlo daría otra versión
                 recortes.add('MAX_CABECERAS')
                 continue
-            if len(valor) >= MAX_VALOR:
-                recortes.add('MAX_VALOR')
             resto -= len(valor)
             headers.setdefault(nombre, []).append(valor)
     if sum(map(len, set_cookie)) >= borde.MAX_COOKIES:
@@ -516,10 +524,11 @@ def entradas(cabeceras=None, cuerpo=None, scripts=(), url=None):
     for nombre, valor, linea in _cookies(set_cookie):
         if prefijos and nombre.startswith(prefijos):
             continue
-        if len(linea) > MAX_VALOR:
+        if len(linea) > MAX_VALOR:   # tampoco se lee cortada
             recortes.add('MAX_VALOR')
-        cookies.setdefault(nombre, []).append(valor[:MAX_VALOR])
-        headers.setdefault('set-cookie', []).append(linea[:MAX_VALOR])
+            continue
+        cookies.setdefault(nombre, []).append(valor)
+        headers.setdefault('set-cookie', []).append(linea)
     html, cortado = _html(cuerpo)
     if cortado:
         recortes.add('MAX_HTML')
@@ -580,9 +589,9 @@ class _Reloj:
 def _buscar(tecnologias, datos, reloj, vistos):
     """Las detecciones [(nombre, campo, llave, versión, confianza, valor, (inicio, fin) de lo que calzó)] de
     `tecnologias` en `datos`. False si se acabó el tiempo. El reloj se revisa antes de cada patrón y antes de cada
-    valor: una cabecera repetida muchas veces no pasa del tope por más de una regex sobre un valor. Un src se compara
-    resuelto y, si es otro, también como vino ('scriptSrc_crudo'): calza con cualquiera y da una sola detección, así
-    que su señal y su confianza no cuentan dos veces."""
+    valor, también entre el src resuelto y el crudo: una cabecera repetida muchas veces no pasa del tope por más de
+    una regex sobre un valor. Un src se compara resuelto y, si es otro, también como vino ('scriptSrc_crudo'): calza
+    con cualquiera y da una sola detección, así que su señal y su confianza no cuentan dos veces."""
     for nombre in tecnologias:
         t = datos['tecnologias'][nombre]
         for campo, patrones in t['patrones'].items():
@@ -601,7 +610,9 @@ def _buscar(tecnologias, datos, reloj, vistos):
                     if i and reloj.vencido():
                         return False
                     formas = (valor, crudos[i]) if i < len(crudos) and crudos[i] != valor else (valor,)
-                    for forma in formas:
+                    for j, forma in enumerate(formas):
+                        if j and reloj.vencido():   # el src crudo es otro valor
+                            return False
                         m = regex.search(forma)
                         if m:
                             yield (nombre, campo, llave, resolver_version(version, regex, forma), confianza, forma,
@@ -631,10 +642,12 @@ def _con_implicadas(nombres, todas):
     return salida
 
 
-def _distribucion_de(campo, llave, valor, donde, de_la_respuesta, cats):
+def _distribucion_de(nombre, campo, llave, valor, donde, de_la_respuesta, cats):
     """La distribución de una versión que salió de valor[donde[0]:donde[1]], con la marca de su pedazo (_pedazo), no
     la de toda la cabecera: None si el pedazo trae la de SIGUEN_UPSTREAM, la de su propia marca, o la de las
-    cabeceras del servidor (`de_la_respuesta`) solo para HEREDAN."""
+    cabeceras del servidor (`de_la_respuesta`) solo para HEREDAN. No la hereda un producto de NO_HEREDAN ni uno cuyo
+    pedazo trae un comentario que no es de una distribución, como 'Apache/2.4.58 (Unix)' o 'Apache/2.4.41 (Win64)':
+    ese Apache se compiló aparte y no es el de la distribución que diga la otra cabecera."""
     if campo != 'headers':
         return None
     pedazo = _pedazo(valor, *donde)
@@ -643,13 +656,15 @@ def _distribucion_de(campo, llave, valor, donde, de_la_respuesta, cats):
     propia = distribucion(pedazo)
     if propia:
         return propia
-    hereda = llave in CABECERAS_DEL_SERVIDOR and cats and set(cats) <= HEREDAN
+    hereda = (llave in CABECERAS_DEL_SERVIDOR and cats and set(cats) <= HEREDAN and nombre not in NO_HEREDAN
+              and not _COMENTARIO.search(pedazo))
     return de_la_respuesta if hereda else None
 
 
 def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=time.monotonic, url=None):
     """Las tecnologías del sitio en una respuesta de la visita web. `url` es la de la página, para resolver los src
-    relativos de los <script> como el DOM (sin ella se comparan como vienen).
+    relativos de los <script> como el DOM (sin ella se comparan como vienen). Solo se resuelven con esa url: un
+    <base href> del HTML no se lee.
 
     {'tecnologias': [{'nombre', 'version' (o None), 'categorias', 'cpe' (o None), 'confianza', 'senales'
     ('campo:llave' de lo que calzó, nunca el valor), 'distribucion' (o None), 'implicada_por' (o None)}] o None,
@@ -658,15 +673,16 @@ def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=
     Primero las de más confianza, luego por nombre.
 
     'completo' dice que las huellas vieron lo que la visita les dio, en la medida en que una página normal se lee: es
-    False si se acabó TOPE_SEGUNDOS antes de revisar todos los patrones o si hubo un recorte de DEJAN_INCOMPLETO
-    (MAX_CABECERAS, más de 64 KiB de cabeceras sin las Set-Cookie, y MAX_COSTO_HTML, el html armado que corta
-    _recortar_html). Esos tres solo los alcanza una respuesta fuera de lo normal, y ahí lo que no se leyó puede
-    esconder cualquier tecnología. Los demás topes (MAX_HTML, MAX_VALOR, MAX_COOKIES, MAX_ETIQUETA, MAX_SRC,
-    MAX_SCRIPTS, MAX_SCRIPT y MAX_TEXTO_SCRIPTS) van en 'recortes' y no lo dejan en False: son cuánto de una página
-    se lee, y una página normal los alcanza (un HTML de más de 256 KiB, o cuatro scripts de 64 KiB de la visita más
-    uno en línea). Si la visita deja sin cobertura el sitio con 'completo' False, con esos topes sus hallazgos nunca
-    se cerrarían. El costo: una tecnología que solo se ve más allá de uno de ellos no sale, y su hallazgo de antes se
-    cierra.
+    False con reto (no se analizó), si se acabó TOPE_SEGUNDOS antes de revisar todos los patrones o si hubo un
+    recorte de DEJAN_INCOMPLETO: MAX_CABECERAS (más de 64 KiB de cabeceras sin las Set-Cookie), MAX_VALOR (una
+    cabecera de MAX_VALOR caracteres o más, o una Set-Cookie de más, que se saltan enteras porque cortadas darían
+    otra versión) y MAX_COSTO_HTML (el html armado que corta _recortar_html). Esos solo los alcanza una respuesta
+    fuera de lo normal, y ahí lo que no se leyó puede esconder cualquier tecnología. Los demás topes (MAX_HTML,
+    MAX_COOKIES, MAX_ETIQUETA, MAX_SRC, MAX_SCRIPTS, MAX_SCRIPT y MAX_TEXTO_SCRIPTS) van en 'recortes' y no lo dejan
+    en False: son cuánto de una página se lee, y una página normal los alcanza (un HTML de más de 256 KiB, o cuatro
+    scripts de 64 KiB de la visita más uno en línea). Si la visita deja sin cobertura el sitio con 'completo' False,
+    con esos topes sus hallazgos nunca se cerrarían. El costo: una tecnología que solo se ve más allá de uno de ellos
+    no sale, y su hallazgo de antes se cierra.
 
     Un error al recorrer `cabeceras` o `scripts` sale de aquí (entradas()): la visita debe atraparlo por sitio y
     dejar ese sitio sin cobertura (en sin_revisar de borde.cobertura), no tumbar toda la fuente."""
@@ -704,7 +720,8 @@ def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=
         numero = re.match(r'\d+', version)
         if len(r['version']) < len(version) <= MAX_LARGO_VERSION and (int(numero.group()) if numero else 0) < 10000:
             r['version'] = version
-            r['distribucion'] = _distribucion_de(campo, llave, valor, donde, de_la_respuesta, todas[nombre]['cats'])
+            r['distribucion'] = _distribucion_de(nombre, campo, llave, valor, donde, de_la_respuesta,
+                                                 todas[nombre]['cats'])
     for nombre in list(resueltas):   # excludes
         for excluida in todas[nombre]['excludes'] if nombre in resueltas else ():
             resueltas.pop(excluida, None)

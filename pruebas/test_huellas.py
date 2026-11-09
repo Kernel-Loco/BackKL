@@ -382,16 +382,18 @@ class Motor(unittest.TestCase):
             texto = (base * (huellas.MAX_HTML // len(base) + 1))[:huellas.MAX_HTML]
             cabeceras = [('Server', (base * 9000)[:9000]), ('X-Powered-By', 'php/' + (base * 9000)[:9000]),
                          ('Set-Cookie', 'a=' + (base * 70000)[:70000])]
-            inicio = time.monotonic()
-            r = huellas.analizar(200, cabeceras, texto, scripts=[texto[:huellas.MAX_SCRIPT]] * 4)
-            peor = max(peor, time.monotonic() - inicio)
-            self.assertIsInstance(r['tecnologias'], list, base)
+            for url in (None, 'https://' + SITIO + '/'):   # con url, cada src se compara resuelto y crudo
+                inicio = time.monotonic()
+                r = huellas.analizar(200, cabeceras, texto, scripts=[texto[:huellas.MAX_SCRIPT]] * 4, url=url)
+                peor = max(peor, time.monotonic() - inicio)
+                self.assertIsInstance(r['tecnologias'], list, (base, url))
         self.assertLess(peor, huellas.TOPE_SEGUNDOS + 1.0)
 
     def test_12_muchas_cabeceras_iguales(self):
         # http.client deja pasar 100 cabeceras y borde._pares corta cada una a 8 KiB. Con el patrón de Liferay
-        # ('[a-z\s]+([\d.]+)') cada valor de tabuladores cuesta unos 0.05 s: 99 tomaban 5 s.
-        cabeceras = [('Liferay-Portal', '-' + '\t' * (huellas.MAX_VALOR - 2) + '-')] * 99
+        # ('[a-z\s]+([\d.]+)') cada valor de tabuladores cuesta unos 0.05 s: 99 tomaban 5 s. Cada valor lleva un
+        # carácter menos que MAX_VALOR: uno de MAX_VALOR no se lee (test_23).
+        cabeceras = [('Liferay-Portal', '-' + '\t' * (huellas.MAX_VALOR - 3) + '-')] * 99
         inicio = time.monotonic()
         r = huellas.analizar(200, cabeceras)
         self.assertLess(time.monotonic() - inicio, huellas.TOPE_SEGUNDOS + 0.5)
@@ -399,8 +401,7 @@ class Motor(unittest.TestCase):
         # MAX_CABECERAS es de toda la respuesta, sin contar las Set-Cookie.
         e = huellas.entradas(cabeceras + [('Set-Cookie', 'PHPSESSID=CIRDAN_FAKE_a')])
         self.assertLessEqual(sum(map(len, e['headers']['liferay-portal'])), huellas.MAX_CABECERAS)
-        # Cada valor llega con MAX_VALOR caracteres: también va en recortes.
-        self.assertEqual((e['recortes'], sorted(e['cookies'])), (['MAX_CABECERAS', 'MAX_VALOR'], ['phpsessid']))
+        self.assertEqual((e['recortes'], sorted(e['cookies'])), (['MAX_CABECERAS'], ['phpsessid']))
         self.assertEqual(huellas.entradas([('Server', 'nginx/1.24.0')] * 3)['recortes'], [])
 
     def test_13_el_reloj_se_revisa_entre_un_valor_y_el_siguiente(self):
@@ -418,6 +419,18 @@ class Motor(unittest.TestCase):
         r = huellas.analizar(200, [('X-Lenta', 'a'), ('X-Lenta', 'b'), ('X-Lenta', 'c')], datos=datos,
                              reloj=lambda: ahora[0])
         self.assertEqual((revisados, r['completo']), (['a', 'b'], False))
+        # El src resuelto y el crudo son dos valores: con una regex de 4 s, el crudo ya no se revisa.
+
+        class MasLenta:
+            def search(self, valor):
+                revisados.append(valor)
+                ahora[0] += 4.0
+
+        ahora[0], revisados[:] = 0.0, []
+        datos['tecnologias']['Lenta']['patrones'] = {'scriptSrc': [(None, MasLenta(), '', 100)]}
+        r = huellas.analizar(200, None, '<script src="/a.js"></script>', datos=datos, reloj=lambda: ahora[0],
+                             url='https://' + SITIO + '/')
+        self.assertEqual((revisados, r['completo']), (['https://www.acme-demo.mx/a.js'], False))
 
     def test_14_la_marca_de_la_otra_cabecera(self):
         # PHP sale solo de X-Powered-By, sin marca, y hereda la de Server: la distribución empaqueta los dos.
@@ -510,8 +523,8 @@ class Motor(unittest.TestCase):
 
     def test_18_un_valor_que_no_cabe_en_max_cabeceras_se_salta_entero(self):
         # Antes de Server quedan 9 caracteres: 'nginx/1.24.0' no se lee, ni cortado a 'nginx/1.2' (otra versión).
-        relleno = [('Content-Security-Policy', 'a' * huellas.MAX_VALOR)] * 7 + [
-            ('Content-Security-Policy', 'a' * (huellas.MAX_CABECERAS - 7 * huellas.MAX_VALOR - 9))]
+        relleno = [('Content-Security-Policy', 'a' * (huellas.MAX_VALOR - 1))] * 7 + [
+            ('Content-Security-Policy', 'a' * (huellas.MAX_CABECERAS - 7 * (huellas.MAX_VALOR - 1) - 9))]
         cabeceras = relleno + [('Server', 'nginx/1.24.0'), ('X-Powered-By', 'PHP/8.1')]
         e = huellas.entradas(cabeceras)
         self.assertNotIn('server', e['headers'])
@@ -547,12 +560,13 @@ class Motor(unittest.TestCase):
                              scripts=['z' * huellas.MAX_SCRIPT] * 4)
         self.assertEqual((r['completo'], r['recortes']), (True, ['MAX_TEXTO_SCRIPTS']))
         self.assertIn('Nginx', por_nombre(r))
-        # MAX_CABECERAS y MAX_COSTO_HTML sí la dejan incompleta, y el tope de tiempo también (test_9).
-        r = huellas.analizar(200, [('X-Relleno', 'a' * huellas.MAX_VALOR)] * 9)
-        self.assertEqual((r['completo'], r['recortes']), (False, ['MAX_CABECERAS', 'MAX_VALOR']))
+        # MAX_CABECERAS, MAX_COSTO_HTML y MAX_VALOR (test_23) sí la dejan incompleta, y el tope de tiempo también
+        # (test_9).
+        r = huellas.analizar(200, [('X-Relleno', 'a' * (huellas.MAX_VALOR - 1))] * 9)
+        self.assertEqual((r['completo'], r['recortes']), (False, ['MAX_CABECERAS']))
         r = huellas.analizar(200, None, '<' * huellas.MAX_HTML)
         self.assertEqual((r['completo'], r['recortes']), (False, ['MAX_COSTO_HTML']))
-        self.assertEqual(huellas.DEJAN_INCOMPLETO, ('MAX_CABECERAS', 'MAX_COSTO_HTML'))
+        self.assertEqual(huellas.DEJAN_INCOMPLETO, ('MAX_CABECERAS', 'MAX_COSTO_HTML', 'MAX_VALOR'))
 
     def test_21_cada_tope_que_corta_va_en_recortes(self):
         def recortes(cabeceras=None, cuerpo=None, scripts=()):
@@ -573,14 +587,69 @@ class Motor(unittest.TestCase):
         # Un src o un content de <meta> de más de MAX_SRC.
         self.assertEqual(recortes(cuerpo='<script src="/%s.js"></script>' % ('a' * 3000)), ['MAX_SRC'])
         self.assertEqual(recortes(cuerpo='<meta name="x" content="%s">' % ('b' * 3000)), ['MAX_SRC'])
+        # Un src corto que resuelto contra una url larga pasa de MAX_SRC.
+        url = 'https://' + SITIO + '/' + 'd/' * huellas.MAX_SRC
+        e = huellas.entradas(None, '<script src="lib.js"></script>', url=url)
+        self.assertEqual((e['scriptSrc_crudo'], len(e['scriptSrc'][0]), e['recortes']),
+                         (['lib.js'], huellas.MAX_SRC, ['MAX_SRC']))
+        r = huellas.analizar(200, None, '<script src="lib.js"></script>', url=url)
+        self.assertEqual((r['completo'], r['recortes']), (True, ['MAX_SRC']))
         # Una cabecera cortada a MAX_VALOR, una Set-Cookie de más de MAX_VALOR y Set-Cookie cortadas a MAX_COOKIES.
-        self.assertEqual(recortes(cabeceras=[('X-Largo', 'a' * 9000)]), ['MAX_VALOR'])
-        self.assertEqual(recortes(cabeceras=[('Set-Cookie', 'a=CIRDAN_FAKE_' + 'b' * 9000)]), ['MAX_VALOR'])
+        # MAX_VALOR deja el análisis incompleto (test_23) y MAX_COOKIES no.
+        for cabeceras in ([('X-Largo', 'a' * 9000)], [('Set-Cookie', 'a=CIRDAN_FAKE_' + 'b' * 9000)]):
+            self.assertEqual(recortes(cabeceras=cabeceras), ['MAX_VALOR'])
+            r = huellas.analizar(200, cabeceras)
+            self.assertEqual((r['completo'], r['recortes']), (False, ['MAX_VALOR']))
         cookies = [('Set-Cookie', 'c%d=CIRDAN_FAKE_%s' % (i, 'd' * 7000)) for i in range(10)]
         self.assertEqual(recortes(cabeceras=cookies), ['MAX_COOKIES'])
+        r = huellas.analizar(200, cookies)
+        self.assertEqual((r['completo'], r['recortes']), (True, ['MAX_COOKIES']))
+        # Un cuerpo en bytes de más de 1 MiB (MAX_HTML * 4) cuyo texto cabe en MAX_HTML: lo que sigue no se lee.
+        cuerpo = ('\U0001F600' * huellas.MAX_HTML).encode() + b'<meta name="generator" content="WordPress 5.8.1">'
+        r = huellas.analizar(200, None, cuerpo)
+        self.assertEqual((r['tecnologias'], r['completo'], r['recortes']), ([], True, ['MAX_HTML']))
         # Una página normal no llega a ninguno.
         pagina = fixture('ubuntu_nginx_wordpress_200')
         self.assertEqual(recortes(pagina['cabeceras'], pagina['cuerpo']), [])
+
+    def test_22_no_hereda_quien_ya_dice_su_origen(self):
+        sury = 'PHP/8.1.27-1+ubuntu22.04.1+deb.sury.org+1'
+        # Un Apache compilado aparte ('(Unix)', '(Win64)') no es el de Ubuntu: sin distribución, sus CVE cuentan.
+        for server in ('Apache/2.4.58 (Unix) OpenSSL/3.0.2', 'Apache/2.4.41 (Win64)', 'Apache/2.4.41 (Win32)'):
+            t = por_nombre(huellas.analizar(200, [('Server', server), ('X-Powered-By', sury)]))
+            apache = t['Apache HTTP Server']
+            self.assertEqual(apache['distribucion'], None, server)
+            self.assertNotEqual(nvd.revisar(apache, fixture('nvd_nginx_1.18.0'), SITIO)['estado'], 'distribucion')
+        # Tampoco junto a un PHP con la marca de Ubuntu.
+        t = por_nombre(huellas.analizar(200, [('Server', 'Apache/2.4.58 (Unix)'),
+                                              ('X-Powered-By', 'PHP/7.4.3-4ubuntu2.19')]))
+        self.assertEqual((t['Apache HTTP Server']['distribucion'], t['PHP']['distribucion']), (None, 'Ubuntu'))
+        # Ni un producto que la distribución no empaqueta con esa cabecera.
+        for server, nombre, version in (('openresty/1.21.4.1', 'OpenResty', '1.21.4.1'),
+                                        ('Jetty(9.4.44.v20210927)', 'Jetty', '9.4.44')):
+            t = por_nombre(huellas.analizar(200, [('Server', server), ('X-Powered-By', sury)]))
+            self.assertEqual((t[nombre]['version'], t[nombre]['distribucion']), (version, None), server)
+        self.assertEqual(huellas.NO_HEREDAN, ('Jetty', 'OpenResty'))
+        # Sin comentario sí hereda (test_17).
+        t = por_nombre(huellas.analizar(200, [('Server', 'Apache/2.4.52'), ('X-Powered-By', sury)]))
+        self.assertEqual(t['Apache HTTP Server']['distribucion'], 'Ubuntu')
+
+    def test_23_un_valor_cortado_por_max_valor_no_se_lee(self):
+        # borde._pares corta Server a MAX_VALOR, y 'nginx/1.24.0' llega como 'nginx/1.2', que es otra versión.
+        cabeceras = [('Server', 'a' * 8182 + ' nginx/1.24.0'), ('X-Powered-By', 'PHP/8.1')]
+        self.assertTrue(borde._pares(cabeceras)[0][1].endswith(' nginx/1.2'))   # borde.py sigue igual
+        e = huellas.entradas(cabeceras)
+        self.assertEqual((sorted(e['headers']), e['recortes']), (['x-powered-by'], ['MAX_VALOR']))
+        r = huellas.analizar(200, cabeceras)
+        self.assertNotIn('Nginx', por_nombre(r))
+        self.assertIn('PHP', por_nombre(r))   # lo demás sí se lee
+        self.assertEqual((r['completo'], r['recortes']), (False, ['MAX_VALOR']))
+        # Con un carácter menos que MAX_VALOR llega entero y se lee.
+        r = huellas.analizar(200, [('Server', 'a' * (huellas.MAX_VALOR - 14) + ' nginx/1.24.0')])
+        self.assertEqual((por_nombre(r)['Nginx']['version'], r['completo'], r['recortes']), ('1.24.0', True, []))
+        # Una Set-Cookie de más de MAX_VALOR tampoco se lee cortada, ni su nombre.
+        e = huellas.entradas([('Set-Cookie', 'laravel_session=CIRDAN_FAKE_' + 'b' * 9000)])
+        self.assertEqual((e['cookies'], e['headers'], e['recortes']), ({}, {}, ['MAX_VALOR']))
 
 
 class Soporte(unittest.TestCase):

@@ -133,10 +133,11 @@ def _varios(x, tope=None):
     """Una lista con lo que llegó: None da [], un solo texto, número, IP o red da [x] y cualquier otra cosa que no se
     pueda recorrer (iter() lanza TypeError) da []. Un error al recorrerla, como el TypeError de map(int, ['1', None]),
     sí sale: con [] se perdería lo ya leído y la visita lo tomaría por un negativo (sin reto, sin borde), cuando el
-    sitio debe quedar sin cobertura. Ese error sale también de quien llama a _varios (_pares, por_cabeceras, reto,
-    detectar, cobertura, y huellas.entradas y huellas.analizar): la visita debe atraparlo por sitio y dejar ese sitio
-    sin cobertura (en sin_revisar de cobertura), no tumbar toda la fuente. Con `tope` se leen exactamente esos, ni
-    uno más: un generador como red.hosts() no se recorre entero."""
+    sitio debe quedar sin cobertura. Ese error sale también de quien llama a _varios. El de _pares, por_cabeceras,
+    reto, detectar, huellas.entradas y huellas.analizar es de un sitio: la visita debe atraparlo por sitio y dejar ese
+    sitio sin cobertura (en sin_revisar de cobertura), no tumbar toda la fuente. El de cobertura es de toda la fuente:
+    así solo recorre `codigos`, los de la fuente, no lo de un sitio. Con `tope` se leen exactamente esos, ni uno más:
+    un generador como red.hosts() no se recorre entero."""
     if x is None:
         return []
     if isinstance(x, _UNO):
