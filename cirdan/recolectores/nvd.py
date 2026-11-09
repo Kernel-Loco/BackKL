@@ -44,7 +44,7 @@ import re
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
-from cirdan.recolectores import huellas, shodan
+from cirdan.recolectores import contrato, huellas, shodan
 
 CODIGOS = {'known_vulnerability': 'medium'}   # la severidad del catálogo (semilla 004), la misma que shodan.py
 URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0?cpeName=%s&isVulnerable&noRejected'
@@ -56,7 +56,7 @@ MAX_DESCRIPCION = 2000       # caracteres de la descripción en inglés de la NV
 METRICAS = ('cvssMetricV31', 'cvssMetricV40', 'cvssMetricV30', 'cvssMetricV2')   # la primera que traiga la CVE
 TITULO = 'Vulnerabilidad conocida %s por la versión de %s %s en %s'
 ESTADOS = ('con_cve', 'sin_cve', 'sin_dato', 'distribucion', 'sin_version')
-COLUMNAS_CVES = ('cve_id', 'description', 'cvss_base_score', 'cvss_vector', 'published_at')   # de la tabla cves
+COLUMNAS_CVES = contrato.COLUMNAS_CVES   # las de la tabla cves que da un recolector
 
 # cpe:2.3:part:vendor:product:version:... con 13 partes, en la forma de cadena de CPE 2.3 (NISTIR 7695, 6.2): cada
 # parte es '*', '-' o letras, dígitos, '.', '_' y '-', con '?' o '*' al inicio o al final, y cualquier otro signo

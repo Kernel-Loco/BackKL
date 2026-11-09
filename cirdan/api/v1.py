@@ -204,7 +204,10 @@ FINDINGS_SQL = '''
 SELECT f.id::text, f.evidence, a.value AS asset, a.asset_type, a.first_seen_at AS asset_first_seen,
     r.category, r.code AS rule_code, r.base_severity, s.code AS source,
     coalesce(sc_score.severity, f.severity) AS severity, f.status,
-       f.cve_id, c.cvss_base_score AS cvss, c.epss_score AS epss, coalesce(c.in_kev, false) AS in_kev,
+       f.cve_id, coalesce(c.cvss_base_score, CASE WHEN jsonb_typeof(f.evidence->'cvss') = 'number' THEN
+           CASE WHEN (f.evidence->>'cvss')::numeric BETWEEN 0 AND 10 THEN (f.evidence->>'cvss')::numeric END END)
+           AS cvss,
+       c.epss_score AS epss, coalesce(c.in_kev, false) AS in_kev,
        f.detected_at, f.last_scan_id::text, sc.queued_at AS scan_at,
        b.breach_name, b.breach_date, b.data_classes,
        fm.attack_version, fm.attack_technique_id, fm.attack_technique_name,

@@ -42,9 +42,16 @@ MAX_INTENTO = 3                           # scan_source_runs.attempt va de 0 a 3
 ESPERAS_REINTENTO = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=25))
 SIN_GRABACION = 'no hay respuesta grabada para '
 MARCA = '.grabacion'                      # inicio de la grabación en curso, dentro de la carpeta del dominio
+# El User-Agent de toda petición de LowTide, el que nombra la sección 9 de la carta (docs/plantilla_carta_autorizacion.md)
+# para que el cliente lo reconozca en sus registros. Uno solo para todas las fuentes y la visita web (#18, RC-46).
+AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'
 NOMBRE_VALIDO = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
 CODIGO_VALIDO = re.compile(r'^[a-z][a-z0-9_]{1,62}$')
 HUELLA_VALIDA = re.compile(r'^[0-9a-f]{64}$')
+CVE_VALIDA = re.compile(r'CVE-[0-9]{4}-[0-9]{4,19}')   # la forma del CHECK de cves.cve_id, con un tope de dígitos
+# Las columnas de cves que un recolector puede dar (la migración 014 le da a cirdan_app INSERT solo en estas). EPSS y
+# KEV son del cargador diario de inteligencia.
+COLUMNAS_CVES = ('cve_id', 'description', 'cvss_base_score', 'cvss_vector', 'published_at')
 
 
 class FuenteNoResponde(Exception):
@@ -92,6 +99,7 @@ class Resultado:
     revisados: list | None = None    # None si revisó todo. Si no, las partes que sí revisó completas (#23)
     sin_revisar: list | None = None  # con revisados, las que existen, revisaría y no revisó. None si no las sabe
     omitidos: list = field(default_factory=list)  # huellas de lo que sigue ahí pero un tope no deja reportar (#23)
+    cves: list = field(default_factory=list)      # filas para la tabla cves (COLUMNAS_CVES) de sus hallazgos (#18)
 
     def a_dict(self):
         return asdict(self)
@@ -106,6 +114,41 @@ def _errores_partes(nombre, partes, puede_faltar=False):
     if len(set(partes)) != len(partes):
         return ['%s tiene partes repetidas' % nombre]
     return []
+
+
+def _errores_cves(cves):
+    """Resultado.cves: filas sin repetir con cve_id válido, solo COLUMNAS_CVES, y valores que cves acepta: textos,
+    un puntaje de 0 a 10 y una fecha ISO con zona. Una fila mala tumbaría en la base todo lo de la fuente."""
+    if not isinstance(cves, list) or not all(isinstance(f, dict) for f in cves):
+        return ['cves debe ser una lista de filas']
+    errores, vistas = [], set()
+    for f in cves:
+        cve = f.get('cve_id')
+        if not isinstance(cve, str) or not CVE_VALIDA.fullmatch(cve):
+            errores.append('cves: cve_id inválido %r' % (cve,))
+            continue
+        if cve in vistas:
+            errores.append('cves: %s repetida' % cve)
+        vistas.add(cve)
+        if set(f) - set(COLUMNAS_CVES):
+            errores.append('cves: %s trae columnas que no son de COLUMNAS_CVES' % cve)
+        for columna in ('description', 'cvss_vector'):
+            if f.get(columna) is not None and not isinstance(f[columna], str):
+                errores.append('cves: %s %s debe ser texto' % (cve, columna))
+        puntaje = f.get('cvss_base_score')
+        if puntaje is not None and (isinstance(puntaje, bool) or not isinstance(puntaje, (int, float))
+                                    or not 0 <= puntaje <= 10):
+            errores.append('cves: %s cvss_base_score fuera de 0 a 10' % cve)
+        fecha = f.get('published_at')
+        if fecha is not None:
+            try:
+                zona = datetime.fromisoformat(fecha).utcoffset() if isinstance(fecha, str) else None
+                ok = zona is not None and abs(zona) <= timedelta(hours=14)   # Postgres no acepta más de 15:59
+            except ValueError:
+                ok = False
+            if not ok:
+                errores.append('cves: %s published_at no es una fecha ISO con zona' % cve)
+    return errores
 
 
 def _nombre_ok(nombre):
@@ -194,6 +237,7 @@ def validar(res, codigos=None):
         errores.append('omitidos debe ser una lista de huellas')
     elif len(set(omitidos)) != len(omitidos):
         errores.append('omitidos tiene huellas repetidas')
+    errores += _errores_cves(res.cves)
     if not isinstance(res.activos, list) or not isinstance(res.hallazgos, list):
         return errores + ['activos y hallazgos deben ser listas']
     if res.estado == 'failed' and (res.activos or res.hallazgos):

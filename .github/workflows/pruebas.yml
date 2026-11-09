@@ -90,7 +90,7 @@ jobs:
           pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py
           pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py
           pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py pruebas/test_borde.py
-          pruebas/test_huellas.py pruebas/test_dataset_ml.py
+          pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_dataset_ml.py
 
       - name: Logs si algo falló
         if: failure()

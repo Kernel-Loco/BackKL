@@ -37,7 +37,7 @@ from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar
-from cirdan.recolectores.contrato import Resultado, ejecutar, siguiente_estado
+from cirdan.recolectores.contrato import COLUMNAS_CVES, CVE_VALIDA, Resultado, ejecutar, siguiente_estado
 from cirdan.score import configuracion, motor
 
 log = logging.getLogger(__name__)
@@ -291,6 +291,13 @@ PARTES = ('''COALESCE(evidence->'partes', '''
           '''THEN jsonb_build_array((evidence->>'host') || '@' || (evidence->>'vence')) END, '[]'::jsonb)''')
 
 
+def _cve_de(hallazgo):
+    """La CVE de un hallazgo (su evidencia 'cve', como la ponen Shodan y la visita web), o None si no trae una con la
+    forma del CHECK de cves.cve_id."""
+    cve = hallazgo.evidencia.get('cve') if isinstance(hallazgo.evidencia, dict) else None
+    return cve if isinstance(cve, str) and CVE_VALIDA.fullmatch(cve) else None
+
+
 def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas, ahora=None):
     """Guarda activos y hallazgos de una fuente que respondió. Devuelve dos conjuntos de id de hallazgos: los que
     abrió (insertó o reabrió) y los que dio por resueltos. `ahora` es la hora del escaneo (la de correr), y sin ella
@@ -355,6 +362,22 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
             previas[bytes(f['fingerprint']).hex()] = f['partes']
     abiertos = set()
 
+    # Las CVE van a la tabla global cves antes que los hallazgos que las nombran (llave foránea de findings.cve_id). Las
+    # filas de la NVD que trae el recolector (Resultado.cves, la visita web) entran completas y las demás, como las que
+    # Shodan deduce, entran como stub. Nunca se actualiza una que ya está: eso es del cargador diario de inteligencia
+    # (#69, RC-127), que llena el CVSS de los stubs, y cirdan_app no tiene UPDATE en cves (migraciones 001 y 014, #18).
+    # Como shodan corre antes que web (fuentes_activas va por code), una CVE que los dos ven queda como stub hasta el
+    # cargador: la API toma entonces el CVSS de la evidencia del hallazgo (cirdan/api/v1.py).
+    for fila in resultado.cves:
+        columnas = [c for c in COLUMNAS_CVES if c in fila]
+        conn.execute(
+            'INSERT INTO cves ({c}) VALUES ({v}) ON CONFLICT (cve_id) DO NOTHING'.format(
+                c=', '.join(columnas), v=', '.join(['%s'] * len(columnas))),
+            [fila[c] for c in columnas])
+    con_fila = {f['cve_id'] for f in resultado.cves}
+    for cve in sorted({_cve_de(h) for h in resultado.hallazgos} - con_fila - {None}):
+        conn.execute('INSERT INTO cves (cve_id) VALUES (%s) ON CONFLICT (cve_id) DO NOTHING', (cve,))
+
     for hallazgo in resultado.hallazgos:
         regla = reglas.get(hallazgo.codigo)
         if not regla:
@@ -379,15 +402,17 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         huella = bytes.fromhex(hallazgo.huella)
         finding_id = conn.execute(
             'INSERT INTO findings (organization_id, domain_id, asset_id, rule_id, source_id, fingerprint, severity, '
-            "status, evidence, detected_at, last_scan_id) VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, now(), %s) "
+            "status, evidence, cve_id, detected_at, last_scan_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, now(), %s) "
             'ON CONFLICT (organization_id, fingerprint) DO UPDATE SET '
             'domain_id = EXCLUDED.domain_id, asset_id = EXCLUDED.asset_id, rule_id = EXCLUDED.rule_id, '
             'source_id = EXCLUDED.source_id, severity = EXCLUDED.severity, evidence = EXCLUDED.evidence, '
+            'cve_id = EXCLUDED.cve_id, '
             'status = CASE WHEN findings.status = %s THEN %s ELSE findings.status END, '
             'resolved_at = CASE WHEN findings.status = %s THEN NULL ELSE findings.resolved_at END, '
             'last_scan_id = EXCLUDED.last_scan_id, updated_at = now() RETURNING id::text',
             (org, domain_id, asset_id, regla['id'], source_id, huella, hallazgo.severidad,
-             Jsonb(evidencia), scan_id, 'resolved', 'open', 'resolved'),
+             Jsonb(evidencia), _cve_de(hallazgo), scan_id, 'resolved', 'open', 'resolved'),
         ).fetchone()['id']
         if previos.get(huella) in (None, 'resolved'):  # no existía o estaba resuelto: ahora queda abierto
             abiertos.add(finding_id)

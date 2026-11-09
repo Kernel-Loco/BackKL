@@ -484,6 +484,60 @@ class Orquestador(unittest.TestCase):
         self.reescanear(resultado_github(), 'github')
         self.assertEqual(self.abiertos('title', en_sitio).popitem()[1], 'resolved')
 
+    def test_2s_las_cve_van_a_cves_y_a_findings_cve_id(self):
+        """La visita web (#18) trae de la NVD sus CVE con CVSS: entran completas en cves como cirdan_app y cada
+        known_vulnerability lleva su cve_id. En el orden de producción (fuentes_activas va por code: shodan antes que
+        web) la CVE que Shodan deduce entra como stub y la fila de la NVD de la misma CVE ya no cambia (eso es del
+        cargador diario): la API toma el CVSS de la evidencia. Una CVE que ya está no cambia y cve_id se conserva."""
+        from cirdan.recolectores import contrato, nvd, visita
+        from pruebas.test_huellas import fixture, tecnologia
+        self.assertEqual(self.uno('SELECT current_user AS u')['u'], 'cirdan_app')
+        ip = '198.51.100.7'
+        # 1. Shodan primero: sus dos CVE entran como stub
+        self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2099-7777'), (ip, 'CVE-2099-0101')]), 'shodan')
+        stubs = self.conn.execute('SELECT cve_id, description, cvss_base_score FROM cves WHERE cve_id = ANY(%s)',
+                                  (['CVE-2099-7777', 'CVE-2099-0101'],)).fetchall()
+        self.assertEqual(sorted((f['cve_id'], f['description'], f['cvss_base_score']) for f in stubs),
+                         [('CVE-2099-0101', None, None), ('CVE-2099-7777', None, None)])
+        # 2. La visita web después: sus otras CVE entran completas; la de Shodan sigue como stub
+        revision = nvd.revisar(tecnologia('Nginx', '1.18.0'), fixture('nvd_nginx_1.18.0'), 'acme-demo.mx')
+        web = Resultado('acme-demo.mx', 'web', cves=revision['cves'])
+        web.activos.append(Activo('domain', 'acme-demo.mx', {'web': {'estado': 'visitado', 'fuente': 'web'}}))
+        web.hallazgos = [visita._hallazgo(c, 'acme-demo.mx', 'acme-demo.mx', AHORA, 'https://acme-demo.mx/')
+                         for c in revision['hallazgos']]
+        self.assertEqual(contrato.validar(web, codigos=set(visita.CODIGOS)), [])
+        ids = sorted(h.evidencia['cve'] for h in web.hallazgos)
+        self.assertEqual(len(ids), 3)
+        self.assertIn('CVE-2099-0101', ids)
+        completas = {f['cve_id']: f for f in revision['cves']}
+        for _ in range(2):   # la segunda vez es el ON CONFLICT de cves y el DO UPDATE de findings
+            s, _ = self.reescanear(web, 'web')
+            filas = {f['cve_id']: f for f in self.conn.execute(
+                'SELECT cve_id, description, cvss_base_score, cvss_vector, published_at FROM cves '
+                'WHERE cve_id = ANY(%s)', (ids,)).fetchall()}
+            self.assertEqual(sorted(filas), ids)
+            for cve in ids:
+                if cve == 'CVE-2099-0101':
+                    self.assertEqual((filas[cve]['description'], filas[cve]['cvss_base_score']), (None, None))
+                    continue
+                self.assertEqual((filas[cve]['description'], float(filas[cve]['cvss_base_score']),
+                                  filas[cve]['cvss_vector']),
+                                 (completas[cve]['description'], completas[cve]['cvss_base_score'],
+                                  completas[cve]['cvss_vector']))
+                self.assertIsNotNone(filas[cve]['published_at'])
+            guardadas = self.conn.execute('SELECT evidence->>%s AS cve, cve_id FROM findings WHERE fingerprint = ANY(%s)',
+                                          ('cve', [bytes.fromhex(h.huella) for h in web.hallazgos])).fetchall()
+            self.assertEqual(sorted((f['cve'], f['cve_id']) for f in guardadas), [(c, c) for c in ids])
+        shodan_ids = self.conn.execute(
+            "SELECT f.cve_id FROM findings f JOIN data_sources d ON d.id = f.source_id WHERE d.code = 'shodan' "
+            'AND f.cve_id = ANY(%s)', (['CVE-2099-7777', 'CVE-2099-0101'],)).fetchall()
+        self.assertEqual(sorted(f['cve_id'] for f in shodan_ids), ['CVE-2099-0101', 'CVE-2099-7777'])
+        # 3. La API da el CVSS de la NVD: de cves si la fila está completa y de la evidencia si es un stub
+        from cirdan.api import v1
+        cvss = {f['evidence']['cve']: f['cvss'] for f in self.conn.execute(v1.FINDINGS_SQL, ('acme-demo.mx',))
+                if f['source'] == 'web' and 'cve' in f['evidence']}
+        self.assertEqual({c: float(v) for c, v in cvss.items()}, {c: completas[c]['cvss_base_score'] for c in ids})
+
     def test_2r_una_cve_que_el_tope_dejo_fuera_sigue_abierta(self):
         """Las CVE que MAX_CVE deja fuera van en omitidos (#23): la que se reportó antes y ahora quedó fuera sigue
         abierta, el escaneo no queda a medias por eso y una omitida que nunca se reportó no se guarda. Si ya no sale

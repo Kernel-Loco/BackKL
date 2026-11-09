@@ -62,14 +62,14 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from cirdan.recolectores import certspotter
+from cirdan.recolectores import certspotter, contrato
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (MARCA, NOMBRE_VALIDO, SIN_GRABACION, Activo, FuenteNoResponde,  # noqa: F401
                                           Grabadora, Hallazgo, Resultado, SinGrabacion, nombre_archivo)
 
 FUENTE = 'ct_logs'
 URL = 'https://crt.sh/'
-AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'
+AGENTE = contrato.AGENTE   # uno solo para todas las fuentes (contrato.py)
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'crtsh'
 
 DIAS_POR_VENCER = 30         # vence en menos de esto = hallazgo...
