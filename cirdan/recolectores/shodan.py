@@ -531,15 +531,18 @@ class ClienteShodan:
         visita web la cambia por la suya, con otro tope de bytes."""
         return _descargar(url, timeout)
 
-    def _http(self, url, intentos, timeout, que, sin_reintento=()):
+    def _http(self, url, intentos, timeout, que, sin_reintento=(), turno=None):
         """JSON de `url` con hasta `intentos` intentos dentro del tiempo de la corrida. None solo con un 404. Un 429
         lanza LimiteAlcanzado, y otro 4xx, un 200 vacío o 'null' o una redirección RespuestaIlegible, sin reintentar.
         Si un 5xx o un 408 traen Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le
-        alcanza a la corrida, pero nunca más de MAX_ESPERA."""
+        alcanza a la corrida, pero nunca más de MAX_ESPERA. `turno()`, si se pasa, corre antes de cada intento, también
+        de los reintentos: la visita web espera ahí el ritmo de la NVD."""
         pedida = {}   # el Retry-After del último intento
 
         def intento():
             pedida.clear()
+            if turno:
+                turno()
             limite = min(timeout, self.restante())
             if limite < MIN_INTENTO:
                 raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de consultar %s' % que)

@@ -138,9 +138,9 @@ class _Conexion(http.client.HTTPSConnection):
     """Una conexión HTTPS en la que todo pasa dentro de `plazo`: getaddrinfo, el connect, el TLS y cada lectura o
     escritura. El `timeout` que pasa urllib no se usa."""
 
-    def __init__(self, host, plazo, cronometro, **otros):
+    def __init__(self, host, plazo, cronometro, familia=socket.AF_UNSPEC, **otros):
         super().__init__(host, **otros)
-        self.plazo, self.cronometro = plazo, cronometro
+        self.plazo, self.cronometro, self.familia = plazo, cronometro, familia
         self._create_connection = self._conectar
 
     def queda(self):
@@ -153,9 +153,13 @@ class _Conexion(http.client.HTTPSConnection):
     def _conectar(self, direccion, *_):
         """El socket conectado a la primera dirección pública de `direccion` (host, puerto) que responda, con
         settimeout en lo que queda para el handshake TLS. Las que no son públicas (publica()) se saltan sin crear su
-        socket, y si no queda ninguna lanza NoPublica. Todo socket que falla se cierra."""
+        socket, y si no queda ninguna lanza NoPublica. Todo socket que falla se cierra. Con `familia` solo cuentan las
+        direcciones de esa familia: la visita web pide AF_INET, así una AAAA que el DNS de la red arma con su propio
+        prefijo de NAT64 (uno que publica() no puede conocer) nunca se usa para llegar a una IPv4 interna."""
         host, puerto = direccion
         todas = resolver(host, puerto, self.queda())
+        if self.familia:
+            todas = [d for d in todas if d[0] == self.familia]
         direcciones = [d for d in todas if publica(d[4][0])]
         if todas and not direcciones:
             raise NoPublica('%s resolvió solo a direcciones que no son públicas' % host)
@@ -188,9 +192,9 @@ class _Conexion(http.client.HTTPSConnection):
 class _Https(urllib.request.HTTPSHandler):
     """Abre cada petición https con una _Conexion que tiene el plazo de la petición."""
 
-    def __init__(self, plazo, cronometro):
+    def __init__(self, plazo, cronometro, familia=socket.AF_UNSPEC):
         super().__init__(context=_contexto())
-        self._conexion = functools.partial(_Conexion, plazo=plazo, cronometro=cronometro)
+        self._conexion = functools.partial(_Conexion, plazo=plazo, cronometro=cronometro, familia=familia)
 
     def https_open(self, req):
         return self.do_open(self._conexion, req, context=self._context)
@@ -205,11 +209,12 @@ class _SinRedirecciones(urllib.request.HTTPRedirectHandler):
         raise Redirigida(code, urllib.parse.urlsplit(req.full_url).hostname, newurl)
 
 
-def abrir(req, plazo, cronometro):
+def abrir(req, plazo, cronometro, familia=socket.AF_UNSPEC):
     """La respuesta a `req`, con _Https, _SinRedirecciones y sin proxies (un ProxyHandler vacío, que build_opener ya no
-    agrega con los del entorno). Las pruebas la cambian por una respuesta simulada."""
+    agrega con los del entorno). Con `familia` la conexión solo va a direcciones de esa familia (_Conexion._conectar).
+    Las pruebas la cambian por una respuesta simulada."""
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _SinRedirecciones,
-                                       _Https(plazo, cronometro)).open(req)
+                                       _Https(plazo, cronometro, familia)).open(req)
 
 
 def descargar(req, plazo, tope, cronometro=None):
@@ -253,13 +258,16 @@ def visitar(req, plazo, tope, cronometro=None):
     Lanza Redirigida con el destino si responde con una redirección que urllib sigue (301, 302, 303, 307 y 308 con
     Location), PlazoVencido si se pasa del plazo, también cuando un timeout del socket llega con el plazo ya vencido, y
     el OSError de la red tal cual: un URLError cuyo reason es NoPublica si el nombre solo resolvió a direcciones que no
-    son públicas, o el de un certificado que no se pudo verificar."""
+    son públicas, o el de un certificado que no se pudo verificar.
+
+    La conexión va solo por IPv4 (AF_INET), como el A con el que la visita decide si el nombre tiene sitio público: una
+    red con NAT64 y un prefijo propio no puede llevarla a una IPv4 interna con una AAAA armada."""
     cronometro = cronometro or time.monotonic
     if req.type != 'https':
         raise ValueError('solo se pide por https: %s' % req.full_url)
     try:
         try:
-            r = abrir(req, plazo, cronometro)
+            r = abrir(req, plazo, cronometro, socket.AF_INET)
         except urllib.error.HTTPError as e:   # la respuesta del sitio con su estado, que se analiza igual
             if e.fp is None:
                 raise

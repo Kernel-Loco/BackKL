@@ -17,6 +17,11 @@ Qué se pide, todo pasivo o dentro del Anexo A:
    script, ni se envía un formulario, ni se reintenta para saltar un reto del WAF.
 4. endoflife.date (una vez por producto, MAX_PRODUCTOS) y la NVD (una vez por CPE con versión, MAX_CPE, con PAUSA_NVD
    segundos entre una y otra, el ritmo de la NVD sin llave), solo para lo que soporte.py y nvd.py pueden revisar.
+   El ritmo de la NVD es de todo el proceso (RITMO_NVD): dos escaneos a la vez salen de la misma IP y comparten las
+   5 peticiones cada 30 s, y un reintento también espera su turno.
+
+Con más de MAX_SITIOS nombres se visitan la raíz y un bloque de los demás que cambia con el día (_elegir): ninguno
+queda siempre fuera. La conexión a un sitio va solo por IPv4, como su A.
 
 Cobertura (#23). Las partes son los sitios (sus nombres). Un sitio queda revisado si su visita terminó y todo lo que
 pedían sus tecnologías llegó: también un nombre sin A, uno que rechaza el 443 (no hay sitio https) o uno que redirige a
@@ -49,6 +54,7 @@ import re
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -100,12 +106,13 @@ MAX_CONSULTAS = (PAGINAS_CT * INTENTOS_CT + MAX_SITIOS * shodan.INTENTOS + MAX_S
 # Topes deterministas: lo que dejan fuera no impide grabar.
 TOPES = ('paginas', 'sitios', 'productos', 'cpe')
 # Motivos de una visita que no llegó a una respuesta final: el sitio pudo redirigir a un nombre que no se conoce.
-OPACOS = ('tiempo', 'red', 'certificado', 'no_publica', 'grabacion', 'dns', 'sin_tiempo', 'redirecciones')
+OPACOS = ('tiempo', 'red', 'certificado', 'tls', 'no_publica', 'grabacion', 'dns', 'sin_tiempo', 'redirecciones')
 # Por qué un sitio no se pudo visitar (la clave 'sin_respuesta' de la visita). Solo estas cuentan como una falla de
 # la corrida (no se graba): las demás son un dato estable del sitio.
 FALLAS_DE_RED = ('tiempo', 'red')
 MOTIVOS = {'tiempo': 'no respondió a tiempo', 'red': 'la conexión falló', 'certificado': 'su certificado no se pudo '
-           'verificar', 'no_publica': 'su nombre resolvió solo a direcciones que no son públicas',
+           'verificar', 'tls': 'no se pudo negociar TLS con el sitio',
+           'no_publica':'su nombre resolvió solo a direcciones que no son públicas',
            'redirecciones': 'redirigió más de %d veces' % MAX_REDIRECCIONES,
            'no_https': 'redirige fuera de https o a otro puerto', 'ilegible': 'redirige a una dirección que no se '
            'puede leer', 'grabacion': 'la grabación no trae su visita', 'dns': 'el DNS no respondió a su A',
@@ -140,6 +147,11 @@ def _descargar_api(url, timeout, cronometro=None):
         raise RespuestaIlegible('web: %s' % e) from None
 
 
+# Errores de ssl que son de la conexión y no del sitio: se cortó a medias o no terminó. Cuentan como 'red'.
+_TLS_PASAJERO = (ssl.SSLEOFError, ssl.SSLZeroReturnError, ssl.SSLSyscallError, ssl.SSLWantReadError,
+                 ssl.SSLWantWriteError)
+
+
 def _motivo(error):
     """El motivo de MOTIVOS de una petición a un sitio que no terminó."""
     razon = error.reason if isinstance(error, urllib.error.URLError) else error
@@ -147,6 +159,8 @@ def _motivo(error):
         return 'no_publica'
     if isinstance(razon, ssl.SSLCertVerificationError):
         return 'certificado'
+    if isinstance(razon, ssl.SSLError) and not isinstance(razon, _TLS_PASAJERO):
+        return 'tls'   # el sitio no negocia TLS con este cliente (protocolo o cifrado): es fijo del sitio, no de la red
     if isinstance(razon, (TimeoutError, socket.timeout)):
         return 'tiempo'
     return 'red'
@@ -250,6 +264,28 @@ def _reducir_nvd(datos):
     return salida
 
 
+class _Ritmo:
+    """El turno de una fuente que limita por IP (la NVD sin llave: 5 peticiones cada 30 s): entre el inicio de una
+    petición y el de la siguiente pasan `pausa` segundos, las pida quien las pida. Un candado lo hace seguro entre los
+    hilos de dos escaneos a la vez (cirdan/api/escaneos.py corre cada escaneo en su hilo, en un solo proceso)."""
+
+    def __init__(self, pausa):
+        self.pausa, self.candado, self.siguiente = pausa, threading.Lock(), None
+
+    def turno(self, ahora):
+        """Los segundos que hay que esperar desde `ahora` para la siguiente petición. Aparta ese turno: quien llame
+        después espera `pausa` segundos más."""
+        with self.candado:
+            inicio = ahora if self.siguiente is None else max(ahora, self.siguiente)
+            self.siguiente = inicio + self.pausa
+            return inicio - ahora
+
+
+# El de todos los clientes del proceso que usan el reloj del sistema. Un cliente con su propio cronómetro (las pruebas)
+# lleva el suyo, porque sus tiempos no se pueden comparar con los de otro reloj.
+RITMO_NVD = _Ritmo(PAUSA_NVD)
+
+
 class ClienteWeb(shodan.ClienteShodan):
     """El cliente de shodan.py (Cert Spotter y el A, con sus reintentos, el tiempo de la corrida y la grabación) con
     las peticiones a los sitios (sitio) y a endoflife.date y la NVD (api). `visitar(url, timeout)` pide a un sitio:
@@ -263,6 +299,7 @@ class ClienteWeb(shodan.ClienteShodan):
         self.visitar = visitar
         self.pedidas = 0       # peticiones a sitios de esta corrida, para el ritmo fijo
         self.vistas = {}       # consulta -> visita de esta corrida: ninguna URL se pide dos veces
+        self.ritmo_nvd = RITMO_NVD if otros.get('cronometro') is None else _Ritmo(PAUSA_NVD)
 
     def _transporte(self, url, timeout):
         return _descargar_api(url, timeout)
@@ -301,9 +338,11 @@ class ClienteWeb(shodan.ClienteShodan):
         self.vistas[consulta] = datos
         return datos
 
-    def api(self, consulta, url, que, pausa=0, reducir=None, limite_403=False):
+    def api(self, consulta, url, que, pausa=0, reducir=None, limite_403=False, ritmo=False):
         """El JSON de endoflife.date o de la NVD (None con un 404), con INTENTOS_API intentos. Con `limite_403` un 403
-        es el límite de consultas (la NVD sin llave responde 403 cuando se pasa): lanza LimiteAlcanzado."""
+        es el límite de consultas (la NVD sin llave responde 403 cuando se pasa): lanza LimiteAlcanzado. Con `ritmo`
+        cada intento, también el reintento, espera su turno de la NVD (self.ritmo_nvd), y lanza SinTiempo si a la
+        corrida no le alcanza para esperarlo."""
         try:
             del_disco, datos = self._de_disco(consulta)
         except (ValueError, KeyError, TypeError, AttributeError):
@@ -311,11 +350,18 @@ class ClienteWeb(shodan.ClienteShodan):
         if del_disco:
             return datos
 
+        def turno():
+            espera = self.ritmo_nvd.turno(self.cronometro())
+            if espera > 0:
+                if self.restante() - espera < shodan.MIN_INTENTO:
+                    raise SinTiempo('web: se acabó el tiempo de la corrida antes de consultar %s' % que)
+                self.dormir(espera)
+
         def pedir():
             if pausa:
                 self.dormir(pausa)
             try:
-                crudo = self._http(url, INTENTOS_API, TIMEOUT_API, que)
+                crudo = self._http(url, INTENTOS_API, TIMEOUT_API, que, turno=turno if ritmo else None)
             except RespuestaIlegible as e:
                 if limite_403 and str(e).endswith(' respondió 403'):
                     raise LimiteAlcanzado('web: %s llegó a su límite de consultas (403)' % que) from None
@@ -471,6 +517,20 @@ class _Sitio:
             self.falta = motivo
 
 
+def _elegir(nombres, ahora, cliente):
+    """Los MAX_SITIOS nombres que se visitan cuando hay más: la raíz y, de los demás, MAX_SITIOS - 1 seguidos desde uno
+    que avanza un bloque completo cada día. Así en días distintos quedan fuera nombres distintos y lo de ninguno se
+    queda para siempre sin revisar ni cerrar. Al reproducir no hay día que valga: van primero los que la grabación
+    trae."""
+    raiz, resto = nombres[0], list(nombres[1:])
+    if cliente.modo == 'reproducir':
+        resto.sort(key=lambda n: not cliente.grabadora.archivo('a:' + n).exists())
+    else:
+        giro = ahora.toordinal() * (MAX_SITIOS - 1) % len(resto)
+        resto = resto[giro:] + resto[:giro]
+    return [raiz] + resto[:MAX_SITIOS - 1]
+
+
 def _ubicar(sitios):
     """{ip: asn} de las IP de los A, con las bases locales pedidas una sola vez y solo si alguna IP es ubicable, y
     el aviso de base faltante, o None."""
@@ -501,7 +561,7 @@ def _revisar(res, cliente, dominio, ahora):
     comodin = any(n.strip().startswith('*.') for c in certs for n in (c.get('name_value') or '').split('\n'))
     if len(nombres) > MAX_SITIOS:
         res.avisos.append('web: se visitaron %d de %d nombres del dominio (MAX_SITIOS)' % (MAX_SITIOS, len(nombres)))
-        nombres = nombres[:MAX_SITIOS]
+        nombres = _elegir(nombres, ahora, cliente)
         parcial.append('sitios')
         todos_los_nombres = False
 
@@ -754,8 +814,10 @@ def _consultar_api(res, cliente, lista, parcial, pausa, nombre, armar):
             cortadas = len(lista) - i
             break
         try:
+            # La NVD (limite_403) no lleva pausa fija: cada intento espera su turno del ritmo de todo el proceso
             respuestas[elemento] = cliente.api(consulta, url, '%s (%s)' % (nombre, elemento),
-                                               pausa=pausa if i else 0, reducir=reducir, limite_403=limite_403)
+                                               pausa=pausa if i and not limite_403 else 0, reducir=reducir,
+                                               limite_403=limite_403, ritmo=limite_403)
         except LimiteAlcanzado as e:
             res.avisos.append('%s. No se consultaron %d más' % (e, len(lista) - i - 1))
             parcial.append('limite')

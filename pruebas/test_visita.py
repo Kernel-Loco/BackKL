@@ -85,13 +85,13 @@ class Sitios:
         return self.paginas.get(url, {'rechazada': True})
 
 
-def correr(sitios, zona=None, apis=None, modo='vivo', carpeta=None):
+def correr(sitios, zona=None, apis=None, modo='vivo', carpeta=None, ahora=None):
     dormidas = []
     cliente = visita.ClienteWeb(modo=modo, carpeta=carpeta or visita.carpeta_de(DOMINIO), visitar=Sitios(sitios),
                                 descargar=apis or Apis(), resolver=ResolvedorSimulado({DOMINIO: a(IP)} if zona is None else zona),
                                 cronometro=lambda: 0.0, dormir=dormidas.append, nueva=(modo == 'grabar'))
     with mock.patch.object(visita.geoip, 'bases_por_omision', return_value=bases_geo()):   # sin datos/geo
-        res = visita.recolectar(DOMINIO, cliente, ahora=AHORA)
+        res = visita.recolectar(DOMINIO, cliente, ahora=ahora or AHORA)
     return res, cliente, dormidas
 
 
@@ -230,8 +230,9 @@ class Peticion(unittest.TestCase):
     def test_1_user_agent_de_la_carta_y_cookies_sin_valor(self):
         pedidas = []
 
-        def abrir(req, plazo, cronometro):
+        def abrir(req, plazo, cronometro, *familia):
             pedidas.append(req)
+            self.assertEqual(familia, (socket.AF_INET,))   # la visita va solo por IPv4, como su A
             return self.Respuesta(200, [('Server', 'nginx'), ('Set-Cookie', 'a=%s; Path=/' % COOKIE),
                                         ('Set-Cookie', 'b=2')], 'ñ'.encode('latin-1'))
         with mock.patch.object(transporte, 'abrir', abrir):
@@ -245,7 +246,7 @@ class Peticion(unittest.TestCase):
             self.assertEqual(importlib.import_module('cirdan.recolectores.' + modulo).AGENTE, contrato.AGENTE, modulo)
 
     def test_2_un_403_es_una_respuesta_y_el_cuerpo_se_corta(self):
-        def abrir(req, plazo, cronometro):
+        def abrir(req, plazo, cronometro, *_):
             raise urllib.error.HTTPError(req.full_url, 403, 'Forbidden', email.message.Message(),
                                          __import__('io').BytesIO(b'x' * (visita.MAX_BYTES_SITIO + 10)))
         with mock.patch.object(transporte, 'abrir', abrir):
@@ -257,6 +258,11 @@ class Peticion(unittest.TestCase):
                  (urllib.error.URLError(ssl.SSLCertVerificationError('x')), {'sin_respuesta': 'certificado'}),
                  (urllib.error.URLError(ConnectionRefusedError()), {'rechazada': True}),
                  (urllib.error.URLError(OSError('x')), {'sin_respuesta': 'red'}),
+                 (urllib.error.URLError(ssl.SSLError(1, '[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE]')),
+                  {'sin_respuesta': 'tls'}),
+                 (ssl.SSLError(1, '[SSL: UNSUPPORTED_PROTOCOL]'), {'sin_respuesta': 'tls'}),
+                 (urllib.error.URLError(ssl.SSLEOFError(8, 'EOF occurred in violation of protocol')),
+                  {'sin_respuesta': 'red'}),
                  (transporte.PlazoVencido('x'), {'sin_respuesta': 'tiempo'}),
                  (transporte.Redirigida(302, DOMINIO, 'https://%s/x' % WWW),
                   {'redirige': 'https://%s/x' % WWW, 'codigo': 302}))
@@ -300,9 +306,9 @@ class Conectar(unittest.TestCase):
         def close(self):
             pass
 
-    def conectar(self, direcciones):
+    def conectar(self, direcciones, **otros):
         self.Socket.conectadas = []
-        conexion = transporte._Conexion(WWW, plazo=time.monotonic() + 30, cronometro=time.monotonic)
+        conexion = transporte._Conexion(WWW, plazo=time.monotonic() + 30, cronometro=time.monotonic, **otros)
         info = [(socket.AF_INET6 if ':' in ip else socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, 443))
                 for ip in direcciones]
         with mock.patch.object(transporte, 'resolver', lambda host, puerto, espera: info), \
@@ -325,6 +331,21 @@ class Conectar(unittest.TestCase):
         self.assertIs(rdap.NAT64, transporte.NAT64)
         self.assertTrue(transporte.publica(IP))
         self.assertFalse(transporte.publica('64:ff9b::7f00:1'))
+
+    def test_4_con_familia_ipv4_una_aaaa_de_nat64_propio_no_se_usa(self):
+        """Un prefijo de NAT64 propio de la red (aquí 2a00:1450:64::/96 con 10.0.0.5 dentro) se ve como una IPv6
+        pública: publica() no lo puede saber. Con familia=AF_INET, que es lo que pide la visita, no se usa."""
+        nat64 = '2a00:1450:64::a00:5'
+        self.assertTrue(transporte.publica(nat64))
+        self.conectar([nat64, IP], familia=socket.AF_INET)
+        self.assertEqual(self.Socket.conectadas, [IP])
+        with self.assertRaises(OSError):
+            self.conectar([nat64], familia=socket.AF_INET)
+        self.assertEqual(self.Socket.conectadas, [])
+        with self.assertRaises(transporte.NoPublica):   # de las IPv4, ninguna pública
+            self.conectar([nat64, '10.0.0.5'], familia=socket.AF_INET)
+        self.conectar([nat64, IP])   # sin familia, como las demás fuentes, que piden a servidores fijos
+        self.assertEqual(self.Socket.conectadas, [nat64])
 
 
 class Contrato(unittest.TestCase):
@@ -622,6 +643,147 @@ class Arreglos(unittest.TestCase):
         res, cliente, _ = correr({'https://%s/' % DOMINIO: {'sin_respuesta': 'tiempo'}})
         self.assertEqual(cliente.fallas, 1)
         self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['tiempo'])
+
+
+class Reloj:
+    """Un reloj simulado: dormir() lo adelanta."""
+
+    def __init__(self):
+        self.t, self.dormidas = 0.0, []
+
+    def ahora(self):
+        return self.t
+
+    def dormir(self, segundos):
+        self.dormidas.append(segundos)
+        self.t += segundos
+
+
+class Confirmados(unittest.TestCase):
+    """Los confirmados de la revisión del 9 nov que quedaban: TLS que no se negocia (tiempos-3), el reintento y el
+    ritmo de la NVD (tiempos-4 y tiempos-5) y más de MAX_SITIOS nombres (cobertura-8)."""
+
+    def test_1_un_sitio_que_no_negocia_tls_es_un_dato_del_sitio_y_si_se_graba(self):
+        with tempfile.TemporaryDirectory() as d:
+            res, cliente, _ = correr({'https://%s/' % DOMINIO: {'sin_respuesta': 'tls'}}, modo='grabar',
+                                     carpeta=Path(d) / DOMINIO)
+            self.assertTrue(list((Path(d) / DOMINIO).glob('*.json')))
+        self.assertEqual(cliente.fallas, 0)
+        self.assertNotIn(visita.NO_SE_GRABO, res.avisos)
+        self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['tls'])
+        self.assertEqual(res.sin_cobertura, list(visita.CODIGOS))   # no se cierra nada
+        self.assertIn('tls', visita.OPACOS)   # pudo redirigir a un nombre que solo cubre un comodín
+        self.assertNotIn('tls', visita.FALLAS_DE_RED)
+
+    def nvd_con_reloj(self, respuestas):
+        """(cliente, reloj, horas de cada petición a la NVD). `respuestas` da la de cada petición, en orden."""
+        reloj, horas = Reloj(), []
+
+        def descargar(url, timeout):
+            horas.append(reloj.t)
+            respuesta = respuestas.pop(0)
+            if isinstance(respuesta, int):
+                raise error_http(url, respuesta)
+            return json.dumps(respuesta).encode()
+        cliente = visita.ClienteWeb(modo='vivo', carpeta=visita.carpeta_de(DOMINIO), descargar=descargar,
+                                    cronometro=reloj.ahora, dormir=reloj.dormir)
+        cliente.empezar()
+        return cliente, reloj, horas
+
+    def test_2_el_reintento_de_la_nvd_tambien_espera_su_ritmo(self):
+        """tiempos-4: tras un 503 el reintento salía a los 5 s (shodan.ESPERAS), menos que los 6 de la NVD."""
+        cliente, reloj, horas = self.nvd_con_reloj([503, fixture('nvd_nginx_1.18.0'), fixture('nvd_nginx_1.18.0')])
+        for n in (1, 2):
+            cliente.api('nvd:%d' % n, 'https://services.nvd.nist.gov/x', 'la NVD', ritmo=True)
+        self.assertEqual(horas, [0.0, 6.0, 12.0])   # PAUSA_NVD entre peticiones, literal
+        self.assertEqual(cliente.consultas, 3)
+        # Sin ritmo (endoflife.date) el reintento sigue a los 5 s
+        cliente, reloj, horas = self.nvd_con_reloj([503, fixture('eol_nginx')])
+        cliente.api('eol:nginx', 'https://endoflife.date/x', 'endoflife.date')
+        self.assertEqual(horas, [0.0, 5.0])
+
+    def test_3_dos_escaneos_a_la_vez_comparten_el_ritmo_de_la_nvd(self):
+        """tiempos-5: el ritmo era de cada cliente y dos escaneos sumaban 10 peticiones cada 30 s desde la misma IP."""
+        reloj, horas = Reloj(), []
+
+        def descargar(url, timeout):
+            horas.append(reloj.t)
+            return json.dumps(fixture('nvd_nginx_1.18.0')).encode()
+        ritmo = visita._Ritmo(visita.PAUSA_NVD)
+        clientes = []
+        for _ in range(2):
+            cliente = visita.ClienteWeb(modo='vivo', carpeta=visita.carpeta_de(DOMINIO), descargar=descargar,
+                                        cronometro=reloj.ahora, dormir=reloj.dormir)
+            cliente.ritmo_nvd = ritmo
+            cliente.empezar()
+            clientes.append(cliente)
+        for n in range(3):
+            for cliente in clientes:
+                cliente.api('nvd:%d' % n, 'https://services.nvd.nist.gov/x', 'la NVD', ritmo=True)
+        self.assertEqual(horas, [0.0, 6.0, 12.0, 18.0, 24.0, 30.0])
+        # Los clientes de verdad (con el reloj del sistema) comparten el del módulo. Con reloj propio, no
+        de_verdad = [visita.ClienteWeb(modo='vivo', carpeta=visita.carpeta_de(DOMINIO)) for _ in range(2)]
+        self.assertTrue(all(c.ritmo_nvd is visita.RITMO_NVD for c in de_verdad))
+        self.assertIsNot(clientes[0].__class__(modo='vivo', carpeta=visita.carpeta_de(DOMINIO),
+                                               cronometro=reloj.ahora).ritmo_nvd, visita.RITMO_NVD)
+        # Si esperar el turno se pasa de la corrida, es el fin del tiempo y no se pide
+        justo = clientes[0]
+        justo.restante = lambda: 3
+        with self.assertRaises(visita.SinTiempo):
+            justo.api('nvd:9', 'https://services.nvd.nist.gov/x', 'la NVD', ritmo=True)
+        self.assertEqual(len(horas), 6)
+
+    def test_4_la_corrida_pide_a_la_nvd_con_ritmo_y_a_endoflife_con_su_pausa(self):
+        pedidas = []
+
+        class Cliente:
+            def restante(self):
+                return 1000
+
+            def api(self, consulta, url, que, **otros):
+                pedidas.append((consulta, otros['pausa'], otros['ritmo']))
+                return {}
+        res = contrato.Resultado(DOMINIO, 'web')
+        visita._consultar_api(res, Cliente(), ['a', 'b'], [], 1, 'endoflife.date',
+                              lambda e: (e, 'https://x', None, False))
+        visita._consultar_api(res, Cliente(), ['c', 'd'], [], 6, 'la NVD', lambda e: (e, 'https://x', None, True))
+        self.assertEqual(pedidas, [('a', 0, False), ('b', 1, False), ('c', 0, True), ('d', 0, True)])
+
+    def test_5_con_mas_de_max_sitios_los_que_quedan_fuera_cambian_con_el_dia(self):
+        """cobertura-8: con 30 nombres siempre quedaban fuera los mismos 10 (orden alfabético)."""
+        nombres = ['s%02d.%s' % (n, DOMINIO) for n in range(29)]
+        zona = dict({n: a(IP) for n in nombres}, **{DOMINIO: a(IP)})
+        visitados = []
+        for dia in (6, 7):
+            res, _, _ = correr({'https://%s/' % DOMINIO: SIMPLE}, zona=zona, apis=Apis(ct=paginas(*nombres)),
+                               ahora=datetime(2026, 11, dia, 12, 0, tzinfo=timezone.utc))
+            visitados.append([x.valor for x in res.activos])
+            self.assertEqual(len(visitados[-1]), visita.MAX_SITIOS)
+            self.assertEqual(visitados[-1][0], DOMINIO)   # la raíz, siempre
+            self.assertIn('web: se visitaron 20 de 30 nombres del dominio (MAX_SITIOS)', res.avisos)
+            # Solo se cierra lo de los visitados (borde.cobertura da cada nombre también con su punto final)
+            self.assertEqual({x.rstrip('.') for x in res.revisados}, set(visitados[-1]))
+            self.assertIsNone(res.sin_revisar)
+        self.assertEqual(set(visitados[0]) | set(visitados[1]), set(nombres) | {DOMINIO})   # en dos días, todos
+        # El mismo día, los mismos
+        res, _, _ = correr({'https://%s/' % DOMINIO: SIMPLE}, zona=zona, apis=Apis(ct=paginas(*nombres)),
+                           ahora=datetime(2026, 11, 7, 23, 0, tzinfo=timezone.utc))
+        self.assertEqual([x.valor for x in res.activos], visitados[1])
+
+    def test_6_al_reproducir_con_mas_de_max_sitios_van_los_que_la_grabacion_trae(self):
+        nombres = ['s%02d.%s' % (n, DOMINIO) for n in range(29)]
+        zona = dict({n: a(IP) for n in nombres}, **{DOMINIO: a(IP)})
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            grabada, _, _ = correr({'https://%s/' % DOMINIO: SIMPLE}, zona=zona, apis=Apis(ct=paginas(*nombres)),
+                                   modo='grabar', carpeta=carpeta,
+                                   ahora=datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc))
+            self.assertNotIn(visita.NO_SE_GRABO, grabada.avisos)   # el tope de sitios no impide grabar
+            res, _, _ = correr({}, zona={}, modo='reproducir', carpeta=carpeta,
+                               ahora=datetime(2026, 12, 25, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual(sorted(x.valor for x in res.activos), sorted(x.valor for x in grabada.activos))
+        self.assertEqual(sorted(res.revisados), sorted(grabada.revisados))
+        self.assertFalse([x.valor for x in res.activos if 'sin_revisar' in x.atributos['web']])
 
 
 if __name__ == '__main__':
