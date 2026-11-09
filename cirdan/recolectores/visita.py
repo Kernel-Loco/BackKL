@@ -24,7 +24,8 @@ otro dominio o uno cuyo A solo trae IP que no son públicas (no tiene sitio púb
 pudo visitar (tiempo, red, certificado, o al conectar no quedó ninguna IP pública), si respondió con un error del
 servidor (5xx), con un reto o bloqueo del WAF, si las huellas no vieron toda la respuesta o si faltó la respuesta de endoflife.date o de la NVD
 de una de sus tecnologías. borde.cobertura() lo pasa al Resultado. Con todos los nombres de Cert Spotter se sabe
-cuáles faltan (sin_revisar), y si no, solo cuáles se revisaron.
+cuáles faltan (sin_revisar), y si no, o si hay un comodín y un sitio no llegó a responder (OPACOS: pudo
+redirigir a un nombre que solo cubre el comodín), solo cuáles se revisaron.
 
 Qué se guarda. Del sitio, en los atributos de su domain o subdomain: 'web' (estado de la visita, la URL final, el
 estado HTTP y a dónde redirige), 'borde' (borde.detectar(), None si no se vio un CDN) y 'tecnologias' (nombre,
@@ -98,6 +99,8 @@ MAX_CONSULTAS = (PAGINAS_CT * INTENTOS_CT + MAX_SITIOS * shodan.INTENTOS + MAX_S
 
 # Topes deterministas: lo que dejan fuera no impide grabar.
 TOPES = ('paginas', 'sitios', 'productos', 'cpe')
+# Motivos de una visita que no llegó a una respuesta final: el sitio pudo redirigir a un nombre que no se conoce.
+OPACOS = ('tiempo', 'red', 'certificado', 'no_publica', 'grabacion', 'dns', 'sin_tiempo', 'redirecciones')
 # Por qué un sitio no se pudo visitar (la clave 'sin_respuesta' de la visita). Solo estas cuentan como una falla de
 # la corrida (no se graba): las demás son un dato estable del sitio.
 FALLAS_DE_RED = ('tiempo', 'red')
@@ -282,8 +285,8 @@ class ClienteWeb(shodan.ClienteShodan):
         self.pedidas += 1
         self.consultas += 1
         datos = limpiar_visita((self.visitar or _visitar)(url, limite))
-        if datos.get('sin_respuesta') in FALLAS_DE_RED or _error_servidor(datos):
-            self.fallas += 1   # un 5xx suele ser pasajero: esa corrida no pisa la grabación
+        if datos.get('sin_respuesta') in FALLAS_DE_RED:
+            self.fallas += 1
         self._grabar(consulta, datos)
         return datos
 
@@ -484,6 +487,7 @@ def _revisar(res, cliente, dominio, ahora):
         res.avisos.append('%s. Solo se visitó la raíz' % e)
         parcial.append('ct')
     nombres = shodan._nombres(dominio, certs)
+    comodin = any(n.strip().startswith('*.') for c in certs for n in (c.get('name_value') or '').split('\n'))
     if len(nombres) > MAX_SITIOS:
         res.avisos.append('web: se visitaron %d de %d nombres del dominio (MAX_SITIOS)' % (MAX_SITIOS, len(nombres)))
         nombres = nombres[:MAX_SITIOS]
@@ -594,15 +598,16 @@ def _revisar(res, cliente, dominio, ahora):
             if motivo not in ('reto', 'sin_tiempo'):   # el reto ya tiene su aviso, y el tiempo también
                 res.avisos.append('web: %s sin revisar: %s (%s)'
                                   % (_cuantos(len(hosts), 'sitio', 'sitios'), MOTIVOS[motivo], _lista(sorted(hosts))))
-    # Con algún sitio sin revisar no se pasa la lista de los que faltan: un nombre que solo se conoce por la
-    # redirección de un sitio que falló (www bajo un comodín) no está en ninguna de las dos, y con sin_revisar el
-    # orquestador cerraría lo suyo sin visitarlo. Así solo se cierra lo de los revisados.
-    revisados, sin_revisar, sin_cobertura = borde.cobertura(hechos, [] if todos_los_nombres and not faltan else None,
-                                                            list(CODIGOS))
+    # Un nombre que solo se conoce por la redirección de otro sitio (www bajo un comodín) no está en ninguna de las dos
+    # listas si ese sitio no llegó a responder: con sin_revisar el orquestador cerraría lo suyo sin visitarlo. En ese
+    # caso, y solo si hay un comodín, no se pasa la lista de los que faltan y solo se cierra lo de los revisados.
+    oculto = comodin and any(sitios[h].falta in OPACOS for h in faltan)
+    lista = faltan if todos_los_nombres and not oculto else None
+    revisados, sin_revisar, sin_cobertura = borde.cobertura(hechos, lista, list(CODIGOS))
     if sin_cobertura and res.hallazgos:
         # Ningún sitio quedó revisado completo, pero alguno dio hallazgos antes de que le faltara otra consulta: se
         # reportan y la corrida queda parcial, sin cerrar nada de lo que no se revisó.
-        revisados, sin_revisar, sin_cobertura = [], None, []
+        revisados, sin_revisar, sin_cobertura = [], (sorted(faltan) if lista is not None else None), []
     res.revisados, res.sin_revisar, res.sin_cobertura = revisados, sin_revisar, sin_cobertura
     if revisados is not None or sin_cobertura:
         res.avisos.append('%s, se revisaron %d de %d sitios' % (PARCIAL, len(hechos), len(sitios)))
@@ -690,10 +695,11 @@ def _soporte_y_cve(res, cliente, sitios, dominio, ahora, parcial):
                     sitio.sin_revisar('tope' if producto not in productos[:MAX_PRODUCTOS] else 'eol')
                 else:
                     revision = soporte.revisar(t, eol[producto], sitio.nombre, ahora)
-                    # Respondió algo que no se lee (404, otra forma, un ciclo sin fin legible): sin revisar. Solo
-                    # una respuesta legible sin ciclo para esta versión ('Apache/2') deja el sitio revisado.
-                    if revision['estado'] == 'sin_dato' and (soporte.ciclos(eol[producto]) is None
-                                                             or revision['ciclo'] is not None):
+                    # Respondió algo que no se lee (otra forma, un ciclo sin fin legible): sin revisar. Un 404 (no
+                    # tiene el producto) o una respuesta legible sin ciclo para esta versión ('Apache/2') no: ahí no
+                    # puede haber outdated_software y el sitio queda revisado.
+                    if revision['estado'] == 'sin_dato' and eol[producto] is not None \
+                            and (not soporte.ciclos(eol[producto]) or revision['ciclo'] is not None):
                         sitio.sin_revisar('eol')
                     if revision['hallazgo']:
                         candidatos.append(revision['hallazgo'])
@@ -749,11 +755,14 @@ def _consultar_api(res, cliente, lista, parcial, pausa, nombre, armar):
         except SinGrabacion:
             fallas.append(elemento)
             parcial.append('grabacion')
-        except FuenteNoResponde as e:   # caída: no se gasta el tiempo de la corrida en las que faltan
+        except FuenteNoResponde as e:
             fallas.append(elemento)
-            resto = len(lista) - i - 1
-            res.avisos.append('%s. No se consultaron %d más' % (e, resto) if resto else str(e))
             parcial.append('red')
+            resto = len(lista) - i - 1
+            if isinstance(e, RespuestaIlegible) or not resto:   # solo esa consulta
+                res.avisos.append(str(e))
+                continue
+            res.avisos.append('%s. No se consultaron %d más' % (e, resto))   # caída: no se gasta el tiempo
             break
     if cortadas:
         res.avisos.append('web: se acabó el tiempo de la corrida antes de consultar %d en %s' % (cortadas, nombre))

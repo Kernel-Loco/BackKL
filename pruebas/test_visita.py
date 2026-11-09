@@ -191,7 +191,7 @@ class Visita(unittest.TestCase):
         self.assertEqual([h.codigo for h in res.hallazgos], ['outdated_software'])   # lo de endoflife.date sí llegó
         self.assertEqual(res.cves, [])
         self.assertEqual(res.revisados, [])
-        self.assertIsNone(res.sin_revisar)   # con un sitio sin revisar solo se cierra lo de los revisados
+        self.assertIn(DOMINIO, res.sin_revisar)
         self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['nvd_falta'])
         self.assertTrue(any('403' in x for x in res.avisos), res.avisos)
 
@@ -431,34 +431,44 @@ class Arreglos(unittest.TestCase):
         self.assertEqual(visita._texto('ñ'.encode('latin-1'), [('Content-Type', 'text/html; charset=latin-1')]), 'ñ')
 
     def test_2_endoflife_que_no_se_lee_deja_el_sitio_sin_revisar(self):
-        for nombre, eol in (('404', 404), ('otra forma', {'cambio': True}),
+        res, _, _ = correr({'https://%s/' % DOMINIO: pagina_nginx()}, apis=Apis(eol=404))   # no tiene el producto
+        self.assertNotIn('sin_revisar', activo(res, DOMINIO).atributos['web'])
+        for nombre, eol in (('otra forma', {'cambio': True}), ('sin ciclos', {'result': {'releases': [{'otra': 1}]}}),
+                            ('vacía', []),
                             ('ciclo sin fin legible', [{'cycle': '1.18', 'eol': 'pronto'}])):
             with self.subTest(nombre):
                 res, _, _ = correr({'https://%s/' % DOMINIO: pagina_nginx()}, apis=Apis(eol=eol))
                 self.assertEqual(res.estado, 'succeeded', res.error)
                 self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['eol'])
                 self.assertNotIn('outdated_software', [h.codigo for h in res.hallazgos])
-                self.assertEqual((res.revisados, res.sin_revisar), ([], None))   # no se cierra nada
+                self.assertEqual((res.revisados, res.sin_revisar), ([], [DOMINIO]))   # no se cierra nada
 
-    def test_3_con_un_sitio_sin_revisar_no_se_dice_cuales_faltan(self):
-        """La raíz no responde (a lo mejor redirigía a www, que solo está bajo un comodín) y blog no tiene A: solo se
-        cierra lo de blog."""
-        res, _, _ = correr({'https://%s/' % DOMINIO: {'sin_respuesta': 'tiempo'}}, zona={DOMINIO: a(IP)},
-                           apis=Apis(ct=paginas(BLOG)))
-        self.assertEqual(res.sin_revisar, None)
-        self.assertIn(BLOG, res.revisados)
-        self.assertNotIn(DOMINIO, res.revisados)
+    def test_3_con_un_comodin_y_un_sitio_que_no_respondio_no_se_dice_cuales_faltan(self):
+        """La raíz no responde (a lo mejor redirigía a www, que solo está bajo el comodín) y blog no tiene A: solo se
+        cierra lo de blog. Sin comodín, o si la raíz respondió (un 5xx), sí se dice cuál falta."""
+        raiz = 'https://%s/' % DOMINIO
+        casos = (('comodín y sin respuesta', paginas('*.' + DOMINIO, BLOG), {'sin_respuesta': 'tiempo'}, None),
+                 ('sin comodín', paginas(BLOG), {'sin_respuesta': 'tiempo'}, [DOMINIO]),
+                 ('comodín y 5xx', paginas('*.' + DOMINIO, BLOG), pagina_nginx(502), [DOMINIO]))
+        for nombre, ct, raiz_responde, faltan in casos:
+            with self.subTest(nombre):
+                res, _, _ = correr({raiz: raiz_responde}, zona={DOMINIO: a(IP)}, apis=Apis(ct=ct))
+                self.assertIn(BLOG, res.revisados)
+                self.assertNotIn(DOMINIO, res.revisados)
+                self.assertEqual(None if res.sin_revisar is None else sorted({x.rstrip('.') for x in res.sin_revisar}),
+                                 faltan)
 
-    def test_4_un_error_del_servidor_queda_sin_revisar_y_no_se_graba(self):
+    def test_4_un_error_del_servidor_queda_sin_revisar(self):
+        """Un 5xx puede ser fijo del sitio (un subdominio olvidado): no es una falla de la corrida y sí se graba."""
         for estado in (500, 502, 504, 520):
             with self.subTest(estado), tempfile.TemporaryDirectory() as d:
                 res, cliente, _ = correr({'https://%s/' % DOMINIO: pagina_nginx(estado)}, modo='grabar',
                                          carpeta=Path(d) / DOMINIO)
-                self.assertEqual(list((Path(d) / DOMINIO).glob('*.json')), [])
+                self.assertTrue(list((Path(d) / DOMINIO).glob('*.json')))
                 self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['error_http'])
                 self.assertEqual((res.hallazgos, res.sin_cobertura), ([], list(visita.CODIGOS)))
-                self.assertIn(visita.NO_SE_GRABO, res.avisos)
-                self.assertEqual(cliente.fallas, 1)
+                self.assertNotIn(visita.NO_SE_GRABO, res.avisos)
+                self.assertEqual(cliente.fallas, 0)
 
     def test_5_un_destino_ya_visitado_no_se_pide_otra_vez(self):
         res, cliente, _ = correr(
@@ -497,7 +507,7 @@ class Arreglos(unittest.TestCase):
         res, _, _ = correr({'https://%s/' % DOMINIO: pagina_nginx()}, apis=Apis(nvd=nvd))
         self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['nvd_falta'])
         self.assertIn('known_vulnerability', [h.codigo for h in res.hallazgos])   # lo que llegó sí se reporta
-        self.assertEqual((res.revisados, res.sin_revisar), ([], None))
+        self.assertEqual((res.revisados, res.sin_revisar), ([], [DOMINIO]))
 
     def test_8_una_grabacion_que_no_se_lee_no_tumba_la_fuente(self):
         original = visita.ClienteWeb._de_disco
@@ -534,6 +544,14 @@ class Arreglos(unittest.TestCase):
         self.assertEqual(visita._consultar_api(res, caida, ['a', 'b', 'c'], parcial, 6, 'x', armar), {})
         self.assertEqual(caida.pedidas, ['a'])
         self.assertIn('caída. No se consultaron 2 más', res.avisos)
+        class Ilegible(Cliente):
+            def api(self, consulta, url, que, **_):
+                self.pedidas.append(consulta)
+                if consulta == 'a':
+                    raise shodan.RespuestaIlegible('ilegible')
+                return {}
+        ilegible = Ilegible(1000, False)
+        self.assertEqual(visita._consultar_api(res, ilegible, ['a', 'b'], [], 6, 'x', armar), {'b': {}})
         justo = Cliente(visita.MIN_RESTANTE + 1, False)
         self.assertEqual(visita._consultar_api(res, justo, ['a', 'b'], [], 6, 'x', armar), {'a': {}})
 

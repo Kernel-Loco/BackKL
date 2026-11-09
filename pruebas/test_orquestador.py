@@ -520,7 +520,8 @@ class Orquestador(unittest.TestCase):
                 if cve == 'CVE-2099-0101':
                     self.assertEqual((filas[cve]['description'], filas[cve]['cvss_base_score']), (None, None))
                     continue
-                self.assertEqual((filas[cve]['description'], float(filas[cve]['cvss_base_score']),
+                puntaje = filas[cve]['cvss_base_score']
+                self.assertEqual((filas[cve]['description'], None if puntaje is None else float(puntaje),
                                   filas[cve]['cvss_vector']),
                                  (completas[cve]['description'], completas[cve]['cvss_base_score'],
                                   completas[cve]['cvss_vector']))
@@ -536,7 +537,9 @@ class Orquestador(unittest.TestCase):
         from cirdan.api import v1
         cvss = {f['evidence']['cve']: f['cvss'] for f in self.conn.execute(v1.FINDINGS_SQL, ('acme-demo.mx',))
                 if f['source'] == 'web' and 'cve' in f['evidence']}
-        self.assertEqual({c: float(v) for c, v in cvss.items()}, {c: completas[c]['cvss_base_score'] for c in ids})
+        self.assertEqual({c: None if v is None else float(v) for c, v in cvss.items()},
+                         {c: completas[c]['cvss_base_score'] for c in ids})
+        self.assertIsNotNone(cvss['CVE-2099-0101'])   # el stub toma el CVSS de la evidencia
 
     def test_2r_una_cve_que_el_tope_dejo_fuera_sigue_abierta(self):
         """Las CVE que MAX_CVE deja fuera van en omitidos (#23): la que se reportó antes y ahora quedó fuera sigue
