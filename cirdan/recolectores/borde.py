@@ -131,21 +131,24 @@ _UNO = (str, bytes, int, ipaddress.IPv4Address, ipaddress.IPv6Address, ipaddress
 
 def _varios(x, tope=None):
     """Una lista con lo que llegó: None da [], un solo texto, número, IP o red da [x] y cualquier otra cosa que no se
-    pueda recorrer, o que lanza TypeError al recorrerla (como map(int, ['1', None])), da []. Con `tope` se leen
-    exactamente esos, ni uno más: un generador como red.hosts() no se recorre entero."""
+    pueda recorrer (iter() lanza TypeError) da []. Un error al recorrerla, como el TypeError de map(int, ['1', None]),
+    sí sale: con [] se perdería lo ya leído y la visita lo tomaría por un negativo (sin reto, sin borde), cuando el
+    sitio debe quedar sin cobertura. Con `tope` se leen exactamente esos, ni uno más: un generador como red.hosts()
+    no se recorre entero."""
     if x is None:
         return []
     if isinstance(x, _UNO):
         return [x]
-    salida = []
     try:
         iterador = iter(x)
+    except TypeError:
+        return []
+    salida = []
+    try:
         while tope is None or len(salida) < tope:
             salida.append(next(iterador))
     except StopIteration:
         pass
-    except TypeError:
-        return []
     return salida
 
 
@@ -194,9 +197,10 @@ def por_cabeceras(cabeceras):
 
 def _limpio(nombre):
     """Un nombre DNS en minúsculas y sin el punto final, o '' si no lo es. Es el de contrato.NOMBRE_VALIDO: al menos
-    dos etiquetas de 1 a 63 letras ASCII, dígitos o guion, sin guion al inicio ni al final, la última solo de letras,
-    y hasta 253 caracteres sin el punto final (un IDN va en punycode). Un espacio, un NUL, una URL, un puerto, una
-    sola etiqueta o dos puntos al final dan ''."""
+    dos etiquetas, las de antes de la última de 1 a 63 letras ASCII, dígitos o guion, sin guion al inicio ni al
+    final, y la última de 2 a 63 letras ASCII, sin dígitos ni guion ('a.b' y 'tienda.acme-demo.123' dan ''), con
+    hasta 253 caracteres sin el punto final (un IDN va en punycode). Un espacio, un NUL, una URL, un puerto, una sola
+    etiqueta o dos puntos al final dan ''."""
     if not isinstance(nombre, str):
         return ''
     nombre = nombre.translate(_MINUSCULAS)
@@ -331,13 +335,14 @@ def _formas(sitios):
 def cobertura(revisados, sin_revisar, codigos):
     """(revisados, sin_revisar, sin_cobertura) del Resultado de la visita web, con los sitios (sus nombres) como partes
     (#23). Un sitio con reto, o que no se pudo visitar, va en sin_revisar, y si también está en revisados gana
-    sin_revisar. Los nombres se comparan en minúsculas y sin el punto final, y solo cuentan los nombres DNS (_limpio).
-    En revisados, lo que no es un nombre se salta. En sin_revisar no: si algo no se puede leer, no se sabe qué sitio
-    quedó sin revisar y ninguno cuenta como revisado. `codigos` son los de la fuente, y sin ninguno lanza ValueError.
-    En revisados y en sin_revisar cada sitio sale en todas las formas en que llegó, en la de _limpio() y en esa con el
-    punto final (_formas). El orquestador compara las partes tal cual: un hallazgo con su sitio en una de esas formas
-    calza, y en la forma de _limpio() calza siempre. Uno guardado en otra corrida con otras mayúsculas no calza: si su
-    sitio va en sin_revisar se cierra sin revisarlo, y con sin_revisar None se queda abierto aunque se haya revisado.
+    sin_revisar, con las formas en que llegó de los dos lados. Los nombres se comparan en minúsculas y sin el punto
+    final, y solo cuentan los nombres DNS (_limpio). En revisados, lo que no es un nombre se salta. En sin_revisar
+    no: si algo no se puede leer, no se sabe qué sitio quedó sin revisar y ninguno cuenta como revisado. `codigos`
+    son los de la fuente, y sin ninguno lanza ValueError. En revisados y en sin_revisar cada sitio sale en todas las
+    formas en que llegó, en la de _limpio() y en esa con el punto final (_formas). El orquestador compara las partes
+    tal cual: un hallazgo con su sitio en una de esas formas calza, y en la forma de _limpio() calza siempre. Uno
+    guardado en otra corrida con otras mayúsculas no calza: si su sitio va en sin_revisar se cierra sin revisarlo, y
+    con sin_revisar None se queda abierto aunque se haya revisado.
     - sin_revisar vacío: (None, None, []), revisó todo. Es lo único que lo dice.
     - sin_revisar None, que no sabe cuáles quedaron sin revisar (contrato.Resultado): con revisados,
       (revisados, None, []), una corrida parcial en la que el orquestador cierra solo lo de revisados. Sin revisados,
@@ -350,7 +355,11 @@ def cobertura(revisados, sin_revisar, codigos):
     falta, ilegible = _sitios(sin_revisar)
     if ilegible:
         return None, None, codigos
-    hechos = {k: s for k, s in _sitios(revisados)[0].items() if k not in falta}
+    llegaron = _sitios(revisados)[0]
+    hechos = {k: s for k, s in llegaron.items() if k not in falta}
+    # Un sitio que también llegó en revisados, con otra forma, lleva esa forma en sin_revisar: un hallazgo con su
+    # sitio así escrito no se cierra sin revisarse.
+    falta = {k: s + [f for f in llegaron.get(k, []) if f not in s] for k, s in falta.items()}
     if sin_revisar is None:
         return (_formas(hechos), None, []) if hechos else (None, None, codigos)
     if not falta:

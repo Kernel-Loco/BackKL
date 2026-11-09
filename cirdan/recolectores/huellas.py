@@ -26,23 +26,31 @@ comparan solo en ASCII (re.ASCII, como borde.py) y un patrón que Python no comp
   'server: cloudflare'): esas son del borde y no del sitio.
 - cookies: el nombre y el valor de cada Set-Cookie, salvo las del borde. De una cookie solo sale su nombre en
   'senales', nunca su valor.
-- meta (name o property y content), scriptSrc (el src de cada <script>), scripts (el texto de cada <script> del HTML,
-  y el de los scripts que pase la visita) y html (el cuerpo).
-Topes: MAX_HTML del cuerpo, MAX_VALOR por cabecera (el de borde._pares), MAX_SCRIPTS y MAX_SCRIPT, y TOPE_SEGUNDOS
-para todo el análisis. re de Python no corta una regex a la mitad: el tope de tiempo se revisa entre un patrón y el
-siguiente, y si se pasa el análisis queda incompleto ('completo': False) con lo que ya salió. Por eso + y * llevan
-tope de 250, como en Wappalyzer, y también {n,}; y el html se recorta donde las regex '<[^>]{1,250}' pasarían de
-MAX_COSTO_HTML (_recortar_html), que también deja el análisis incompleto. Una respuesta armada para trabar las regex
-no pasa de TOPE_SEGUNDOS más un patrón (pruebas/test_huellas.py).
+- meta (name o property y content), scriptSrc (el src de cada <script>, resuelto contra la URL de la página si la
+  visita la pasa, como el DOM que lee Wappalyzer), scripts (el texto de cada <script> del HTML, y el de los scripts
+  que pase la visita) y html (el cuerpo).
+Topes: MAX_HTML del cuerpo, MAX_VALOR por cabecera (el de borde._pares) y MAX_CABECERAS entre todas las que no son
+Set-Cookie (las Set-Cookie ya llevan borde.MAX_COOKIES entre todas), MAX_SCRIPTS, MAX_SCRIPT y MAX_TEXTO_SCRIPTS, y
+TOPE_SEGUNDOS para todo el análisis. re de Python no corta una regex a la mitad: el tope de tiempo se revisa antes
+de cada valor que se compara con cada patrón, y si se pasa el análisis queda incompleto ('completo': False) con lo
+que ya salió. Por eso + y * llevan tope de 250, como en Wappalyzer, y también {n,}, y el html se recorta donde las
+regex '<[^>]{1,250}' pasarían de MAX_COSTO_HTML (_recortar_html). Lo que se corta por MAX_HTML, MAX_CABECERAS,
+MAX_SCRIPTS, MAX_TEXTO_SCRIPTS o MAX_COSTO_HTML también deja el análisis incompleto ('recortes' de entradas()): una
+tecnología que no salió puede estar en lo que no se leyó. Una respuesta armada para trabar las regex no pasa de
+TOPE_SEGUNDOS más una regex sobre un valor (pruebas/test_huellas.py).
 
 Reto. Si borde.reto() dice que la respuesta es un reto o un bloqueo del WAF, no se analiza: 'tecnologias' es None,
 que quiere decir sin cobertura, nunca 0 tecnologías, y la visita pone el sitio en sin_revisar con borde.aviso().
 
 Distribución. Una versión de la misma cabecera que trae la marca de una distribución, como 'nginx/1.24.0 (Ubuntu)' o
-'PHP/8.1.2-1ubuntu2.14', o de una cabecera server o x-powered-by de una respuesta que en alguna de esas dos trae la
-marca, como 'Apache/2.4.6 (CentOS)' con 'X-Powered-By: PHP/5.4.16', lleva 'distribucion': la distribución le sigue
-mandando parches que endoflife.date y la NVD no ven (_plan de RC-66, etica-1), así que soporte.py y nvd.py no la
-marcan. Una versión del HTML (por ejemplo el generator de WordPress) no la lleva: esa no la actualiza la distribución.
+'PHP/8.1.2-1ubuntu2.14', lleva 'distribucion': la distribución le sigue mandando parches que endoflife.date y la NVD
+no ven (_plan de RC-66, etica-1), así que soporte.py y nvd.py no la marcan. La marca de la otra cabecera server o
+x-powered-by de la respuesta, como 'Apache/2.4.6 (CentOS)' con 'X-Powered-By: PHP/5.4.16', solo la heredan los
+servidores web y los lenguajes (HEREDAN, todas sus categorías), que son lo que la distribución empaqueta: un
+framework como Next.js detrás de 'nginx (Ubuntu)' no la lleva. Una versión con la marca de un repositorio que sigue
+las versiones oficiales (SIGUEN_UPSTREAM, como el PPA de PHP de deb.sury.org en
+'PHP/8.1.27-1+ubuntu22.04.1+deb.sury.org+1') no lleva distribución ni la hereda: ahí el número sí dice qué parches
+tiene. Una versión del HTML (por ejemplo el generator de WordPress) no la lleva: esa no la actualiza la distribución.
 """
 import base64
 import functools
@@ -54,6 +62,7 @@ import sys
 import tarfile
 import time
 from pathlib import Path
+from urllib.parse import urljoin
 
 from cirdan.recolectores import borde
 
@@ -75,13 +84,14 @@ CON_LLAVE = ('cookies', 'headers', 'meta')                                  # {n
 
 MAX_HTML = 256 * 1024        # caracteres del cuerpo que se analizan
 MAX_VALOR = borde.MAX_VALOR  # de cada cabecera, ya cortada en borde._pares
+MAX_CABECERAS = 64 * 1024    # entre todas las cabeceras que no son Set-Cookie: 99 de 8 KiB tomaban más de 5 s
 MAX_SCRIPTS = 200            # <script src> y <meta> que se leen del HTML
 MAX_SRC = 2 * 1024           # caracteres de cada src y de cada content de <meta>
 MAX_ETIQUETA = 4 * 1024      # caracteres que se buscan hasta el '>' de un <script> o <meta>
 MAX_SCRIPT = 64 * 1024       # caracteres de cada script que se analizan
 MAX_TEXTO_SCRIPTS = 256 * 1024   # entre todos los scripts
 MAX_COSTO_HTML = 1000000     # pasos de las regex '<[^>]{1,250}...' en el html (_recortar_html)
-TOPE_SEGUNDOS = 3.0          # para todo el análisis, revisado entre patrones
+TOPE_SEGUNDOS = 3.0          # para todo el análisis, revisado antes de cada valor de cada patrón
 CUANTIFICADOR = 250          # el tope de + y * de Wappalyzer (parsePattern)
 MAX_LARGO_VERSION = 15       # Wappalyzer descarta versiones más largas (resolve)
 
@@ -93,8 +103,12 @@ DISTRIBUCIONES = (('Ubuntu', r'ubuntu'), ('Debian', r'debian|[+~.-]deb\d'), ('Ce
                   ('Raspbian', r'raspbian'), ('Alpine', r'alpine'),
                   ('Enterprise Linux', r'[.-]el\d+(?:_\d+)?\b'))
 CABECERAS_DEL_SERVIDOR = ('server', 'x-powered-by')
+HEREDAN = {22, 27}           # Web servers y Programming languages: las que heredan la marca de la otra cabecera
+# Repositorios que siguen las versiones oficiales: su marca no es de una distribución, aunque nombre una.
+SIGUEN_UPSTREAM = (r'deb\.sury\.org',)
 
 _DISTROS = [(n, re.compile(p, re.I | re.A)) for n, p in DISTRIBUCIONES]
+_UPSTREAM = re.compile('|'.join(SIGUEN_UPSTREAM), re.I | re.A)
 _SEPARA_COOKIES = re.compile(r',\s*(?=[^;,=\s]+=)')   # Set-Cookie juntadas con ', ', sin partir un Expires
 
 
@@ -319,10 +333,13 @@ def _atributos(texto):
 class _Html:
     """meta (name o property -> [content]), src de cada <script> y texto de cada <script>, con sus topes. No usa
     html.parser: con muchas etiquetas sin '>' vuelve a leer hasta el final desde cada una y tarda minutos. Aquí cada
-    etiqueta se busca a lo más MAX_ETIQUETA caracteres y el texto avanza siempre, así que es lineal."""
+    etiqueta se busca a lo más MAX_ETIQUETA caracteres y el texto avanza siempre, así que es lineal. Con `url`, cada
+    src se resuelve contra ella (urljoin), como el src del DOM que lee Wappalyzer: '/glpi/js/common.min.js' de
+    https://www.acme-demo.mx/ es 'https://www.acme-demo.mx/glpi/js/common.min.js'. 'recortes' dice qué tope dejó
+    algo sin leer (MAX_SCRIPTS o MAX_TEXTO_SCRIPTS)."""
 
-    def __init__(self, html):
-        self.meta, self.script_src, self.scripts = {}, [], []
+    def __init__(self, html, url=None):
+        self.meta, self.script_src, self.scripts, self.recortes = {}, [], [], set()
         metas, total, p = 0, 0, 0
         while True:
             m = _ETIQUETA.search(html, p)
@@ -340,33 +357,61 @@ class _Html:
             p = fin + 1
             if m.group(1).lower() == 'meta':
                 llave = a.get('name') or a.get('property')
-                if llave and 'content' in a and metas < MAX_SCRIPTS:
-                    metas += 1
-                    self.meta.setdefault(llave.translate(borde._MINUSCULAS), []).append(a['content'][:MAX_SRC])
+                if llave and 'content' in a:
+                    if metas < MAX_SCRIPTS:
+                        metas += 1
+                        self.meta.setdefault(llave.translate(borde._MINUSCULAS), []).append(a['content'][:MAX_SRC])
+                    else:
+                        self.recortes.add('MAX_SCRIPTS')
                 continue
             src = a.get('src', '').strip()
-            if src and not src.startswith('data:text/javascript;') and len(self.script_src) < MAX_SCRIPTS:
-                self.script_src.append(src[:MAX_SRC])
+            if src and not src.startswith('data:text/javascript;'):
+                if len(self.script_src) < MAX_SCRIPTS:
+                    self.script_src.append(_resuelto(url, src[:MAX_SRC])[:MAX_SRC])
+                else:
+                    self.recortes.add('MAX_SCRIPTS')
             cierre = _FIN_SCRIPT.search(html, p)
             texto = html[p:cierre.start() if cierre else len(html)][:MAX_SCRIPT]
             p = cierre.end() if cierre else len(html)
-            if texto.strip() and total < MAX_TEXTO_SCRIPTS and len(self.scripts) < MAX_SCRIPTS:
+            if not texto.strip():
+                continue
+            if len(self.scripts) >= MAX_SCRIPTS:
+                self.recortes.add('MAX_SCRIPTS')
+            elif total >= MAX_TEXTO_SCRIPTS or len(texto) > MAX_TEXTO_SCRIPTS - total:
+                self.recortes.add('MAX_TEXTO_SCRIPTS')
+            if len(self.scripts) < MAX_SCRIPTS and total < MAX_TEXTO_SCRIPTS:
                 self.scripts.append(texto[:MAX_TEXTO_SCRIPTS - total])
                 total += len(self.scripts[-1])
 
 
+def _resuelto(url, src):
+    """El src resuelto contra la URL de la página, o tal cual sin URL o si urljoin no lo puede leer."""
+    if not isinstance(url, str) or not url:
+        return src
+    try:
+        return urljoin(url[:MAX_SRC], src)
+    except ValueError:   # una URL o un src con '[' sin cerrar, como '//[x' (urlsplit lo lee como IPv6)
+        return src
+
+
 def _html(cuerpo):
-    """Los primeros MAX_HTML caracteres del cuerpo. Bytes se leen como UTF-8 y lo ilegible se cambia."""
+    """(los primeros MAX_HTML caracteres del cuerpo, si quedó algo fuera). Bytes se leen como UTF-8 y lo ilegible se
+    cambia."""
+    cortado = False
     if isinstance(cuerpo, (bytes, bytearray)):
+        cortado = len(cuerpo) > MAX_HTML * 4
         cuerpo = bytes(cuerpo[:MAX_HTML * 4]).decode('utf-8', errors='replace')
-    return cuerpo[:MAX_HTML] if isinstance(cuerpo, str) else ''
+    if not isinstance(cuerpo, str):
+        return '', False
+    return cuerpo[:MAX_HTML], cortado or len(cuerpo) > MAX_HTML
 
 
 def _recortar_html(html):
-    """(html, recortado): el html hasta donde las regex de Wappalyzer que empiezan con '<[^>]{1,250}' (unas 200)
-    caben en MAX_COSTO_HTML. Cada '<' les cuesta hasta el siguiente '>', con tope de 250: una página real de 256 KiB
-    cuesta unos 200 mil y una armada de puros '<', 65 millones (31 s). Lo que queda fuera no se revisa con las regex
-    del html, pero sí con el lector de <meta> y <script>."""
+    """(html, recortado): el html hasta donde las regex del html de Wappalyzer con '[^>]{' (85 de las 121 de
+    huellas_wappalyzer.json, 18 de ellas empiezan con '<[^>]') caben en MAX_COSTO_HTML. Cada '<' les cuesta hasta el
+    siguiente '>', con tope de 250: una página real de 256 KiB cuesta unos 200 mil y una armada de puros '<', 65
+    millones (31 s). Lo que queda fuera no se revisa con las regex del html, pero sí con el lector de <meta> y
+    <script>."""
     costo, fin = 0, -1
     p = html.find('<')
     while p >= 0:
@@ -394,27 +439,36 @@ def _cookies(valores):
 
 
 def distribucion(valor):
-    """El nombre de la distribución que marca el valor de una cabecera, o None."""
+    """El nombre de la distribución que marca el valor de una cabecera, o None. La parte con la marca de
+    SIGUEN_UPSTREAM (como '8.1.27-1+ubuntu22.04.1+deb.sury.org+1') no cuenta."""
     if not isinstance(valor, str):
         return None
+    valor = ' '.join(parte for parte in valor.split() if not _UPSTREAM.search(parte))
     return next((n for n, p in _DISTROS if p.search(valor)), None)
 
 
-def entradas(cabeceras=None, cuerpo=None, scripts=()):
+def entradas(cabeceras=None, cuerpo=None, scripts=(), url=None):
     """Lo que el motor lee de una respuesta, sin lo del borde: {'headers': {nombre: [valores]}, 'cookies': {nombre:
-    [valores]}, 'meta', 'scriptSrc', 'scripts', 'html', 'html_recortado' (_recortar_html), 'del_borde': [nombres que
-    se quitaron]}. `cabeceras` como en
-    borde.py (dict, http.client.HTTPMessage o lista de pares) y `scripts` el texto de scripts aparte que ya tenga la
-    visita."""
+    [valores]}, 'meta', 'scriptSrc', 'scripts', 'html', 'recortes': [topes que dejaron algo sin leer, de MAX_HTML,
+    MAX_CABECERAS, MAX_SCRIPTS, MAX_TEXTO_SCRIPTS y MAX_COSTO_HTML (_recortar_html)], 'del_borde': [nombres que se
+    quitaron]}. `cabeceras` como en borde.py (dict, http.client.HTTPMessage o lista de pares), `scripts` el texto de
+    scripts aparte que ya tenga la visita y `url` la de la página, para resolver los src relativos."""
     pares = borde._pares(cabeceras)
     del_borde = sorted({n for ns in borde.por_cabeceras(pares).values() for n in ns})
     fuera = {n for n in del_borde if not n.startswith('set-cookie:')}
     prefijos = tuple(n.split(':', 1)[1] for n in del_borde if n.startswith('set-cookie:'))
-    headers, set_cookie = {}, []
+    headers, set_cookie, recortes = {}, [], set()
+    resto = MAX_CABECERAS   # de toda la respuesta, como borde.MAX_COOKIES en set-cookie
     for nombre, valor in pares:
         if nombre == 'set-cookie':
             set_cookie.append(valor)
         elif nombre not in fuera:
+            if len(valor) > resto:   # lo que no cabe no se lee: ni su nombre cuenta si no cabe nada
+                recortes.add('MAX_CABECERAS')
+                valor = valor[:resto]
+                if not valor:
+                    continue
+            resto -= len(valor)
             headers.setdefault(nombre, []).append(valor)
     cookies = {}
     for nombre, valor, linea in _cookies(set_cookie):
@@ -422,16 +476,28 @@ def entradas(cabeceras=None, cuerpo=None, scripts=()):
             continue
         cookies.setdefault(nombre, []).append(valor[:MAX_VALOR])
         headers.setdefault('set-cookie', []).append(linea[:MAX_VALOR])
-    html = _html(cuerpo)
-    lector = _Html(html)
+    html, cortado = _html(cuerpo)
+    if cortado:
+        recortes.add('MAX_HTML')
+    lector = _Html(html, url)
+    recortes |= lector.recortes
     total = sum(map(len, lector.scripts))
-    for s in borde._varios(scripts, MAX_SCRIPTS):
-        if isinstance(s, str) and s.strip() and total < MAX_TEXTO_SCRIPTS:
-            lector.scripts.append(s[:min(MAX_SCRIPT, MAX_TEXTO_SCRIPTS - total)])
-            total += len(lector.scripts[-1])
+    aparte = borde._varios(scripts, MAX_SCRIPTS + 1)   # uno de más para saber si quedó alguno fuera
+    if len(aparte) > MAX_SCRIPTS:
+        recortes.add('MAX_SCRIPTS')
+    for s in aparte[:MAX_SCRIPTS]:
+        if isinstance(s, str) and s.strip():
+            texto = s[:MAX_SCRIPT]
+            if len(texto) > MAX_TEXTO_SCRIPTS - total:
+                recortes.add('MAX_TEXTO_SCRIPTS')
+            if total < MAX_TEXTO_SCRIPTS:
+                lector.scripts.append(texto[:MAX_TEXTO_SCRIPTS - total])
+                total += len(lector.scripts[-1])
     html, recortado = _recortar_html(html)
+    if recortado:
+        recortes.add('MAX_COSTO_HTML')
     return {'headers': headers, 'cookies': cookies, 'meta': lector.meta, 'scriptSrc': lector.script_src,
-            'scripts': lector.scripts, 'html': html, 'html_recortado': recortado, 'del_borde': del_borde}
+            'scripts': lector.scripts, 'html': html, 'recortes': sorted(recortes), 'del_borde': del_borde}
 
 
 # ---------------------------------------------------------------- motor
@@ -466,7 +532,8 @@ class _Reloj:
 
 def _buscar(tecnologias, datos, reloj, vistos):
     """Las detecciones [(nombre, campo, llave, versión, confianza, valor)] de `tecnologias` en `datos`. False si se
-    acabó el tiempo."""
+    acabó el tiempo. El reloj se revisa antes de cada patrón y antes de cada valor: una cabecera repetida muchas veces
+    no pasa del tope por más de una regex sobre un valor."""
     for nombre in tecnologias:
         t = datos['tecnologias'][nombre]
         for campo, patrones in t['patrones'].items():
@@ -480,7 +547,9 @@ def _buscar(tecnologias, datos, reloj, vistos):
                     valores = [entrada] if entrada else []
                 else:
                     valores = entrada
-                for valor in valores:
+                for i, valor in enumerate(valores):
+                    if i and reloj.vencido():
+                        return False
                     if regex.search(valor):
                         yield (nombre, campo, llave, resolver_version(version, regex, valor), confianza, valor)
     return True
@@ -507,26 +576,34 @@ def _con_implicadas(nombres, todas):
     return salida
 
 
-def _distribucion_de(campo, llave, valor, de_la_respuesta):
+def _distribucion_de(campo, llave, valor, de_la_respuesta, cats):
+    """La distribución de una versión que salió de `valor`: la de su propia marca, o la de la otra cabecera del
+    servidor (`de_la_respuesta`) solo para HEREDAN y si el valor no trae la marca de SIGUEN_UPSTREAM."""
     if campo != 'headers':
         return None
-    return distribucion(valor) or (de_la_respuesta if llave in CABECERAS_DEL_SERVIDOR else None)
+    propia = distribucion(valor)
+    if propia or _UPSTREAM.search(valor):
+        return propia
+    hereda = llave in CABECERAS_DEL_SERVIDOR and cats and set(cats) <= HEREDAN
+    return de_la_respuesta if hereda else None
 
 
-def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=time.monotonic):
-    """Las tecnologías del sitio en una respuesta de la visita web.
+def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=time.monotonic, url=None):
+    """Las tecnologías del sitio en una respuesta de la visita web. `url` es la de la página, para resolver los src
+    relativos de los <script> como el DOM (sin ella se comparan como vienen).
 
     {'tecnologias': [{'nombre', 'version' (o None), 'categorias', 'cpe' (o None), 'confianza', 'senales'
     ('campo:llave' de lo que calzó, nunca el valor), 'distribucion' (o None), 'implicada_por' (o None)}] o None,
-    'reto': lo de borde.reto() o None, 'completo': si se revisaron todos los patrones con todo el html, 'del_borde':
-    las cabeceras que se quitaron por ser del CDN o WAF}. Con reto, 'tecnologias' es None: sin cobertura, nunca 0.
-    Primero las de más confianza, luego por nombre."""
+    'reto': lo de borde.reto() o None, 'completo': si se revisaron todos los patrones antes de TOPE_SEGUNDOS y sin
+    que ningún tope dejara algo sin leer ('recortes' de entradas()), 'del_borde': las cabeceras que se quitaron por
+    ser del CDN o WAF}. Con reto, 'tecnologias' es None: sin cobertura, nunca 0. Primero las de más confianza, luego
+    por nombre."""
     pares = borde._pares(cabeceras)
     datos = datos or cargar()
     reto = borde.reto(estado, pares, cuerpo)
     if reto:
         return {'tecnologias': None, 'reto': reto, 'completo': False, 'del_borde': []}
-    vistos = entradas(pares, cuerpo, scripts)
+    vistos = entradas(pares, cuerpo, scripts, url)
     de_la_respuesta = next((d for c in CABECERAS_DEL_SERVIDOR for v in vistos['headers'].get(c, [])
                             for d in [distribucion(v)] if d), None)
     tiempo = _Reloj(reloj, TOPE_SEGUNDOS)
@@ -555,7 +632,7 @@ def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=
         numero = re.match(r'\d+', version)
         if len(r['version']) < len(version) <= MAX_LARGO_VERSION and (int(numero.group()) if numero else 0) < 10000:
             r['version'] = version
-            r['distribucion'] = _distribucion_de(campo, llave, valor, de_la_respuesta)
+            r['distribucion'] = _distribucion_de(campo, llave, valor, de_la_respuesta, todas[nombre]['cats'])
     for nombre in list(resueltas):   # excludes
         for excluida in todas[nombre]['excludes'] if nombre in resueltas else ():
             resueltas.pop(excluida, None)
@@ -575,7 +652,7 @@ def analizar(estado, cabeceras=None, cuerpo=None, scripts=(), datos=None, reloj=
         salida.append(dict(r, version=r['version'] or None, categorias=[CATEGORIAS[c] for c in t['cats']],
                            cpe=t['cpe'], senales=sorted(r['senales'])))
     salida.sort(key=lambda r: (-r['confianza'], r['nombre']))
-    return {'tecnologias': salida, 'reto': None, 'completo': completo and not vistos['html_recortado'],
+    return {'tecnologias': salida, 'reto': None, 'completo': completo and not vistos['recortes'],
             'del_borde': vistos['del_borde']}
 
 

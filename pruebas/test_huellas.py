@@ -34,6 +34,8 @@ FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'huellas'
 FIXTURES_BORDE = Path(__file__).resolve().parent / 'fixtures' / 'borde'
 SITIO = 'www.acme-demo.mx'
 HOY = date(2026, 11, 6)
+# Tecnología -> lo que hace que su CPE no sea una cadena de CPE 2.3 en Wappalyzer 6.10.54.
+CPE_INVALIDOS = {'Angular': ':*:*:*:*:*:*:*:*:*', 'Erlang': 'erlang%2fotp', 'Weblication': 'cms_core_&_grid'}
 
 
 def fixture(nombre, carpeta=FIXTURES):
@@ -54,6 +56,17 @@ def tecnologia(nombre, version, distribucion=None, confianza=100, implicada_por=
     return {'nombre': nombre, 'version': version, 'categorias': [huellas.CATEGORIAS[c] for c in datos['cats']],
             'cpe': cpe or datos['cpe'], 'confianza': confianza, 'senales': ['headers:server'],
             'distribucion': distribucion, 'implicada_por': implicada_por}
+
+
+def cookies_de(valor):
+    """[(nombre, valor)] de cada cookie de una Set-Cookie, también juntadas con ', ', sin usar huellas._cookies: un
+    pedazo después de una coma cuenta si antes de su primer ';' trae un '=' (el resto de un Expires no lo trae)."""
+    salida = []
+    for pedazo in valor.split(','):
+        nombre, igual, resto = pedazo.split(';', 1)[0].strip().partition('=')
+        if igual and nombre:
+            salida.append((nombre, resto))
+    return salida
 
 
 def severidades_del_catalogo():
@@ -113,11 +126,18 @@ class Datos(unittest.TestCase):
                     self.assertIn(otra.split('\\;')[0], t, '%s %s %s' % (nombre, campo, otra))
             for c in x.get('requiresCategory', []):
                 self.assertIn(int(c), huellas.CATEGORIAS, nombre)
-            if 'cpe' in x and nombre != 'Angular':
+            if 'cpe' in x and nombre not in CPE_INVALIDOS:
                 self.assertEqual(nvd.cpe_con_version(x['cpe'], '1.0').split(':')[5], '1.0', nombre)
-        # El de Angular trae 14 partes en Wappalyzer 6.10.54: nvd.py no lo arregla ni lo consulta.
+        # Los CPE de Wappalyzer 6.10.54 que no son una cadena de CPE 2.3: nvd.py no los arregla ni los consulta.
+        self.assertEqual({n for n, x in t.items() if 'cpe' in x and nvd.cpe_con_version(x['cpe'], '1.0') is None},
+                         set(CPE_INVALIDOS))
+        for nombre, por_que in CPE_INVALIDOS.items():
+            self.assertIn(por_que, t[nombre]['cpe'], nombre)
         self.assertEqual(t['Angular']['cpe'].count(':'), 13)
-        self.assertIsNone(nvd.cpe_con_version(t['Angular']['cpe'], '17.0.1'))
+        # El de GLPI termina en un espacio: nvd.py lo quita y lo consulta.
+        self.assertTrue(t['GLPI']['cpe'].endswith(' '))
+        self.assertEqual(nvd.cpe_con_version(t['GLPI']['cpe'], '10.0.7'),
+                         'cpe:2.3:a:glpi-project:glpi:10.0.7:*:*:*:*:*:*:*')
         cargado = huellas.cargar()
         self.assertEqual(len(cargado['tecnologias']), len(t))
         self.assertEqual(sum(len(p) for x in cargado['tecnologias'].values() for p in x['patrones'].values()), 870)
@@ -241,7 +261,10 @@ class Motor(unittest.TestCase):
         self.assertEqual((t['Laravel']['senales'], t['Vue.js']['version']), (['cookies:laravel_session'], '2.6.14'))
         e = huellas.entradas(fixture('cloudflare_laravel_200')['cabeceras'])
         self.assertNotIn('server', e['headers'])
-        self.assertEqual(sorted(e['cookies']), ['laravel_session'])   # el Expires con coma no parte la cookie
+        self.assertEqual(sorted(e['cookies']), ['laravel_session'])
+        # El Expires con coma no parte la cookie: la línea llega entera, con lo que va después de la coma.
+        self.assertEqual(e['headers']['set-cookie'], ['laravel_session=CIRDAN_FAKE_laravel; expires=Thu, '
+                                                      '05-Nov-2026 20:00:00 GMT; Max-Age=7200; path=/; httponly'])
         # Si el CDN no reescribe server, la de origen sí cuenta.
         self.assertIn('Nginx', por_nombre(huellas.analizar(200, {'Server': 'nginx/1.20.1', 'CF-RAY': 'x'})))
         self.assertEqual(huellas.analizar(200, {'Server': 'cloudflare'})['tecnologias'], [])
@@ -356,6 +379,98 @@ class Motor(unittest.TestCase):
             self.assertIsInstance(r['tecnologias'], list, base)
         self.assertLess(peor, huellas.TOPE_SEGUNDOS + 1.0)
 
+    def test_12_muchas_cabeceras_iguales(self):
+        # http.client deja pasar 100 cabeceras y borde._pares corta cada una a 8 KiB. Con el patrón de Liferay
+        # ('[a-z\s]+([\d.]+)') cada valor de tabuladores cuesta unos 0.05 s: 99 tomaban 5 s.
+        cabeceras = [('Liferay-Portal', '-' + '\t' * (huellas.MAX_VALOR - 2) + '-')] * 99
+        inicio = time.monotonic()
+        r = huellas.analizar(200, cabeceras)
+        self.assertLess(time.monotonic() - inicio, huellas.TOPE_SEGUNDOS + 0.5)
+        self.assertFalse(r['completo'])
+        # MAX_CABECERAS es de toda la respuesta, sin contar las Set-Cookie.
+        e = huellas.entradas(cabeceras + [('Set-Cookie', 'PHPSESSID=CIRDAN_FAKE_a')])
+        self.assertLessEqual(sum(map(len, e['headers']['liferay-portal'])), huellas.MAX_CABECERAS)
+        self.assertEqual((e['recortes'], sorted(e['cookies'])), (['MAX_CABECERAS'], ['phpsessid']))
+        self.assertEqual(huellas.entradas([('Server', 'nginx/1.24.0')] * 3)['recortes'], [])
+
+    def test_13_el_reloj_se_revisa_entre_un_valor_y_el_siguiente(self):
+        # Una regex que tarda 2 s en cada valor: con el tope de 3 s, el tercer valor ya no se revisa.
+        ahora, revisados = [0.0], []
+
+        class Lenta:
+            def search(self, valor):
+                revisados.append(valor)
+                ahora[0] += 2.0
+
+        datos = {'tecnologias': {'Lenta': {'cats': [22], 'cpe': None, 'implies': [], 'excludes': [], 'requires': [],
+                                           'requiresCategory': [],
+                                           'patrones': {'headers': [('x-lenta', Lenta(), '', 100)]}}}}
+        r = huellas.analizar(200, [('X-Lenta', 'a'), ('X-Lenta', 'b'), ('X-Lenta', 'c')], datos=datos,
+                             reloj=lambda: ahora[0])
+        self.assertEqual((revisados, r['completo']), (['a', 'b'], False))
+
+    def test_14_la_marca_de_la_otra_cabecera(self):
+        # PHP sale solo de X-Powered-By, sin marca, y hereda la de Server: la distribución empaqueta los dos.
+        t = por_nombre(huellas.analizar(200, [('Server', 'Apache/2.4.6 (CentOS)'), ('X-Powered-By', 'PHP/5.4.16')]))
+        self.assertEqual(t['PHP']['senales'], ['headers:x-powered-by'])
+        self.assertEqual((t['PHP']['version'], t['PHP']['distribucion']), ('5.4.16', 'CentOS'))
+        self.assertEqual(soporte.revisar(t['PHP'], fixture('eol_php'), SITIO, HOY)['estado'], 'distribucion')
+        # Un framework detrás del servidor de la distribución no la hereda: Ubuntu no parcha Next.js.
+        t = por_nombre(huellas.analizar(200, [('Server', 'nginx/1.18.0 (Ubuntu)'),
+                                              ('X-Powered-By', 'Next.js 12.3.4')]))
+        self.assertEqual((t['Next.js']['version'], t['Next.js']['distribucion']), ('12.3.4', None))
+        self.assertEqual(t['Nginx']['distribucion'], 'Ubuntu')
+        # El PPA de deb.sury.org sigue la versión oficial: ni marca propia ni heredada.
+        sury = 'PHP/8.1.27-1+ubuntu22.04.1+deb.sury.org+1'
+        self.assertIsNone(huellas.distribucion(sury))
+        for server in ('nginx/1.18.0', 'Apache/2.4.52 (Ubuntu)'):
+            t = por_nombre(huellas.analizar(200, [('Server', server), ('X-Powered-By', sury)]))
+            self.assertEqual((t['PHP']['version'], t['PHP']['distribucion']), ('8.1.27', None), server)
+        self.assertEqual(huellas.distribucion('Apache/2.4.52 (Ubuntu) ' + sury), 'Ubuntu')
+
+    def test_15_lo_que_no_se_lee_deja_el_analisis_incompleto(self):
+        # Un generator después de MAX_HTML no se ve: no es 'no hay WordPress', es incompleto.
+        cuerpo = 'x' * (huellas.MAX_HTML + 6000) + '<meta name="generator" content="WordPress 5.8.1">'
+        r = huellas.analizar(200, None, cuerpo)
+        self.assertEqual((r['tecnologias'], r['completo']), ([], False))
+        self.assertEqual(huellas.entradas(None, cuerpo)['recortes'], ['MAX_HTML'])
+        self.assertEqual(huellas.entradas(None, cuerpo.encode())['recortes'], ['MAX_HTML'])
+        # Igual con un src después de MAX_SCRIPTS.
+        cuerpo = '<script src="/a.js"></script>' * 250 + '<script src="https://code.jquery.com/jquery-3.5.1.min.js">'
+        r = huellas.analizar(200, None, cuerpo)
+        self.assertEqual((r['tecnologias'], r['completo']), ([], False))
+        self.assertEqual(huellas.entradas(None, cuerpo)['recortes'], ['MAX_SCRIPTS'])
+        self.assertEqual(huellas.entradas(None, '<meta name="a" content="b">' * 201)['recortes'], ['MAX_SCRIPTS'])
+        self.assertEqual(huellas.entradas(None, None, scripts=['x = 1'] * 201)['recortes'], ['MAX_SCRIPTS'])
+        # Y con el texto de los scripts después de MAX_TEXTO_SCRIPTS, del HTML o aparte.
+        self.assertEqual(huellas.entradas(None, None, scripts=['y' * 100000] * 10)['recortes'], ['MAX_TEXTO_SCRIPTS'])
+        html = '<script>%s</script>' % ('y' * 60000)
+        self.assertEqual(huellas.entradas(None, html, scripts=['z' * 64000] * 4)['recortes'], ['MAX_TEXTO_SCRIPTS'])
+        self.assertEqual(huellas.entradas(None, html, scripts=['z' * 64000] * 3)['recortes'], [])
+        # _recortar_html corta una página armada de '<' y la deja incompleta, y no corta una normal.
+        armada = '<' * huellas.MAX_HTML
+        corto, recortado = huellas._recortar_html(armada)
+        self.assertTrue(recortado)
+        self.assertLess(len(corto), len(armada) // 10)
+        self.assertEqual(huellas.entradas(None, armada)['recortes'], ['MAX_COSTO_HTML'])
+        self.assertFalse(huellas.analizar(200, None, armada)['completo'])
+        pagina = fixture('ubuntu_nginx_wordpress_200')['cuerpo']
+        self.assertEqual(huellas._recortar_html(pagina), (pagina, False))
+        self.assertEqual(huellas.entradas(None, pagina)['recortes'], [])
+
+    def test_16_src_relativo_con_la_url_de_la_pagina(self):
+        # El scriptSrc de GLPI empieza con '//': Wappalyzer lo compara con el src ya resuelto del DOM.
+        cuerpo = '<script src="/glpi/js/common.min.js?v=10.0.7"></script>'
+        self.assertNotIn('GLPI', por_nombre(huellas.analizar(200, None, cuerpo)))
+        t = por_nombre(huellas.analizar(200, None, cuerpo, url='https://' + SITIO + '/front/central.php'))
+        self.assertEqual((t['GLPI']['version'], t['GLPI']['senales']), ('10.0.7', ['scriptSrc']))
+        e = huellas.entradas(None, cuerpo, url='https://' + SITIO + '/')
+        self.assertEqual(e['scriptSrc'], ['https://www.acme-demo.mx/glpi/js/common.min.js?v=10.0.7'])
+        # Sin URL, o con una que urljoin no puede leer, el src queda como vino.
+        for url in (None, '', 7, 'http://[x/'):
+            self.assertEqual(huellas.entradas(None, cuerpo, url=url)['scriptSrc'],
+                             ['/glpi/js/common.min.js?v=10.0.7'], url)
+
 
 class Soporte(unittest.TestCase):
     def test_1_version_sin_soporte(self):
@@ -430,6 +545,18 @@ class Soporte(unittest.TestCase):
         self.assertEqual(validar(res, codigos=list(soporte.CODIGOS) + list(nvd.CODIGOS)), [])
 
 
+    def test_9_un_ciclo_con_eol_ilegible_es_sin_dato(self):
+        # Si el ciclo que calza con la versión no trae un fin legible, no se cae a un ciclo más corto que sí lo trae.
+        v1 = {'result': {'releases': [{'name': '10.2', 'isEol': None, 'eolFrom': '2024-12-11T00:00:00Z'},
+                                      {'name': '10', 'isEol': False, 'eolFrom': None}]}}
+        antes = [{'cycle': '10.2', 'eol': None}, {'cycle': '10', 'eol': False}]
+        for respuesta in (v1, antes):
+            r = soporte.revisar(tecnologia('Drupal', '10.2.3'), respuesta, SITIO, HOY)
+            self.assertEqual((r['estado'], r['ciclo'], r['hallazgo']), ('sin_dato', '10.2', None), respuesta)
+            # Una versión de otro ciclo sí usa el que se lee.
+            r = soporte.revisar(tecnologia('Drupal', '10.3.1'), respuesta, SITIO, HOY)
+            self.assertEqual((r['estado'], r['ciclo']), ('con_soporte', '10'), respuesta)
+
 class Nvd(unittest.TestCase):
     def test_1_cpe_con_version(self):
         cpe = 'cpe:2.3:a:nginx:nginx:*:*:*:*:*:*:*:*'
@@ -443,6 +570,17 @@ class Nvd(unittest.TestCase):
         self.assertEqual(nvd.url('cpe:2.3:a:nginx:nginx:1.18.0:*:*:*:*:*:*:*'),
                          'https://services.nvd.nist.gov/rest/json/cves/2.0'
                          '?cpeName=cpe:2.3:a:nginx:nginx:1.18.0:*:*:*:*:*:*:*&isVulnerable&noRejected')
+        # Solo cadenas de CPE 2.3: un espacio adentro, un signo sin escapar o algo que no es ASCII no pasan.
+        for malo in ('cpe:2.3:a:glpi project:glpi:*:*:*:*:*:*:*:*',
+                     'cpe:2.3:a:weblication:cms_core_&_grid:*:*:*:*:*:*:*:*',
+                     'cpe:2.3:a:erlang:erlang%2fotp:*:*:*:*:*:*:*:*', 'cpe:2.3:a:x:y z:*:*:*:*:*:*:*:*',
+                     'cpe:2.3:a:x:ñandú:*:*:*:*:*:*:*:*', 'cpe:2.3:a:x::*:*:*:*:*:*:*:*',
+                     'cpe:2.3:a:x:a*b:*:*:*:*:*:*:*:*'):
+            self.assertIsNone(nvd.cpe_con_version(malo, '1.0'), malo)
+        self.assertEqual(nvd.cpe_con_version('cpe:2.3:a:weblication:cms_core_\\&_grid:*:*:*:*:*:*:*:*', '5.3'),
+                         'cpe:2.3:a:weblication:cms_core_\\&_grid:5.3:*:*:*:*:*:*:*')
+        self.assertEqual(nvd.cpe_con_version('cpe:2.3:a:erlang:erlang\\/otp:*:*:*:*:*:*:*:*', '26.1'),
+                         'cpe:2.3:a:erlang:erlang\\/otp:26.1:*:*:*:*:*:*:*')
 
     def test_2_una_cve_por_hallazgo(self):
         r = nvd.revisar(tecnologia('Nginx', '1.18.0'), fixture('nvd_nginx_1.18.0'), SITIO)
@@ -457,13 +595,37 @@ class Nvd(unittest.TestCase):
         filas = {f['cve_id']: f for f in r['cves']}
         self.assertEqual(filas['CVE-2099-0101']['description'], 'Fake test vulnerability, written by hand.')
         self.assertEqual(filas['CVE-2099-0101']['cvss_vector'], 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H')
-        self.assertEqual((filas['CVE-2099-0102']['cvss_base_score'], filas['CVE-2099-0102']['cvss_metrica']),
-                         (5.0, 'cvssMetricV2'))
+        self.assertEqual(filas['CVE-2099-0102']['cvss_base_score'], 5.0)
+        self.assertEqual(r['hallazgos'][0]['evidencia']['cvss_metrica'], 'cvssMetricV2')
         self.assertEqual((filas['CVE-2098-12345']['cvss_base_score'], filas['CVE-2098-12345']['published_at']),
                          (None, None))   # un puntaje de 11 y una fecha que no es fecha no pasan
         self.assertNotIn('CVE-2098-0103', filas)   # rechazada
         for f in r['cves']:
             self.assertRegex(f['cve_id'], r'^CVE-[0-9]{4}-[0-9]{4,}$')   # el CHECK de cves.cve_id
+
+    def test_2b_filas_con_solo_columnas_de_cves_y_fecha_con_zona(self):
+        # Las columnas de CREATE TABLE cves en la migración 001: un INSERT con las llaves de la fila no falla.
+        sql = (RAIZ / 'db' / 'migraciones' / '001_esquema_inicial.sql').read_text(encoding='utf-8')
+        tabla = re.search(r'CREATE TABLE cves \((.*?)\n\);', sql, re.S).group(1)
+        columnas = {linea.split()[0] for linea in tabla.strip().splitlines()}
+        self.assertLessEqual(set(nvd.COLUMNAS_CVES), columnas)
+        r = nvd.revisar(tecnologia('Nginx', '1.18.0'), fixture('nvd_nginx_1.18.0'), SITIO)
+        for f in r['cves']:
+            self.assertEqual(tuple(f), nvd.COLUMNAS_CVES, f['cve_id'])
+        # La NVD da la hora en UTC sin zona: la fila lleva '+00:00' para que timestamptz no la lea en hora de México.
+        publicada = {f['cve_id']: f['published_at'] for f in r['cves']}
+        self.assertEqual(publicada['CVE-2099-0101'], '2099-01-02T10:00:00.000+00:00')
+        self.assertEqual(datetime.fromisoformat(publicada['CVE-2099-0102']),
+                         datetime(2099, 1, 3, 10, tzinfo=timezone.utc))
+        # Si ya trae zona, se respeta.
+        for fecha in ('2099-01-02T10:00:00Z', '2099-01-02T10:00:00.5-06:00'):
+            leidas = nvd.leer({'totalResults': 1, 'vulnerabilities': [{'cve': {'id': 'CVE-2099-0001',
+                                                                               'published': fecha}}]})
+            self.assertEqual(leidas['cves'][0]['published_at'], fecha)
+        for mala in ('2099-01-02T10:00:00+0600', '2099-01-02 10:00:00', '2099-01-02T10:00:00+06:00x'):
+            leidas = nvd.leer({'totalResults': 1, 'vulnerabilities': [{'cve': {'id': 'CVE-2099-0001',
+                                                                               'published': mala}}]})
+            self.assertIsNone(leidas['cves'][0]['published_at'], mala)
 
     def test_3_nunca_la_version_de_una_distribucion(self):
         t = por_nombre(analizar('ubuntu_nginx_wordpress_200'))['Nginx']
@@ -486,6 +648,25 @@ class Nvd(unittest.TestCase):
         r = nvd.revisar(tecnologia('Nginx', '1.18.0'), {'totalResults': 0, 'startIndex': 0, 'vulnerabilities': []},
                         SITIO)
         self.assertEqual((r['estado'], r['completa']), ('sin_cve', True))
+        # Sin CVE de una respuesta incompleta o con entradas que no se pudieron leer: no se sabe, nunca 0 CVE.
+        ilegibles = [{'cve': {'id': 'CVE-2021-23017-x'}}, {'sin': 'cve'}, 7]
+        for respuesta in ({'totalResults': 40, 'startIndex': 0, 'vulnerabilities': []},
+                          {'totalResults': 3, 'startIndex': 0, 'vulnerabilities': ilegibles},
+                          {'totalResults': 0, 'startIndex': 5, 'vulnerabilities': []},
+                          {'vulnerabilities': []}):
+            r = nvd.revisar(tecnologia('Nginx', '1.18.0'), respuesta, SITIO)
+            self.assertEqual((r['estado'], r['completa'], r['hallazgos']), ('sin_dato', False, []), respuesta)
+        # Con CVE sigue 'con_cve', y 'completa' dice que se tiró algo.
+        respuesta = {'totalResults': 4, 'startIndex': 0,
+                     'vulnerabilities': ilegibles + [{'cve': {'id': 'CVE-2099-0101'}}]}
+        r = nvd.revisar(tecnologia('Nginx', '1.18.0'), respuesta, SITIO)
+        self.assertEqual((r['estado'], r['completa'], [h['clave'] for h in r['hallazgos']]),
+                         ('con_cve', False, ['CVE-2099-0101']))
+        self.assertEqual(nvd.leer(respuesta)['descartadas'], 3)
+        # Una rechazada no es ilegible: la respuesta sigue completa.
+        r = nvd.revisar(tecnologia('Nginx', '1.18.0'), {'totalResults': 1, 'startIndex': 0, 'vulnerabilities': [
+            {'cve': {'id': 'CVE-2099-0101', 'vulnStatus': 'Rejected'}}]}, SITIO)
+        self.assertEqual((r['estado'], r['completa']), ('sin_cve', True))
         for t in (tecnologia('Nginx', None), tecnologia('Nginx', '1.18.0', confianza=75),
                   tecnologia('Nginx', '1.18.0', implicada_por='X'), tecnologia('Vue.js', '2.6.14')):
             self.assertEqual(nvd.revisar(t, fixture('nvd_nginx_1.18.0'), SITIO)['estado'], 'sin_version', t['nombre'])
@@ -503,14 +684,26 @@ class Nvd(unittest.TestCase):
 
 class Textos(unittest.TestCase):
     def test_1_sin_valores_reales_en_los_fixtures(self):
-        for archivo in sorted(FIXTURES.glob('*.json')):
+        revisadas = []
+        for archivo in sorted(FIXTURES.glob('*.json')) + sorted(FIXTURES_BORDE.glob('*.json')):
             datos = json.loads(archivo.read_text(encoding='utf-8'))
-            texto = json.dumps(datos)
-            self.assertIn('_nota', texto, archivo.name)
-            self.assertIn('a mano', texto, archivo.name)
-            for cookie in re.findall(r'(?:Set-Cookie|PHPSESSID|session)[^"]*?=([^;" ]+)', texto):
-                if cookie not in ('/', 'http'):
-                    self.assertTrue(cookie.startswith('CIRDAN_FAKE_'), (archivo.name, cookie))
+            if archivo.parent == FIXTURES:   # las de endoflife.date de antes son una lista con la nota en la primera
+                nota = datos[0] if isinstance(datos, list) else datos
+                self.assertIn('a mano', nota['_nota'], archivo.name)
+            for nombre, valor in datos.get('cabeceras', []) if isinstance(datos, dict) else ():
+                if nombre.lower() != 'set-cookie':
+                    continue
+                for cookie in cookies_de(valor):
+                    revisadas.append(cookie)
+                    self.assertTrue(cookie[1].startswith('CIRDAN_FAKE_'), (archivo.name, cookie))
+        # Todas las cookies de los fixtures, también las que llegan juntadas con ', '.
+        self.assertGreaterEqual({n for n, _ in revisadas}, {'PHPSESSID', 'ASP.NET_SessionId', '__cf_bm',
+                                                            'laravel_session'})
+
+    def test_2_la_revision_de_cookies_ve_cada_una(self):
+        juntas = 'a=CIRDAN_FAKE_a; expires=Thu, 05-Nov-2026 20:00:00 GMT; path=/, XSRF-TOKEN=real; path=/'
+        self.assertEqual(cookies_de(juntas), [('a', 'CIRDAN_FAKE_a'), ('XSRF-TOKEN', 'real')])
+        self.assertEqual(cookies_de('ASP.NET_SessionId=abc123; HttpOnly'), [('ASP.NET_SessionId', 'abc123')])
 
 
 if __name__ == '__main__':

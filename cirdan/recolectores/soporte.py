@@ -12,8 +12,8 @@ Cómo decide:
 - Nunca una versión de una distribución, como 'nginx/1.24.0 (Ubuntu)' (huellas.py, 'distribucion'): la distribución le
   sigue mandando parches que endoflife.date no ve. Da 'distribucion' y ningún hallazgo (_plan de RC-66, etica-1).
 - El ciclo es el más largo de endoflife.date que es prefijo de la versión por partes: 1.24.0 cae en 1.24, 7.4.33 en
-  7.4 y 3.6.0 en 3. Sin ciclo da 'sin_dato', igual que una respuesta que no se puede leer: no se sabe, nunca 'con
-  soporte'.
+  7.4 y 3.6.0 en 3. Sin ciclo da 'sin_dato', igual que una respuesta que no se puede leer o un ciclo cuyo eol no se
+  puede leer (no cae en un ciclo más corto): no se sabe, nunca 'con soporte'.
 - Sin soporte si eol es true o si su fecha ya pasó (`hoy`). Con eol false o una fecha que no ha llegado da
   'con_soporte'.
 Lee las dos formas de la API: la v1 (/api/v1/products/<producto>/, con result.releases, isEol y eolFrom) y la de antes
@@ -62,8 +62,9 @@ def _fecha(x):
 
 
 def ciclos(respuesta):
-    """[{'ciclo', 'eol': True, False o una fecha, 'ultima'}] de la respuesta de la API v1 o de la de antes. Un ciclo
-    que no es numérico o sin eol legible se salta. None si la respuesta no se puede leer."""
+    """[{'ciclo', 'eol': True, False, una fecha o None, 'ultima'}] de la respuesta de la API v1 o de la de antes. Un
+    ciclo que no es numérico se salta. Uno sin eol legible queda con eol None, para que la versión no caiga en un
+    ciclo más corto que sí se lee (revisar() da 'sin_dato'). None si la respuesta no se puede leer."""
     if isinstance(respuesta, dict) and isinstance(respuesta.get('result'), dict):
         filas, v1 = respuesta['result'].get('releases'), True
     elif isinstance(respuesta, list):
@@ -87,8 +88,6 @@ def ciclos(respuesta):
         else:
             eol = f.get('eol') if isinstance(f.get('eol'), bool) else _fecha(f.get('eol'))
             ultima = f.get('latest')
-        if eol is None:
-            continue
         salida.append({'ciclo': nombre, 'eol': eol, 'ultima': ultima if isinstance(ultima, str) else None})
     return salida
 
@@ -130,8 +129,10 @@ def revisar(tecnologia, respuesta, host, hoy=None):
     ciclo = ciclo_de(version, ciclos(respuesta))
     if not ciclo:
         return dict(salida, estado='sin_dato')
-    hoy = _hoy(hoy)
     eol = ciclo['eol']
+    if eol is None:   # el ciclo de la versión existe pero su fin no se puede leer: no se sabe
+        return dict(salida, estado='sin_dato', ciclo=ciclo['ciclo'])
+    hoy = _hoy(hoy)
     sin_soporte = eol is True or (isinstance(eol, date) and eol <= hoy)
     salida = dict(salida, ciclo=ciclo['ciclo'], estado='sin_soporte' if sin_soporte else 'con_soporte')
     if not sin_soporte:

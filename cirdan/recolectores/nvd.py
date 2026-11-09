@@ -15,10 +15,17 @@ Cómo decide:
 - Una CVE por hallazgo, con la CVE como clave, como shodan.hallazgo_cve, normalizada con shodan._cve. Las rechazadas
   (vulnStatus Rejected) no cuentan. Hasta MAX_CVE por tecnología, las más recientes por año y número; las demás van en
   'omitidas' para el aviso y no se cierran. Si la NVD tiene más resultados que los de la página, 'completa' es False.
-- Sin una respuesta que se pueda leer da 'sin_dato': no se sabe, nunca 0 CVE.
-'cves' trae una fila por CVE para la tabla cves (cve_id, description, cvss_base_score, cvss_vector y published_at),
-sin EPSS ni KEV, que son del cargador diario (#69, RC-127). Guardarlas en cves y llenar findings.cve_id lo hace el
-orquestador cuando se conecte la visita web, no este módulo.
+- Sin una respuesta que se pueda leer da 'sin_dato': no se sabe, nunca 0 CVE. También sin ninguna CVE si la
+  respuesta no está completa (más resultados que los de la página) o si se tiró alguna entrada que no se pudo leer
+  (sin 'cve' o con un id que no es una CVE): 'sin_cve' solo sale de una respuesta completa y leída entera. Con CVE
+  da 'con_cve', y 'completa' dice si faltó algo.
+'cves' trae una fila por CVE para la tabla cves con 5 de sus columnas y ninguna llave más (COLUMNAS_CVES: cve_id,
+description, cvss_base_score, cvss_vector y published_at), sin EPSS ni KEV, que son del cargador diario (#69,
+RC-127). published_at lleva su zona: la NVD da la hora en UTC sin zona y aquí se le pone '+00:00', porque
+cves.published_at es timestamptz y cirdan/db.py fija la zona de México en cada transacción (sin zona quedaría 6 h
+corrida). Si la NVD ya trae zona, se respeta. La métrica de CVSS que se usó (cvss_metrica) va solo en la evidencia
+del hallazgo. Guardarlas en cves y llenar findings.cve_id lo hace el orquestador cuando se conecte la visita web, no
+este módulo.
 """
 import re
 from urllib.parse import quote
@@ -35,17 +42,30 @@ MAX_DESCRIPCION = 2000       # caracteres de la descripción en inglés de la NV
 METRICAS = ('cvssMetricV31', 'cvssMetricV40', 'cvssMetricV30', 'cvssMetricV2')   # la primera que traiga la CVE
 TITULO = 'Vulnerabilidad conocida %s por la versión de %s %s en %s'
 ESTADOS = ('con_cve', 'sin_cve', 'sin_dato', 'distribucion', 'sin_version')
+COLUMNAS_CVES = ('cve_id', 'description', 'cvss_base_score', 'cvss_vector', 'published_at')   # de la tabla cves
 
-# cpe:2.3:part:vendor:product:version:... con 13 partes. La versión de las huellas solo lleva estos caracteres.
-_CPE = re.compile(r'cpe:2\.3:[aho](?::(?:[^:\\]|\\.)*){10}')
+# cpe:2.3:part:vendor:product:version:... con 13 partes, en la forma de cadena de CPE 2.3 (NISTIR 7695, 6.2): cada
+# parte es '*', '-' o letras, dígitos, '.', '_' y '-', con '?' o '*' al inicio o al final, y cualquier otro signo
+# ASCII va escapado con '\' (como 'cms_core_\&_grid'). Un espacio, un '&' sin escapar o algo que no es ASCII no
+# pasan. La versión de las huellas solo lleva los caracteres de _VERSION.
+_PARTE = r'(?:\*|-|(?:\?+|\*)?(?:[a-z0-9._-]|\\[!-/:-@\[-`{-~])+(?:\?+|\*)?)'
+_CPE = re.compile(r'cpe:2\.3:[aho](?::%s){10}' % _PARTE, re.I | re.A)
 _VERSION = re.compile(r'[0-9][0-9a-z._-]{0,30}', re.I | re.A)
-_FECHA = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?')
+# La fecha de la NVD, con su zona si la trae (grupo 2).
+_FECHA = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)(Z|[+-][0-9]{2}:[0-9]{2})?',
+                    re.A)
 
 
 def cpe_con_version(cpe, version):
     """El CPE de las huellas (con '*' en la versión) con la versión puesta en minúsculas, o None. _VERSION solo deja
     letras, dígitos, '.', '_' y '-', que no se escapan en un CPE 2.3 (el '-' solo, sin más, querría decir 'no
-    aplica', pero _VERSION pide un dígito al inicio). Un CPE con un ':' escapado no tiene 13 partes y da None."""
+    aplica', pero _VERSION pide un dígito al inicio). Un CPE que no es una cadena de CPE 2.3 bien formada (_CPE) da
+    None, y uno con un ':' escapado tampoco tiene 13 partes. Los espacios de las orillas se quitan antes: el de GLPI
+    en huellas_wappalyzer.json termina en un espacio. Con los datos de Wappalyzer 6.10.54 quedan sin CPE válido 3 de
+    136, que nunca se consultan: Angular (14 partes), Erlang ('erlang%2fotp', con el '%' sin escapar) y Weblication
+    ('cms_core_&_grid', con el '&' sin escapar) (pruebas/test_huellas.py, CPE_INVALIDOS)."""
+    if isinstance(cpe, str):
+        cpe = cpe.strip(' \t')
     if not (isinstance(cpe, str) and _CPE.fullmatch(cpe) and isinstance(version, str) and _VERSION.fullmatch(version)):
         return None
     partes = cpe.split(':')
@@ -86,35 +106,53 @@ def _descripcion(descripciones):
     return None
 
 
+def _publicada(x):
+    """La fecha de publicación con su zona, o None: sin zona es UTC y lleva '+00:00'."""
+    m = _FECHA.fullmatch(x) if isinstance(x, str) else None
+    if not m:
+        return None
+    return m.group(0) if m.group(2) else m.group(1) + '+00:00'
+
+
 def leer(respuesta):
-    """{'cves': [filas para la tabla cves, de la más reciente a la más vieja], 'completa'} de una respuesta de la API
-    2.0, o None si no se puede leer. Sin repetir ni rechazadas."""
+    """{'cves': [filas para la tabla cves con solo COLUMNAS_CVES, de la más reciente a la más vieja], 'metricas':
+    {cve_id: la de METRICAS que dio el puntaje, o None}, 'descartadas': las entradas que no se pudieron leer,
+    'completa'} de una respuesta de la API 2.0, o None si no se puede leer. Sin repetir ni rechazadas. 'completa' es
+    False si la NVD tiene más resultados que los de la página o si se descartó alguna entrada."""
     if not isinstance(respuesta, dict) or not isinstance(respuesta.get('vulnerabilities'), list):
         return None
-    filas = {}
+    filas, metricas, descartadas = {}, {}, 0
     for v in respuesta['vulnerabilities']:
         cve = v.get('cve') if isinstance(v, dict) else None
-        if not isinstance(cve, dict) or cve.get('vulnStatus') == 'Rejected':
+        if not isinstance(cve, dict):
+            descartadas += 1
+            continue
+        if cve.get('vulnStatus') == 'Rejected':
             continue
         cve_id = shodan._cve(cve.get('id'))
-        if not cve_id or cve_id in filas:
+        if not cve_id:
+            descartadas += 1
+            continue
+        if cve_id in filas:
             continue
         puntaje, vector, metrica = _cvss(cve.get('metrics'))
-        publicada = cve.get('published')
         filas[cve_id] = {'cve_id': cve_id, 'description': _descripcion(cve.get('descriptions')),
-                         'cvss_base_score': puntaje, 'cvss_vector': vector, 'cvss_metrica': metrica,
-                         'published_at': publicada if isinstance(publicada, str) and _FECHA.fullmatch(publicada)
-                         else None}
+                         'cvss_base_score': puntaje, 'cvss_vector': vector,
+                         'published_at': _publicada(cve.get('published'))}
+        metricas[cve_id] = metrica
     total, inicio = respuesta.get('totalResults'), respuesta.get('startIndex', 0)
     leidas = len(respuesta['vulnerabilities'])
-    completa = isinstance(total, int) and isinstance(inicio, int) and inicio == 0 and total <= leidas
+    completa = isinstance(total, int) and isinstance(inicio, int) and inicio == 0 and total <= leidas \
+        and not descartadas
     orden = sorted(filas, key=lambda c: tuple(int(n) for n in c.split('-')[1:]), reverse=True)
-    return {'cves': [filas[c] for c in orden], 'completa': completa}
+    return {'cves': [filas[c] for c in orden], 'metricas': metricas, 'descartadas': descartadas,
+            'completa': completa}
 
 
 def revisar(tecnologia, respuesta, host):
     """{'estado' (de ESTADOS), 'cpe' (con la versión), 'hallazgos', 'omitidas', 'cves' (filas para la tabla cves de
-    los hallazgos), 'completa'} de una tecnología de huellas.analizar() con la respuesta de la NVD de su CPE."""
+    los hallazgos), 'completa'} de una tecnología de huellas.analizar() con la respuesta de la NVD de su CPE. Sin
+    ninguna CVE y con una respuesta incompleta da 'sin_dato', nunca 'sin_cve'."""
     t = tecnologia if isinstance(tecnologia, dict) else {}
     salida = {'estado': 'sin_version', 'cpe': None, 'hallazgos': [], 'omitidas': [], 'cves': [], 'completa': False}
     cpe = cpe_con_version(t.get('cpe'), t.get('version'))
@@ -132,10 +170,12 @@ def revisar(tecnologia, respuesta, host):
     for fila in filas[:MAX_CVE]:
         titulo = TITULO % (fila['cve_id'], t['nombre'], t['version'], host)
         evidencia = {'title': titulo, 'cve': fila['cve_id'], 'cpe': cpe, 'tecnologia': t['nombre'],
-                     'version': t['version'], 'cvss': fila['cvss_base_score'], 'cvss_metrica': fila['cvss_metrica'],
+                     'version': t['version'], 'cvss': fila['cvss_base_score'],
+                     'cvss_metrica': leidas['metricas'][fila['cve_id']],
                      'senales': list(t.get('senales') or []), 'deducida_por_version': True,
                      'fuente_datos': NOMBRE_FUENTE, 'host': host}
         hallazgos.append({'codigo': 'known_vulnerability', 'severidad': CODIGOS['known_vulnerability'],
                           'clave': fila['cve_id'], 'titulo': titulo, 'evidencia': evidencia})
-    return dict(salida, estado='con_cve' if hallazgos else 'sin_cve', hallazgos=hallazgos,
+    estado = 'con_cve' if hallazgos else 'sin_cve' if leidas['completa'] else 'sin_dato'
+    return dict(salida, estado=estado, hallazgos=hallazgos,
                 omitidas=[f['cve_id'] for f in filas[MAX_CVE:]], cves=filas[:MAX_CVE], completa=leidas['completa'])
