@@ -17,7 +17,7 @@ from cirdan.auth.deps import Session, current_session, require_roles
 from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import audit, transaction
-from cirdan.score import comparacion, configuracion, criterio, motor, plan as plan_accion
+from cirdan.score import cambios, comparacion, configuracion, criterio, motor, plan as plan_accion
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
@@ -259,9 +259,9 @@ def domain_findings(fqdn: str, session: Session = Depends(current_session)):
 # ---------------------------------------------------------------- score e histórico
 
 SCORES_SQL = '''
-SELECT ds.id::text AS score_id, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
+SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
     ds.model_version, ds.model_fallback_reason, ds.computed_at,
-    rs.version AS rule_set_version, rs.category_weights, sc.stats,
+    rs.version AS rule_set_version, rs.category_weights, sc.stats, sc.queued_at, sc.finished_at,
        (SELECT count(*) FROM score_contributions x WHERE x.score_id = ds.id AND x.severity = 'critical') AS critical_at_time
   FROM domain_scores ds
   JOIN domains d ON d.id = ds.domain_id
@@ -306,13 +306,36 @@ def domain_score(fqdn: str, session: Session = Depends(current_session)):
 @router.get('/domains/{fqdn}/score/history', summary='Todos los scores del dominio, del más viejo al más nuevo')
 def score_history(fqdn: str, session: Session = Depends(current_session)):
     _domain_id(session, fqdn)
+    rows = _query(session, SCORES_SQL, (fqdn,))
+    scan_ids = [row['scan_id'] for row in rows if row['reason'] == 'scan']
+    nuevos_activos = {}
+    if scan_ids:
+        nuevos_activos = {
+            row['scan_id']: row['new_assets']
+            for row in _query(session, '''
+                SELECT s.id::text AS scan_id, count(a.id) AS new_assets
+                  FROM scans s
+                  LEFT JOIN assets a ON a.domain_id = s.domain_id
+                                    AND a.first_seen_at >= s.queued_at
+                                    AND a.first_seen_at <= s.finished_at
+                 WHERE s.id::text = ANY(%s)
+                 GROUP BY s.id
+            ''', (scan_ids,))
+        }
     items = []
-    for row in _query(session, SCORES_SQL, (fqdn,)):
+    escaneo_anterior = None
+    for row in rows:
         base, _ = _score_base(row, row['critical_at_time'])
         # Un recálculo no encuentra ni resuelve hallazgos. Un escaneo que no los contó (antes de RC-55) da null, no 0.
         stats = (row['stats'] or {}) if row['reason'] == 'scan' else {'new_findings': 0, 'resolved_findings': 0}
+        cambios_semanales = None
+        if row['reason'] == 'scan':
+            escaneo = {**row, 'new_assets': nuevos_activos.get(row['scan_id'], 0)}
+            cambios_semanales = cambios.resumen_semanal(escaneo, escaneo_anterior)
+            escaneo_anterior = escaneo
         items.append({**base, 'categories': row['category_scores'],
-                      'new_findings': stats.get('new_findings'), 'resolved_findings': stats.get('resolved_findings')})
+                      'new_findings': stats.get('new_findings'), 'resolved_findings': stats.get('resolved_findings'),
+                      'weekly_changes': cambios_semanales})
     return {'domain': fqdn, 'items': items, 'total': len(items)}
 
 
