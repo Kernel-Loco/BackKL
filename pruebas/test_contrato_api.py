@@ -86,6 +86,11 @@ class Score(unittest.TestCase):
 
 class Historico(unittest.TestCase):
 
+    def test_0_cambios_semanales_solo_en_el_punto_del_escaneo(self):
+        primero, segundo = HISTORICO['items']
+        self.assertEqual(primero['weekly_changes']['alerts']['new_finding'], True)
+        self.assertIsNone(segundo['weekly_changes'])
+
     def test_1_cada_punto_cuadra_con_el_criterio(self):
         for p in HISTORICO['items']:
             r = calcular(p['categories'], p['critical_open'])
