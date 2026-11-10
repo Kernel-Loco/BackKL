@@ -165,10 +165,13 @@ class Sembrada(unittest.TestCase):
                             url(DOMINIO, '/docs'): (200, [], b'<html><h1>Documentos de la empresa</h1></html>')})
         self.assertEqual([h.codigo for h in res.hallazgos], ['exposed_api_docs'])   # la raíz no: su /docs es otra cosa
         self.assertEqual(res.hallazgos[0].activo, API)
-        # Swagger UI y ReDoc en el mismo sitio: una sola página de documentación, con su otra ruta
-        self.assertEqual([d['formato'] for d in res.hallazgos[0].evidencia['documentos']], ['página de documentación'])
+        # Swagger UI y ReDoc en el mismo sitio son dos páginas distintas: cada una es su activo
+        self.assertEqual([d['url'] for d in res.hallazgos[0].evidencia['documentos']],
+                         [url(API, '/swagger-ui/'), url(API, '/docs')])
         pagina = activo(res, url(API, '/swagger-ui/')).atributos
-        self.assertEqual((pagina['operaciones'], pagina['tambien_en']), (None, [url(API, '/docs')]))
+        self.assertEqual((pagina['formato'], pagina['operaciones'], pagina['tambien_en']),
+                         ('página de documentación', None, []))
+        self.assertEqual(activo(res, url(API, '/docs')).atributos['tambien_en'], [])
         self.assertEqual(contrato.validar(res, codigos=set(api_docs.CODIGOS)), [])
 
     def test_4_el_mismo_documento_en_dos_rutas_es_un_solo_activo(self):
@@ -503,7 +506,8 @@ class Cobertura(unittest.TestCase):
 
     def test_6_un_documento_que_no_cabe_esta_a_la_vista_y_queda_sin_revisar(self):
         cortado = json.dumps(openapi3()).encode()[:200]
-        self.assertEqual(api_docs.resumir(200, [], cortado, True), {'estado': 200, 'doc': {'formato': 'grande'}})
+        doc = api_docs.resumir(200, [], cortado, True)['doc']
+        self.assertEqual((doc['formato'], sorted(doc)), ('grande', ['formato', 'huella']))
         self.assertIsNone(api_docs.resumir(200, [], cortado, False)['doc'])
         res, _, _ = correr({url(API, '/openapi.json'): {'estado': 200, 'doc': {'formato': 'grande'}}})
         # Está a la vista, pero sus funciones no se contaron
@@ -625,7 +629,7 @@ class Revision(unittest.TestCase):
 
     def test_5_un_documento_cortado_esta_a_la_vista_y_un_json_cualquiera_cortado_no(self):
         cortado = json.dumps(openapi3()).encode()[:-40]
-        self.assertEqual(api_docs.analizar(cortado, cortado=True), {'formato': 'grande'})
+        self.assertEqual(api_docs.analizar(cortado, cortado=True)['formato'], 'grande')
         self.assertIsNone(api_docs.analizar(cortado))                               # entero y roto: no es nada
         otro = b'{"usuarios": [{"id": 1}, {"id"'
         self.assertEqual(api_docs.analizar(otro, cortado=True), {'formato': 'cortado'})
@@ -706,6 +710,97 @@ class Revision(unittest.TestCase):
         self.assertLess(sql.index("SET LOCAL lock_timeout = '5s';"), sql.index('ALTER TABLE assets'))
         self.assertGreater(sql.index('SET LOCAL lock_timeout'), sql.index('BEGIN;'))
         self.assertRegex(sql, r"COMMENT ON TABLE assets IS '[^']*documentos de API")
+
+
+class Ronda3(unittest.TestCase):
+    """Lo que quedó pendiente de la segunda revisión: qué se tapa del título y de la muestra, qué página cuenta y
+    cuándo dos rutas son el mismo activo."""
+
+    def visible(self, ruta):
+        return api_docs.leer(openapi3(paths={ruta: {'get': {}}}))['muestra'][0][len('GET '):]
+
+    def test_1_la_muestra_tapa_llaves_partidas_y_datos_personales_cortos(self):
+        partida = '/s3/CIRDANfakeXUtnFEMI/K7MDENG/bPxRfiCYEJEMPLOKEY/upload'   # la forma de una llave de AWS, con '/'
+        for ruta, queda in ((partida, '/s3/\u2026/upload'),
+                            ('/clientes/XEXX850101HDFRRN05', '/clientes/\u2026'),            # forma de CURP
+                            ('/proveedores/XEX850101AB1/facturas', '/proveedores/\u2026/facturas'),   # forma de RFC
+                            ('/sms/5500000000', '/sms/\u2026'),
+                            ('/sms/+52-55-0000-0000', '/sms/\u2026'),
+                            ('/sesiones/00000000-0000-4000-8000-000000000000', '/sesiones/\u2026'),
+                            ('/archivos/00ff00ff00ff00ff', '/archivos/\u2026'),
+                            ('/usuarios/a@b', '/usuarios/\u2026')):
+            with self.subTest(ruta=ruta):
+                self.assertEqual(self.visible(ruta), queda)
+
+    def test_2_el_titulo_tambien_se_tapa(self):
+        titulo = 'Pagos v2 (2026-11-09) de juan.perez@acme-demo.mx tel 5500000000 llave %s/x' % MARCA.replace('_', '1')
+        doc = api_docs.leer(openapi3(info={'title': titulo}))
+        self.assertEqual(doc['titulo'], 'Pagos v2 (2026-11-09) de \u2026 tel \u2026 llave \u2026/x')
+        self.assertIsNone(api_docs.leer(openapi3(info={'title': 7}))['titulo'])
+        # El principio de una llave no queda a la vista por el corte del texto
+        larga = api_docs.leer(openapi3(info={'title': 'a ' * 395 + 'CIRDAN1FAKE' + 'x' * 40}))['titulo']
+        self.assertNotIn('CIRDAN', larga)
+
+    def test_3_un_tramo_legitimo_no_se_tapa(self):
+        for ruta in ('/auth/oauth2-token-exchange', '/auth/oauth2-device-authorization', '/v1/s3-presigned-upload-url',
+                     '/users/@me', '/reportes/2026-11-09', '/api/v2/getUserById/XMLExport', '/pedidos/{id}/lineas',
+                     '/Clientes/ObtenerPedidosPorFecha/ExportarExcel'):
+            with self.subTest(ruta=ruta):
+                self.assertEqual(self.visible(ruta), ruta)
+
+    def test_4_las_rutas_que_quedan_iguales_van_una_vez_con_cuantas_son(self):
+        doc = api_docs.leer(openapi3(paths={'/items': {'get': {}}, '/items?x=1': {'get': {}}, '/otra': {'get': {}},
+                                            '/usuarios/a@acme-demo.mx': {'post': {}},
+                                            '/usuarios/b@acme-demo.mx': {'post': {}},
+                                            '/usuarios/c@acme-demo.mx': {'post': {}}}))
+        self.assertEqual(doc['sin_declarar'], 6)
+        self.assertEqual(doc['muestra'],
+                         ['POST /usuarios/\u2026 (3 funciones)', 'GET /items (2 funciones)', 'GET /otra'])
+        self.assertEqual(api_docs.limpiar({'estado': 200, 'doc': doc})['doc'], doc)
+
+    def test_5_dos_paginas_o_dos_documentos_sin_leer_distintos_son_dos_activos(self):
+        v3 = (json.dumps(openapi3()) + ' ' * 50).encode()[:-60]
+        v2 = (json.dumps(swagger2()) + ' ' * 50).encode()[:-60]
+        respuestas = {url(API, '/v3/api-docs'): api_docs.resumir(200, [], v3, True),
+                      url(API, '/v2/api-docs'): api_docs.resumir(200, [], v2, True),
+                      url(API, '/api/openapi.json'): api_docs.resumir(200, [], v3, True)}
+        res, _, _ = correr(respuestas)
+        docs = [(x.valor, x.atributos['tambien_en']) for x in res.activos if x.tipo == 'api_doc']
+        self.assertEqual(docs, [(url(API, '/v3/api-docs'), [url(API, '/api/openapi.json')]),
+                                (url(API, '/v2/api-docs'), [])])
+        self.assertEqual(contrato.validar(res, codigos=set(api_docs.CODIGOS)), [])
+        # Una grabación sin huella no dice si dos rutas dan lo mismo: cada una es su activo
+        sin_huella = {'estado': 200, 'doc': {'formato': 'ui'}}
+        res, _, _ = correr({url(API, '/docs'): sin_huella, url(API, '/swagger-ui/'): sin_huella})
+        self.assertEqual([x.atributos['tambien_en'] for x in res.activos if x.tipo == 'api_doc'], [[], []])
+        with self.assertRaises(ValueError):
+            api_docs.limpiar({'estado': 200, 'doc': {'formato': 'ui', 'huella': 'no es una huella'}})
+
+    def test_6_zwj_zwnj_y_el_guion_opcional_se_quedan_y_no_depende_de_la_version_de_python(self):
+        for texto in ('Equipo \U0001f469\u200d\U0001f4bb', 'API\u0647\u0627\u200c\u06cc', 'co\u00adoperativa',
+                      'sin asignar \U0001fae9 \u0378'):
+            with self.subTest(texto=texto):
+                self.assertEqual(api_docs._texto(texto), texto)
+        raro = 'a\u202eb\u200bc\ufeffd\udc00e\ue000f\U000e0041g\ufffeh\U0001ffffi\x00j\u2028k'
+        self.assertEqual(api_docs._texto(raro), 'a?b?c?d?e?f?g?h?i?j?k')
+        self.assertFalse(hasattr(api_docs, 'unicodedata'))   # sus categor\u00edas cambian con la versi\u00f3n de Python
+
+    def test_7_una_pagina_solo_cuenta_si_la_respuesta_es_html(self):
+        html = [('Content-Type', 'text/html; charset=utf-8')]
+        plano = b'Este README menciona swagger-ui y como instalarlo'
+        self.assertEqual(api_docs.resumir(200, html, SWAGGER_UI)['doc']['formato'], 'ui')
+        xhtml = [('content-type', 'APPLICATION/XHTML+XML')]
+        self.assertEqual(api_docs.resumir(200, xhtml, SWAGGER_UI)['doc']['formato'], 'ui')
+        for cabeceras, cuerpo in (([('Content-Type', 'text/plain')], plano), ([], plano),
+                                  ([('Content-Type', 'text/plain')], SWAGGER_UI),
+                                  ([('Content-Type', 'application/javascript')], b'var x = "swagger-ui";')):
+            with self.subTest(cabeceras=cabeceras, cuerpo=cuerpo):
+                self.assertIsNone(api_docs.resumir(200, cabeceras, cuerpo)['doc'])
+        # Un documento JSON cuenta con cualquier tipo de contenido: muchos sitios lo sirven como texto
+        doc = api_docs.resumir(200, [('Content-Type', 'text/plain')], json.dumps(openapi3()).encode())['doc']
+        self.assertEqual(doc['formato'], 'openapi')
+        res, _, _ = correr({url(API, '/docs'): (200, [('Content-Type', 'text/plain')], plano)})
+        self.assertEqual((res.hallazgos, [x.tipo for x in res.activos]), ([], ['domain', 'subdomain']))
 
 
 class Base(unittest.TestCase):
