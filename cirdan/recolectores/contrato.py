@@ -200,9 +200,10 @@ def _errores_activo(a):
     hosts = a.atributos.get('hosts') or ([a.atributos['host']] if a.atributos.get('host') else [])
     if not isinstance(hosts, list) or not hosts or not all(_nombre_ok(h) for h in hosts):
         errores.append("activo %r: necesita 'host' o 'hosts' con nombres válidos para el filtro de alcance" % a.valor)
-    elif a.tipo == 'api_doc' and _host_de_url(a.valor) not in [h.lower().rstrip('.') for h in hosts]:
-        # El filtro de alcance mira 'host': si la URL fuera de otro sitio, pasaría como si fuera del dominio
-        errores.append("activo %r: debe ser una URL https del sitio de su 'host'" % a.valor)
+    elif a.tipo == 'api_doc' and {h.lower().rstrip('.') for h in hosts} != {_host_de_url(a.valor)}:
+        # El filtro de alcance mira 'host' y 'hosts': con la URL de otro sitio, o con otro nombre además del suyo,
+        # pasaría como si fuera del dominio
+        errores.append("activo %r: debe ser una URL https del sitio de su 'host', y solo de ese" % a.valor)
     return errores
 
 

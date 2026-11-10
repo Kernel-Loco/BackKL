@@ -32,7 +32,7 @@ from cirdan.config import config
 from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
-from cirdan.recolectores import certspotter, crtsh, ejemplo, github, shodan
+from cirdan.recolectores import api_docs, certspotter, crtsh, ejemplo, github, shodan
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado
 from pruebas.test_certspotter import AHORA, EMISIONES, RespaldoSimulado, emision
 from pruebas.test_certspotter import recolectar as recolectar_ct
@@ -426,6 +426,25 @@ class Orquestador(unittest.TestCase):
                         'shodan')
         self.assertEqual(self.abiertos('ip', *rdp), {ip_a: 'open', ip_b: 'open', ip_c: 'resolved'})
         self.assertEqual(self.abiertos('cve', *cves), dict.fromkeys(cve_b, 'open'))
+
+    def test_2n2_un_documento_de_api_se_guarda_como_api_doc_hijo_de_su_sitio(self):
+        """La migración 015 (#63, RC-118): la base acepta el tipo api_doc, el activo cuelga de su sitio y su hallazgo
+        queda sobre él."""
+        sitio = 'api.acme-demo.mx'
+        url = 'https://%s/openapi.json' % sitio
+        res = Resultado('acme-demo.mx', 'ejemplo')
+        res.activos += [Activo('subdomain', sitio, {}),
+                        Activo('api_doc', url, {'host': sitio, 'parent': sitio, 'formato': 'OpenAPI'})]
+        hallazgo = api_docs._hallazgo('api_auth_not_declared', 'acme-demo.mx', url, 'api_doc', 'Sin autenticación',
+                                      {'host': sitio, 'url': url}, AHORA, sitio)
+        res.hallazgos.append(hallazgo)
+        self.reescanear(res)
+        fila = self.uno('SELECT a.asset_type, p.value AS padre, p.asset_type AS tipo_padre FROM assets a '
+                        'JOIN assets p ON p.id = a.parent_asset_id WHERE a.value = %s', url)
+        self.assertEqual(fila, {'asset_type': 'api_doc', 'padre': sitio, 'tipo_padre': 'subdomain'})
+        guardado = self.uno('SELECT a.value, f.status FROM findings f JOIN assets a ON a.id = f.asset_id '
+                            'WHERE f.fingerprint = %s', bytes.fromhex(hallazgo.huella))
+        self.assertEqual(guardado, {'value': url, 'status': 'open'})
 
     def test_2o_lo_guardado_sin_partes_las_saca_de_su_evidencia(self):
         """Lo guardado antes de evidence.partes (#23): el secreto las saca de 'repo', el puerto de 'ip', la CVE de 'ip'

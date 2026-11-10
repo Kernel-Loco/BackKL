@@ -40,9 +40,10 @@ import json
 import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from cirdan.ml import caracteristicas as rubrica
 from cirdan.recolectores import borde, certspotter, contrato, shodan, transporte, visita
@@ -72,6 +73,11 @@ RUTAS = (
     '/swagger-ui/',               # la página de Swagger UI
     '/docs',                      # Swagger UI de FastAPI, ReDoc
 )
+# Solo en estas una página cuenta como la de Swagger UI o ReDoc: en las demás se espera un documento JSON, y una
+# página de respaldo que nombre a swagger-ui no lo es.
+RUTAS_UI = ('/swagger-ui/', '/docs')
+# La actividad 9 del Anexo A rige desde este día: antes, la línea de comandos solo reproduce.
+VIGENTE_DESDE = date(2026, 11, 13)
 
 AGENTE = contrato.AGENTE
 ACEPTA = 'application/json,text/html;q=0.9,*/*;q=0.1'
@@ -87,6 +93,7 @@ MAX_ERRORES = 3                   # errores del servidor (5xx) de un sitio con l
 MAX_MUESTRA = 10                  # funciones que no declaran autenticación que van en la evidencia
 MAX_TEXTO = 200                   # caracteres de una ruta documentada o de un título que se guardan
 MAX_HTML = 256 * 1024             # caracteres de una página en los que se busca la marca de Swagger UI o ReDoc
+MAX_CABEZA = 4096                 # caracteres de un documento cortado en los que se busca 'openapi' o 'swagger'
 TIEMPO_CORRIDA = 600              # segundos de toda la corrida: ninguna petición empieza después
 MIN_RESTANTE = 5                  # con menos segundos que esto ya no se empieza otro sitio ni otra ruta
 # Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición.
@@ -94,11 +101,17 @@ MAX_CONSULTAS = PAGINAS_CT * INTENTOS_CT + MAX_SITIOS * shodan.INTENTOS + MAX_SI
 
 METODOS = ('get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace')
 CAMBIAN_DATOS = ('POST', 'PUT', 'PATCH', 'DELETE')   # van primero en la muestra
-FORMATOS = {'openapi': 'OpenAPI', 'swagger': 'Swagger', 'ui': 'página de documentación'}
+FORMATOS = {'openapi': 'OpenAPI', 'swagger': 'Swagger', 'ui': 'página de documentación',
+            'grande': 'documento que no se leyó completo'}
+DOCUMENTOS = ('openapi', 'swagger')   # los formatos que se leen: traen título, funciones y huella
 MARCAS_UI = ('swagger-ui', 'swaggeruibundle', '<redoc', 'redoc.standalone')
 _VERSION = re.compile(r'[0-9][0-9A-Za-z.+-]{0,19}', re.A)
 _HUELLA_DOC = re.compile(r'[0-9a-f]{16}')
-_RARO = re.compile(r'[^\x20-\x7e¡-￿]')
+# Lo que no se guarda de un texto del documento: controles, invisibles y marcas de dirección (cambian cómo se lee
+# en el portal), mitades sueltas de un par (la base no las acepta), uso privado y sin asignar.
+_RARAS = ('Cc', 'Cf', 'Cs', 'Co', 'Cn', 'Zl', 'Zp')
+_LLAVE = re.compile(r'[A-Za-z0-9_:.~%+=-]{20,}', re.A)
+_CORTE = re.compile(r'[?;#]')
 
 # Topes deterministas: lo que dejan fuera no impide grabar.
 TOPES = ('paginas', 'sitios')
@@ -128,8 +141,21 @@ TITULO_AUTENTICACION = 'La documentación de %s no declara autenticación en %s'
 # ---------------------------------------------------------------- lectura del documento
 
 def _texto(x, tope=MAX_TEXTO):
-    """Un texto del documento como se guarda: sin caracteres de control y cortado a `tope`. None si no es texto."""
-    return _RARO.sub('?', x)[:tope] if isinstance(x, str) else None
+    """Un texto del documento como se guarda: cortado a `tope` y con ? en vez de cada carácter de _RARAS. None si
+    no es texto."""
+    if not isinstance(x, str):
+        return None
+    return ''.join('?' if unicodedata.category(c) in _RARAS else c for c in x[:tope])
+
+
+def _ruta_visible(ruta):
+    """Una ruta documentada como va en la muestra: sin consulta, parámetros ni fragmento, y con … en vez de un tramo
+    que parece un correo o una llave (20 caracteres o más con algún dígito). La evidencia nunca guarda un token ni
+    un dato personal, aunque el documento los traiga en una ruta."""
+    tramos = _CORTE.split(ruta, maxsplit=1)[0].split('/')
+    return _texto('/'.join(
+        '…' if '@' in t or '%40' in t or (_LLAVE.fullmatch(t) and any(c.isdigit() for c in t)) else t
+        for t in tramos))
 
 
 def declara(seguridad):
@@ -170,7 +196,9 @@ def leer(documento):
         for metodo, funcion in metodos.items():
             if not isinstance(metodo, str) or metodo.lower() not in METODOS or not isinstance(funcion, dict):
                 continue
-            propia = funcion['security'] if 'security' in funcion else general
+            propia = funcion.get('security')
+            if propia is None:   # no viene, o viene en null: vale el general
+                propia = general
             funciones.append((ruta, metodo.upper(), declara(propia)))
     funciones.sort()
     abiertas = sorted(((m not in CAMBIAN_DATOS, r, m) for r, m, ok in funciones if not ok))
@@ -179,13 +207,14 @@ def leer(documento):
     return {'formato': version[0], 'version': version[1],
             'titulo': _texto(info.get('title')) if isinstance(info, dict) else None,
             'operaciones': len(funciones), 'sin_declarar': len(abiertas),
-            'muestra': ['%s %s' % (m, _texto(r)) for _, r, m in abiertas[:MAX_MUESTRA]], 'huella': huella[:16]}
+            'muestra': ['%s %s' % (m, _ruta_visible(r)) for _, r, m in abiertas[:MAX_MUESTRA]],
+            'huella': huella[:16]}
 
 
 def analizar(cuerpo, cortado=False):
     """Lo que hay en el cuerpo de una respuesta 200: el resumen de leer() si es un documento, {'formato': 'ui'} si
-    es la página de Swagger UI o de ReDoc, {'formato': 'grande'} si parece un documento JSON que no cupo en
-    MAX_BYTES, o None. Nunca lanza por el contenido."""
+    es la página de Swagger UI o de ReDoc, {'formato': 'grande'} si es un documento que no cupo en MAX_BYTES (un
+    JSON cortado que nombra 'openapi' o 'swagger' en su principio), o None. Nunca lanza por el contenido."""
     texto = cuerpo.decode('utf-8-sig', errors='replace') if isinstance(cuerpo, (bytes, bytearray)) else cuerpo
     if not isinstance(texto, str):
         return None
@@ -195,7 +224,8 @@ def analizar(cuerpo, cortado=False):
         try:
             documento = json.loads(texto)
         except (ValueError, RecursionError):
-            return {'formato': 'grande'} if cortado else None
+            cabeza = texto[:MAX_CABEZA]
+            return {'formato': 'grande'} if cortado and ('"openapi"' in cabeza or '"swagger"' in cabeza) else None
         return leer(documento)
     pagina = texto[:MAX_HTML].lower()
     return {'formato': 'ui'} if any(marca in pagina for marca in MARCAS_UI) else None
@@ -214,9 +244,9 @@ def resumir(estado, cabeceras, cuerpo, cortado=False):
 def _doc_valido(doc):
     if doc is None:
         return True
-    if not isinstance(doc, dict) or doc.get('formato') not in tuple(FORMATOS) + ('grande',):
+    if not isinstance(doc, dict) or doc.get('formato') not in FORMATOS:
         return False
-    if doc['formato'] in ('ui', 'grande'):
+    if doc['formato'] not in DOCUMENTOS:
         return True
     enteros = all(shodan._entero(doc.get(k)) and doc[k] >= 0 for k in ('operaciones', 'sin_declarar'))
     muestra = doc.get('muestra')
@@ -255,7 +285,7 @@ def limpiar(datos):
     doc = datos.get('doc')
     if not _doc_valido(doc):
         raise ValueError('forma inesperada')
-    if isinstance(doc, dict) and doc['formato'] in ('openapi', 'swagger'):
+    if isinstance(doc, dict) and doc['formato'] in DOCUMENTOS:
         doc = {'formato': doc['formato'], 'version': doc['version'], 'titulo': _texto(doc['titulo']),
                'operaciones': doc['operaciones'], 'sin_declarar': doc['sin_declarar'],
                'muestra': [_texto(m, MAX_TEXTO + 8) for m in doc['muestra']], 'huella': doc['huella']}
@@ -389,7 +419,7 @@ class _Sitio:
 
     def __init__(self, nombre):
         self.nombre = nombre
-        self.estado = None       # 'sin_a', 'no_publica', 'sin_https' o 'revisado', si se llegó a saber
+        self.estado = None       # 'sin_a', 'no_publica', 'sin_https', 'revisado' o 'sin_revisar', si se llegó a saber
         self.docs = []           # (ruta, doc) de cada ruta que dio un documento o la página de documentación
         self.falta = None        # el motivo de MOTIVOS si quedó sin revisar
 
@@ -410,6 +440,7 @@ def _pedir_rutas(res, cliente, sitio):
                 sitio.estado = 'sin_https'    # no hay sitio https: no hay nada que revisar
             else:
                 sitio.sin_revisar('red')      # respondía y dejó de hacerlo
+                cliente.fallas += 1           # una falla de red de la corrida: no se graba
             return
         if 'sin_respuesta' in respuesta:
             sitio.sin_revisar(respuesta['sin_respuesta'])
@@ -428,14 +459,15 @@ def _pedir_rutas(res, cliente, sitio):
             sitio.sin_revisar('error_http')
             errores += 1
             if errores >= MAX_ERRORES:
-                return
+                break
             continue
         doc = respuesta.get('doc')
-        if doc and doc['formato'] == 'grande':
-            sitio.sin_revisar('grande')
-        elif doc:
-            sitio.docs.append((ruta, doc))
-    sitio.estado = 'revisado'
+        if not doc or (doc['formato'] == 'ui' and ruta not in RUTAS_UI):
+            continue
+        if doc['formato'] == 'grande':
+            sitio.sin_revisar('grande')   # está a la vista, pero sus funciones no se contaron
+        sitio.docs.append((ruta, doc))
+    sitio.estado = 'revisado' if sitio.falta is None else 'sin_revisar'
 
 
 def _reportar(res, sitio, dominio, ahora):
@@ -445,10 +477,11 @@ def _reportar(res, sitio, dominio, ahora):
     unicos, repetidos = [], {}
     for ruta, doc in sitio.docs:
         url = 'https://%s%s' % (host, ruta)
-        primero = next((u for u, d in unicos if doc['formato'] != 'ui' and d.get('huella') == doc.get('huella')
-                        and d['formato'] == doc['formato']), None)
+        # El mismo documento en otra ruta es un solo activo, y la página y el documento sin leer, uno por sitio
+        primero = next((u for u, d in unicos if d['formato'] == doc['formato']
+                        and (doc['formato'] not in DOCUMENTOS or d.get('huella') == doc.get('huella'))), None)
         if primero:
-            repetidos.setdefault(primero, []).append(url)   # el mismo documento en otra ruta: un solo activo
+            repetidos.setdefault(primero, []).append(url)
         else:
             unicos.append((url, doc))
     documentos = [_describir(url, doc) for url, doc in unicos]
@@ -462,15 +495,15 @@ def _reportar(res, sitio, dominio, ahora):
     res.hallazgos.append(_hallazgo('exposed_api_docs', dominio, host, tipo, TITULO_EXPUESTA % host,
                                    {'host': host, 'url': unicos[0][0], 'documentos': documentos}, ahora, host))
     for url, doc in unicos:
-        atributos = dict(_describir(url, doc), host=host, parent=host, fuente=FUENTE)
+        leido = doc['formato'] in DOCUMENTOS
+        # Siempre las mismas llaves: la base mezcla los atributos con los guardados y una que falte no se borra
+        atributos = dict(_describir(url, doc), host=host, parent=host, fuente=FUENTE,
+                         tambien_en=repetidos.get(url, []), titulo=doc['titulo'] if leido else None,
+                         operaciones=doc['operaciones'] if leido else None,
+                         no_declaran_autenticacion=doc['sin_declarar'] if leido else None)
         del atributos['url']
-        if url in repetidos:
-            atributos['tambien_en'] = repetidos[url]
-        if doc['formato'] != 'ui':
-            atributos.update(titulo=doc['titulo'], operaciones=doc['operaciones'],
-                             no_declaran_autenticacion=doc['sin_declarar'])
         res.activos.append(Activo(TIPO_ACTIVO, url, atributos))
-        if doc['formato'] == 'ui' or not doc['sin_declarar']:
+        if not leido or not doc['sin_declarar']:
             continue
         titulo = TITULO_AUTENTICACION % (host, '%d de %s' % (doc['sin_declarar'], _funciones(doc['operaciones'])))
         evidencia = dict(_describir(url, doc), host=host, operaciones=doc['operaciones'],
@@ -581,7 +614,7 @@ def _revisar(res, cliente, dominio, ahora):
     # 3. Activos y hallazgos: lo que se encontró se reporta aunque al sitio le haya faltado otra ruta
     for host in sorted(sitios, key=lambda h: (h != dominio, h)):
         sitio = sitios[host]
-        if sitio.docs or sitio.estado in ('revisado', 'sin_https'):
+        if sitio.docs or sitio.estado in ('revisado', 'sin_revisar', 'sin_https'):
             _reportar(res, sitio, dominio, ahora)
 
     # 4. Cobertura
@@ -637,18 +670,24 @@ def codigo_salida(res):
     return 2 if res.sin_cobertura or res.revisados is not None else 0
 
 
-def _main(argv=None):
+def _main(argv=None, hoy=None):
     p = argparse.ArgumentParser(description='Documentación de APIs a la vista, actividad 9 (sin --reproducir consulta '
                                             'en vivo)')
     p.add_argument('dominio')
     modo = p.add_mutually_exclusive_group()
     modo.add_argument('--grabar', action='store_true', help='consulta en vivo y graba las respuestas')
+    p.epilog = ('En vivo y con --grabar las consultas no pasan por el límite diario de la fuente (eso lo hace el '
+                'orquestador) y solo se permiten desde el %s.' % VIGENTE_DESDE.isoformat())
     modo.add_argument('--reproducir', action='store_true', help='usa solo lo grabado, sin red')
     args = p.parse_args(argv)
     dominio = args.dominio.strip().lower().rstrip('.')
     elegido = 'grabar' if args.grabar else 'reproducir' if args.reproducir else 'vivo'
     if elegido != 'reproducir' and not shodan._en_vivo_permitido(dominio):
         print('%s no está en DOMINIOS_EN_VIVO: solo se puede --reproducir' % dominio, file=sys.stderr)
+        return 1
+    if elegido != 'reproducir' and (hoy or datetime.now(timezone.utc).date()) < VIGENTE_DESDE:
+        print('la actividad 9 del Anexo A rige desde el %s: antes solo se puede --reproducir'
+              % VIGENTE_DESDE.isoformat(), file=sys.stderr)
         return 1
     res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
     print(resumen(res))

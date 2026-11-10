@@ -165,9 +165,10 @@ class Sembrada(unittest.TestCase):
                             url(DOMINIO, '/docs'): (200, [], b'<html><h1>Documentos de la empresa</h1></html>')})
         self.assertEqual([h.codigo for h in res.hallazgos], ['exposed_api_docs'])   # la raíz no: su /docs es otra cosa
         self.assertEqual(res.hallazgos[0].activo, API)
-        self.assertEqual([d['formato'] for d in res.hallazgos[0].evidencia['documentos']],
-                         ['página de documentación'] * 2)
-        self.assertNotIn('operaciones', activo(res, url(API, '/swagger-ui/')).atributos)
+        # Swagger UI y ReDoc en el mismo sitio: una sola página de documentación, con su otra ruta
+        self.assertEqual([d['formato'] for d in res.hallazgos[0].evidencia['documentos']], ['página de documentación'])
+        pagina = activo(res, url(API, '/swagger-ui/')).atributos
+        self.assertEqual((pagina['operaciones'], pagina['tambien_en']), (None, [url(API, '/docs')]))
         self.assertEqual(contrato.validar(res, codigos=set(api_docs.CODIGOS)), [])
 
     def test_4_el_mismo_documento_en_dos_rutas_es_un_solo_activo(self):
@@ -500,12 +501,13 @@ class Cobertura(unittest.TestCase):
         self.assertEqual(cliente.visitar.urls, esperadas(DOMINIO) + esperadas(API)[:3])
         self.assertEqual(partes(res.sin_revisar), [API])
 
-    def test_6_un_documento_que_no_cabe_queda_sin_revisar(self):
+    def test_6_un_documento_que_no_cabe_esta_a_la_vista_y_queda_sin_revisar(self):
         cortado = json.dumps(openapi3()).encode()[:200]
         self.assertEqual(api_docs.resumir(200, [], cortado, True), {'estado': 200, 'doc': {'formato': 'grande'}})
         self.assertIsNone(api_docs.resumir(200, [], cortado, False)['doc'])
         res, _, _ = correr({url(API, '/openapi.json'): {'estado': 200, 'doc': {'formato': 'grande'}}})
-        self.assertEqual((res.hallazgos, partes(res.sin_revisar)), ([], [API]))
+        # Está a la vista, pero sus funciones no se contaron
+        self.assertEqual(([h.codigo for h in res.hallazgos], partes(res.sin_revisar)), (['exposed_api_docs'], [API]))
         self.assertTrue(any('2 MB' in x for x in res.avisos))
 
     def test_7_si_ningun_sitio_se_pudo_revisar_no_hay_cobertura(self):
@@ -578,6 +580,121 @@ class Grabacion(unittest.TestCase):
                 mock.patch('sys.stderr'):
             self.assertEqual(api_docs._main(['otra-empresa.com']), 1)
             self.assertEqual(api_docs._main(['otra-empresa.com', '--grabar']), 1)
+
+
+class Revision(unittest.TestCase):
+    """Lo que encontró la revisión del cambio: textos que la base o el portal no deben recibir, páginas que no son
+    documentación, documentos cortados y el estado de un sitio a medias."""
+
+    def test_1_un_texto_con_media_pareja_o_con_marcas_invisibles_no_tumba_la_corrida(self):
+        doc = openapi3(paths={'/x\udc00': {'post': {}}, '/publico/\u202enimda': {'get': {}}, '/a\u200bb': {'get': {}}},
+                       info={'title': 'API \ud83d\ufeff'})
+        res, _, _ = correr({url(API, '/openapi.json'): (200, [], json.dumps(doc).encode())})
+        self.assertEqual((res.estado, contrato.validar(res, codigos=set(api_docs.CODIGOS))), ('succeeded', []))
+        self.assertEqual(activo(res, url(API, '/openapi.json')).atributos['titulo'], 'API ??')
+        self.assertEqual(hallazgos(res, 'api_auth_not_declared')[0].evidencia['muestra'],
+                         ['POST /x?', 'GET /a?b', 'GET /publico/?nimda'])
+        json.dumps([h.evidencia for h in res.hallazgos], ensure_ascii=False).encode('utf-8')   # como la grabadora
+
+    def test_2_la_muestra_no_guarda_llaves_correos_ni_consultas_de_una_ruta(self):
+        llave = 'bot123456:' + MARCA
+        doc = openapi3(paths={'/%s/webhook' % llave: {'post': {}},
+                              '/callback?api_key=' + MARCA: {'get': {}},
+                              '/usuarios/juan.perez@acme-demo.mx': {'get': {}},
+                              '/usuarios/juan%40acme-demo.mx;v=1': {'put': {}},
+                              '/pedidos/{id}/autorizaciones-pendientes': {'get': {}}})
+        res, _, _ = correr({url(API, '/openapi.json'): (200, [], doc)})
+        muestra = hallazgos(res, 'api_auth_not_declared')[0].evidencia['muestra']
+        self.assertEqual(muestra, ['POST /\u2026/webhook', 'PUT /usuarios/\u2026', 'GET /callback',
+                                   'GET /pedidos/{id}/autorizaciones-pendientes', 'GET /usuarios/\u2026'])
+        self.assertNotIn(MARCA, repr((res.hallazgos, res.activos)))
+
+    def test_3_una_pagina_de_respaldo_que_nombra_a_swagger_ui_no_es_un_documento(self):
+        respaldo = b'<html><head><link href="/swagger-ui/swagger-ui.css"></head><body>Inicio</body></html>'
+        res, _, _ = correr({url(API, r): (200, [], respaldo) for r in api_docs.RUTAS})
+        docs = [x for x in res.activos if x.tipo == 'api_doc']
+        # Solo cuenta en las dos rutas de página, y es un solo activo por sitio
+        self.assertEqual([(x.valor, x.atributos['tambien_en']) for x in docs],
+                         [(url(API, '/swagger-ui/'), [url(API, '/docs')])])
+        self.assertEqual(len(hallazgos(res, 'exposed_api_docs')), 1)
+
+    def test_4_security_en_null_hereda_el_general(self):
+        for armar in (openapi3, swagger2):
+            doc = api_docs.leer(armar(paths={'/a': {'get': {'security': None}, 'post': {}}}, security=LLAVE))
+            self.assertEqual((doc['operaciones'], doc['sin_declarar']), (2, 0))
+
+    def test_5_un_documento_cortado_esta_a_la_vista_y_un_json_cualquiera_cortado_no(self):
+        cortado = json.dumps(openapi3()).encode()[:-40]
+        self.assertEqual(api_docs.analizar(cortado, cortado=True), {'formato': 'grande'})
+        self.assertIsNone(api_docs.analizar(cortado))                               # entero y roto: no es nada
+        self.assertIsNone(api_docs.analizar(b'{"usuarios": [{"id": 1}, {"id"', cortado=True))
+        res, _, _ = correr({url(API, '/v3/api-docs'): {'estado': 200, 'doc': {'formato': 'grande'}}})
+        self.assertEqual(contrato.validar(res, codigos=set(api_docs.CODIGOS)), [])
+        self.assertEqual([h.codigo for h in res.hallazgos], ['exposed_api_docs'])
+        doc = activo(res, url(API, '/v3/api-docs'))
+        self.assertEqual((doc.atributos['formato'], doc.atributos['operaciones'], doc.atributos['titulo']),
+                         ('documento que no se leyó completo', None, None))
+        # Sus funciones no se contaron: el sitio no queda como revisado
+        self.assertEqual(partes(res.sin_revisar), [API])
+        self.assertEqual(activo(res, API).atributos['api_docs']['sin_revisar'], api_docs.MOTIVOS['grande'])
+
+    def test_6_el_activo_lleva_siempre_las_mismas_llaves(self):
+        res, _, _ = correr({url(API, '/openapi.json'): (200, [], openapi3()),
+                            url(DOMINIO, '/docs'): (200, [], SWAGGER_UI)})
+        llaves = [sorted(x.atributos) for x in res.activos if x.tipo == 'api_doc']
+        self.assertEqual(len(llaves), 2)
+        self.assertEqual(llaves[0], llaves[1])
+        self.assertEqual(activo(res, url(API, '/openapi.json')).atributos['tambien_en'], [])
+        pagina = activo(res, url(DOMINIO, '/docs')).atributos
+        self.assertEqual((pagina['titulo'], pagina['operaciones'], pagina['no_declaran_autenticacion']),
+                         (None, None, None))
+
+    def test_7_un_sitio_que_deja_de_aceptar_conexiones_a_media_corrida_no_se_graba(self):
+        carpeta = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, carpeta, True)
+        res, cliente, _ = correr({url(API, '/swagger.json'): {'rechazada': True}}, modo='grabar', carpeta=carpeta)
+        self.assertEqual(cliente.fallas, 1)
+        self.assertEqual((res.avisos[0], api_docs.codigo_salida(res)), (api_docs.NO_SE_GRABO, 3))
+        self.assertEqual(partes(res.sin_revisar), [API])
+
+    def test_8_un_sitio_con_errores_del_servidor_no_dice_revisado(self):
+        for cuantos in (1, api_docs.MAX_ERRORES):
+            with self.subTest(errores=cuantos):
+                res, cliente, _ = correr({url(API, r): (503, [], b'') for r in api_docs.RUTAS[:cuantos]})
+                estado = activo(res, API).atributos['api_docs']
+                self.assertEqual((estado['estado'], estado['sin_revisar']),
+                                 ('sin_revisar', api_docs.MOTIVOS['error_http']))
+                self.assertEqual(partes(res.sin_revisar), [API])
+
+    def test_9_un_api_doc_con_otro_nombre_en_hosts_no_pasa_el_contrato(self):
+        ajena = 'https://otra-empresa.com/openapi.json'
+        for atributos in ({'hosts': [DOMINIO, 'otra-empresa.com']}, {'host': DOMINIO}):
+            res = contrato.Resultado(DOMINIO, api_docs.FUENTE)
+            res.activos.append(Activo('api_doc', ajena, atributos))
+            self.assertTrue(any('solo de ese' in e for e in contrato.validar(res, codigos=set(api_docs.CODIGOS))))
+        propia = Activo('api_doc', url(API, '/openapi.json'), {'hosts': [API, DOMINIO]})
+        res = contrato.Resultado(DOMINIO, api_docs.FUENTE)
+        res.activos.append(propia)
+        self.assertTrue(contrato.validar(res, codigos=set(api_docs.CODIGOS)))
+
+    def test_10_la_linea_de_comandos_no_consulta_en_vivo_antes_de_que_rija_la_actividad(self):
+        vispera = api_docs.VIGENTE_DESDE.replace(day=api_docs.VIGENTE_DESDE.day - 1)
+        corrio = mock.Mock(return_value=contrato.Resultado(DOMINIO, api_docs.FUENTE))
+        with mock.patch.dict('os.environ', {'DOMINIOS_EN_VIVO': DOMINIO}), mock.patch('sys.stderr'), \
+                mock.patch('sys.stdout'), mock.patch.object(api_docs.contrato, 'ejecutar', corrio):
+            self.assertEqual(api_docs._main([DOMINIO], hoy=vispera), 1)
+            self.assertEqual(api_docs._main([DOMINIO, '--grabar'], hoy=vispera), 1)
+            corrio.assert_not_called()
+            api_docs._main([DOMINIO, '--reproducir'], hoy=vispera)
+            api_docs._main([DOMINIO], hoy=api_docs.VIGENTE_DESDE)
+        self.assertEqual([c.args[2] for c in corrio.call_args_list], ['reproducir', 'vivo'])
+
+    def test_11_la_migracion_no_espera_sin_limite_y_deja_al_dia_el_comentario_de_la_tabla(self):
+        texto = MIGRACION.read_text(encoding='utf-8')
+        sql = '\n'.join(linea.split('--', 1)[0] for linea in texto.splitlines())
+        self.assertLess(sql.index("SET LOCAL lock_timeout = '5s';"), sql.index('ALTER TABLE assets'))
+        self.assertGreater(sql.index('SET LOCAL lock_timeout'), sql.index('BEGIN;'))
+        self.assertRegex(sql, r"COMMENT ON TABLE assets IS '[^']*documentos de API")
 
 
 class Base(unittest.TestCase):
