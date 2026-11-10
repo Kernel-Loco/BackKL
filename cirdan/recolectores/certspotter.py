@@ -38,8 +38,10 @@ MAX_PAGINAS = 4              # cada página es una consulta del límite por hora
 SIN_REINTENTO = (429,)       # límite por hora alcanzado: reintentar a los 5 o 15 s solo gasta cupo
 COMPLEMENTO = {'intentos': 2, 'timeout': 20}  # con crt.sh arriba, como las variantes de parecidos de crtsh.py
 SIN_COBERTURA = ['cert_expired', 'lookalike_domain']
-AVISO = ('crt.sh no respondió. Los subdominios y certificados vigentes salen de Cert Spotter (SSLMate), que no da '
-         'certificados vencidos ni dominios parecidos')
+SOLO = ('Los subdominios y certificados vigentes salen de Cert Spotter (SSLMate), que no da certificados vencidos ni '
+        'dominios parecidos')
+AVISO = 'crt.sh no respondió. ' + SOLO
+AVISO_DANADA = 'La grabación de crt.sh está dañada. ' + SOLO  # al reproducir: crt.sh sí pudo haber respondido
 INCOMPLETO = ('Cert Spotter no dio todas las páginas o alguna emisión no se pudo leer: pueden faltar subdominios y '
               'renovaciones recientes, así que un certificado por vencer puede estar ya renovado')
 SIN_COMPLEMENTO = ('No se completó lo de crt.sh con Cert Spotter: pueden faltar subdominios y certificados vigentes que '
@@ -110,7 +112,9 @@ def certificados(cliente, dominio, max_paginas=MAX_PAGINAS, **opciones):
     FuenteNoResponde si la primera página no llega o si no trae ninguna emisión que se pueda leer (pagina_legible).
     Si falla una de las siguientes, devuelve lo que ya llegó con `completos` en False, igual que si se cortó en
     `max_paginas` o si se saltó una emisión que no es legible(). Al reproducir, una página que no se grabó es
-    SinGrabacion, que hereda de FuenteNoResponde, así sale lo mismo que en vivo.
+    SinGrabacion, que hereda de FuenteNoResponde, así sale lo mismo que en vivo. Un archivo dañado de la grabación
+    (crtsh.GrabacionDanada, también FuenteNoResponde) corta igual que una página que no llegó: sigue lo que ya se leyó
+    y ClienteCrtsh lo anota en `danados`, con lo que crtsh.recolectar no cierra nada y nombra el archivo.
     """
     emisiones, despues, raras = [], None, 0
     for _ in range(max_paginas):

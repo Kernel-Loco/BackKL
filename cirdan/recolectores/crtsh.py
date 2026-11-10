@@ -29,6 +29,12 @@ revisados lleva las partes de todos los certificados que llegaron y sin_revisar 
 orquestador no cierra lo de un certificado que esta corrida no vio. En el respaldo no van los ya
 vencidos, porque cert_expired queda en sin_cobertura.
 
+Grabación dañada (RC-46). Al reproducir, un archivo vacío, cortado o ilegible (una respuesta de crt.sh, una
+página de Cert Spotter, un falla_ o un dns_) no es que la fuente no respondiera. El resultado trae lo que sí
+se pudo leer, revisados queda en [] para que el orquestador no cierre nada en ese escaneo, y el primer aviso
+nombra los archivos dañados (DANADA). Nunca queda 'failed' ni completo: si no se pudo leer nada, sale sin
+activos, con los tres códigos en sin_cobertura.
+
     python -m cirdan.recolectores.crtsh olmardo.com
     python -m cirdan.recolectores.crtsh olmardo.com --con-parecidos     (solo cuando el equipo apruebe las variantes)
     python -m cirdan.recolectores.crtsh olmardo.com --grabar
@@ -45,7 +51,7 @@ crt.sh dejó a medias. Las páginas de Cert Spotter se graban en la misma carpet
 respaldo de Cert Spotter, también se graba que crt.sh no respondió, así --reproducir lo repite igual,
 y --completar vuelve a probar crt.sh sin repetir la consulta a Cert Spotter. Si crt.sh ya responde,
 sus certificados se unen a los de Cert Spotter grabados y la grabación deja de ser respaldo. Código de
-salida: 0 bien, 1 si el resultado queda en 'failed', 2 si quedan avisos (grabación incompleta,
+salida: 0 bien, 1 si el resultado queda en 'failed', 2 si quedan avisos (grabación incompleta o dañada,
 variantes sin respuesta, Cert Spotter sin responder o respaldo de Cert Spotter). Con el respaldo de
 Cert Spotter el código 2 es lo esperado.
 """
@@ -109,6 +115,23 @@ MESES = ('ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', '
 
 CrtshNoResponde = FuenteNoResponde  # el contrato (#13) define las excepciones de todas las fuentes
 
+# Avisos de una grabación con archivos dañados (RC-46). DANADA va primero, para que no lo corte el tope de avisos.
+DANADA = ('La grabación tiene %s (%s). Se muestra lo que sí se pudo leer, pueden faltar subdominios y certificados, y '
+          'en este escaneo no se marca nada como resuelto')
+MAX_DANADOS = 5              # archivos dañados que nombra el aviso. De los demás dice cuántos son
+SIN_LEER = 'No se pudo leer ningún certificado de la grabación de este dominio'
+POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsqueda por nombre y pueden faltar '
+                     'subdominios')
+
+
+class GrabacionDanada(FuenteNoResponde):
+    """Un archivo de la grabación vacío, cortado o ilegible. Hereda de FuenteNoResponde para que la corrida siga con
+    lo demás, pero no es que la fuente no respondiera: los avisos no lo dicen así y la corrida no cierra nada."""
+
+    def __init__(self, archivo):
+        super().__init__('El archivo %s de la grabación está dañado (vacío, cortado o ilegible)' % archivo)
+        self.archivo = archivo
+
 
 # ---------------------------------------------------------------- consulta a crt.sh
 
@@ -154,6 +177,7 @@ class ClienteCrtsh:
         self.resolver = resolver or getattr(self.transporte, 'resolver', None) or _resolver_dns
         self.dormir = dormir or time.sleep
         self.consultas = 0
+        self.danados = []          # archivos de la grabación que no se pudieron leer, sin repetir (RC-46)
         self._dns_funciona = {}    # nombre de control -> si el DNS responde, una vez por corrida
 
     @property
@@ -161,15 +185,29 @@ class ClienteCrtsh:
         """(archivo, fecha de grabación) de cada respuesta tomada del disco."""
         return self.grabadora.leidas
 
+    def _de_disco(self, consulta):
+        """de_disco de la Grabadora. Un archivo que no se puede leer (solo pasa al reproducir: con --completar se
+        consulta otra vez) se anota en `danados` y lanza GrabacionDanada con su nombre."""
+        try:
+            return self.grabadora.de_disco(consulta)
+        except ValueError:
+            archivo = _nombre_grabado(consulta)
+            if archivo not in self.danados:
+                self.danados.append(archivo)
+            raise GrabacionDanada(archivo) from None
+
     def resuelve(self, nombre, control=None):
         """True si el nombre resuelve en DNS, False si no existe y None si no se pudo saber. La respuesta se graba y se
         reproduce como las de crt.sh (dns_<nombre>.json), así --reproducir no consulta el DNS.
 
         Un «no existe» solo se cree si el nombre de `control` (el dominio autorizado) sí resuelve: sin servidor DNS
         alcanzable, Windows y macOS dan el mismo código que un nombre que no existe. Si el control falla, es None y no
-        se graba."""
+        se graba. Con el archivo de la grabación dañado también es None, y queda anotado en `danados`."""
         consulta = 'dns:' + nombre
-        del_disco, datos = self.grabadora.de_disco(consulta)
+        try:
+            del_disco, datos = self._de_disco(consulta)
+        except GrabacionDanada:
+            return None
         if del_disco:
             return datos
         valor = self.resolver(nombre)
@@ -186,13 +224,14 @@ class ClienteCrtsh:
         """Una consulta a crt.sh. `pausa`: segundos de espera antes de consultar, no aplica si la respuesta sale del disco.
 
         Al reproducir, si la grabación dice que crt.sh no respondió a esta consulta, lanza CrtshNoResponde con el mismo
-        error, así el respaldo de Cert Spotter se repite igual que en vivo."""
+        error, así el respaldo de Cert Spotter se repite igual que en vivo. Si el archivo de la respuesta o el de su
+        falla está dañado, lanza GrabacionDanada."""
         url = URL + '?' + urllib.parse.urlencode(dict(q=consulta, output='json', **extra))
         try:
             datos = self.pedir(consulta, url, 'crt.sh', intentos, timeout, pausa)
         except SinGrabacion as falta:
             try:
-                _, error = self.grabadora.de_disco(FALLA + consulta)
+                _, error = self._de_disco(FALLA + consulta)
             except SinGrabacion:
                 raise falta from None
             raise CrtshNoResponde(error) from None
@@ -204,7 +243,7 @@ class ClienteCrtsh:
         respondió (por ejemplo con --completar)."""
         if error is None:
             self.grabadora.descartar(FALLA + consulta)
-        elif not isinstance(error, SinGrabacion):
+        elif not isinstance(error, (SinGrabacion, GrabacionDanada)):
             self.grabadora.guardar(FALLA + consulta, str(error))
 
     def pedir(self, consulta, url, fuente='crt.sh', intentos=INTENTOS, timeout=None, pausa=0, sin_reintento=(),
@@ -213,11 +252,8 @@ class ClienteCrtsh:
         Lo usan crt.sh y su respaldo Cert Spotter (certspotter.py). Un código HTTP de `sin_reintento` corta los
         intentos, por ejemplo el 429 de Cert Spotter. `texto` se muestra en el error en lugar de `consulta`. Una
         respuesta con la que `valida(datos)` da False cuenta como una que no llegó, no se graba y no se reintenta.
-        Un archivo de la grabación vacío o cortado también es una consulta que no llegó."""
-        try:
-            del_disco, datos = self.grabadora.de_disco(consulta)
-        except ValueError:
-            raise CrtshNoResponde('la grabación de %s de %s no se puede leer' % (fuente, texto or consulta)) from None
+        Un archivo de la grabación vacío, cortado o ilegible lanza GrabacionDanada (_de_disco)."""
+        del_disco, datos = self._de_disco(consulta)
         if del_disco:
             return datos
         if pausa:
@@ -541,18 +577,29 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
     respaldo = certs is None
     completo = not fallas  # sin la búsqueda por nombre ni Cert Spotter a medias llegaron todos los certificados
     sin_revocaciones = False  # el complemento no respondió: no se sabe qué certificado de crt.sh se revocó
+
+    def danados():  # archivos de la grabación que no se pudieron leer hasta ahora (RC-46)
+        return list(getattr(cliente, 'danados', ()))
+    antes = danados()  # los de crt.sh: si Cert Spotter suma otro, sus páginas no faltan porque no las diera
     if respaldo:  # crt.sh no respondió a ninguna: los certificados vigentes salen de Cert Spotter (#14b)
         try:
             certs, completos = certspotter.certificados(cliente, dominio)
         except FuenteNoResponde as e:
             res.consultas = cliente.consultas
+            if danados():  # no hay nada que mostrar, pero por un archivo dañado: ni failed ni completo
+                res.avisos += [str(x) for x in [f for _, f in fallas] + [e] if not isinstance(x, GrabacionDanada)]
+                res.avisos.append(SIN_LEER)
+                res.sin_cobertura = list(CODIGOS)
+                return _danada(res, danados())
             res.estado, res.error = 'failed', '%s. %s' % (fallas[-1][1], e)
             return res
         certs = _con_fechas(certs)
         for consulta, e in fallas:  # Cert Spotter ya respondió: grabar la falla no borra la grabación anterior
             cliente.grabar_falla(consulta, e)
-        res.avisos += [str(e) for _, e in fallas] + [certspotter.AVISO]
-        if not completos:
+        res.avisos += [str(e) for _, e in fallas if not isinstance(e, GrabacionDanada)]
+        res.avisos.append(certspotter.AVISO_DANADA if any(isinstance(e, GrabacionDanada) for _, e in fallas)
+                          else certspotter.AVISO)
+        if not completos and danados() == antes:
             res.avisos.append(certspotter.INCOMPLETO)
         res.sin_cobertura = list(certspotter.SIN_COBERTURA)
         completo = completos  # vencidos y parecidos ya van en sin_cobertura
@@ -563,6 +610,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
         if fallas:  # se usó la búsqueda por nombre, que puede no traer todos los subdominios
             falla_comodin = fallas[0][1]
             res.avisos.append(str(falla_comodin) if isinstance(falla_comodin, SinGrabacion) else
+                              POR_NOMBRE_DANADA % dominio if isinstance(falla_comodin, GrabacionDanada) else
                               'crt.sh no respondió a %%.%s. Se usó la búsqueda por nombre y pueden faltar subdominios'
                               % dominio)
         try:  # crt.sh no siempre lee todos los logs: Cert Spotter suma los certificados vigentes que le falten (#14b)
@@ -576,7 +624,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
         else:
             certs = _unir(certs, _con_fechas(de_cert_spotter), dominio)
             if not completos:
-                res.avisos.append(certspotter.INCOMPLETO)
+                if danados() == antes:  # una página dañada de la grabación no es que Cert Spotter no la diera
+                    res.avisos.append(certspotter.INCOMPLETO)
                 completo = False  # las revocaciones de las páginas que faltan quedan como residual (README)
     res.consultas = cliente.consultas
     desconocidos = []
@@ -635,6 +684,18 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
     if not respondidas and 'lookalike_domain' not in res.sin_cobertura:  # sin búsquedas no es lo mismo que 0 parecidos
         res.sin_cobertura.append('lookalike_domain')
     res.consultas = cliente.consultas
+    return _danada(res, danados()) if danados() else res
+
+
+def _danada(res, archivos):
+    """El resultado de una corrida con archivos dañados en la grabación (RC-46): no se sabe qué dejó de verse, así que
+    revisados queda en [] y el orquestador no cierra nada de esta fuente en ese escaneo (con None lo daría por completo
+    y cerraría lo que no salió). El aviso que nombra los archivos va primero."""
+    res.revisados, res.sin_revisar = [], None
+    nombres = ', '.join(archivos[:MAX_DANADOS])
+    if len(archivos) > MAX_DANADOS:
+        nombres += ' y %d más' % (len(archivos) - MAX_DANADOS)
+    res.avisos.insert(0, DANADA % (_cuantos(len(archivos), 'archivo dañado', 'archivos dañados'), nombres))
     return res
 
 
@@ -659,6 +720,10 @@ def resumen(res, cliente=None, maximo_activos=20):
     """Líneas en español para leer el resultado en una terminal o en una demo."""
     if certspotter.AVISO in res.avisos:
         origen = 'Cert Spotter (crt.sh no respondió)'
+    elif certspotter.AVISO_DANADA in res.avisos:
+        origen = 'Cert Spotter (la grabación de crt.sh está dañada)'
+    elif SIN_LEER in res.avisos:
+        origen = 'grabación dañada'
     elif res.estado != 'succeeded' or any(a.endswith(certspotter.SIN_COMPLEMENTO) or
                                           a.startswith(SIN_GRABACION + certspotter.PREFIJO) for a in res.avisos):
         origen = 'crt.sh'

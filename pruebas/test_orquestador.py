@@ -709,6 +709,41 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.abiertos('host', nuevo), {'nuevo.acme-demo.mx': 'resolved'})
         self.assertEqual(self.conteos(s.scan_id)[1], 1)
 
+    def test_2z2_un_archivo_danado_de_la_grabacion_de_ct_logs_no_cierra_nada(self):
+        """RC-46 (Ernesto, 9 nov): al reproducir con un archivo de la grabación dañado, ct_logs no cierra ningún
+        hallazgo en ese escaneo, ni el por vencer de pagos, que solo trae crt.sh. El escaneo queda parcial, con ct_logs
+        en sources_partial, y el primer aviso de la fuente nombra el archivo. Con la grabación sana otra vez tampoco se
+        cierra nada, porque todo sigue ahí."""
+        pagos = cert(40, ['pagos.acme-demo.mx'], '2026-07-27T00:00:00', '2026-10-24T12:00:00')
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)):
+            carpeta = crtsh.carpeta_de('acme-demo.mx')
+            simulado = RespaldoSimulado([EMISIONES[:3], []], crtsh={'%.acme-demo.mx': SUBDOMINIOS + [pagos]})
+            antes, _ = recolectar_ct(simulado, carpeta, 'grabar', nueva=True)
+
+            def escanear():
+                s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+                return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], modo='reproducir',
+                                             ahora=AHORA, conn=self.conn)
+            escanear()
+            todos = dict.fromkeys(('api.acme-demo.mx', 'dev.acme-demo.mx', 'pagos.acme-demo.mx'), 'open')
+            self.assertEqual(self.abiertos('host', *antes.hallazgos), todos)
+            for nombre in ('subdominios_acme-demo.mx.json', 'certspotter_acme-demo.mx.json',
+                           'dns_dev.acme-demo.mx.json'):
+                bueno = (carpeta / nombre).read_bytes()
+                (carpeta / nombre).write_bytes(b'')
+                s, resumen = escanear()
+                (carpeta / nombre).write_bytes(bueno)
+                with self.subTest(nombre=nombre):
+                    self.assertEqual(self.abiertos('host', *antes.hallazgos), todos)
+                    self.assertEqual(self.conteos(s.scan_id)[1], 0)
+                    self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
+                    fuente = resumen['sources'][0]
+                    self.assertEqual((fuente['status'], fuente['error']), ('succeeded', None))
+                    self.assertEqual(fuente['avisos'][0], crtsh.DANADA % ('1 archivo dañado', nombre))
+            s, resumen = escanear()
+            self.assertEqual(self.abiertos('host', *antes.hallazgos), todos)
+            self.assertNotIn('sources_partial', resumen['stats'])
+
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         # crt.sh no tiene respuestas grabadas de acme-demo.mx: falla sin salir a la red
