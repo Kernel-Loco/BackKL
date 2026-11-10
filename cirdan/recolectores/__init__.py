@@ -8,7 +8,8 @@ import importlib
 REGISTRO = {'ct_logs': 'cirdan.recolectores.crtsh', 'dns': 'cirdan.recolectores.registros_dns',
             'subfinder': 'cirdan.recolectores.subfinder', 'github': 'cirdan.recolectores.github',
             'shodan': 'cirdan.recolectores.shodan', 'whois': 'cirdan.recolectores.rdap',
-            'web': 'cirdan.recolectores.visita', 'ejemplo': 'cirdan.recolectores.ejemplo'}
+            'web': 'cirdan.recolectores.visita', 'api_docs': 'cirdan.recolectores.api_docs',
+            'ejemplo': 'cirdan.recolectores.ejemplo'}
 
 
 def cargar(fuente):

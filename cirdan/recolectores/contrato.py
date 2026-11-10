@@ -26,6 +26,7 @@ import json
 import re
 import time
 import urllib.error
+import urllib.parse
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,7 +34,7 @@ from pathlib import Path
 CARPETA_GRABADAS = Path(__file__).resolve().parent / 'respuestas_grabadas'   # dentro del paquete, viaja con el código
 MODOS = ('vivo', 'grabar', 'reproducir')
 ESTADOS = ('succeeded', 'failed')                                                    # scan_source_runs.status final de una corrida
-TIPOS_ACTIVO = ('domain', 'subdomain', 'ip', 'service', 'certificate', 'email')      # assets.asset_type
+TIPOS_ACTIVO = ('domain', 'subdomain', 'ip', 'service', 'certificate', 'email', 'api_doc')   # assets.asset_type
 SEVERIDADES = ('critical', 'high', 'medium', 'low')                                  # scoring_rules.base_severity
 CARACTERISTICAS = ('tipo', 'antiguedad_dias', 'exposicion', 'sensibilidad')          # las del reto (lámina 7)
 EXPOSICIONES = ('directa', 'publica')     # directa: el activo responde en internet. publica: el dato es público
@@ -68,8 +69,8 @@ class SinGrabacion(FuenteNoResponde):
 @dataclass
 class Activo:
     tipo: str                      # uno de TIPOS_ACTIVO
-    valor: str                     # nombre, IP, ip:puerto/protocolo, correo o huella del certificado
-    atributos: dict = field(default_factory=dict)   # va a assets.attributes. ip, service y certificate llevan 'host' o 'hosts'
+    valor: str                     # nombre, IP, ip:puerto/protocolo, correo, huella del certificado o URL del documento
+    atributos: dict = field(default_factory=dict)   # va a assets.attributes. ip, service, certificate y api_doc llevan 'host' o 'hosts'
 
 
 @dataclass
@@ -199,7 +200,28 @@ def _errores_activo(a):
     hosts = a.atributos.get('hosts') or ([a.atributos['host']] if a.atributos.get('host') else [])
     if not isinstance(hosts, list) or not hosts or not all(_nombre_ok(h) for h in hosts):
         errores.append("activo %r: necesita 'host' o 'hosts' con nombres válidos para el filtro de alcance" % a.valor)
+    elif a.tipo == 'api_doc' and {h.lower().rstrip('.') for h in hosts} != {_host_de_url(a.valor)}:
+        # El filtro de alcance mira 'host' y 'hosts': con la URL de otro sitio, o con otro nombre además del suyo,
+        # pasaría como si fuera del dominio
+        errores.append("activo %r: debe ser una URL https del sitio de su 'host', y solo de ese" % a.valor)
     return errores
+
+
+def _host_de_url(valor):
+    """El sitio de una URL https sin usuario, puerto, consulta ni fragmento, en minúsculas, o None si no es una."""
+    # urlsplit quita tabuladores y saltos de línea de toda la URL antes de leerla: con uno, o con un espacio, no es una
+    if not isinstance(valor, str) or any(c <= ' ' or c == '\x7f' for c in valor):
+        return None
+    try:
+        url = urllib.parse.urlsplit(valor)
+        puerto = url.port
+    except ValueError:
+        return None
+    if url.scheme != 'https' or not url.hostname or url.username is not None or url.password is not None:
+        return None
+    if puerto is not None or url.query or url.fragment or not url.path.startswith('/') or valor != valor.strip():
+        return None
+    return url.hostname.lower().rstrip('.')
 
 
 def validar(res, codigos=None):
@@ -327,7 +349,8 @@ def en_alcance_nombre(nombre, dominio):
 
 
 def en_alcance(activo, dominio):
-    """Nombres por su nombre, correos por su dominio, y IP, servicios y certificados por su 'host' o 'hosts'."""
+    """Nombres por su nombre, correos por su dominio, y IP, servicios, certificados y documentos de API por su 'host' o
+    'hosts'."""
     if activo.tipo in ('domain', 'subdomain'):
         return en_alcance_nombre(activo.valor, dominio)
     if activo.tipo == 'email':

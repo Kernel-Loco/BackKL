@@ -44,8 +44,8 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 25 | `server_version_disclosed` | configuration | low | 8.00 | #18 RC-46 | Planeado |
 | 26 | `public_bucket` | data_leaks | high | 25.00 | #62 | Previsto |
 | 27 | `subdomain_takeover_risk` | configuration | high | 25.00 | #62 | Previsto |
-| 28 | `exposed_api_docs` | infrastructure | medium | 10.00 | #63 | Previsto |
-| 29 | `api_auth_not_declared` | infrastructure | medium | 10.00 | #63 | Previsto |
+| 28 | `exposed_api_docs` | infrastructure | medium | 10.00 | #63 RC-118 | Lo emite hoy |
+| 29 | `api_auth_not_declared` | infrastructure | medium | 10.00 | #63 RC-118 | Lo emite hoy |
 | 30 | `secret_in_container_image` | data_leaks | critical | 40.00 | #64 | Previsto |
 
 Por categoría: infrastructure 14, digital_identity 4, configuration 6 y data_leaks 6. Los secretos en repos públicos (#16) van a data_leaks y los correos en commits a digital_identity, como pide #30.
@@ -59,6 +59,8 @@ Si crt.sh no responde, la fuente `ct_logs` sigue con el respaldo de Cert Spotter
 La fuente `shodan` (#17) usa Shodan InternetDB, que no pide llave. Sin la llave de Shodan (#8, RC-40) no hay API de host: `exposed_iot_device`, `exposed_ot_device` y `outdated_software` van en `sin_cobertura` de `shodan` en todo escaneo (`SIN_LLAVE` de `cirdan/recolectores/shodan.py`). Los dos primeros siguen como Planeado y `outdated_software` lo emite la visita web. Si una corrida no revisa todas las IP del dominio (Cert Spotter caído, un 429, los topes de nombres o de IP, una respuesta de InternetDB que no se puede leer o el tope de tiempo), los códigos de `CODIGOS` sin hallazgos también van ahí, y lo que sí se revisó completo va en `revisados` (la IP para sus puertos e `IP/cve` para sus CVE) y, si se conocen todas las IP, lo demás de esas IP en `sin_revisar`: un hallazgo de una IP que no se revisó no se cierra aunque su código traiga otros (#23). Las CVE que pasan del tope de 25 por IP van en `omitidos` y tampoco se cierran.
 
 La fuente `web` (#18, RC-46) es la visita web de la actividad 6 del Anexo A (`cirdan/recolectores/visita.py`): pide la página principal de cada sitio del dominio por https y saca sus tecnologías, `outdated_software` con endoflife.date y `known_vulnerability` con la NVD. Sus partes son los sitios: un sitio con reto o bloqueo del WAF, que no se pudo visitar o al que le faltó la respuesta de endoflife.date o de la NVD queda en `sin_revisar`, y si ningún sitio quedó revisado los dos códigos van en `sin_cobertura`. Las CVE que pasan del tope de 25 por tecnología van en `omitidos`.
+
+La fuente `api_docs` (#63, RC-118) es la actividad 9 del Anexo A (`cirdan/recolectores/api_docs.py`): pide por https, solo con GET, una lista fija de 10 rutas de documentación en cada sitio del dominio y nunca llama a las funciones documentadas. `exposed_api_docs` va en el sitio y `api_auth_not_declared` en cada documento con funciones que no declaran autenticación, que es lo que dice el documento y no una prueba de que estén abiertas. Sus partes son los sitios: un sitio con reto o límite de peticiones, que no respondió, con errores del servidor o con una respuesta en JSON de más de 2 MB queda en `sin_revisar`, y si ningún sitio quedó revisado los dos códigos van en `sin_cobertura`. La semilla 013 la deja apagada hasta que el aviso de la actividad nueva esté dado.
 
 ## Cómo agregar un código
 

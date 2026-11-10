@@ -34,6 +34,9 @@ cirdan/recolectores/respuestas_grabadas/whois/*
 # respuestas reducidas de endoflife.date y la NVD)
 cirdan/recolectores/respuestas_grabadas/web/*
 !cirdan/recolectores/respuestas_grabadas/web/.gitkeep
+# Documentación de APIs (#63, RC-118): la grabación trae el resumen de cada documento, no el documento
+cirdan/recolectores/respuestas_grabadas/api_docs/*
+!cirdan/recolectores/respuestas_grabadas/api_docs/.gitkeep
 
 # Bases de DB-IP Lite (#15b, RC-166): pesan unos 17 MB y se bajan a mano cada mes. La imagen de la API sí las copia (Dockerfile)
 datos/geo/*
