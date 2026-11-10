@@ -45,6 +45,22 @@ async def same_origin_writes(request: Request, call_next):
     return await call_next(request)
 
 
+# Ningún sitio mete una respuesta de la API en un marco y el navegador no adivina su tipo (RC-283). Van aquí y no
+# solo en el portal porque la API también se llama sin él, y porque el portal entrega tal cual lo que reenvía a
+# /api/v1/*: sus cabeceras de next.config.ts no llegan a esas respuestas. La CSP completa y HSTS son de RC-89.
+CABECERAS_SEGURIDAD = {'X-Frame-Options': 'DENY', 'Content-Security-Policy': "frame-ancestors 'none'",
+                       'X-Content-Type-Options': 'nosniff'}
+
+
+@app.middleware('http')
+async def cabeceras_de_seguridad(request: Request, call_next):
+    """Va después de same_origin_writes para envolverlo: su 403 también sale con las cabeceras."""
+    response = await call_next(request)
+    for nombre, valor in CABECERAS_SEGURIDAD.items():
+        response.headers[nombre] = valor
+    return response
+
+
 app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(v1_router)
