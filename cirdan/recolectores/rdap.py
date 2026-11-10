@@ -214,7 +214,9 @@ def _descargar(url, timeout, cronometro=None):
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE,
                                                'Accept': 'application/rdap+json, application/json'})
     try:
-        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES, cronometro)
+        # Solo IPv4, como la visita web: el nombre del servidor RDAP llega del bootstrap de IANA, y una AAAA que el DNS
+        # de la red arma con su propio prefijo de NAT64 no puede llevar la petición a una IPv4 interna (#181, RC-299)
+        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES, cronometro, familia=socket.AF_INET)
     except transporte.PlazoVencido:
         raise SinTiempo('whois: la respuesta tardó más de %s s' % timeout) from None
     except transporte.Redirigida as e:
@@ -306,14 +308,16 @@ def _conversar(host, consulta, timeout, cronometro=None):
 def _url_https(url):
     """La URL base de un servidor RDAP, terminada en '/', o None si no es https limpia: ASCII imprimible sin espacios,
     sin usuario ni contraseña ('@'), sin '\\', '?' ni '#' (aunque la consulta o el fragmento queden vacíos), y con un
-    nombre de host (no una IP)."""
+    nombre de host (no una IP) y, si trae puerto, uno de transporte.PUERTOS (#181, RC-299)."""
     if not isinstance(url, str) or len(url) > MAX_URL or not (url.isascii() and url.isprintable()) \
             or any(c in url for c in ' @\\?#'):
         return None
     try:
         partes = urllib.parse.urlsplit(url)
-        partes.port   # lanza ValueError con un puerto roto
+        puerto = partes.port   # lanza ValueError con un puerto roto
     except ValueError:
+        return None
+    if puerto is not None and puerto not in transporte.PUERTOS:
         return None
     if partes.scheme.lower() != 'https' or not partes.hostname or not HOST_VALIDO.fullmatch(partes.hostname) \
             or partes.query or partes.fragment:
