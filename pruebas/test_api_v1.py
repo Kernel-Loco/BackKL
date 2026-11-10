@@ -6,11 +6,14 @@ Con los datos demo de Acme, las respuestas deben coincidir con los JSON de docs/
 diferencias aceptadas son los campos «propuestos» del portal (signer_email) y los
 textos que todavía no calcula el motor de score (#31). Los textos de cada regla (#30) sí se comparan.
 """
+import csv
+import io
 import json
 import unittest
 from pathlib import Path
 
 from pruebas import sesion
+from pruebas.test_aislamiento import psql
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
 PROPUESTOS = {'signer_email'}
@@ -99,6 +102,8 @@ class ApiV1(unittest.TestCase):
         hist = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')
         self.assertEqual([(p['score'], p['reason'], p['new_findings']) for p in hist['items']],
                          [(68, 'scan', 3), (60, 'correction', 0)])
+        self.assertEqual([p['weekly_changes'] for p in hist['items']],
+                         [p['weekly_changes'] for p in ejemplo('historico.json')['items']])
         tienda = self.get(self.acme, '/api/v1/domains/acme-tienda.mx/score/history')['items']
         semilla = next(p for p in tienda if p['score_id'] == 'a0000000-0000-4000-8000-000000000002')
         self.assertEqual((semilla['new_findings'], semilla['resolved_findings']), (None, None))  # su escaneo no los contó
@@ -166,6 +171,125 @@ class ApiV1(unittest.TestCase):
                 with self.acme.opener.open(url, timeout=10) as r:
                     self.assertEqual(r.status, 200, url)
                     self.assertTrue(r.headers['Content-Type'].startswith(tipo), url)
+
+    def descargar(self, client, url):
+        with client.opener.open(sesion.BASE + url, timeout=10) as r:
+            return r.status, r.headers, r.read().decode('utf-8')
+
+    def test_9b_comparacion_hallazgo_por_hallazgo(self):
+        # a..01 (escaneo de la semilla 001) solo trae el aporte de la brecha. a..04 (corrección de la 009) trae
+        # los cuatro hallazgos abiertos de acme-demo.mx, con la brecha en 40 puntos en vez de 24.
+        url = ('/api/v1/domains/acme-demo.mx/score/compare?desde=a0000000-0000-4000-8000-000000000001'
+               '&hasta=a0000000-0000-4000-8000-000000000004')
+        comp = self.get(self.acme, url)
+        self.assertEqual((comp['from']['score'], comp['to']['score']), (68, 60))
+        self.assertEqual(comp['summary'], {'new': 3, 'gone': 0, 'kept': 1, 'severity_changed': 0})
+        brecha = next(i for i in comp['items'] if i['finding_id'] == '80000000-0000-4000-8000-000000000001')
+        self.assertEqual((brecha['change'], brecha['penalty_from'], brecha['penalty_to']), ('kept', 24.0, 40.0))
+        self.assertEqual(comp['total'], 4)
+        self.assertEqual([i['change'] for i in comp['items']], ['new', 'new', 'new', 'kept'])
+        # Al revés, los tres nuevos pasan a 'gone'.
+        reves = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/compare?desde=a0000000-0000-4000-8000-000000000004'
+                                    '&hasta=a0000000-0000-4000-8000-000000000001')
+        self.assertEqual(reves['summary'], {'new': 0, 'gone': 3, 'kept': 1, 'severity_changed': 0})
+        # Un score de otro dominio, de otra empresa o mal formado responde 404, igual que uno que no existe.
+        for desde in ('a0000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-000000000000', 'no-es-uuid'):
+            code, _ = self.acme.get(url.replace('a0000000-0000-4000-8000-000000000001', desde))
+            self.assertEqual(code, 404, desde)
+        self.assertEqual(self.beta.get(url)[0], 404)
+        self.assertEqual(self.acme.get('/api/v1/domains/acme-demo.mx/score/compare')[0], 422)
+        # Exportaciones de la comparación: CSV con BOM y un renglón por hallazgo, JSON igual a la respuesta.
+        code, headers, texto = self.descargar(self.acme, url.replace('/compare?', '/compare/export?formato=csv&'))
+        self.assertEqual(code, 200)
+        self.assertTrue(headers['Content-Type'].startswith('text/csv'))
+        self.assertIn('acme-demo.mx-comparacion.csv', headers['Content-Disposition'])
+        self.assertTrue(texto.startswith('﻿'))
+        filas = list(csv.reader(io.StringIO(texto[1:], newline='')))
+        self.assertEqual(len(filas), 1 + comp['total'])
+        self.assertEqual(sorted(f[5] for f in filas[1:]), sorted(i['finding_id'] for i in comp['items']))
+        code, headers, texto = self.descargar(self.acme, url.replace('/compare?', '/compare/export?formato=json&'))
+        self.assertTrue(headers['Content-Type'].startswith('application/json'))
+        self.assertEqual(json.loads(texto), comp)
+        self.assertEqual(self.acme.get(url.replace('/compare?', '/compare/export?formato=xlsx&'))[0], 422)
+
+    def test_9c_exportacion_de_hallazgos_escapa_formulas(self):
+        # Un hallazgo abierto con un título que Excel tomaría por fórmula. Se borra al terminar.
+        hallazgo = '80000000-0000-4000-8000-0000000005f7'
+        ok, _, err = psql('''
+            INSERT INTO findings (id, organization_id, domain_id, asset_id, rule_id, source_id, fingerprint,
+                                  severity, status, evidence, detected_at)
+            SELECT '%s', d.organization_id, d.id,
+                   (SELECT a.id FROM assets a WHERE a.domain_id = d.id ORDER BY a.id LIMIT 1),
+                   (SELECT r.id FROM scoring_rules r WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001'
+                       AND r.code = 'spf_missing'),
+                   (SELECT s.id FROM data_sources s WHERE s.code = 'dns'),
+                   sha256('rc57-prueba-formula'), 'low', 'open',
+                   '{"title": "=HYPERLINK(\\"http://x\\",\\"clic\\")", "banner": "@SUM(1)"}', now()
+              FROM domains d WHERE d.fqdn = 'acme-demo.mx';
+        ''' % hallazgo, user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            _, headers, texto = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/findings/export?formato=csv')
+            self.assertTrue(headers['Content-Type'].startswith('text/csv'))
+            self.assertTrue(texto.startswith('﻿'))
+            filas = list(csv.reader(io.StringIO(texto[1:], newline='')))
+            fila = dict(zip(filas[0], next(f for f in filas[1:] if f[1] == hallazgo)))
+            self.assertEqual(fila['titulo'], '\'=HYPERLINK("http://x","clic")')
+            self.assertEqual(json.loads(fila['evidencia'])['banner'], '@SUM(1)')  # el JSON empieza con {, no es fórmula
+            _, headers, texto = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/findings/export?formato=json')
+            data = json.loads(texto)
+            self.assertEqual(data, self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings'))
+            self.assertEqual(len(filas), 1 + data['total'])
+            self.assertEqual(next(i for i in data['items'] if i['id'] == hallazgo)['title'],
+                             '=HYPERLINK("http://x","clic")')  # el JSON no se toca
+        finally:
+            ok, _, err = psql("DELETE FROM findings WHERE id = '%s';" % hallazgo, user='postgres')
+            self.assertTrue(ok, err)
+
+    def test_9e_comparacion_con_hallazgo_que_cambio_de_dominio(self):
+        # El upsert por huella puede mover domain_id (orquestador/__init__.py). El aporte guardado en el score sigue
+        # siendo del dominio del score, así que la comparación lo cuenta igual. Se regresa al terminar.
+        url = ('/api/v1/domains/acme-demo.mx/score/compare?desde=a0000000-0000-4000-8000-000000000001'
+               '&hasta=a0000000-0000-4000-8000-000000000004')
+        antes = self.get(self.acme, url)
+        movido = next(i['finding_id'] for i in antes['items'] if i['change'] == 'new')
+        ok, activo, err = psql("SELECT asset_id FROM findings WHERE id = '%s';" % movido, user='postgres')
+        self.assertTrue(ok and activo, err)
+        # La llave (organization_id, domain_id, asset_id) pide un activo del otro dominio, y la semilla no trae
+        # activos de acme-tienda.mx: se crea uno de prueba y se borra al terminar.
+        temporal = '70000000-0000-4000-8000-0000000005f7'
+        ok, _, err = psql('''
+            INSERT INTO assets (id, organization_id, domain_id, asset_type, value, attributes, first_seen_at, last_seen_at)
+            SELECT '%s', d.organization_id, d.id, 'domain', 'rc57-prueba.acme-tienda.mx', '{}', now(), now()
+              FROM domains d WHERE d.fqdn = 'acme-tienda.mx' ON CONFLICT (id) DO NOTHING;
+            UPDATE findings f SET domain_id = a.domain_id, asset_id = a.id FROM assets a
+             WHERE a.id = '%s' AND f.id = '%s';
+        ''' % (temporal, temporal, movido), user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            despues = self.get(self.acme, url)
+            self.assertEqual((despues['summary'], despues['total']), (antes['summary'], antes['total']))
+            self.assertIn(movido, [i['finding_id'] for i in despues['items']])
+        finally:
+            ok, _, err = psql("UPDATE findings SET domain_id = (SELECT id FROM domains WHERE fqdn = 'acme-demo.mx'), "
+                              "asset_id = '%s' WHERE id = '%s'; DELETE FROM assets WHERE id = '%s';"
+                              % (activo, movido, temporal), user='postgres')
+            self.assertTrue(ok, err)
+
+    def test_9d_403_sin_autorizacion_vigente_y_404_de_otra_empresa(self):
+        # old-example.net es de Acme y su autorización venció el 15 ago 2026.
+        for url in ('/api/v1/domains/old-example.net/findings/export?formato=csv',
+                    '/api/v1/domains/old-example.net/findings/export?formato=json',
+                    '/api/v1/domains/old-example.net/score/compare?desde=a0000000-0000-4000-8000-000000000001'
+                    '&hasta=a0000000-0000-4000-8000-000000000004',
+                    '/api/v1/domains/old-example.net/score/compare/export?formato=csv'
+                    '&desde=a0000000-0000-4000-8000-000000000001&hasta=a0000000-0000-4000-8000-000000000004'):
+            code, body = self.acme.get(url)
+            self.assertEqual(code, 403, (url, body))
+            self.assertEqual(self.beta.get(url)[0], 404, url)
+        self.assertEqual(self.beta.get('/api/v1/domains/acme-demo.mx/findings/export')[0], 404)
+        self.assertEqual(self.get(self.beta, '/api/v1/domains/beta-corp.mx/findings/export')['domain'], 'beta-corp.mx')
+        self.assertEqual(sesion.Client().get('/api/v1/domains/acme-demo.mx/findings/export')[0], 401)
 
 
 if __name__ == '__main__':

@@ -1135,6 +1135,21 @@ class Orquestador(unittest.TestCase):
         sin_dns = self.solicitar('acme-demo.mx', DnsSimulado(ConsultaTxt(None, error='Timeout')))
         self.assertEqual((sin_dns.aceptada, sin_dns.txt), (False, 'dns_error'))
 
+    def test_7b_la_evidencia_guarda_el_resolvedor_que_dio_el_resultado(self):
+        """#119, RC-236: un match por DNS sobre HTTPS queda con resolver_ip 1.0.0.1, y uno por el 53 con 1.1.1.1."""
+        for resolvedor in ('1.0.0.1', '1.1.1.1'):
+            with self.subTest(resolvedor=resolvedor):
+                s = self.solicitar('acme-demo.mx', DnsSimulado(ConsultaTxt((TXT_ACME,), resolvedor)))
+                self.assertTrue(s.aceptada, s.detalle)
+                try:
+                    evidencia = self.uno('SELECT host(v.resolver_ip) AS ip, v.result FROM scans s JOIN '
+                                         'dns_txt_verifications v ON v.id = s.txt_verification_id WHERE s.id = %s',
+                                         s.scan_id)
+                    self.assertEqual((evidencia['ip'], evidencia['result']), (resolvedor, 'match'))
+                finally:   # el siguiente subTest no choca con este escaneo aunque aquí falle algo
+                    self.conn.execute("UPDATE scans SET status = 'completed', finished_at = now() WHERE id = %s",
+                                      (s.scan_id,))
+
     def test_8_no_consulta_en_vivo_un_dominio_de_la_demo(self):
         s = orquestador.solicitar(ACME, 'acme-demo.mx', conn=self.conn)  # sin DNS simulado = consulta real
         self.assertEqual((s.aceptada, s.motivos), (False, ['live_scan_not_allowed']))

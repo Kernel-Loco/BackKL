@@ -3,18 +3,21 @@
 Todo con sesión: la empresa sale de la cookie y RLS filtra en la base. Las bandas, el ponderado y
 el piso salen del criterio de criticidad (cirdan/score/criterio.py, #29).
 """
+import json
 import uuid
 from datetime import date, datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from psycopg.types.json import Jsonb
 
 from cirdan import orquestador
 from cirdan.auth.deps import Session, current_session, require_roles
+from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import audit, transaction
-from cirdan.score import configuracion, criterio, motor, plan as plan_accion
+from cirdan.score import cambios, comparacion, configuracion, criterio, motor, plan as plan_accion
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
@@ -259,9 +262,9 @@ def domain_findings(fqdn: str, session: Session = Depends(current_session)):
 # ---------------------------------------------------------------- score e histórico
 
 SCORES_SQL = '''
-SELECT ds.id::text AS score_id, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
+SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
     ds.model_version, ds.model_fallback_reason, ds.computed_at,
-    rs.version AS rule_set_version, rs.category_weights, sc.stats,
+    rs.version AS rule_set_version, rs.category_weights, sc.stats, sc.queued_at, sc.finished_at,
        (SELECT count(*) FROM score_contributions x WHERE x.score_id = ds.id AND x.severity = 'critical') AS critical_at_time
   FROM domain_scores ds
   JOIN domains d ON d.id = ds.domain_id
@@ -306,14 +309,151 @@ def domain_score(fqdn: str, session: Session = Depends(current_session)):
 @router.get('/domains/{fqdn}/score/history', summary='Todos los scores del dominio, del más viejo al más nuevo')
 def score_history(fqdn: str, session: Session = Depends(current_session)):
     _domain_id(session, fqdn)
+    rows = _query(session, SCORES_SQL, (fqdn,))
+    scan_ids = [row['scan_id'] for row in rows if row['reason'] == 'scan']
+    nuevos_activos = {}
+    if scan_ids:
+        nuevos_activos = {
+            row['scan_id']: row['new_assets']
+            for row in _query(session, '''
+                SELECT s.id::text AS scan_id, count(a.id) AS new_assets
+                  FROM scans s
+                  LEFT JOIN assets a ON a.domain_id = s.domain_id
+                                    AND a.first_seen_at >= s.queued_at
+                                    AND a.first_seen_at <= s.finished_at
+                 WHERE s.id::text = ANY(%s)
+                 GROUP BY s.id
+            ''', (scan_ids,))
+        }
     items = []
-    for row in _query(session, SCORES_SQL, (fqdn,)):
+    escaneo_anterior = None
+    for row in rows:
         base, _ = _score_base(row, row['critical_at_time'])
         # Un recálculo no encuentra ni resuelve hallazgos. Un escaneo que no los contó (antes de RC-55) da null, no 0.
         stats = (row['stats'] or {}) if row['reason'] == 'scan' else {'new_findings': 0, 'resolved_findings': 0}
+        cambios_semanales = None
+        if row['reason'] == 'scan':
+            escaneo = {**row, 'new_assets': nuevos_activos.get(row['scan_id'], 0)}
+            cambios_semanales = cambios.resumen_semanal(escaneo, escaneo_anterior)
+            escaneo_anterior = escaneo
         items.append({**base, 'categories': row['category_scores'],
-                      'new_findings': stats.get('new_findings'), 'resolved_findings': stats.get('resolved_findings')})
+                      'new_findings': stats.get('new_findings'), 'resolved_findings': stats.get('resolved_findings'),
+                      'weekly_changes': cambios_semanales})
     return {'domain': fqdn, 'items': items, 'total': len(items)}
+
+
+# ---------------------------------------------------------------- comparación y exportaciones (#24, RC-57)
+# Las dos piden autorización firmada vigente (retro-11): un dominio de otra empresa responde 404, como
+# en el resto de la API, y uno de la empresa sin autorización vigente responde 403.
+
+def _dominio_autorizado(session, fqdn):
+    rows = _query(session, '''
+        SELECT d.id::text,
+               EXISTS (SELECT 1 FROM domain_authorizations a
+                        WHERE a.domain_id = d.id AND a.revoked_at IS NULL
+                          AND current_date BETWEEN a.valid_from AND a.valid_until) AS vigente
+          FROM domains d WHERE d.fqdn = %s
+    ''', (fqdn,))
+    if not rows:
+        raise HTTPException(404, 'Dominio no encontrado para esta organización')
+    if not rows[0]['vigente']:
+        raise HTTPException(403, 'El dominio no tiene una autorización firmada vigente')
+    return rows[0]['id']
+
+
+def _formato(formato):
+    if formato not in ('csv', 'json'):
+        raise HTTPException(422, "El formato debe ser 'csv' o 'json'")
+    return formato
+
+
+def _descarga(contenido, media_type, nombre):
+    return Response(content=contenido, media_type=media_type,
+                    headers={'Content-Disposition': 'attachment; filename="%s"' % nombre})
+
+
+def _json(data):
+    return json.dumps(jsonable_encoder(data), ensure_ascii=False, separators=(',', ':'))
+
+
+ENCABEZADOS_HALLAZGOS = (
+    'dominio', 'hallazgo_id', 'titulo', 'severidad', 'severidad_base', 'categoria', 'regla', 'activo',
+    'tipo_activo', 'fuente', 'estado', 'recurrencia', 'cve', 'cvss', 'epss', 'en_kev', 'detectado',
+    'ultimo_escaneo_id', 'mitre_attack', 'iso_27001_2022', 'cis_controls_v8_1', 'evidencia',
+)
+
+
+@router.get('/domains/{fqdn}/findings/export', summary='Descarga los hallazgos abiertos del dominio en CSV o JSON')
+def export_findings(fqdn: str, formato: str = Query(default='json'), session: Session = Depends(current_session)):
+    formato = _formato(formato)
+    _dominio_autorizado(session, fqdn)
+    items = [_finding(f) for f in _query(session, FINDINGS_SQL, (fqdn,))]
+    if formato == 'json':
+        return _descarga(_json({'domain': fqdn, 'items': items, 'total': len(items)}),
+                         'application/json; charset=utf-8', '%s-hallazgos.json' % fqdn)
+    filas = [(fqdn, i['id'], i['title'], i['severity'], i['base_severity'], i['category'], i['rule_code'], i['asset'],
+              i['asset_type'], i['source'], i['status'], i['recurrence'], i['cve_id'], i['cvss'], i['epss'], i['in_kev'],
+              i['detected_at'], i['last_scan_id'], i['frameworks']['mitre_attack']['technique_id'],
+              i['frameworks']['iso_27001_2022']['control_id'], i['frameworks']['cis_controls_v8_1']['safeguard_id'],
+              i['evidence']) for i in items]
+    return _descarga(csv_con_bom(ENCABEZADOS_HALLAZGOS, filas), 'text/csv; charset=utf-8', '%s-hallazgos.csv' % fqdn)
+
+
+COMPARE_SCORES_SQL = '''
+SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.reason, ds.partial_coverage, ds.computed_at
+  FROM domain_scores ds WHERE ds.domain_id = %s AND ds.id = ANY(%s::uuid[])
+'''
+
+COMPARE_CONTRIBUTIONS_SQL = '''
+SELECT x.score_id::text, f.id::text AS finding_id, x.severity, x.penalty,
+       coalesce(f.evidence->>'title', r.code) AS title, r.code AS rule_code, r.category,
+       a.value AS asset, a.asset_type, f.status
+  FROM score_contributions x
+  JOIN domain_scores ds ON ds.id = x.score_id
+  JOIN findings f       ON f.id = x.finding_id  -- sin f.domain_id: el upsert por huella puede haberlo movido
+  JOIN assets a         ON a.id = f.asset_id
+  JOIN scoring_rules r  ON r.id = x.rule_id
+ WHERE ds.domain_id = %s AND x.score_id = ANY(%s::uuid[])
+'''
+
+
+def _score_ids(*valores):
+    try:
+        return [str(uuid.UUID(v)) for v in valores]
+    except ValueError:
+        raise HTTPException(404, 'Escaneo no encontrado')  # un id mal formado se responde igual que uno ajeno
+
+
+def _comparacion(session, fqdn, desde, hasta):
+    domain_id = _dominio_autorizado(session, fqdn)
+    desde, hasta = _score_ids(desde, hasta)
+    with transaction(session.org_id) as conn:  # una sola transacción: las dos fotos y sus aportes del mismo momento
+        scores = {r['score_id']: r for r in conn.execute(COMPARE_SCORES_SQL, (domain_id, [desde, hasta])).fetchall()}
+        if desde not in scores or hasta not in scores:
+            raise HTTPException(404, 'Escaneo no encontrado')
+        aportes = conn.execute(COMPARE_CONTRIBUTIONS_SQL, (domain_id, [desde, hasta])).fetchall()
+    items, resumen = comparacion.comparar([a for a in aportes if a['score_id'] == desde],
+                                          [a for a in aportes if a['score_id'] == hasta])
+    return {'domain': fqdn, 'from': scores[desde], 'to': scores[hasta], 'summary': resumen,
+            'items': items, 'total': len(items)}
+
+
+@router.get('/domains/{fqdn}/score/compare',
+            summary='Compara hallazgo por hallazgo dos scores del histórico: nuevos, que ya no están y que siguen')
+def compare_scores(fqdn: str, desde: str = Query(..., description='score_id del histórico'),
+                   hasta: str = Query(..., description='score_id del histórico'),
+                   session: Session = Depends(current_session)):
+    return _comparacion(session, fqdn, desde, hasta)
+
+
+@router.get('/domains/{fqdn}/score/compare/export', summary='Descarga la comparación de dos scores en CSV o JSON')
+def export_comparison(fqdn: str, desde: str = Query(...), hasta: str = Query(...),
+                      formato: str = Query(default='json'), session: Session = Depends(current_session)):
+    formato = _formato(formato)
+    data = _comparacion(session, fqdn, desde, hasta)
+    if formato == 'json':
+        return _descarga(_json(data), 'application/json; charset=utf-8', '%s-comparacion.json' % fqdn)
+    return _descarga(comparacion.exportar_csv(data), 'text/csv; charset=utf-8', '%s-comparacion.csv' % fqdn)
 
 
 # ---------------------------------------------------------------- plan de acción y simulador (#42, #70)

@@ -1,6 +1,6 @@
 # Política de uso ético y alcance de LowTide
 
-Tarjeta #6 (RC-36). La política de seguridad y privacidad de la tarjeta #78 integrará estas reglas.
+Tarjeta #6 (RC-36). La [política de seguridad y privacidad](politica_seguridad_privacidad.md) de la tarjeta #78 (RC-39) integra estas reglas con los controles de ISO/IEC 27001 y el aviso de privacidad.
 
 LowTide es el nombre comercial del servicio. Cirdan es su nombre clave y se queda en los identificadores técnicos, como el prefijo del TXT `cirdan-verification=`, el prefijo `CIRDAN_FAKE_` de los tokens falsos y los nombres del paquete, la base, los contenedores, las variables de entorno y los archivos. Las peticiones de LowTide salen con el User-Agent `lowtide-osint`.
 
@@ -51,7 +51,7 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 4. La base rechaza guardar en `scan_source_runs.raw_payload` la respuesta cruda de Have I Been Pwned, y el recolector tampoco la copia en la evidencia de un hallazgo ni en los atributos de un activo. Toda fuente que pueda traer secretos, correos o datos de brechas se da de alta en `data_sources` con `keep_raw_payload = false`.
 5. Todo token falso que se siembra o se usa en pruebas lleva el prefijo `CIRDAN_FAKE_` y solo vive en `pruebas/fixtures/` o en el repositorio sembrado de la organización de GitHub del dominio de prueba (tarjeta #10b).
 6. Nunca se sube al repositorio un `.env`, una contraseña, una llave ni un token. Los repositorios son públicos. Se nombran las variables, nunca sus valores.
-7. Los papeles de cada parte ante la LFPDPPP (la empresa como responsable y el equipo como encargado), la retención y el borrado los fijan la carta de autorización y la política de privacidad de la tarjeta #78.
+7. Los papeles de cada parte ante la LFPDPPP (la empresa como responsable y el equipo como encargado), la retención y el borrado los fijan la carta de autorización y la [política de seguridad y privacidad](politica_seguridad_privacidad.md) de la tarjeta #78.
 8. Si una vulneración de seguridad de LowTide (la máquina virtual, la base o un respaldo) afecta datos de una empresa, el equipo le avisa en el plazo de la sección 6 de su carta para que ella informe a las personas afectadas, y avisa al profesor.
 
 ## 5. Datos de terceros
@@ -63,7 +63,7 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 
 ## 6. Confidencialidad, demostraciones y cartas
 
-1. Los resultados de una empresa solo los ven el equipo y esa empresa. Los terceros de la sección 6 de la carta solo reciben lo que ahí se dice, como el proveedor de IA, que recibe el título, la categoría y la severidad de los hallazgos, sin correos. Un integrador solo los ve si la carta de la empresa lo nombra.
+1. Los resultados de una empresa solo los ven el equipo y esa empresa. Los terceros de la sección 6 de la carta solo reciben lo que ahí se dice, como el proveedor de IA, que recibe el título, la categoría y la severidad de los hallazgos, sin correos, y la pregunta que escribe el usuario. Un integrador solo los ve si la carta de la empresa lo nombra.
 2. Las demostraciones, las láminas y los repositorios solo usan datos de empresas ficticias (Acme Demo, Beta Corp y Grupo Olmardo) o datos de un cliente anonimizados y con su permiso por escrito.
 3. Las respuestas reales grabadas de un dominio que no sea del equipo nunca se suben a un repositorio. Las respuestas inventadas para pruebas, como la del recolector `ejemplo`, sí se pueden subir.
 4. Los nombres que se siembran en certificados del dominio de prueba quedan para siempre en registros públicos. No llevan nombres de personas reales, de terceros ni el nombre comercial del producto.

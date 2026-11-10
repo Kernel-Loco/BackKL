@@ -53,6 +53,25 @@ jobs:
           done
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
           sed -i "s|^TOTP_ENCRYPTION_KEY=.*|TOTP_ENCRYPTION_KEY=$llave|" .env
+          # .env.example la trae en false (#169, RC-287) y las pruebas entran con las cuentas de demo.
+          sed -i "s|^DEMO_ACCOUNTS=.*|DEMO_ACCOUNTS=true|" .env
+          grep -qx 'DEMO_ACCOUNTS=true' .env
+
+      # Decisión 3 de RC-40 (docs/servicios_externos.md): con un token 'Public Repo Read-only' de Docker Hub el límite
+      # de descargas pasa de 100 a 200 cada 6 h. Los secretos no llegan a los PR de forks, y los de Dependabot salen de
+      # sus propios secretos. Sin secreto, o si el login falla, el CI sigue y baja las imágenes sin cuenta, como antes.
+      - name: docker login en Docker Hub (se salta sin secreto)
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "Sin DOCKERHUB_USERNAME o DOCKERHUB_TOKEN: las imágenes se bajan sin cuenta"
+            exit 0
+          fi
+          if ! printf '%s' "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin; then
+            echo "::warning::El docker login falló: las imágenes se bajan sin cuenta"
+          fi
 
       - name: Levantar base, Valkey y API (carga migraciones y semillas)
         run: |
@@ -77,20 +96,22 @@ jobs:
       # Transporte de test_rdap.py hace su certificado con cryptography, que el runner no trae: allí se salta y aquí
       # prueba el transporte, TLS incluido, con el OpenSSL de la imagen. TRANSPORTE_TLS=1 hace que falle si a la
       # imagen le falta (RC-166).
-      - name: Pruebas del orquestador, el explorador, el modelo ML, gitleaks y TLS (dentro del contenedor)
+      - name: Pruebas dentro del contenedor (orquestador, explorador, modelo ML, TXT, cuentas de demo, gitleaks y TLS)
         run: >-
           docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -v "$PWD/pruebas:/app/pruebas:ro"
           -v "$PWD/datos/ml:/app/datos/ml:ro" -v "$PWD/db:/app/db:ro" -v "$PWD/docs:/app/docs:ro" api python -m unittest
-          pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py
-          pruebas.test_github.Integracion pruebas.test_rdap.Transporte
+          pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_txt.py
+          pruebas/test_demo_cuentas.py pruebas.test_github.Integracion pruebas.test_rdap.Transporte
 
       - name: Pruebas sin base ni red
         run: >-
           python -m unittest pruebas/test_criterio.py pruebas/test_motor_score.py pruebas/test_plan_accion.py
+          pruebas/test_cambios.py
           pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py
           pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py
           pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py pruebas/test_borde.py
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_dataset_ml.py
+          pruebas/test_exportar.py pruebas/test_politica_seguridad.py
 
       - name: Logs si algo falló
         if: failure()
