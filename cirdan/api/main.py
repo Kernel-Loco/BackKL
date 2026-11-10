@@ -19,7 +19,7 @@ from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.v1 import router as v1_router
 from cirdan.auth.routes import router as auth_router
-from cirdan.config import config
+from cirdan.config import ORIGENES_LOCALES, config
 from cirdan.db import transaction
 
 app = FastAPI(
@@ -31,8 +31,7 @@ app = FastAPI(
 )
 
 # Orígenes que pueden mandar POST con la cookie: el portal y la propia API.
-ALLOWED_ORIGINS = {o.strip() for o in config(
-    'ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000').split(',')}
+ALLOWED_ORIGINS = {o.strip() for o in config('ALLOWED_ORIGINS', ORIGENES_LOCALES).split(',')}
 
 
 @app.middleware('http')

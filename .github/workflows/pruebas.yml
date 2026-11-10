@@ -53,6 +53,9 @@ jobs:
           done
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
           sed -i "s|^TOTP_ENCRYPTION_KEY=.*|TOTP_ENCRYPTION_KEY=$llave|" .env
+          # .env.example la trae en false (#169, RC-287) y las pruebas entran con las cuentas de demo.
+          sed -i "s|^DEMO_ACCOUNTS=.*|DEMO_ACCOUNTS=true|" .env
+          grep -qx 'DEMO_ACCOUNTS=true' .env
 
       # Decisión 3 de RC-40 (docs/servicios_externos.md): con un token 'Public Repo Read-only' de Docker Hub el límite
       # de descargas pasa de 100 a 200 cada 6 h. Los secretos no llegan a los PR de forks, y los de Dependabot salen de
@@ -93,12 +96,12 @@ jobs:
       # Transporte de test_rdap.py hace su certificado con cryptography, que el runner no trae: allí se salta y aquí
       # prueba el transporte, TLS incluido, con el OpenSSL de la imagen. TRANSPORTE_TLS=1 hace que falle si a la
       # imagen le falta (RC-166).
-      - name: Pruebas del orquestador, el explorador, el modelo ML, el TXT, gitleaks y TLS (dentro del contenedor)
+      - name: Pruebas dentro del contenedor (orquestador, explorador, modelo ML, TXT, cuentas de demo, gitleaks y TLS)
         run: >-
           docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -v "$PWD/pruebas:/app/pruebas:ro"
           -v "$PWD/datos/ml:/app/datos/ml:ro" -v "$PWD/db:/app/db:ro" -v "$PWD/docs:/app/docs:ro" api python -m unittest
           pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_txt.py
-          pruebas.test_github.Integracion pruebas.test_rdap.Transporte
+          pruebas/test_demo_cuentas.py pruebas.test_github.Integracion pruebas.test_rdap.Transporte
 
       - name: Pruebas sin base ni red
         run: >-
