@@ -12,7 +12,7 @@ y /db solo existe con DEMO_EXPLORER=true y también pide sesión (RC-58).
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from cirdan.auth.deps import Session, current_session
 from cirdan.api.escaneos import router as scans_router
@@ -59,6 +59,12 @@ async def cabeceras_de_seguridad(request: Request, call_next):
     for nombre, valor in CABECERAS_SEGURIDAD.items():
         response.headers[nombre] = valor
     return response
+
+
+@app.exception_handler(Exception)
+async def error_no_manejado(request: Request, exc: Exception):
+    """El 500 de un error sin manejar lo arma Starlette por fuera de los middlewares: aquí lleva las cabeceras."""
+    return PlainTextResponse('Internal Server Error', status_code=500, headers=CABECERAS_SEGURIDAD)
 
 
 app.include_router(auth_router)
