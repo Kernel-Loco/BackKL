@@ -469,8 +469,9 @@ class Grabadora:
       la carpeta, el siguiente guardado lo vuelve a intentar. Con `completar`,
       reutiliza lo grabado desde `desde` y vuelve a consultar lo demás.
     - 'reproducir': solo lee del disco y lanza SinGrabacion si falta una respuesta.
-    Un archivo vacío no se puede leer (ValueError): es una escritura que se cortó, no una respuesta sin datos. Con
-    `sobre`, tampoco uno sin {grabado, datos} (el formato anterior).
+    Un archivo vacío no se puede leer (ValueError con el nombre del archivo): es una escritura que se cortó, no una
+    respuesta sin datos. Con `sobre`, tampoco uno sin {grabado, datos} (el formato anterior). Con `completar`, un
+    archivo que no se puede leer cuenta como que no está y esa respuesta se consulta otra vez.
     """
 
     def __init__(self, carpeta, modo='vivo', completar=False, desde=None, nueva=False, reloj=None,
@@ -489,8 +490,11 @@ class Grabadora:
     @staticmethod
     def abrir(archivo, sobre=False):
         """(datos, fecha de grabación). El formato anterior (solo los datos) usa la fecha del sistema, salvo con
-        `sobre`, que lo rechaza. Un archivo vacío lanza ValueError (json.loads)."""
-        contenido = json.loads(archivo.read_text(encoding='utf-8'))
+        `sobre`, que lo rechaza. Un archivo vacío o cortado lanza ValueError con el nombre del archivo."""
+        try:
+            contenido = json.loads(archivo.read_text(encoding='utf-8'))
+        except ValueError as e:   # nunca el texto del error: puede traer pedazos de la respuesta
+            raise ValueError('la grabación %s no se puede leer (%s)' % (archivo.name, type(e).__name__)) from None
         if isinstance(contenido, dict) and 'datos' in contenido:
             return contenido['datos'], fecha_iso(contenido['grabado'])
         if sobre:
@@ -507,7 +511,10 @@ class Grabadora:
             self.leidas.append((archivo.name, fecha))
             return True, datos
         if self.completar and archivo.exists():
-            datos, fecha = self.abrir(archivo, self.sobre)
+            try:
+                datos, fecha = self.abrir(archivo, self.sobre)
+            except ValueError:   # una escritura que se cortó: esa respuesta se consulta otra vez
+                return False, None
             if self.desde is None or fecha >= self.desde:
                 self.leidas.append((archivo.name, fecha))
                 return True, datos

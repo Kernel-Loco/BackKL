@@ -715,7 +715,10 @@ class ClienteGitHub:
     def revisar(self, org, repo, dominio):
         """{secretos, correos, ajenos, invalidos} de un repo: lo clona, corre gitleaks y lee los correos de git log."""
         consulta = 'repo:%s/%s' % (org, repo)
-        del_disco, datos = self._de_disco(consulta)
+        try:
+            del_disco, datos = self._de_disco(consulta)
+        except ValueError:   # un archivo vacío o cortado: ese repo queda sin revisar y los demás dan lo suyo
+            raise FallaRepo('github: la grabación de un repo no se puede leer') from None
         if del_disco:
             return revision_valida(datos, dominio)
         vivo = self._revisar_en_vivo(org, repo, dominio)

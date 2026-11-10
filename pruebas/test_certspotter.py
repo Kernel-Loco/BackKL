@@ -450,6 +450,55 @@ class GrabarYReproducir(unittest.TestCase):
             grabado, _ = recolectar(sin_red, d, 'reproducir', parecidos=True)
         self.assertEqual((grabado.activos, grabado.hallazgos, grabado.sin_cobertura), (res.activos, res.hallazgos, []))
 
+    def test_3b_un_archivo_vacio_de_la_grabacion_es_una_consulta_que_no_llego(self):
+        """Regresión 2 de la ronda 4 (RC-46): una página vacía de Cert Spotter o el archivo vacío de crt.sh no deja
+        ct_logs en failed ni completo con datos de menos: es una consulta que no llegó, igual que en vivo."""
+        paginas = [EMISIONES, []]
+        with tempfile.TemporaryDirectory() as d:
+            completa, _ = recolectar(RespaldoSimulado(paginas, crtsh={'%.acme-demo.mx': SUBDOMINIOS}), d, 'grabar',
+                                     nueva=True)
+            self.assertEqual((completa.estado, completa.revisados), ('succeeded', None))
+            esperado = {'certspotter_acme-demo.mx.json': certspotter.SIN_COMPLEMENTO,
+                        'certspotter_acme-demo.mx_despues_9004.json': certspotter.INCOMPLETO,
+                        'subdominios_acme-demo.mx.json': certspotter.AVISO}
+            for nombre, aviso in esperado.items():
+                archivo = Path(d) / nombre
+                bueno = archivo.read_bytes()
+                for roto in (b'', bueno[:len(bueno) // 2]):
+                    archivo.write_bytes(roto)
+                    res, cliente = recolectar(sin_red, d, 'reproducir')
+                    with self.subTest(nombre=nombre, roto=len(roto)):
+                        self.assertEqual((res.estado, cliente.consultas), ('succeeded', 0))
+                        if aviso == certspotter.AVISO:   # sin crt.sh, lo que no se vio va en sin_cobertura
+                            self.assertEqual(res.sin_cobertura, certspotter.SIN_COBERTURA)
+                        else:   # parcial: no se cierra lo que no se vio
+                            self.assertIsNotNone(res.revisados)
+                        self.assertTrue(res.activos)
+                        self.assertTrue([a for a in res.avisos if aviso in a], res.avisos)
+                archivo.write_bytes(bueno)
+            res, _ = recolectar(sin_red, d, 'reproducir')
+            self.assertEqual((res.activos, res.hallazgos, res.revisados), (completa.activos, completa.hallazgos, None))
+
+    def test_3c_completar_vuelve_a_consultar_un_archivo_vacio(self):
+        """Regresión 3 de la ronda 4 (RC-46): un --grabar que se cortó deja un archivo de 0 bytes y --grabar --completar
+        lo consulta otra vez en lugar de caerse."""
+        with tempfile.TemporaryDirectory() as d:
+            sano = {'%.acme-demo.mx': SUBDOMINIOS}
+            completa, _ = recolectar(RespaldoSimulado(crtsh=sano), d, 'grabar', nueva=True)
+            desde = contrato.Grabadora.inicio(d)
+            for nombre, host in (('subdominios_acme-demo.mx.json', 'crt.sh'),
+                                 ('certspotter_acme-demo.mx.json', 'api.certspotter.com')):
+                (Path(d) / nombre).write_bytes(b'')
+                t = RespaldoSimulado(crtsh=sano)
+                res, _ = recolectar(t, d, 'grabar', completar=True, desde=desde)
+                with self.subTest(nombre=nombre):
+                    self.assertEqual(len(t.de(host)), 1)
+                    self.assertEqual((res.estado, res.activos, res.hallazgos, res.revisados),
+                                     ('succeeded', completa.activos, completa.hallazgos, None))
+                    self.assertTrue((Path(d) / nombre).read_bytes())
+            grabado, _ = recolectar(sin_red, d, 'reproducir')
+        self.assertEqual((grabado.activos, grabado.hallazgos), (completa.activos, completa.hallazgos))
+
     def test_4_reproducir_sin_grabacion_de_cert_spotter_queda_failed(self):
         with tempfile.TemporaryDirectory() as d:
             res, _ = recolectar(sin_red, d, 'reproducir')

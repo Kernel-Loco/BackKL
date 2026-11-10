@@ -212,8 +212,12 @@ class ClienteCrtsh:
         """La lista JSON de `url` con reintentos. Sale del disco si la grabación la trae y, al grabar, se guarda.
         Lo usan crt.sh y su respaldo Cert Spotter (certspotter.py). Un código HTTP de `sin_reintento` corta los
         intentos, por ejemplo el 429 de Cert Spotter. `texto` se muestra en el error en lugar de `consulta`. Una
-        respuesta con la que `valida(datos)` da False cuenta como una que no llegó, no se graba y no se reintenta."""
-        del_disco, datos = self.grabadora.de_disco(consulta)
+        respuesta con la que `valida(datos)` da False cuenta como una que no llegó, no se graba y no se reintenta.
+        Un archivo de la grabación vacío o cortado también es una consulta que no llegó."""
+        try:
+            del_disco, datos = self.grabadora.de_disco(consulta)
+        except ValueError:
+            raise CrtshNoResponde('la grabación de %s de %s no se puede leer' % (fuente, texto or consulta)) from None
         if del_disco:
             return datos
         if pausa:

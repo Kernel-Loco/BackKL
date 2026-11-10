@@ -564,8 +564,25 @@ class Grabadora(unittest.TestCase):
                 with self.subTest(anterior=anterior), self.assertRaises(ValueError):
                     contrato.Grabadora(d, 'reproducir', sobre=True).de_disco('q')
                 g = contrato.Grabadora(d, 'grabar', completar=True, sobre=True)
-                with self.subTest(completar=anterior), self.assertRaises(ValueError):
-                    g.de_disco('q')
+                with self.subTest(completar=anterior):   # al completar no se reutiliza: se consulta otra vez
+                    self.assertEqual((g.de_disco('q'), g.leidas), ((False, None), []))
+
+    def test_1c_el_error_de_un_archivo_roto_nombra_la_grabacion_y_al_completar_se_consulta_otra_vez(self):
+        """Regresiones 3 y 4 de la ronda 4 (RC-46): el error de un archivo vacío o cortado dice qué archivo es y no
+        copia su contenido, y con `completar` ese archivo cuenta como que no está."""
+        with tempfile.TemporaryDirectory() as d:
+            archivo = Path(d) / 'q.json'
+            for roto in ('', '{"grabado": "2026-10-15T12:00:00+00:00", "datos": ["secreto-a-medi'):
+                archivo.write_text(roto, encoding='utf-8')
+                for sobre in (False, True):
+                    with self.subTest(roto=roto, sobre=sobre):
+                        with self.assertRaises(ValueError) as error:
+                            contrato.Grabadora(d, 'reproducir', sobre=sobre).de_disco('q')
+                        self.assertEqual(str(error.exception), 'la grabación q.json no se puede leer (JSONDecodeError)')
+                        g = contrato.Grabadora(d, 'grabar', completar=True, sobre=sobre)
+                        self.assertEqual((g.de_disco('q'), g.leidas), ((False, None), []))
+            g.guardar('q', [1])   # lo consultado otra vez reemplaza al archivo roto
+            self.assertEqual(contrato.Grabadora(d, 'reproducir').de_disco('q'), (True, [1]))
 
     def test_2_vivo_no_toca_el_disco(self):
         with tempfile.TemporaryDirectory() as d:
