@@ -9,6 +9,7 @@ omisión, y otra con DEMO_EXPLORER=true:
 Las sesiones se crean con cirdan.auth.sessions, igual que al iniciar sesión, y se borran al final.
 Solo leen: la base queda igual.
 """
+import asyncio
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 from cirdan.api.explorer import TABLES
 from cirdan.auth import sessions
@@ -203,6 +205,42 @@ class ExploradorEncendido(Explorador):
                     self.assertEqual(body['detail'], SIN_PERMISO)
             self.assertEqual(self.api.get('/api/v1/domains/txt', token)[0], 403, 'la misma regla que la API v1')
             self.assertEqual(self.api.get('/domains', token)[0], 200, 'los dominios de la página sí le responden')
+
+
+class ErrorSinManejar(unittest.TestCase):
+    """RC-283: el 500 de un error que ninguna ruta maneja también sale con las tres cabeceras.
+
+    Llama a la aplicación en el mismo proceso, sin servidor, con la base de /health cambiada por una que falla.
+    """
+
+    def test_1_el_500_trae_la_proteccion_contra_marcos_y_nosniff(self):
+        from cirdan.api import main
+
+        def base_caida(*args, **kwargs):
+            raise ConnectionError('base caída de prueba')
+
+        scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': 'GET', 'scheme': 'http',
+                 'path': '/health', 'raw_path': b'/health', 'query_string': b'', 'headers': [],
+                 'client': ('127.0.0.1', 1), 'server': ('127.0.0.1', 80)}
+        mensajes = []
+
+        async def receive():
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+        async def send(mensaje):
+            mensajes.append(mensaje)
+
+        with mock.patch.object(main, 'transaction', base_caida):
+            # Starlette manda el 500 y después vuelve a lanzar el error para que el servidor lo registre
+            with self.assertRaises(ConnectionError):
+                asyncio.run(main.app(scope, receive, send))
+        inicio = [m for m in mensajes if m['type'] == 'http.response.start']
+        self.assertEqual([m['status'] for m in inicio], [500])
+        cabeceras = [(k.decode().lower(), v.decode()) for k, v in inicio[0]['headers']]
+        for nombre, valor in main.CABECERAS_SEGURIDAD.items():
+            self.assertEqual([v for k, v in cabeceras if k == nombre.lower()], [valor], nombre)
+        cuerpo = b''.join(m.get('body', b'') for m in mensajes if m['type'] == 'http.response.body')
+        self.assertEqual(cuerpo, b'Internal Server Error')
 
 
 if __name__ == '__main__':
