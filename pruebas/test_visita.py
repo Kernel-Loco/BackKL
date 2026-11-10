@@ -22,6 +22,7 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlsplit
 
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))  # también corre como python pruebas/test_visita.py
@@ -60,11 +61,12 @@ class Apis:
 
     def __call__(self, url, timeout):
         self.urls.append(url)
-        if 'certspotter' in url:
+        servidor = urlsplit(url).hostname   # el nombre exacto del servidor, no un trozo de la URL
+        if servidor == 'api.certspotter.com':
             respuesta = self.ct.pop(0) if self.ct else []
-        elif 'endoflife.date' in url:
+        elif servidor == 'endoflife.date':
             respuesta = self.eol
-        elif 'services.nvd.nist.gov' in url:
+        elif servidor == 'services.nvd.nist.gov':
             respuesta = self.nvd
         else:
             raise AssertionError('consulta inesperada: %s' % url)
