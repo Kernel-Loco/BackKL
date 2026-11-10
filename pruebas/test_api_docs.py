@@ -843,13 +843,23 @@ class Ronda3(unittest.TestCase):
     def test_10_un_security_general_enorme_se_revisa_una_vez_y_no_en_cada_funcion(self):
         # 50,000 requisitos generales y 32,000 funciones vacías en unos 700 KB: antes eran más de 60 s de CPU, porque
         # cada función sin security propio recorría otra vez el general (con 2 MB, unos 12 minutos)
-        paths = {'/%d' % i: {m: {} for m in api_docs.METODOS} for i in range(4000)}
+        # Sin reloj: el general se revisa una vez, y además solo el security propio de la función que lo trae
+        chico = {'/a': {'get': {}, 'post': {'security': None}, 'put': {'security': LLAVE}, 'delete': {}}}
+        with mock.patch.object(api_docs, 'declara', wraps=api_docs.declara) as cuenta:
+            doc = api_docs.leer(openapi3(paths=chico, security=[{}]))
+        self.assertEqual((cuenta.call_count, doc['operaciones'], doc['sin_declarar']), (2, 4, 3))
+        # La mitad de las funciones no trae security y la otra mitad lo trae en null: las dos usan el general
+        vacias = [{}, {'security': None}]
+        paths = {'/%d' % i: {m: vacias[(i + j) % 2] for j, m in enumerate(sorted(api_docs.METODOS))}
+                 for i in range(4000)}
         for general, sin_declarar in (([{'': 0}] * 50000, 0), ([{'': 0}] * 49999 + [{}], 32000)):
             cuerpo = json.dumps(openapi3(paths=paths, security=general), separators=(',', ':')).encode()
             self.assertLessEqual(len(cuerpo), api_docs.MAX_BYTES)
             inicio = time.perf_counter()
-            doc = api_docs.resumir(200, [], cuerpo)['doc']
+            with mock.patch.object(api_docs, 'declara', wraps=api_docs.declara) as cuenta:
+                doc = api_docs.resumir(200, [], cuerpo)['doc']
             self.assertLess(time.perf_counter() - inicio, 8)
+            self.assertEqual(cuenta.call_count, 1)
             self.assertEqual((doc['operaciones'], doc['sin_declarar']), (32000, sin_declarar))
         # El security propio de una función sigue mandando sobre el general, y cada uno se recorre una sola vez
         paths['/0'] = {'get': {'security': []}, 'post': {'security': [{'llave': []}] * 50000}, 'put': {}}
