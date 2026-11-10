@@ -27,6 +27,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/012_garantia_mapeo_marcos.sql` | FK diferida de `scoring_rule_texts.code` al mapeo de la 011, para que todo texto (y toda regla) tenga su mapeo siempre y no solo al aplicar la 011, y `created_at` y `updated_at` en el mapeo. Corrige el mapeo de la 011: técnica de ATT&CK solo con relación directa, enlaces fijos a la v19, 11 controles de ISO y CIS en 10 reglas y el comentario de la tabla (#68, RC-131). Necesita la 011 |
 | `migraciones/013_pesos_por_organizacion.sql` | Conserva v1 como plantilla global y habilita juegos versionados de pesos/reglas por organización con RLS (#32) |
 | `migraciones/014_cves_desde_recolectores.sql` | Da a `cirdan_app` INSERT sobre `description`, `cvss_base_score`, `cvss_vector` y `published_at` de `cves`, solo al crear la fila (sin UPDATE), para que el orquestador guarde las CVE que la fuente `web` trae de la NVD (#18, RC-46). Va antes que la semilla 012: sin ella, un escaneo de `web` que trae CVE falla al insertarlas y queda `failed` |
+| `migraciones/015_tipo_activo_api_doc.sql` | Agrega `api_doc` al CHECK de `assets.asset_type`: la documentación de un servicio web (Swagger u OpenAPI, o la página de Swagger UI o de ReDoc) que un sitio del dominio deja a la vista, con su URL en `value` y su sitio como activo padre (#63, RC-118). Solo cambia el CHECK, en una transacción, y se puede correr otra vez. Va antes que la semilla 013 |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -39,6 +40,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `semillas/010_corrige_procedencia_009.sql` | Corrige las tres filas que cargó la primera versión de la 009, con `rules_change`, un motivo de fallback a reglas y una hora que no eran ciertos, y deja el antes y el después en `audit_log` (RC-72, desviación 16). En una base nueva no hace nada. Necesita la migración 010 |
 | `semillas/011_shodan_nombres.sql` | Sube el límite diario de `shodan` a 1840 consultas, 10 corridas de 184, porque el tope de nombres que resuelve pasó de 10 a 50 (RC-55, #23). Solo cambia la fila si no tiene límite o si tiene el 640 de la 007. Un límite puesto a mano menor que 184 queda igual y da un WARNING, porque no le cabe ninguna corrida. Necesita la 007 |
 | `semillas/012_visita_web.sql` | Fuente `web` (la visita de la actividad 6 del Anexo A: tecnologías, versión sin soporte con endoflife.date y CVE con la NVD), sembrada encendida, con `keep_raw_payload` = true y límite diario de 1840 consultas, 10 corridas de 184 (#18, RC-46). Necesita la migración 008 y la 014: la 014 va primero, porque con la fuente encendida el orquestador inserta las CVE con su CVSS |
+| `semillas/013_api_docs.sql` | Fuente `api_docs` (la actividad 9 del Anexo A: hasta 10 rutas fijas de documentación de APIs por sitio, solo GET), sembrada apagada, con `keep_raw_payload` = true y límite diario de 2640 consultas, 10 corridas de 264 (#63, RC-118). Necesita la migración 008 y la 015. Se enciende con otra semilla cuando el aviso de la actividad nueva esté dado a cada cliente |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 25 tablas con filas y RLS, más el resumen de objetos |
@@ -94,6 +96,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/012_garantia_mapeo_marcos.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/013_pesos_por_organizacion.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/014_cves_desde_recolectores.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/015_tipo_activo_api_doc.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -107,6 +110,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/010_corrige_procedencia_009.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/011_shodan_nombres.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/012_visita_web.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/013_api_docs.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -285,6 +289,13 @@ Para la fuente `web` (RC-46, #18) van la migración 014 y la semilla 012, en ese
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/014_cves_desde_recolectores.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/012_visita_web.sql
+```
+
+Para la fuente `api_docs` (RC-118, #63) van la migración 015 y la semilla 013, en ese orden, y las dos antes de reconstruir la API. La 015 agrega `api_doc` al CHECK de `assets.asset_type` y la 013 da de alta la fuente apagada, así que después de las dos ningún escaneo cambia: la fuente no corre hasta que otra semilla la encienda. Sin la 015, una API nueva con la fuente encendida falla al guardar el primer `api_doc` y el escaneo queda `failed`. La API anterior no conoce el recolector y salta la fuente, así que la base puede ir antes sin romperla. Las dos se pueden correr otra vez sin error:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/015_tipo_activo_api_doc.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/013_api_docs.sql
 ```
 
 ## Huellas de db/

@@ -32,9 +32,9 @@ Además se registra en `REGISTRO` de `cirdan/recolectores/__init__.py`, y `carga
 
 | Campo | Regla |
 |---|---|
-| `tipo` | `domain`, `subdomain`, `ip`, `service`, `certificate` o `email`, igual que `assets.asset_type` |
-| `valor` | El nombre, la IP, `ip:puerto/protocolo`, el correo o la huella del certificado. Los nombres, las IP y los correos tienen que ser válidos. No se repite con el mismo tipo |
-| `atributos` | Va a `assets.attributes`. Los tipos `ip`, `service` y `certificate` llevan `host` (o `hosts`, si son varios nombres) con nombres válidos para el filtro de alcance. Sin eso no cumplen el contrato |
+| `tipo` | `domain`, `subdomain`, `ip`, `service`, `certificate`, `email` o `api_doc`, igual que `assets.asset_type` |
+| `valor` | El nombre, la IP, `ip:puerto/protocolo`, el correo, la huella del certificado o la URL del documento de API. Los nombres, las IP y los correos tienen que ser válidos, y la URL de un `api_doc` es https, del sitio de su `host`, sin puerto, usuario, consulta ni fragmento. No se repite con el mismo tipo |
+| `atributos` | Va a `assets.attributes`. Los tipos `ip`, `service`, `certificate` y `api_doc` llevan `host` (o `hosts`, si son varios nombres) con nombres válidos para el filtro de alcance. Sin eso no cumplen el contrato |
 
 **Hallazgo**, que va a la tabla `findings`:
 
@@ -67,7 +67,7 @@ Solo se aceptan activos del dominio autorizado:
 
 - `domain` y `subdomain`: el dominio o un subdominio suyo. `acme-demo.mx.evil.com` y `xacme-demo.mx` quedan fuera.
 - `email`: su dominio está en el alcance.
-- `ip`, `service` y `certificate`: su `host` (o alguno de `hosts`) está en el alcance.
+- `ip`, `service`, `certificate` y `api_doc`: su `host` (o alguno de `hosts`) está en el alcance.
 
 Lo que queda fuera se descarta, junto con los hallazgos que le pertenecen, y queda un aviso. Un hallazgo de dominio parecido pertenece al dominio de la empresa, y el dominio parecido solo va en la evidencia, así que no se descarta.
 
@@ -134,6 +134,8 @@ El recolector de Shodan (#17) se graba con `python -m cirdan.recolectores.shodan
 El recolector de RDAP (#15b, fuente `whois`) se graba con `python -m cirdan.recolectores.rdap <dominio> --grabar`, en `cirdan/recolectores/respuestas_grabadas/whois/<dominio>/`, y como el de Shodan graba todo al final y solo si la corrida no tuvo ninguna falla. Guarda el bootstrap de IANA reducido al servicio que cubre el dominio (`bootstrap.json`) y la respuesta RDAP reducida a lo que se lee, con la forma de RDAP (`rdap_<dominio>.json`): del registrador solo su nombre y su IANA Registrar ID, y nada de las demás entidades (registrante, contactos y abuso). Cada valor pasa el mismo filtro que al leerlo y queda un evento por acción, así no se graba texto libre, y si algo no se puede guardar en UTF-8 no se graba nada y queda la grabación anterior. Al reproducir, esa respuesta pasa otra vez por `leer_rdap()`, así una grabación rota queda `failed`. El 404 del registro y un TLD sin servidor RDAP https sí se graban, porque otra corrida daría lo mismo. Si hubo respaldo por WHOIS en el puerto 43 (TLD sin RDAP, como .mx, o RDAP que no respondió), también guarda el servidor WHOIS que dio whois.iana.org para el TLD (`whois-iana_<tld>.json`) y la respuesta WHOIS ya reducida a las llaves de `CAMPOS_WHOIS` (`whois_<dominio>.json`), nunca el texto crudo, así que contactos, correos, teléfonos y direcciones no se leen ni se graban. Si RDAP falló y WHOIS respondió, el resultado sale completo pero no se graba. Al reproducir, esa respuesta pasa otra vez por `leer_whois()`. Una grabación de un TLD sin RDAP hecha antes del respaldo, sin `whois-iana`, da lo mismo que entonces. Si ni RDAP ni WHOIS responden, la fuente no queda `failed`: da el activo `domain` con 'No disponible', `domain_expiring_soon` en `sin_cobertura` y un aviso, como pide RC-166. Sin grabación del dominio, `reproducir` da lo mismo con su propio aviso.
 
 El país, el ASN y el proveedor de los activos `ip` de DNS y de Shodan (#15b, `cirdan/recolectores/geoip.py`) no se graban: salen de la base local de DB-IP Lite en `datos/geo/`, sin red, también al reproducir. Por eso cada activo `ip` que sí se buscó en una base lleva `fuente_geo` = 'DB-IP Lite' y `base_geo` con las bases que se usaron (por ejemplo `dbip-asn-lite-2026-10`). Una IP que no es global, o una corrida sin ninguna base, lleva 'No disponible' en los dos. Sin la base de ASN, Shodan no puede descartar por ASN las IP de un CDN sin CNAME conocido y las consulta igual, y el aviso de base faltante lo dice. Al reproducir con otra base que la de la grabación, una IP puede cambiar de CDN por ASN. En Shodan, una IP que al grabar se marcó como CDN por ASN no se consultó ni se grabó: si la base del momento ya no trae ese ASN (o no hay base de ASN), la IP se pide a la grabación y no está. La corrida sale con cobertura parcial (código de salida 2), el aviso 'shodan: no hay respuesta grabada para internetdb:<ip>', esa IP con `internetdb` = 'sin_respuesta' y los códigos sin hallazgos en `sin_cobertura`. La grabación no guarda la marca de CDN, así que para repetir la corrida completa hay que reproducir con la misma base.
+
+El recolector de documentación de APIs (#63, fuente `api_docs`) se graba con `python -m cirdan.recolectores.api_docs <dominio> --grabar`, en `cirdan/recolectores/respuestas_grabadas/api_docs/<dominio>/`, y como el de Shodan graba todo al final y solo si la corrida no tuvo ninguna falla. De cada ruta guarda solo el resumen: el estado HTTP y, si hubo documento, su formato, versión, título, cuántas funciones tiene, cuántas no declaran autenticación y hasta 10 de esas. Nunca el documento, sus parámetros, sus ejemplos ni sus servidores.
 
 ## Cómo agregar un recolector
 

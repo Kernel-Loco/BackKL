@@ -159,13 +159,13 @@ Table scan_source_runs [note: 'Resultado de cada fuente dentro de un escaneo. Co
   finished_at timestamptz
 }
 
-Table assets [note: 'Inventario normalizado de la superficie expuesta: dominio, subdominios, IP, servicios, certificados y correos. Desde #23 (RC-55) cada escaneo guarda los de las fuentes que respondieron, sin duplicar por (domain_id, asset_type, value).'] {
+Table assets [note: 'Inventario normalizado de la superficie expuesta: dominio, subdominios, IP, servicios, certificados, correos y documentos de API (015). Desde #23 (RC-55) cada escaneo guarda los de las fuentes que respondieron, sin duplicar por (domain_id, asset_type, value).'] {
   id uuid [pk, note: 'UNIQUE (organization_id, domain_id, id) para las FK compuestas de findings y parent_asset_id']
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [not null, ref: > domains.id]
   parent_asset_id uuid [ref: > assets.id, note: 'Jerarquía simple: servicio pertenece a IP, subdominio a dominio. FK compuesta (organization_id, domain_id, parent_asset_id): el padre es del mismo dominio']
-  asset_type text [not null, note: 'CHECK IN (\'domain\',\'subdomain\',\'ip\',\'service\',\'certificate\',\'email\')']
-  value text [not null, note: 'Valor normalizado: FQDN en minúsculas, IP, ip:puerto/proto, huella SHA-256 del certificado o correo. UNIQUE (domain_id, asset_type, value)']
+  asset_type text [not null, note: 'CHECK IN (\'domain\',\'subdomain\',\'ip\',\'service\',\'certificate\',\'email\',\'api_doc\')']
+  value text [not null, note: 'Valor normalizado: FQDN en minúsculas, IP, ip:puerto/proto, huella SHA-256 del certificado, correo o URL https del documento de API. UNIQUE (domain_id, asset_type, value)']
   ip_address inet [note: 'Solo para ip y service. Permite filtrar por rango']
   attributes jsonb [not null, note: 'Datos variables por fuente: banner, producto y versión, emisor y vencimiento del certificado, registros DNS, WHOIS']
   first_seen_at timestamptz [not null]
