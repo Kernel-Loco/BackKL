@@ -840,6 +840,24 @@ class Ronda3(unittest.TestCase):
         largo = 'OPTIONS /%s (al menos 9999999 funciones)' % ('a' * (api_docs.MAX_TEXTO - 1))
         self.assertEqual(api_docs._texto(largo, api_docs.MAX_TEXTO + 48), largo)
 
+    def test_10_un_security_general_enorme_se_revisa_una_vez_y_no_en_cada_funcion(self):
+        # 50,000 requisitos generales y 32,000 funciones vacías en unos 700 KB: antes eran más de 60 s de CPU, porque
+        # cada función sin security propio recorría otra vez el general (con 2 MB, unos 12 minutos)
+        paths = {'/%d' % i: {m: {} for m in api_docs.METODOS} for i in range(4000)}
+        for general, sin_declarar in (([{'': 0}] * 50000, 0), ([{'': 0}] * 49999 + [{}], 32000)):
+            cuerpo = json.dumps(openapi3(paths=paths, security=general), separators=(',', ':')).encode()
+            self.assertLessEqual(len(cuerpo), api_docs.MAX_BYTES)
+            inicio = time.perf_counter()
+            doc = api_docs.resumir(200, [], cuerpo)['doc']
+            self.assertLess(time.perf_counter() - inicio, 8)
+            self.assertEqual((doc['operaciones'], doc['sin_declarar']), (32000, sin_declarar))
+        # El security propio de una función sigue mandando sobre el general, y cada uno se recorre una sola vez
+        paths['/0'] = {'get': {'security': []}, 'post': {'security': [{'llave': []}] * 50000}, 'put': {}}
+        doc = api_docs.leer(openapi3(paths=paths, security=[{'': 0}] * 49999 + [{}]))
+        self.assertEqual((doc['operaciones'], doc['sin_declarar']), (31995, 31994))
+        doc = api_docs.leer(openapi3(paths=paths, security=LLAVE))
+        self.assertEqual((doc['operaciones'], doc['sin_declarar'], doc['muestra']), (31995, 1, ['GET /0']))
+
 
 class Base(unittest.TestCase):
     """Migración: tipo de activo 'api_doc', su fuente y sus reglas con los códigos mapeados en #68. Lectura estática de

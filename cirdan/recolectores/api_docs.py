@@ -305,7 +305,8 @@ def leer(documento):
     if version is None:
         return None
     rutas = documento.get('paths')
-    general = documento.get('security')
+    # Una sola vez: calcularlo en cada función cuesta funciones por requisitos del `security` general
+    general = declara(documento.get('security'))
     funciones = []
     for ruta, metodos in (rutas.items() if isinstance(rutas, dict) else ()):
         if not isinstance(ruta, str) or not ruta.startswith('/') or not isinstance(metodos, dict):
@@ -314,9 +315,8 @@ def leer(documento):
             if not isinstance(metodo, str) or metodo.lower() not in METODOS or not isinstance(funcion, dict):
                 continue
             propia = funcion.get('security')
-            if propia is None:   # no viene, o viene en null: vale el general
-                propia = general
-            funciones.append((ruta, metodo.upper(), declara(propia)))
+            # Si no viene, o viene en null, vale el general
+            funciones.append((ruta, metodo.upper(), general if propia is None else declara(propia)))
     funciones.sort()
     abiertas = sorted(((m not in CAMBIAN_DATOS, r, m) for r, m, ok in funciones if not ok))
     info = documento.get('info')
