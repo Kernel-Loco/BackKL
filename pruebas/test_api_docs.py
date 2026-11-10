@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 from datetime import datetime, timezone
@@ -801,6 +802,43 @@ class Ronda3(unittest.TestCase):
         self.assertEqual(doc['formato'], 'openapi')
         res, _, _ = correr({url(API, '/docs'): (200, [('Content-Type', 'text/plain')], plano)})
         self.assertEqual((res.hallazgos, [x.tipo for x in res.activos]), ([], ['domain', 'subdomain']))
+
+    def test_8_un_documento_hostil_de_2_mb_no_se_come_el_tiempo_de_la_corrida(self):
+        # 2,300 rutas de 800 caracteres hechas solo de '/' con los 8 métodos vacíos: antes eran unos 26 s de CPU
+        metodos = {m: {} for m in api_docs.METODOS}
+        paths = {'/' * (800 - len(str(i))) + str(i): metodos for i in range(2300)}
+        cuerpo = json.dumps(openapi3(paths=paths)).encode()
+        self.assertGreater(len(cuerpo), 1900 * 1024)
+        self.assertLessEqual(len(cuerpo), api_docs.MAX_BYTES)
+        inicio = time.perf_counter()
+        doc = api_docs.resumir(200, [], cuerpo)['doc']
+        self.assertLess(time.perf_counter() - inicio, 8)
+        # Los conteos siguen exactos: solo la cuenta de cada texto de la muestra es un mínimo, y lo dice
+        self.assertEqual((doc['operaciones'], doc['sin_declarar']), (2300 * 8, 2300 * 8))
+        self.assertTrue(doc['muestra'])
+        for texto in doc['muestra']:
+            self.assertRegex(texto, r'^(DELETE|PATCH|POST|PUT) /\S* \(al menos \d+ funciones\)$')
+        self.assertEqual(api_docs.limpiar({'estado': 200, 'doc': doc})['doc'], doc)
+        # Lo mismo con cada método en mayúsculas y minúsculas, que multiplica las funciones de cada ruta
+        variantes = {v: {} for v in ('get', 'GET', 'Get', 'gEt', 'geT', 'post', 'POST', 'Post', 'pOst', 'poSt')}
+        paths = {'/x%d' % i + '/a' * 398: variantes for i in range(900)}
+        inicio = time.perf_counter()
+        doc = api_docs.leer(openapi3(paths=paths))
+        self.assertLess(time.perf_counter() - inicio, 8)
+        self.assertEqual((doc['operaciones'], doc['sin_declarar']), (9000, 9000))
+        visible = ('/x0' + '/a' * 398)[:api_docs.MAX_TEXTO]
+        self.assertEqual(doc['muestra'][0], 'POST %s (al menos 5 funciones)' % visible)
+
+    def test_9_un_documento_grande_normal_conserva_la_cuenta_exacta_de_la_muestra(self):
+        paths = {'/clientes/c%d@acme-demo.mx/pedidos' % i: {'post': {}, 'get': {}} for i in range(700)}
+        paths['/salud'] = {'get': {}}
+        doc = api_docs.leer(openapi3(paths=paths))
+        self.assertEqual((doc['operaciones'], doc['sin_declarar']), (1401, 1401))
+        self.assertEqual(doc['muestra'], ['POST /clientes/…/pedidos (700 funciones)',
+                                          'GET /clientes/…/pedidos (700 funciones)', 'GET /salud'])
+        # La cuenta más larga que puede salir cabe en lo que limpiar deja de cada texto de la muestra
+        largo = 'OPTIONS /%s (al menos 9999999 funciones)' % ('a' * (api_docs.MAX_TEXTO - 1))
+        self.assertEqual(api_docs._texto(largo, api_docs.MAX_TEXTO + 48), largo)
 
 
 class Base(unittest.TestCase):

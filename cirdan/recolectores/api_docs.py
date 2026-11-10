@@ -123,6 +123,9 @@ _RARAS = re.compile('[\x00-\x1f\x7f-\x9f\u061c\u200b\u200e\u200f\u2028-\u202e\u2
 _CORTE = re.compile(r'[?;#]')
 TAPADO = '…'
 MAX_CRUDO = 4 * MAX_TEXTO         # caracteres de un título o de una ruta en los que se busca qué tapar
+# Caracteres de rutas que se revisan para armar la muestra de un documento (_muestra). Alcanza para unas 800 rutas
+# de 40 caracteres y, con las más largas que se revisan (2 * MAX_CRUDO), para más de MAX_MUESTRA
+MAX_REVISADO = 40 * MAX_CRUDO
 # Lo que se tapa de un tramo de una ruta o de una palabra del título (_tapar), por su forma
 _CORREO = re.compile(r'.(?:@|%40).')
 _DIGITOS = re.compile(r'[0-9]{7,}')                 # un teléfono o un número de cuenta seguido
@@ -252,12 +255,24 @@ def _titulo_visible(titulo):
 
 def _muestra(abiertas):
     """Hasta MAX_MUESTRA funciones (método y ruta visible) de `abiertas`, en su orden. Las que quedan con el mismo
-    texto, porque se les tapó un tramo o se les quitó la consulta, van una vez con cuántas son."""
-    cuentas = {}
+    texto, porque se les tapó un tramo o se les quitó la consulta, van una vez con cuántas son.
+
+    El texto visible de cada ruta se calcula una sola vez, y solo hasta juntar MAX_REVISADO caracteres de rutas: el
+    costo no crece con el documento. Si no alcanzó para todas, las demás no entran y la cuenta de cada texto es un
+    mínimo, y lo dice: '(al menos N funciones)'."""
+    cuentas, visibles, revisado, completa = {}, {}, 0, True
     for _, ruta, metodo in abiertas:
-        texto = '%s %s' % (metodo, _ruta_visible(ruta))
+        visible = visibles.get(ruta)
+        if visible is None:
+            if revisado >= MAX_REVISADO:
+                completa = False
+                break
+            revisado += min(len(ruta), 2 * MAX_CRUDO)   # lo más que _ruta_visible revisa de una ruta
+            visible = visibles[ruta] = _ruta_visible(ruta)
+        texto = '%s %s' % (metodo, visible)
         cuentas[texto] = cuentas.get(texto, 0) + 1
-    return [texto if n == 1 else '%s (%d funciones)' % (texto, n) for texto, n in list(cuentas.items())[:MAX_MUESTRA]]
+    varias = '%s (%d funciones)' if completa else '%s (al menos %d funciones)'
+    return [texto if n == 1 else varias % (texto, n) for texto, n in list(cuentas.items())[:MAX_MUESTRA]]
 
 
 def declara(seguridad):
@@ -414,7 +429,7 @@ def limpiar(datos):
     if isinstance(doc, dict) and doc['formato'] in DOCUMENTOS:
         doc = {'formato': doc['formato'], 'version': doc['version'], 'titulo': _texto(doc['titulo']),
                'operaciones': doc['operaciones'], 'sin_declarar': doc['sin_declarar'],
-               'muestra': [_texto(m, MAX_TEXTO + 32) for m in doc['muestra']], 'huella': doc['huella']}
+               'muestra': [_texto(m, MAX_TEXTO + 48) for m in doc['muestra']], 'huella': doc['huella']}
     elif isinstance(doc, dict):
         doc = dict({'formato': doc['formato']}, **({'huella': doc['huella']} if doc.get('huella') else {}))
     return {'estado': estado, 'doc': doc}
