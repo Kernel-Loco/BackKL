@@ -1,6 +1,6 @@
 # Política de seguridad y privacidad de LowTide
 
-Tarjeta #78 (RC-39). Versión 2 del 8 nov 2026: suma la matriz de responsable y encargado (sección 5.1), el responsable del aviso, el buzón ARCO y los términos de uso del portal (sección 11) de la tarjeta #96g (RC-207).
+Tarjeta #78 (RC-39). Versión 2.0 del 8 nov 2026: suma la matriz de responsable y encargado (sección 5.1), el responsable del aviso, el buzón ARCO y los términos de uso del portal (sección 11) de la tarjeta #96g (RC-207).
 
 Esta política integra las reglas de la [política de uso ético y alcance](politica_uso_etico.md) de la tarjeta #6 (RC-36) en un sistema de gestión con la metodología de ISO/IEC 27001:2022 y los controles de ISO/IEC 27002:2022, y trae el aviso de privacidad conforme a la Ley Federal de Protección de Datos Personales en Posesión de los Particulares (LFPDPPP, DOF 20 de marzo de 2025, última reforma DOF 14 de noviembre de 2025). Va junto con la [plantilla de carta de autorización](plantilla_carta_autorizacion.md), que remite a esta política en su sección 6.
 
@@ -67,7 +67,7 @@ Es la declaración de aplicabilidad de LowTide. Estado: Existe, En parte, Falta 
 | 5.17 Información de autenticación | Contraseñas con argon2id y semilla TOTP cifrada con AES-256-GCM. Las llaves de la API se guardarán solo como SHA-256, según el diseño de #87, que todavía no tiene llaves ni endpoint para crearlas | Existe. Las llaves de la API, en diseño |
 | 5.18 Derechos de acceso | Hoy los usuarios y sus roles solo llegan por las semillas o por SQL. El plan es que el Admin de cada empresa dé y quite roles | Falta la pantalla o la API del Admin y una revisión periódica de accesos |
 | 5.19 a 5.22 Proveedores | Cada proveedor se elige por sus términos (que no entrene con los datos, que no los guarde) y se anota en `servicios_externos.md` con su fecha de revisión | En parte. No hay acuerdos firmados con los proveedores y falta revisar los términos de las fuentes de subfinder |
-| 5.23 Servicios en la nube | VM en Azure for Students, DNS y Workers AI en Cloudflare, respaldo de IA en Groq. Tokens con el menor permiso y con vencimiento | En parte. La VM llega con RC-91. Falta exigir 2FA en la organización de GitHub y anotar el 2FA de cada cuenta en `servicios_externos.md` |
+| 5.23 Servicios en la nube | VM en Azure for Students, DNS y Workers AI en Cloudflare, respaldo de IA en Groq. Tokens con el menor permiso y con vencimiento | En parte. La VM llega con RC-91. La organización lowtidesec de GitHub exige 2FA desde el 8 nov 2026. Falta exigirlo en Kernel-Loco, donde están los repositorios, y anotar el 2FA de cada cuenta en `servicios_externos.md` |
 | 5.24 a 5.28 Incidentes | Secciones 4.2, 4.8, 5.2 y 8 de #6: se detiene, se borra, se avisa el mismo día a quien coordine y a la empresa en el plazo de la carta, y se documenta en un lugar privado | Existe como procedimiento |
 | 5.29 y 5.30 Continuidad | Plan B: el mismo compose en una PC del equipo con Cloudflare Tunnel. Respaldo de la demo con respuestas grabadas | En parte. Sin prueba de recuperación escrita |
 | 5.31 Requisitos legales | LFPDPPP y artículos 211 bis del Código Penal Federal (sección 6) | Existe |
