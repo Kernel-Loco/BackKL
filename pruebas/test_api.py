@@ -7,6 +7,8 @@ Cada empresa entra con la sesión de una cuenta de demo: la empresa sale de la s
 no de un encabezado (#25).
 """
 import unittest
+import urllib.error
+import urllib.request
 
 from pruebas import sesion
 
@@ -64,6 +66,23 @@ class ApiCirdan(unittest.TestCase):
         # Los dos modos los prueba pruebas/test_explorador.py dentro del contenedor.
         code, body = sesion.Client().get('/db/tables/users/rows', headers={'X-Organization': BETA})
         self.assertIn(code, (401, 404), body)
+
+    def test_8_toda_respuesta_trae_la_proteccion_contra_marcos_y_nosniff(self):
+        # RC-283: también los errores y el 403 que da el middleware de origen antes de llegar a una ruta
+        casos = (('GET', '/health', None, 200), ('GET', '/domains', None, 401), ('GET', '/no-existe', None, 404),
+                 ('GET', '/docs', None, 200), ('POST', '/api/v1/auth/logout', 'https://otro.example', 403))
+        for metodo, ruta, origen, esperado in casos:
+            req = urllib.request.Request(sesion.BASE + ruta, method=metodo,
+                                         headers={'Origin': origen} if origen else {})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    estado, cabeceras = r.status, r.headers
+            except urllib.error.HTTPError as e:
+                estado, cabeceras = e.code, e.headers
+            with self.subTest(ruta=ruta):
+                self.assertEqual(estado, esperado)
+                self.assertEqual(cabeceras.get_all('X-Frame-Options'), ['DENY'])
+                self.assertEqual(cabeceras.get_all('X-Content-Type-Options'), ['nosniff'])
 
 
 if __name__ == '__main__':

@@ -45,6 +45,20 @@ async def same_origin_writes(request: Request, call_next):
     return await call_next(request)
 
 
+# Para cuando la API se llama sin el portal (RC-283): ningún sitio la mete en un marco y el navegador no adivina
+# el tipo de una respuesta. La CSP completa y HSTS son de RC-89.
+CABECERAS_SEGURIDAD = {'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff'}
+
+
+@app.middleware('http')
+async def cabeceras_de_seguridad(request: Request, call_next):
+    """Va después de same_origin_writes para envolverlo: su 403 también sale con las cabeceras."""
+    response = await call_next(request)
+    for nombre, valor in CABECERAS_SEGURIDAD.items():
+        response.headers[nombre] = valor
+    return response
+
+
 app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(v1_router)
