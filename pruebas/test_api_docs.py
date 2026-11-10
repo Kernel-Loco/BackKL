@@ -629,7 +629,8 @@ class Revision(unittest.TestCase):
         self.assertIsNone(api_docs.analizar(cortado))                               # entero y roto: no es nada
         otro = b'{"usuarios": [{"id": 1}, {"id"'
         self.assertEqual(api_docs.analizar(otro, cortado=True), {'formato': 'cortado'})
-        # Un JSON cortado que no nombra el formato puede ser un documento con esa llave al final: ni hallazgo ni revisado
+        # Un JSON cortado que no nombra el formato puede ser un documento con esa llave al final:
+        # ni hallazgo ni revisado
         res, _, _ = correr({url(API, '/openapi.json'): (200, [], openapi3()),
                             url(API, '/v3/api-docs'): {'estado': 200, 'doc': {'formato': 'cortado'}}})
         self.assertEqual(([x.valor for x in res.activos if x.tipo == 'api_doc'], partes(res.sin_revisar)),
