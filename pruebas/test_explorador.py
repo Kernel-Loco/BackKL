@@ -158,6 +158,28 @@ class ExploradorEncendido(Explorador):
         self.assertNotIn('acme-demo.mx', dominios)
         self.assertNotIn('olmardo.com', dominios)
 
+    def test_5b_de_cves_solo_las_que_nombran_sus_hallazgos(self):
+        """cves no tiene RLS y la llenan los escaneos de todas las empresas (#18): una CVE que nombra un hallazgo de
+        Acme la ve Acme y no Beta, y una que no nombra ningún hallazgo suyo no la ve ninguna."""
+        from cirdan.db import transaction
+        de_acme, de_nadie = 'CVE-2099-46001', 'CVE-2099-46002'
+        with transaction(ACME) as conn:
+            for cve in (de_acme, de_nadie):
+                conn.execute('INSERT INTO cves (cve_id) VALUES (%s) ON CONFLICT (cve_id) DO NOTHING', (cve,))
+            hallazgo = conn.execute('SELECT id FROM findings WHERE cve_id IS NULL LIMIT 1').fetchone()['id']
+            conn.execute('UPDATE findings SET cve_id = %s WHERE id = %s', (de_acme, hallazgo))
+
+        def limpiar():
+            with transaction(ACME) as conn:
+                conn.execute('UPDATE findings SET cve_id = NULL WHERE id = %s', (hallazgo,))
+        self.addCleanup(limpiar)
+        de = lambda sesion, org: [f['cve_id'] for f in self.filas('cves', sesion, org)]
+        self.assertEqual(de(self.acme, BETA), [de_acme])
+        self.assertEqual(de(self.beta, ACME), [])
+        for sesion, cuantas in ((self.acme, 1), (self.beta, 0)):
+            tablas = {t['table']: t['rows'] for t in self.api.get('/db/tables', sesion)[1]['tables']}
+            self.assertEqual(tablas['cves'], cuantas)
+
     def test_6_la_pagina_demo_inicia_sesion_y_no_manda_el_encabezado(self):
         # La página no trae datos: los pide con la cookie. Sin sesión muestra el inicio de sesión.
         code, html = self.api.get('/demo')

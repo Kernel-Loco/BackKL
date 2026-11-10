@@ -1,0 +1,21 @@
+{
+  "_nota": "Armada a mano con la forma de la API 2.0 de la NVD (cves/2.0?cpeName=...). Las CVE de 2098 y 2099 son falsas y no se consultaron.",
+  "resultsPerPage": 5,
+  "startIndex": 0,
+  "totalResults": 5,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "vulnerabilities": [
+    {"cve": {"id": "CVE-2099-0101", "vulnStatus": "Analyzed", "published": "2099-01-02T10:00:00.000",
+             "descriptions": [{"lang": "es", "value": "Vulnerabilidad falsa de prueba."}, {"lang": "en", "value": "Fake test vulnerability, written by hand."}],
+             "metrics": {"cvssMetricV31": [
+               {"source": "otro@example.org", "type": "Secondary", "cvssData": {"version": "3.1", "baseScore": 5.3, "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"}},
+               {"source": "nvd@nist.gov", "type": "Primary", "cvssData": {"version": "3.1", "baseScore": 7.5, "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"}}]}}},
+    {"cve": {"id": "cve-2099-00102", "vulnStatus": "Modified", "published": "2099-01-03T10:00:00",
+             "descriptions": [{"lang": "en", "value": "Second fake test vulnerability."}],
+             "metrics": {"cvssMetricV2": [{"source": "nvd@nist.gov", "type": "Primary", "cvssData": {"version": "2.0", "baseScore": 5.0, "vectorString": "AV:N/AC:L/Au:N/C:N/I:N/A:P"}}]}}},
+    {"cve": {"id": "CVE-2099-0102", "vulnStatus": "Modified", "published": "2099-01-03T10:00:00", "descriptions": [], "metrics": {}}},
+    {"cve": {"id": "CVE-2098-0103", "vulnStatus": "Rejected", "published": "2098-05-01T10:00:00", "descriptions": [], "metrics": {}}},
+    {"cve": {"id": "CVE-2098-12345", "vulnStatus": "Awaiting Analysis", "published": "no es fecha", "descriptions": [], "metrics": {"cvssMetricV31": [{"type": "Primary", "cvssData": {"baseScore": 11}}]}}}
+  ]
+}

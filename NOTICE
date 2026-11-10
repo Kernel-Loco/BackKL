@@ -48,6 +48,45 @@ MITRE ATT&CK
   Cirdan guarda de cada regla solo el ID de la técnica de Enterprise v19, un
   nombre breve en español y el enlace (tabla scoring_rule_framework_mappings).
 
+Wappalyzer 6.10.54
+  https://registry.npmjs.org/wappalyzer/-/wappalyzer-6.10.54.tgz
+  (dist.integrity sha512-P9VSYXSL6hiExangdWwipDlmMEdpdPqeHuv4QqsUTVxhuj4ua1Y
+  rE4xL7ENxs9b2wk9JeIzFR+ZqTmrlSYSEgw==)
+  Licencia MIT, según el package.json del paquete, con autor Wappalyzer. El
+  paquete no trae un archivo LICENSE ni otro aviso de copyright. Este es el
+  texto de la licencia MIT:
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+  and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  DEALINGS IN THE SOFTWARE.
+
+  cirdan/recolectores/huellas_wappalyzer.json guarda una parte de sus
+  huellas, sin cambiar los patrones: las 553 tecnologías de las categorías
+  CMS, JavaScript frameworks, Web frameworks, Web servers, Programming
+  languages y JavaScript libraries, con sus huellas de cabeceras, cookies,
+  meta, scriptSrc, scripts y html y su CPE (cirdan/recolectores/huellas.py,
+  generar()). Desde la 6.10.55 Wappalyzer cambió a GPL-3.0: esas no se usan.
+
+NVD
+  This product uses the NVD API but is not endorsed or certified by the NVD.
+  Cirdan pide a la API 2.0 de la NVD (https://nvd.nist.gov) las CVE del CPE
+  de cada tecnología con versión (cirdan/recolectores/nvd.py) y toma de
+  cada una su ID, la descripción, el puntaje y el vector CVSS y la fecha.
+
 Software de terceros incluido en la imagen
 ------------------------------------------
 

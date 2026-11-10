@@ -24,7 +24,7 @@ from pruebas.test_subfinder import SubfinderSimulado  # noqa: E402
 from pruebas.test_geoip import bases as bases_geo  # noqa: E402
 from pruebas.test_rdap import HttpSimulado as RdapSimulado, respuesta as respuesta_rdap  # noqa: E402
 from cirdan.recolectores import (REGISTRO, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, rdap,  # noqa: E402
-                                 registros_dns, shodan, subfinder)
+                                 registros_dns, shodan, subfinder, visita)
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
@@ -398,7 +398,9 @@ class Ejecutar(unittest.TestCase):
         """Sin red ni binarios: crt.sh y Cert Spotter con su transporte simulado, subfinder con un proceso simulado, el DNS con un
         resolvedor simulado, GitHub con su API, git y gitleaks simulados, con acme-demo.mx declarado como la organización
         acme-demo (sin declaración GitHub no consulta ni graba nada), y Shodan con Cert Spotter e InternetDB simulados y
-        el A de acme-demo.mx en una IP con el 8080 abierto, y RDAP con el bootstrap y el registro simulados.
+        el A de acme-demo.mx en una IP con el 8080 abierto, RDAP con el bootstrap y el registro simulados, y la visita
+        web con Cert Spotter y la página de acme-demo.mx simulados (un nginx sin versión, que no pide endoflife.date ni
+        la NVD).
         Un recolector nuevo en REGISTRO necesita aquí su simulación, o correría su fuente real.
         dns y shodan ubican sus IP con unas Bases falsas (geo-G6): la prueba no lee datos/geo ni abre maxminddb, así que
         da lo mismo en una PC con las bases que sin ellas, y _POR_OMISION queda como estaba."""
@@ -421,7 +423,8 @@ class Ejecutar(unittest.TestCase):
                     mock.patch.object(github, '_binario', BINARIOS.get), \
                     mock.patch.object(shodan, '_descargar', HttpSimulado(ips={CAMARA: CAMARA_8080})), \
                     mock.patch.object(shodan, '_resolver_a', ResolvedorSimulado({'acme-demo.mx': a(CAMARA)})), \
-                    mock.patch.object(rdap, '_descargar', RdapSimulado(dominios={'acme-demo.mx': respuesta_rdap('acme-demo.mx')})), \
+                    mock.patch.object(rdap, '_descargar', RdapSimulado(dominios={'acme-demo.mx': respuesta_rdap('acme-demo.mx')})),                     mock.patch.object(visita, '_descargar_api', HttpSimulado()),                     mock.patch.object(visita, '_visitar', lambda url, timeout: {
+                        'estado': 200, 'cabeceras': [['Server', 'nginx']], 'cuerpo': '<html></html>'}), \
                     mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo'}):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
@@ -449,7 +452,8 @@ class Ejecutar(unittest.TestCase):
             self.assertIs(type(maximo), int, fuente)
             self.assertGreaterEqual(maximo, 0, fuente)
         self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, shodan.MAX_CONSULTAS,
-                          rdap.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS), (18, len(subfinder.FUENTES_SUBFINDER), 16, 184, 10, 0))
+                          rdap.MAX_CONSULTAS, visita.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS),
+                         (18, len(subfinder.FUENTES_SUBFINDER), 16, 184, 10, 184, 0))
 
     def test_15c_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
         """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento."""
@@ -539,6 +543,46 @@ class Grabadora(unittest.TestCase):
             self.assertEqual(r.leidas, [('q.json', fecha)])
             with self.assertRaises(contrato.SinGrabacion):
                 r.de_disco('otra')
+
+    def test_1b_un_archivo_vacio_no_se_lee_y_con_sobre_tampoco_el_formato_anterior(self):
+        """c3-1 (RC-46): un archivo de 0 bytes es una escritura que se cortó, no una respuesta sin datos. El formato
+        anterior (solo los datos) se sigue leyendo, salvo en una Grabadora con `sobre`."""
+        with tempfile.TemporaryDirectory() as d:
+            archivo = Path(d) / 'q.json'
+            for sobre in (False, True):
+                r = contrato.Grabadora(d, 'reproducir', sobre=sobre)
+                for roto in ('', ' ', '\n'):
+                    archivo.write_text(roto, encoding='utf-8')
+                    with self.subTest(sobre=sobre, roto=roto), self.assertRaises(ValueError):
+                        r.de_disco('q')
+                archivo.write_text('{"grabado": "2026-10-15T12:00:00+00:00", "consulta": "q", "datos": []}',
+                                   encoding='utf-8')
+                self.assertEqual(r.de_disco('q'), (True, []))
+            for anterior in ('[]', '[1]', '{}', '{"x": 1}'):
+                archivo.write_text(anterior, encoding='utf-8')
+                self.assertEqual(contrato.Grabadora(d, 'reproducir').de_disco('q'), (True, json.loads(anterior)))
+                with self.subTest(anterior=anterior), self.assertRaises(ValueError):
+                    contrato.Grabadora(d, 'reproducir', sobre=True).de_disco('q')
+                g = contrato.Grabadora(d, 'grabar', completar=True, sobre=True)
+                with self.subTest(completar=anterior):   # al completar no se reutiliza: se consulta otra vez
+                    self.assertEqual((g.de_disco('q'), g.leidas), ((False, None), []))
+
+    def test_1c_el_error_de_un_archivo_roto_nombra_la_grabacion_y_al_completar_se_consulta_otra_vez(self):
+        """Regresiones 3 y 4 de la ronda 4 (RC-46): el error de un archivo vacío o cortado dice qué archivo es y no
+        copia su contenido, y con `completar` ese archivo cuenta como que no está."""
+        with tempfile.TemporaryDirectory() as d:
+            archivo = Path(d) / 'q.json'
+            for roto in ('', '{"grabado": "2026-10-15T12:00:00+00:00", "datos": ["secreto-a-medi'):
+                archivo.write_text(roto, encoding='utf-8')
+                for sobre in (False, True):
+                    with self.subTest(roto=roto, sobre=sobre):
+                        with self.assertRaises(ValueError) as error:
+                            contrato.Grabadora(d, 'reproducir', sobre=sobre).de_disco('q')
+                        self.assertEqual(str(error.exception), 'la grabación q.json no se puede leer (JSONDecodeError)')
+                        g = contrato.Grabadora(d, 'grabar', completar=True, sobre=sobre)
+                        self.assertEqual((g.de_disco('q'), g.leidas), ((False, None), []))
+            g.guardar('q', [1])   # lo consultado otra vez reemplaza al archivo roto
+            self.assertEqual(contrato.Grabadora(d, 'reproducir').de_disco('q'), (True, [1]))
 
     def test_2_vivo_no_toca_el_disco(self):
         with tempfile.TemporaryDirectory() as d:

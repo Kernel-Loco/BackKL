@@ -116,7 +116,7 @@ from pathlib import Path
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import certspotter, geoip, transporte
+from cirdan.recolectores import certspotter, contrato, geoip, transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos, en_alcance_nombre)
@@ -132,7 +132,7 @@ SIN_LLAVE = ('exposed_iot_device', 'exposed_ot_device', 'outdated_software')
 
 URL_INTERNETDB = 'https://internetdb.shodan.io/'
 NOMBRE_INTERNETDB = 'Shodan InternetDB'          # atribución: va en los atributos y la evidencia
-AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
+AGENTE = contrato.AGENTE   # uno solo para todas las fuentes (contrato.py)
 ORIGEN = 'cert_spotter_a'                        # de dónde salió la IP: un nombre de Cert Spotter y su A
 RESOLVEDORES = ('1.1.1.1', '8.8.8.8')            # públicos y fijos, como registros_dns.py. Nunca el DNS del sistema
 
@@ -441,10 +441,14 @@ class ClienteShodan:
     _resolver_a, buscados en el módulo en cada consulta, así una prueba los puede cambiar con mock.patch.object.
     `cronometro` y `dormir` son time.monotonic y time.sleep por omisión. `consultas` suma cada intento de cada petición HTTP o DNS."""
 
+    PREFIJO = 'shodan: '             # lo que abre sus errores. La visita web (visita.py) hereda el cliente con el suyo
+    TIEMPO_CORRIDA = TIEMPO_CORRIDA
+    TOPES = TOPES
+
     def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, descargar=None, resolver=None, nueva=False, reloj=None,
                  cronometro=None, dormir=None):
         self.modo = modo
-        self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj)
+        self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj, sobre=True)
         self.descargar, self.resolver = descargar, resolver
         self.cronometro = cronometro or time.monotonic
         self.dormir = dormir or time.sleep
@@ -469,10 +473,10 @@ class ClienteShodan:
     def restante(self):
         """Segundos que le quedan a la corrida, sin la reserva. Al reproducir no hay consultas y no hay tope."""
         if self.modo == 'reproducir':
-            return TIEMPO_CORRIDA
+            return self.TIEMPO_CORRIDA
         if self.inicio is None:
             self.inicio = self.cronometro()
-        return TIEMPO_CORRIDA - self.reserva - (self.cronometro() - self.inicio)
+        return self.TIEMPO_CORRIDA - self.reserva - (self.cronometro() - self.inicio)
 
     def esperar(self, segundos):
         """El dormir de con_reintentos. Si después de esperar `segundos` quedaría menos de MIN_INTENTO más HOLGURA para
@@ -487,7 +491,7 @@ class ClienteShodan:
     def degradada(self, parcial=()):
         """True si la corrida tuvo alguna falla: una consulta que falló, de cualquier tipo, o una razón de cobertura
         parcial (`parcial`, de _revisar) que no es un tope determinista de TOPES. Con eso 'grabar' no escribe."""
-        return bool(self.fallas) or bool(set(parcial) - set(TOPES))
+        return bool(self.fallas) or bool(set(parcial) - set(self.TOPES))
 
     def terminar(self):
         """La corrida terminó: graba todo lo pendiente. Una corrida que falla no llega aquí y no toca la grabación."""
@@ -501,8 +505,14 @@ class ClienteShodan:
 
     def _de_disco(self, consulta):
         """(True, datos) si sale de la grabación. Una corrida con fallas ya no se graba, pero una grabación de antes o
-        editada a mano puede traer una falla: se lanza otra vez, con su clase y su texto, y no se lee como datos."""
-        del_disco, datos = self.grabadora.de_disco(consulta)
+        editada a mano puede traer una falla: se lanza otra vez, con su clase y su texto, y no se lee como datos. Un
+        archivo vacío, truncado, que no es JSON o sin su sobre {grabado, datos} es una consulta que no llegó
+        (FuenteNoResponde), nunca un error que tumbe la fuente ni una respuesta sin datos: vale para toda consulta,
+        también el A y las páginas de Cert Spotter."""
+        try:
+            del_disco, datos = self.grabadora.de_disco(consulta)
+        except (ValueError, KeyError, TypeError, AttributeError):   # SinGrabacion no es ninguna de estas
+            raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta) from None
         if del_disco and isinstance(datos, dict) and 'falla' in datos:
             raise FALLAS.get(datos.get('tipo'), FuenteNoResponde)(str(datos['falla'])[:300])
         return del_disco, datos
@@ -517,27 +527,35 @@ class ClienteShodan:
             self.fallas += 1
             raise
 
-    def _http(self, url, intentos, timeout, que, sin_reintento=()):
+    def _transporte(self, url, timeout):
+        """La petición HTTP por omisión: _descargar, buscada en el módulo en cada consulta (mock.patch.object). La
+        visita web la cambia por la suya, con otro tope de bytes."""
+        return _descargar(url, timeout)
+
+    def _http(self, url, intentos, timeout, que, sin_reintento=(), turno=None):
         """JSON de `url` con hasta `intentos` intentos dentro del tiempo de la corrida. None solo con un 404. Un 429
         lanza LimiteAlcanzado, y otro 4xx, un 200 vacío o 'null' o una redirección RespuestaIlegible, sin reintentar.
         Si un 5xx o un 408 traen Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le
-        alcanza a la corrida, pero nunca más de MAX_ESPERA."""
+        alcanza a la corrida, pero nunca más de MAX_ESPERA. `turno()`, si se pasa, corre antes de cada intento, también
+        de los reintentos: la visita web espera ahí el ritmo de la NVD."""
         pedida = {}   # el Retry-After del último intento
 
         def intento():
             pedida.clear()
+            if turno:
+                turno()
             limite = min(timeout, self.restante())
             if limite < MIN_INTENTO:
-                raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de consultar %s' % que)
+                raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de consultar %s' % que)
             self.consultas += 1
             try:
-                cuerpo = (self.descargar or _descargar)(url, limite)
+                cuerpo = (self.descargar or self._transporte)(url, limite)
             except SinTiempo:
                 # La respuesta se pasó de su plazo. Si con eso se acabó la corrida, es el corte por tiempo. Si no, es
                 # una respuesta lenta y cuenta como una falla de red, que con_reintentos reintenta.
                 if self.restante() < MIN_INTENTO:
-                    raise SinTiempo('shodan: se acabó el tiempo de la corrida mientras se leía %s' % que) from None
-                raise TimeoutError('shodan: %s tardó más de %s s en responder' % (que, limite)) from None
+                    raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida mientras se leía %s' % que) from None
+                raise TimeoutError(self.PREFIJO + '%s tardó más de %s s en responder' % (que, limite)) from None
             except urllib.error.HTTPError as e:
                 codigo, espera = e.code, (e.headers or {}).get('Retry-After')
                 pedida['segundos'] = min(transporte.retry_after(e.headers) or 0, MAX_ESPERA)   # aunque pida más
@@ -546,18 +564,18 @@ class ClienteShodan:
                 if codigo == 404:
                     return _NO_ENCONTRADO
                 if codigo == 429:
-                    raise LimiteAlcanzado('shodan: %s llegó a su límite de consultas (429, Retry-After %s s)'
+                    raise LimiteAlcanzado(self.PREFIJO + '%s llegó a su límite de consultas (429, Retry-After %s s)'
                                           % (que, espera or '?')) from None
                 if codigo in sin_reintento or (codigo < 500 and codigo != 408):
-                    raise RespuestaIlegible('shodan: %s respondió %d' % (que, codigo)) from None
+                    raise RespuestaIlegible(self.PREFIJO + '%s respondió %d' % (que, codigo)) from None
                 raise
             if not cuerpo or not cuerpo.strip():
-                raise RespuestaIlegible('shodan: %s respondió sin cuerpo' % que)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió sin cuerpo' % que)
             datos = json.loads(cuerpo)
             if datos is None:
-                raise RespuestaIlegible('shodan: %s respondió null' % que)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió null' % que)
             return datos
-        intento.__name__ = 'shodan: %s no respondió' % que
+        intento.__name__ = self.PREFIJO + '%s no respondió' % que
         datos = con_reintentos(intento, intentos=intentos, esperas=ESPERAS,
                                dormir=lambda segundos: self.esperar(max(segundos, pedida.get('segundos') or 0)))
         return None if datos is _NO_ENCONTRADO else datos
@@ -570,7 +588,7 @@ class ClienteShodan:
         del_disco, datos = self._de_disco(consulta)
         if del_disco:
             if not isinstance(datos, list):
-                raise FuenteNoResponde('shodan: la grabación de %s no se puede leer' % consulta)
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta)
         else:
             que = '%s (%s)' % (fuente, texto or consulta)
 
@@ -579,7 +597,7 @@ class ClienteShodan:
                     self.dormir(pausa)
                 datos = self._http(url, intentos, timeout or TIMEOUT_CT, que, sin_reintento)
                 if not isinstance(datos, list) or (valida and not valida(datos)):
-                    raise RespuestaIlegible('shodan: %s respondió algo que no se puede leer' % que)
+                    raise RespuestaIlegible(self.PREFIJO + '%s respondió algo que no se puede leer' % que)
                 return reducir_pagina(datos)
             datos = self._consultar(consulta, pagina)
             self._grabar(consulta, datos)
@@ -596,15 +614,15 @@ class ClienteShodan:
             try:
                 return limpiar_a(datos['estado'], datos['ips'], datos.get('cnames', datos.get('cname')))
             except (ValueError, KeyError, TypeError, AttributeError):
-                raise FuenteNoResponde('shodan: la grabación de %s no se puede leer' % consulta) from None
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta) from None
 
         def intento():
             limite = min(TIMEOUT_DNS, self.restante())
             if limite < MIN_INTENTO:
-                raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de resolver %s' % nombre)
+                raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de resolver %s' % nombre)
             self.consultas += 1
             return limpiar_a(*(self.resolver or _resolver_a)(nombre, limite))
-        intento.__name__ = 'shodan: el DNS no respondió al A de %s' % nombre
+        intento.__name__ = self.PREFIJO + 'el DNS no respondió al A de %s' % nombre
 
         datos = self._consultar(consulta, lambda: con_reintentos(intento, intentos=INTENTOS, esperas=ESPERAS,
                                                                  errores=(ConsultaFallida,), dormir=self.esperar))
@@ -619,7 +637,7 @@ class ClienteShodan:
         if del_disco:
             limpio = limpiar_internetdb(datos, dominio)
             if limpio is None:
-                raise FuenteNoResponde('shodan: la grabación de %s no se puede leer' % consulta)
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta)
             return limpio
         que = 'InternetDB (%s)' % ip
 
@@ -629,7 +647,7 @@ class ClienteShodan:
             crudo = self._http(URL_INTERNETDB + ip, INTENTOS, TIMEOUT_HTTP, que)
             limpio = {'sin_datos': True} if crudo is None else limpiar_internetdb(crudo, dominio)
             if limpio is None:
-                raise RespuestaIlegible('shodan: %s respondió algo que no es un objeto' % que)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió algo que no es un objeto' % que)
             return limpio
         limpio = self._consultar(consulta, consulta_ip)
         self._grabar(consulta, limpio)

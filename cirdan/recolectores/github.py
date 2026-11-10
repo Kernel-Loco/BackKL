@@ -94,6 +94,7 @@ from pathlib import Path
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
+from cirdan.recolectores import contrato
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos, en_alcance_nombre, fecha_iso, nombre_archivo)
@@ -112,7 +113,7 @@ NINGUNA = 'ninguna'                            # la empresa declaró que no tien
 
 API = 'https://api.github.com'
 CLON = 'https://github.com/%s/%s.git'
-AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
+AGENTE = contrato.AGENTE   # uno solo para todas las fuentes (contrato.py)
 VERSION_API = '2022-11-28'
 TIMEOUT_HTTP = 30                # segundos por petición a la API
 INTENTOS = 3                     # intentos por petición a la API dentro de una corrida
@@ -714,7 +715,10 @@ class ClienteGitHub:
     def revisar(self, org, repo, dominio):
         """{secretos, correos, ajenos, invalidos} de un repo: lo clona, corre gitleaks y lee los correos de git log."""
         consulta = 'repo:%s/%s' % (org, repo)
-        del_disco, datos = self._de_disco(consulta)
+        try:
+            del_disco, datos = self._de_disco(consulta)
+        except ValueError:   # un archivo vacío o cortado: ese repo queda sin revisar y los demás dan lo suyo
+            raise FallaRepo('github: la grabación de un repo no se puede leer') from None
         if del_disco:
             return revision_valida(datos, dominio)
         vivo = self._revisar_en_vivo(org, repo, dominio)

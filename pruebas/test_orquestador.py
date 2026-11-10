@@ -484,6 +484,63 @@ class Orquestador(unittest.TestCase):
         self.reescanear(resultado_github(), 'github')
         self.assertEqual(self.abiertos('title', en_sitio).popitem()[1], 'resolved')
 
+    def test_2s_las_cve_van_a_cves_y_a_findings_cve_id(self):
+        """La visita web (#18) trae de la NVD sus CVE con CVSS: entran completas en cves como cirdan_app y cada
+        known_vulnerability lleva su cve_id. En el orden de producción (fuentes_activas va por code: shodan antes que
+        web) la CVE que Shodan deduce entra como stub y la fila de la NVD de la misma CVE ya no cambia (eso es del
+        cargador diario): la API toma el CVSS de la evidencia. Una CVE que ya está no cambia y cve_id se conserva."""
+        from cirdan.recolectores import contrato, nvd, visita
+        from pruebas.test_huellas import fixture, tecnologia
+        self.assertEqual(self.uno('SELECT current_user AS u')['u'], 'cirdan_app')
+        ip = '198.51.100.7'
+        # 1. Shodan primero: sus dos CVE entran como stub
+        self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2099-7777'), (ip, 'CVE-2099-0101')]), 'shodan')
+        stubs = self.conn.execute('SELECT cve_id, description, cvss_base_score FROM cves WHERE cve_id = ANY(%s)',
+                                  (['CVE-2099-7777', 'CVE-2099-0101'],)).fetchall()
+        self.assertEqual(sorted((f['cve_id'], f['description'], f['cvss_base_score']) for f in stubs),
+                         [('CVE-2099-0101', None, None), ('CVE-2099-7777', None, None)])
+        # 2. La visita web después: sus otras CVE entran completas; la de Shodan sigue como stub
+        revision = nvd.revisar(tecnologia('Nginx', '1.18.0'), fixture('nvd_nginx_1.18.0'), 'acme-demo.mx')
+        web = Resultado('acme-demo.mx', 'web', cves=revision['cves'])
+        web.activos.append(Activo('domain', 'acme-demo.mx', {'web': {'estado': 'visitado', 'fuente': 'web'}}))
+        web.hallazgos = [visita._hallazgo(c, 'acme-demo.mx', 'acme-demo.mx', AHORA, 'https://acme-demo.mx/')
+                         for c in revision['hallazgos']]
+        self.assertEqual(contrato.validar(web, codigos=set(visita.CODIGOS)), [])
+        ids = sorted(h.evidencia['cve'] for h in web.hallazgos)
+        self.assertEqual(len(ids), 3)
+        self.assertIn('CVE-2099-0101', ids)
+        completas = {f['cve_id']: f for f in revision['cves']}
+        for _ in range(2):   # la segunda vez es el ON CONFLICT de cves y el DO UPDATE de findings
+            s, _ = self.reescanear(web, 'web')
+            filas = {f['cve_id']: f for f in self.conn.execute(
+                'SELECT cve_id, description, cvss_base_score, cvss_vector, published_at FROM cves '
+                'WHERE cve_id = ANY(%s)', (ids,)).fetchall()}
+            self.assertEqual(sorted(filas), ids)
+            for cve in ids:
+                if cve == 'CVE-2099-0101':
+                    self.assertEqual((filas[cve]['description'], filas[cve]['cvss_base_score']), (None, None))
+                    continue
+                puntaje = filas[cve]['cvss_base_score']
+                self.assertEqual((filas[cve]['description'], None if puntaje is None else float(puntaje),
+                                  filas[cve]['cvss_vector']),
+                                 (completas[cve]['description'], completas[cve]['cvss_base_score'],
+                                  completas[cve]['cvss_vector']))
+                self.assertEqual(filas[cve]['published_at'] is None, completas[cve].get('published_at') is None)
+            guardadas = self.conn.execute('SELECT evidence->>%s AS cve, cve_id FROM findings WHERE fingerprint = ANY(%s)',
+                                          ('cve', [bytes.fromhex(h.huella) for h in web.hallazgos])).fetchall()
+            self.assertEqual(sorted((f['cve'], f['cve_id']) for f in guardadas), [(c, c) for c in ids])
+        shodan_ids = self.conn.execute(
+            "SELECT f.cve_id FROM findings f JOIN data_sources d ON d.id = f.source_id WHERE d.code = 'shodan' "
+            'AND f.cve_id = ANY(%s)', (['CVE-2099-7777', 'CVE-2099-0101'],)).fetchall()
+        self.assertEqual(sorted(f['cve_id'] for f in shodan_ids), ['CVE-2099-0101', 'CVE-2099-7777'])
+        # 3. La API da el CVSS de la NVD: de cves si la fila está completa y de la evidencia si es un stub
+        from cirdan.api import v1
+        cvss = {f['evidence']['cve']: f['cvss'] for f in self.conn.execute(v1.FINDINGS_SQL, ('acme-demo.mx',))
+                if f['source'] == 'web' and 'cve' in f['evidence']}
+        self.assertEqual({c: None if v is None else float(v) for c, v in cvss.items()},
+                         {c: completas[c]['cvss_base_score'] for c in ids})
+        self.assertIsNotNone(cvss['CVE-2099-0101'])   # el stub toma el CVSS de la evidencia
+
     def test_2r_una_cve_que_el_tope_dejo_fuera_sigue_abierta(self):
         """Las CVE que MAX_CVE deja fuera van en omitidos (#23): la que se reportó antes y ahora quedó fuera sigue
         abierta, el escaneo no queda a medias por eso y una omitida que nunca se reportó no se guarda. Si ya no sale
@@ -651,6 +708,41 @@ class Orquestador(unittest.TestCase):
         s, _ = self.reescanear(parcial, 'ct_logs', datetime(2026, 10, 25, 12, 0, 1, tzinfo=timezone.utc))
         self.assertEqual(self.abiertos('host', nuevo), {'nuevo.acme-demo.mx': 'resolved'})
         self.assertEqual(self.conteos(s.scan_id)[1], 1)
+
+    def test_2z2_un_archivo_danado_de_la_grabacion_de_ct_logs_no_cierra_nada(self):
+        """RC-46 (Ernesto, 9 nov): al reproducir con un archivo de la grabación dañado, ct_logs no cierra ningún
+        hallazgo en ese escaneo, ni el por vencer de pagos, que solo trae crt.sh. El escaneo queda parcial, con ct_logs
+        en sources_partial, y el primer aviso de la fuente nombra el archivo. Con la grabación sana otra vez tampoco se
+        cierra nada, porque todo sigue ahí."""
+        pagos = cert(40, ['pagos.acme-demo.mx'], '2026-07-27T00:00:00', '2026-10-24T12:00:00')
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)):
+            carpeta = crtsh.carpeta_de('acme-demo.mx')
+            simulado = RespaldoSimulado([EMISIONES[:3], []], crtsh={'%.acme-demo.mx': SUBDOMINIOS + [pagos]})
+            antes, _ = recolectar_ct(simulado, carpeta, 'grabar', nueva=True)
+
+            def escanear():
+                s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+                return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], modo='reproducir',
+                                             ahora=AHORA, conn=self.conn)
+            escanear()
+            todos = dict.fromkeys(('api.acme-demo.mx', 'dev.acme-demo.mx', 'pagos.acme-demo.mx'), 'open')
+            self.assertEqual(self.abiertos('host', *antes.hallazgos), todos)
+            for nombre in ('subdominios_acme-demo.mx.json', 'certspotter_acme-demo.mx.json',
+                           'dns_dev.acme-demo.mx.json'):
+                bueno = (carpeta / nombre).read_bytes()
+                (carpeta / nombre).write_bytes(b'')
+                s, resumen = escanear()
+                (carpeta / nombre).write_bytes(bueno)
+                with self.subTest(nombre=nombre):
+                    self.assertEqual(self.abiertos('host', *antes.hallazgos), todos)
+                    self.assertEqual(self.conteos(s.scan_id)[1], 0)
+                    self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
+                    fuente = resumen['sources'][0]
+                    self.assertEqual((fuente['status'], fuente['error']), ('succeeded', None))
+                    self.assertEqual(fuente['avisos'][0], crtsh.DANADA % ('1 archivo dañado', nombre))
+            s, resumen = escanear()
+            self.assertEqual(self.abiertos('host', *antes.hallazgos), todos)
+            self.assertNotIn('sources_partial', resumen['stats'])
 
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))

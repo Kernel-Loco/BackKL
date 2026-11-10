@@ -184,8 +184,11 @@ class Senales(unittest.TestCase):
         media = ('Set-Cookie', 'c=CIRDAN_FAKE_' + 'x' * (borde.MAX_COOKIES // 2))
         self.assertEqual(borde.por_cabeceras([media, cf]), {'cloudflare': ['set-cookie:__cf_bm']})
         self.assertEqual(borde.por_cabeceras([media, media, cf]), {})
-        # Las demás cabeceras siguen con MAX_VALOR cada una.
-        self.assertEqual(borde.por_cabeceras([llena, ('cf-ray', 'x' * borde.MAX_VALOR)]), {'cloudflare': ['cf-ray']})
+        # Las demás cabeceras siguen con MAX_VALOR cada una. Van server y via, que tienen patrón: si su valor llegara
+        # vacío o corto por el tope de las cookies, no calzarían (cf-ray calza con cualquier valor).
+        via = ('Via', '1.1 ' + 'x' * (borde.MAX_VALOR - 20) + ' (CloudFront)')
+        self.assertEqual(borde.por_cabeceras([llena, ('Server', 'cloudflare'), via]),
+                         {'cloudflare': ['server'], 'cloudfront': ['via']})
 
 
 class Detectar(unittest.TestCase):
@@ -387,8 +390,11 @@ class Cobertura(unittest.TestCase):
                          (None, None, CODIGOS))
         # Salen como llegaron, para que calcen con las partes de los hallazgos de la misma visita.
         tienda = 'Tienda.Acme-Demo.mx'
-        self.assertEqual(borde.cobertura([SITIO, tienda.upper()], [tienda], CODIGOS),
-                         (y_punto(SITIO), [tienda] + y_punto(OTRO), []))
+        # Un sitio que llegó en los dos lados con formas distintas lleva en sin_revisar también la de revisados: un
+        # hallazgo con su sitio en esa forma no se cierra sin revisarse.
+        revisados, sin_revisar, _ = borde.cobertura([SITIO, tienda.upper()], [tienda], CODIGOS)
+        self.assertEqual((revisados, sin_revisar), (y_punto(SITIO), [tienda, tienda.upper()] + y_punto(OTRO)))
+        self.assertFalse(se_cierra([tienda.upper()], revisados, sin_revisar))
         self.assertEqual(borde.cobertura([SITIO.upper(), SITIO], [OTRO], CODIGOS),
                          ([SITIO.upper()] + y_punto(SITIO), y_punto(OTRO), []))
 
@@ -474,10 +480,11 @@ class Cobertura(unittest.TestCase):
         res = Resultado(DOMINIO, 'prueba', revisados=revisados, sin_revisar=sin_revisar,
                         activos=[Activo('subdomain', SITIO)], hallazgos=[hallazgo(partes=[SITIO + '.'])])
         self.assertEqual(validar(res, codigos=CODIGOS), [])
-        # Las llaves de revisados y sin_revisar no se cruzan, así que sus formas tampoco.
+        # Las llaves de revisados y sin_revisar no se cruzan, y la forma de OTRO que llegó en revisados pasa a
+        # sin_revisar con las demás.
         revisados, sin_revisar, _ = borde.cobertura([SITIO, OTRO + '.', SITIO.upper()], [OTRO.upper()], CODIGOS)
         self.assertEqual((revisados, sin_revisar),
-                         ([SITIO, SITIO.upper(), SITIO + '.'], [OTRO.upper()] + y_punto(OTRO)))
+                         ([SITIO, SITIO.upper(), SITIO + '.'], [OTRO.upper(), OTRO + '.', OTRO]))
         res = Resultado(DOMINIO, 'prueba', revisados=revisados, sin_revisar=sin_revisar,
                         activos=[Activo('subdomain', SITIO)], hallazgos=[hallazgo(partes=[SITIO])])
         self.assertEqual(validar(res, codigos=CODIGOS), [])
@@ -501,11 +508,15 @@ class Entradas(unittest.TestCase):
             self.assertIsNone(borde.reto(403, raro, raro), raro)
 
     def test_3_un_iterador_que_falla_o_es_largo(self):
-        # Un TypeError al recorrer da [], como lo que no se puede recorrer.
-        self.assertIsNone(borde.detectar(asns=map(int, ['13335', None])))
-        self.assertIsNone(borde.detectar(ips=map(str.strip, ['104.16.0.1', 7])))
-        self.assertIsNone(borde.reto(403, map(tuple, [7])))
-        self.assertIsNone(borde.reto(200, map(tuple, [('cf-mitigated', 'challenge'), 7])))
+        # Un error al recorrer sale, como en fba2d1c: con [] se perdería lo ya leído y sería un negativo (sin reto,
+        # sin borde), y la visita debe dejar el sitio sin cobertura. Lo que no se puede recorrer sí da [].
+        for llamada in (lambda: borde.detectar(asns=map(int, ['13335', None])),
+                        lambda: borde.detectar(ips=map(str.strip, ['104.16.0.1', 7])),
+                        lambda: borde.reto(403, map(tuple, [7])),
+                        lambda: borde.reto(200, map(tuple, [('cf-mitigated', 'challenge'), 7]))):
+            with self.assertRaises(TypeError):
+                llamada()
+        self.assertEqual(borde._varios(object()), [])
         # Con el tope se leen exactamente esos, ni uno más.
         ips = iter(['104.16.0.%d' % i for i in range(1, 101)])
         self.assertEqual(len(borde.por_rangos(ips)['cloudflare']), borde.MAX_IPS)
