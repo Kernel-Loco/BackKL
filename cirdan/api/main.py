@@ -45,9 +45,11 @@ async def same_origin_writes(request: Request, call_next):
     return await call_next(request)
 
 
-# Para cuando la API se llama sin el portal (RC-283): ningún sitio la mete en un marco y el navegador no adivina
-# el tipo de una respuesta. La CSP completa y HSTS son de RC-89.
-CABECERAS_SEGURIDAD = {'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff'}
+# Ningún sitio mete una respuesta de la API en un marco y el navegador no adivina su tipo (RC-283). Van aquí y no
+# solo en el portal porque la API también se llama sin él, y porque el portal entrega tal cual lo que reenvía a
+# /api/v1/*: sus cabeceras de next.config.ts no llegan a esas respuestas. La CSP completa y HSTS son de RC-89.
+CABECERAS_SEGURIDAD = {'X-Frame-Options': 'DENY', 'Content-Security-Policy': "frame-ancestors 'none'",
+                       'X-Content-Type-Options': 'nosniff'}
 
 
 @app.middleware('http')

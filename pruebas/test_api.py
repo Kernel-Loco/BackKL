@@ -83,6 +83,7 @@ class ApiCirdan(unittest.TestCase):
                 self.assertEqual(estado, esperado)
                 self.assertEqual(cabeceras.get_all('X-Frame-Options'), ['DENY'])
                 self.assertEqual(cabeceras.get_all('X-Content-Type-Options'), ['nosniff'])
+                self.assertEqual(cabeceras.get_all('Content-Security-Policy'), ["frame-ancestors 'none'"])
 
 
 if __name__ == '__main__':
