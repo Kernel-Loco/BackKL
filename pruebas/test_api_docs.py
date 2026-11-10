@@ -615,7 +615,7 @@ class Revision(unittest.TestCase):
         docs = [x for x in res.activos if x.tipo == 'api_doc']
         # Solo cuenta en las dos rutas de página, y es un solo activo por sitio
         self.assertEqual([(x.valor, x.atributos['tambien_en']) for x in docs],
-                         [(url(API, '/swagger-ui/'), [url(API, '/docs')])])
+                         [(url(API, '/api-docs'), [url(API, '/swagger-ui/'), url(API, '/docs')])])
         self.assertEqual(len(hallazgos(res, 'exposed_api_docs')), 1)
 
     def test_4_security_en_null_hereda_el_general(self):
@@ -627,7 +627,13 @@ class Revision(unittest.TestCase):
         cortado = json.dumps(openapi3()).encode()[:-40]
         self.assertEqual(api_docs.analizar(cortado, cortado=True), {'formato': 'grande'})
         self.assertIsNone(api_docs.analizar(cortado))                               # entero y roto: no es nada
-        self.assertIsNone(api_docs.analizar(b'{"usuarios": [{"id": 1}, {"id"', cortado=True))
+        otro = b'{"usuarios": [{"id": 1}, {"id"'
+        self.assertEqual(api_docs.analizar(otro, cortado=True), {'formato': 'cortado'})
+        # Un JSON cortado que no nombra el formato puede ser un documento con esa llave al final: ni hallazgo ni revisado
+        res, _, _ = correr({url(API, '/openapi.json'): (200, [], openapi3()),
+                            url(API, '/v3/api-docs'): {'estado': 200, 'doc': {'formato': 'cortado'}}})
+        self.assertEqual(([x.valor for x in res.activos if x.tipo == 'api_doc'], partes(res.sin_revisar)),
+                         ([url(API, '/openapi.json')], [API]))
         res, _, _ = correr({url(API, '/v3/api-docs'): {'estado': 200, 'doc': {'formato': 'grande'}}})
         self.assertEqual(contrato.validar(res, codigos=set(api_docs.CODIGOS)), [])
         self.assertEqual([h.codigo for h in res.hallazgos], ['exposed_api_docs'])
@@ -658,12 +664,16 @@ class Revision(unittest.TestCase):
         self.assertEqual(partes(res.sin_revisar), [API])
 
     def test_8_un_sitio_con_errores_del_servidor_no_dice_revisado(self):
+        con_doc = {url(API, '/openapi.json'): (503, [], b''), url(API, '/swagger.json'): (200, [], swagger2())}
+        res, _, _ = correr(con_doc)
+        estado = activo(res, API).atributos['api_docs']
+        self.assertEqual((estado['estado'], estado['sin_revisar']),
+                         ('con_documentacion', api_docs.MOTIVOS['error_http']))
         for cuantos in (1, api_docs.MAX_ERRORES):
             with self.subTest(errores=cuantos):
                 res, cliente, _ = correr({url(API, r): (503, [], b'') for r in api_docs.RUTAS[:cuantos]})
-                estado = activo(res, API).atributos['api_docs']
-                self.assertEqual((estado['estado'], estado['sin_revisar']),
-                                 ('sin_revisar', api_docs.MOTIVOS['error_http']))
+                # Sin documentos no se reporta: no pisa lo que una corrida anterior guardó del sitio
+                self.assertEqual([x.valor for x in res.activos], [DOMINIO])
                 self.assertEqual(partes(res.sin_revisar), [API])
 
     def test_9_un_api_doc_con_otro_nombre_en_hosts_no_pasa_el_contrato(self):

@@ -43,7 +43,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from cirdan.ml import caracteristicas as rubrica
 from cirdan.recolectores import borde, certspotter, contrato, shodan, transporte, visita
@@ -75,9 +75,11 @@ RUTAS = (
 )
 # Solo en estas una página cuenta como la de Swagger UI o ReDoc: en las demás se espera un documento JSON, y una
 # página de respaldo que nombre a swagger-ui no lo es.
-RUTAS_UI = ('/swagger-ui/', '/docs')
+RUTAS_UI = ('/swagger-ui/', '/docs', '/api-docs')
 # La actividad 9 del Anexo A rige desde este día: antes, la línea de comandos solo reproduce.
 VIGENTE_DESDE = date(2026, 11, 13)
+# El día de VIGENTE_DESDE es el de la Ciudad de México, que no tiene horario de verano
+HORA_MEXICO = timezone(timedelta(hours=-6))
 
 AGENTE = contrato.AGENTE
 ACEPTA = 'application/json,text/html;q=0.9,*/*;q=0.1'
@@ -93,7 +95,6 @@ MAX_ERRORES = 3                   # errores del servidor (5xx) de un sitio con l
 MAX_MUESTRA = 10                  # funciones que no declaran autenticación que van en la evidencia
 MAX_TEXTO = 200                   # caracteres de una ruta documentada o de un título que se guardan
 MAX_HTML = 256 * 1024             # caracteres de una página en los que se busca la marca de Swagger UI o ReDoc
-MAX_CABEZA = 4096                 # caracteres de un documento cortado en los que se busca 'openapi' o 'swagger'
 TIEMPO_CORRIDA = 600              # segundos de toda la corrida: ninguna petición empieza después
 MIN_RESTANTE = 5                  # con menos segundos que esto ya no se empieza otro sitio ni otra ruta
 # Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición.
@@ -214,7 +215,8 @@ def leer(documento):
 def analizar(cuerpo, cortado=False):
     """Lo que hay en el cuerpo de una respuesta 200: el resumen de leer() si es un documento, {'formato': 'ui'} si
     es la página de Swagger UI o de ReDoc, {'formato': 'grande'} si es un documento que no cupo en MAX_BYTES (un
-    JSON cortado que nombra 'openapi' o 'swagger' en su principio), o None. Nunca lanza por el contenido."""
+    JSON cortado que nombra 'openapi' o 'swagger'), {'formato': 'cortado'} si es un JSON que no cupo y no los nombra
+    en lo que se leyó, o None. Nunca lanza por el contenido."""
     texto = cuerpo.decode('utf-8-sig', errors='replace') if isinstance(cuerpo, (bytes, bytearray)) else cuerpo
     if not isinstance(texto, str):
         return None
@@ -224,8 +226,10 @@ def analizar(cuerpo, cortado=False):
         try:
             documento = json.loads(texto)
         except (ValueError, RecursionError):
-            cabeza = texto[:MAX_CABEZA]
-            return {'formato': 'grande'} if cortado and ('"openapi"' in cabeza or '"swagger"' in cabeza) else None
+            if not cortado:
+                return None
+            # Lo que cupo nombra el formato: es un documento. Si no, puede serlo o no: no se sabe
+            return {'formato': 'grande' if '"openapi"' in texto or '"swagger"' in texto else 'cortado'}
         return leer(documento)
     pagina = texto[:MAX_HTML].lower()
     return {'formato': 'ui'} if any(marca in pagina for marca in MARCAS_UI) else None
@@ -244,7 +248,7 @@ def resumir(estado, cabeceras, cuerpo, cortado=False):
 def _doc_valido(doc):
     if doc is None:
         return True
-    if not isinstance(doc, dict) or doc.get('formato') not in FORMATOS:
+    if not isinstance(doc, dict) or doc.get('formato') not in tuple(FORMATOS) + ('cortado',):
         return False
     if doc['formato'] not in DOCUMENTOS:
         return True
@@ -464,6 +468,9 @@ def _pedir_rutas(res, cliente, sitio):
         doc = respuesta.get('doc')
         if not doc or (doc['formato'] == 'ui' and ruta not in RUTAS_UI):
             continue
+        if doc['formato'] == 'cortado':
+            sitio.sin_revisar('grande')   # no se sabe si es documentación: ni se reporta ni se da por revisado
+            continue
         if doc['formato'] == 'grande':
             sitio.sin_revisar('grande')   # está a la vista, pero sus funciones no se contaron
         sitio.docs.append((ruta, doc))
@@ -614,7 +621,8 @@ def _revisar(res, cliente, dominio, ahora):
     # 3. Activos y hallazgos: lo que se encontró se reporta aunque al sitio le haya faltado otra ruta
     for host in sorted(sitios, key=lambda h: (h != dominio, h)):
         sitio = sitios[host]
-        if sitio.docs or sitio.estado in ('revisado', 'sin_revisar', 'sin_https'):
+        # Un sitio a medias y sin documentos no se reporta: lo guardado de una corrida anterior sigue igual
+        if sitio.docs or sitio.estado in ('revisado', 'sin_https'):
             _reportar(res, sitio, dominio, ahora)
 
     # 4. Cobertura
@@ -685,7 +693,7 @@ def _main(argv=None, hoy=None):
     if elegido != 'reproducir' and not shodan._en_vivo_permitido(dominio):
         print('%s no está en DOMINIOS_EN_VIVO: solo se puede --reproducir' % dominio, file=sys.stderr)
         return 1
-    if elegido != 'reproducir' and (hoy or datetime.now(timezone.utc).date()) < VIGENTE_DESDE:
+    if elegido != 'reproducir' and (hoy or datetime.now(HORA_MEXICO).date()) < VIGENTE_DESDE:
         print('la actividad 9 del Anexo A rige desde el %s: antes solo se puede --reproducir'
               % VIGENTE_DESDE.isoformat(), file=sys.stderr)
         return 1
