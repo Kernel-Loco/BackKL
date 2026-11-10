@@ -19,6 +19,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -346,8 +347,40 @@ class Conectar(unittest.TestCase):
         self.assertEqual(self.Socket.conectadas, [])
         with self.assertRaises(transporte.NoPublica):   # de las IPv4, ninguna pública
             self.conectar([nat64, '10.0.0.5'], familia=socket.AF_INET)
-        self.conectar([nat64, IP])   # sin familia, como las demás fuentes, que piden a servidores fijos
+        self.conectar([nat64, IP])   # sin familia, como las fuentes que piden a un servidor fijo. RDAP pide AF_INET
         self.assertEqual(self.Socket.conectadas, [nat64])
+
+    def test_5_ninguna_direccion_interna_abre_un_socket(self):
+        """Las de #181 (RC-299), una por una: loopback, redes privadas, metadatos de la nube, CGNAT, NAT64 hacia el
+        loopback y una IPv4 mapeada en IPv6. 1.0.0.1, la del TXT por DoH (orquestador/txt.py), sí pasa."""
+        for ip in ('127.0.0.1', '::1', '10.0.0.1', '172.16.0.1', '192.168.0.1', '169.254.169.254', '100.64.0.1',
+                   '64:ff9b::7f00:1', '::ffff:127.0.0.1', '::ffff:10.0.0.1', '0.0.0.0', 'fec0::1',
+                   '::ffff:0:7f00:1', '::ffff:0:a9fe:a9fe'):
+            with self.subTest(ip), self.assertRaises(transporte.NoPublica):
+                self.conectar([ip])
+            self.assertEqual(self.Socket.conectadas, [], ip)
+        self.conectar(['1.0.0.1'])
+        self.assertEqual(self.Socket.conectadas, ['1.0.0.1'])
+
+    def test_6_un_puerto_fuera_de_la_lista_no_resuelve_ni_abre_un_socket(self):
+        self.assertEqual(transporte.PUERTOS, frozenset({443}))
+        self.assertTrue(issubclass(transporte.PuertoNoPermitido, OSError))
+        self.Socket.conectadas = []
+        resueltos = []
+        with mock.patch.object(transporte, 'resolver', lambda *a: resueltos.append(a) or []), \
+                mock.patch.object(transporte.socket, 'socket', self.Socket):
+            for puerto in (80, 6379, 5432, 8443, 0, None):
+                conexion = transporte._Conexion(WWW, plazo=time.monotonic() + 30, cronometro=time.monotonic)
+                with self.subTest(puerto), self.assertRaises(transporte.PuertoNoPermitido):
+                    conexion._conectar((WWW, puerto))
+            # Por las dos entradas, con la URL completa: urllib entrega el error como la razón de un URLError
+            for pedir in (lambda r: transporte.descargar(r, time.monotonic() + 30, 1000),
+                          lambda r: transporte.visitar(r, time.monotonic() + 30, 1000)):
+                for url in ('https://%s:6379/' % WWW, 'https://%s:80/' % WWW):
+                    with self.subTest(url), self.assertRaises(urllib.error.URLError) as error:
+                        pedir(urllib.request.Request(url))
+                    self.assertIsInstance(error.exception.reason, transporte.PuertoNoPermitido)
+        self.assertEqual((resueltos, self.Socket.conectadas), ([], []))
 
 
 class Contrato(unittest.TestCase):
