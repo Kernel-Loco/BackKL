@@ -133,9 +133,9 @@ MAX_REVISADO = 40 * MAX_CRUDO
 # Lo que se tapa de un tramo de una ruta o de una palabra del título (_tapar), por su forma
 _CORREO = re.compile(r'.(?:@|%40).')
 _DIGITOS = re.compile(r'[0-9]{7,}')                 # un teléfono o un número de cuenta seguido
-# Un teléfono con sus separadores, también pegado a otro texto ('tel:55-0000-0000'): 10 dígitos o más con hasta 2
-# separadores entre uno y otro
-_TELEFONO = re.compile(r'[+(]{0,2}[0-9](?:(?:[\s()+.\-]|%2[0Bb]){0,2}[0-9]){9,}')
+# Un teléfono con sus separadores, también pegado a otro texto ('tel:55-0000-0000'): 10 dígitos o más con hasta 6
+# separadores entre uno y otro ('55 - 0000 - 0000'). El tope es para que una entrada hostil no cueste de más
+_TELEFONO = re.compile(r'[+(]{0,2}[0-9](?:(?:[\s()+.\-]|%2[0Bb]){0,6}[0-9]){9,}')
 # Lo que cambia en cada respuesta de una misma página (un nonce, un token, una fecha en segundos): no va en su huella
 _CAMBIA = re.compile(r'[0-9A-Za-z+/=_\-]{16,}|[0-9]{6,}', re.A)
 _MUESTRA = re.compile(r'([A-Z]+) (.*?)((?: \((?:al menos )?(?:1 función|[0-9]+ funciones)\))?)', re.S)
@@ -618,7 +618,7 @@ class _Sitio:
 
 def _pedir_rutas(res, cliente, sitio):
     """Pide las RUTAS de un sitio, en orden, y deja en `sitio` lo que respondieron. SinTiempo sale de aquí."""
-    errores, respaldo = 0, set()
+    errores = 0
     for i, ruta in enumerate(RUTAS):
         if cliente.restante() < MIN_RESTANTE:
             raise SinTiempo('api_docs: se acabó el tiempo de la corrida')
@@ -653,11 +653,9 @@ def _pedir_rutas(res, cliente, sitio):
         doc = respuesta.get('doc')
         if not doc:
             continue
-        if doc['formato'] == 'ui' and (ruta not in RUTAS_UI or (doc.get('huella') and doc['huella'] in respaldo)):
-            # Una página donde se espera un documento JSON es la de respaldo del sitio (una SPA la sirve en cualquier
-            # ruta). La misma página en una ruta de RUTAS_UI tampoco es la documentación
-            if ruta not in RUTAS_UI and doc.get('huella'):
-                respaldo.add(doc['huella'])
+        if doc['formato'] == 'ui' and ruta not in RUTAS_UI:
+            # Una página donde se espera un documento JSON no cuenta. En las rutas de RUTAS_UI sí, aunque el sitio
+            # sirva la misma en todas: desde afuera no se distingue de una Swagger UI que responde en cualquier ruta
             continue
         if doc['formato'] == 'cortado':
             sitio.sin_revisar('cortado')   # no se sabe si es documentación: ni se reporta ni se da por revisado

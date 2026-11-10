@@ -642,10 +642,14 @@ class Revision(unittest.TestCase):
     def test_3_una_pagina_de_respaldo_que_nombra_a_swagger_ui_no_es_un_documento(self):
         respaldo = b'<html><head><link href="/swagger-ui/swagger-ui.css"></head><body>Inicio</body></html>'
         res, _, _ = correr({url(API, r): (200, [], respaldo) for r in api_docs.RUTAS})
-        # La misma página donde se espera un documento JSON es la de respaldo del sitio: no cuenta en ninguna ruta
-        self.assertEqual(([x for x in res.activos if x.tipo == 'api_doc'], res.hallazgos), ([], []))
-        self.assertEqual(activo(res, API).atributos['api_docs']['estado'], 'revisado')
-        # Solo en las rutas de página sí cuenta, y es un solo activo por sitio aunque cada respuesta traiga su nonce
+        # Solo cuenta en las rutas de página, y es un solo activo por sitio. El resultado no depende de en qué ruta
+        # empiece a salir la página
+        esperado = [(url(API, '/api-docs'), [url(API, '/swagger-ui/'), url(API, '/docs')])]
+        self.assertEqual([(x.valor, x.atributos['tambien_en']) for x in res.activos if x.tipo == 'api_doc'], esperado)
+        desde = api_docs.RUTAS.index('/api-docs')
+        res, _, _ = correr({url(API, r): (200, [], respaldo) for r in api_docs.RUTAS[desde:]})
+        self.assertEqual([(x.valor, x.atributos['tambien_en']) for x in res.activos if x.tipo == 'api_doc'], esperado)
+        # También es un solo activo aunque cada respuesta traiga su nonce
         pagina = '<html><head><script nonce="%s">var t=%d</script></head><body id="swagger-ui"></body></html>'
         res, _, _ = correr({url(API, r): (200, [], (pagina % ('CIRDANfake%020d' % i, 1762700000 + i)).encode())
                             for i, r in enumerate(api_docs.RUTAS_UI)})
@@ -762,6 +766,8 @@ class Ronda3(unittest.TestCase):
                             ('/sms/5500000000', '/sms/\u2026'),
                             ('/sms/+52-55-0000-0000', '/sms/\u2026'),
                             ('/sms/tel:55-0000-0000', '/sms/\u2026'),                       # con un prefijo pegado
+                            ('/sms/55 - 0000 - 0000', '/sms/\u2026'),                       # con 3 separadores
+                            ('/sms/55%20-%200000%20-%200000', '/sms/\u2026'),
                             ('/llaves/CIRDAN-FAKE-Ab1C-dE2f-Gh3I-jK4l-Mn5O', '/llaves/\u2026'),   # partida por guiones
                             ('/sesiones/00000000-0000-4000-8000-000000000000', '/sesiones/\u2026'),
                             ('/archivos/00ff00ff00ff00ff', '/archivos/\u2026'),
@@ -781,7 +787,8 @@ class Ronda3(unittest.TestCase):
         self.assertTrue(api_docs.leer(openapi3(info={'title': 'a ' * 95 + 'CIRDAN1FAKE' + 'x' * 40}))['titulo']
                         .endswith('a …'))
         # Un teléfono escrito con espacios, que al partir el título en palabras quedaría en pedazos
-        for titulo in ('Soporte 55 0000 0000 hoy', 'Soporte +52 (55) 0000 0000 hoy'):
+        for titulo in ('Soporte 55 0000 0000 hoy', 'Soporte +52 (55) 0000 0000 hoy', 'Soporte 55.-.0000.-.0000 hoy',
+                       'Soporte 55%20%20%200000%200000 hoy'):
             self.assertEqual(api_docs.leer(openapi3(info={'title': titulo}))['titulo'], 'Soporte … hoy')
         # Al reproducir se tapa otra vez: la grabación pudo hacerla una versión que tapaba menos
         grabado = dict(api_docs.leer(openapi3()), titulo='Pagos de a@acme-demo.mx',
