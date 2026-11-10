@@ -87,6 +87,8 @@ services:
 
   # Corre una vez en cada `up`: con DEMO_ACCOUNTS=true pone contraseña y MFA a las cuentas
   # de la semilla (cirdan/auth/demo.py). Con false no toca nada. Nunca true en producción.
+  # Tampoco toca nada si ALLOWED_ORIGINS trae un origen que no es localhost ni 127.0.0.1 (#169, RC-287),
+  # o uno local con barra final o ruta.
   demo-accounts:
     build: .
     command: ["python", "-m", "cirdan.auth.demo"]
@@ -97,6 +99,8 @@ services:
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY}
       DEMO_ACCOUNTS: ${DEMO_ACCOUNTS:-false}
+      # Vacía cuenta como sin poner: vale la lista local por omisión.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
     depends_on:
       db:
         condition: service_healthy

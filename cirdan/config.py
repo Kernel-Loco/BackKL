@@ -4,6 +4,9 @@ from functools import cache
 
 from cirdan import RAIZ
 
+# Orígenes de la API cuando ALLOWED_ORIGINS no está puesta: el portal y la propia API en la PC de quien desarrolla.
+ORIGENES_LOCALES = 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000'
+
 
 @cache
 def _env_file():
