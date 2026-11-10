@@ -544,6 +544,29 @@ class Grabadora(unittest.TestCase):
             with self.assertRaises(contrato.SinGrabacion):
                 r.de_disco('otra')
 
+    def test_1b_un_archivo_vacio_no_se_lee_y_con_sobre_tampoco_el_formato_anterior(self):
+        """c3-1 (RC-46): un archivo de 0 bytes es una escritura que se cortó, no una respuesta sin datos. El formato
+        anterior (solo los datos) se sigue leyendo, salvo en una Grabadora con `sobre`."""
+        with tempfile.TemporaryDirectory() as d:
+            archivo = Path(d) / 'q.json'
+            for sobre in (False, True):
+                r = contrato.Grabadora(d, 'reproducir', sobre=sobre)
+                for roto in ('', ' ', '\n'):
+                    archivo.write_text(roto, encoding='utf-8')
+                    with self.subTest(sobre=sobre, roto=roto), self.assertRaises(ValueError):
+                        r.de_disco('q')
+                archivo.write_text('{"grabado": "2026-10-15T12:00:00+00:00", "consulta": "q", "datos": []}',
+                                   encoding='utf-8')
+                self.assertEqual(r.de_disco('q'), (True, []))
+            for anterior in ('[]', '[1]', '{}', '{"x": 1}'):
+                archivo.write_text(anterior, encoding='utf-8')
+                self.assertEqual(contrato.Grabadora(d, 'reproducir').de_disco('q'), (True, json.loads(anterior)))
+                with self.subTest(anterior=anterior), self.assertRaises(ValueError):
+                    contrato.Grabadora(d, 'reproducir', sobre=True).de_disco('q')
+                g = contrato.Grabadora(d, 'grabar', completar=True, sobre=True)
+                with self.subTest(completar=anterior), self.assertRaises(ValueError):
+                    g.de_disco('q')
+
     def test_2_vivo_no_toca_el_disco(self):
         with tempfile.TemporaryDirectory() as d:
             g = contrato.Grabadora(Path(d) / 'nada', 'vivo')

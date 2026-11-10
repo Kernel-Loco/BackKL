@@ -448,7 +448,7 @@ class ClienteShodan:
     def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, descargar=None, resolver=None, nueva=False, reloj=None,
                  cronometro=None, dormir=None):
         self.modo = modo
-        self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj)
+        self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj, sobre=True)
         self.descargar, self.resolver = descargar, resolver
         self.cronometro = cronometro or time.monotonic
         self.dormir = dormir or time.sleep
@@ -506,8 +506,9 @@ class ClienteShodan:
     def _de_disco(self, consulta):
         """(True, datos) si sale de la grabación. Una corrida con fallas ya no se graba, pero una grabación de antes o
         editada a mano puede traer una falla: se lanza otra vez, con su clase y su texto, y no se lee como datos. Un
-        archivo truncado o que no es JSON es una consulta que no llegó (FuenteNoResponde), nunca un error que tumbe la
-        fuente: vale para toda consulta, también el A y las páginas de Cert Spotter."""
+        archivo vacío, truncado, que no es JSON o sin su sobre {grabado, datos} es una consulta que no llegó
+        (FuenteNoResponde), nunca un error que tumbe la fuente ni una respuesta sin datos: vale para toda consulta,
+        también el A y las páginas de Cert Spotter."""
         try:
             del_disco, datos = self.grabadora.de_disco(consulta)
         except (ValueError, KeyError, TypeError, AttributeError):   # SinGrabacion no es ninguna de estas

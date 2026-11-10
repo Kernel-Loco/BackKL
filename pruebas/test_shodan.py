@@ -1308,6 +1308,33 @@ class Arreglos(unittest.TestCase):
         reloj['t'] = shodan.TIEMPO_CORRIDA - 115
         self.assertIs(cliente.esperar(5), True)
 
+    def test_un_archivo_vacio_o_sin_sobre_de_la_grabacion_no_se_lee_como_sin_datos(self):
+        """c3-1 (RC-46): un archivo de 0 bytes (una escritura que se cortó) se leía como [] y la corrida reproducida
+        salía completa, con revisados None, así que el orquestador cerraba lo que no salió. Ahora es una consulta
+        que no llegó, igual que un archivo sin su sobre {grabado, datos}."""
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            recolectar(HttpSimulado(ct_olmardo(), {CAMARA: CAMARA_8080, RESERVAS: 404}),
+                       ResolvedorSimulado(zona_olmardo()), modo='grabar', carpeta=carpeta, nueva=True)
+            archivos = sorted(carpeta.glob('*.json'))
+            self.assertGreaterEqual(len(archivos), 3)
+            completa = recolectar(HttpSimulado(), ResolvedorSimulado({}), modo='reproducir', carpeta=carpeta)
+            self.assertEqual((completa.estado, completa.revisados, completa.sin_cobertura),
+                             ('succeeded', None, list(shodan.SIN_LLAVE)))
+            for archivo in archivos:
+                bueno = archivo.read_text(encoding='utf-8')
+                for roto in ('', '[]', '{}'):
+                    with self.subTest(archivo=archivo.name, roto=roto):
+                        archivo.write_text(roto, encoding='utf-8')
+                        try:
+                            res = recolectar(HttpSimulado(), ResolvedorSimulado({}), modo='reproducir',
+                                             carpeta=carpeta)
+                        except contrato.FuenteNoResponde:
+                            continue
+                        self.assertFalse(res.estado == 'succeeded' and res.revisados is None
+                                         and res.sin_cobertura == completa.sin_cobertura, 'quedó como completa')
+                archivo.write_text(bueno, encoding='utf-8')
+
 
 class Geo(unittest.TestCase):
     """País, ASN y proveedor de DB-IP Lite en los activos ip, y el CDN por ASN antes de InternetDB (#15b, RC-166). Los

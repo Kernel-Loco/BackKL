@@ -4,8 +4,10 @@
 -- carta (cirdan/recolectores/visita.py). Pide la página principal de cada
 -- sitio del dominio por https y saca sus tecnologías, la versión sin
 -- soporte con endoflife.date y las CVE con la NVD.
--- Necesita la migración 008 (daily_limit) y, para guardar las CVE con su
--- CVSS, la 014.
+-- Necesita la migración 008 (daily_limit) y la 014, que va ANTES que esta
+-- semilla: la fuente queda encendida y el orquestador inserta cada CVE
+-- con su CVSS. Sin la 014, cirdan_app no tiene ese INSERT y un escaneo
+-- que trae CVE de la NVD queda failed.
 --
 -- web: 1840 consultas por día. Una corrida reserva a lo más 184
 -- (MAX_CONSULTAS de visita.py: 2 páginas de Cert Spotter con 2 intentos,

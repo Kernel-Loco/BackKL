@@ -394,6 +394,16 @@ class Base(unittest.TestCase):
         texto = SEMILLA.read_text(encoding='utf-8')
         self.assertIn("SET client_encoding = 'UTF8';", texto)
         self.assertIn('ON CONFLICT (code) DO NOTHING', texto)
+        # b3-1: la 014 va antes que la 012, en el encabezado de la semilla y en db/README.md (tabla, carga desde
+        # cero y la sección de una base que ya existe)
+        self.assertIn('la 014, que va ANTES que esta', texto)
+        leeme = (RAIZ / 'db' / 'README.md').read_text(encoding='utf-8')
+        m014, s012 = '< db/migraciones/%s' % MIGRACION.name, '< db/semillas/%s' % SEMILLA.name
+        self.assertEqual((leeme.count(m014), leeme.count(s012)), (2, 2))
+        ordenes = [linea.split('< db/')[1].strip() for linea in leeme.splitlines() if m014 in linea or s012 in linea]
+        self.assertEqual(ordenes, ['migraciones/' + MIGRACION.name, 'semillas/' + SEMILLA.name] * 2)
+        for archivo in ('migraciones/' + MIGRACION.name, 'semillas/' + SEMILLA.name):
+            self.assertIn('| `%s` |' % archivo, leeme)
         # El id no lo usa otra semilla
         otras = [p.name for p in SEMILLA.parent.glob('*.sql') if p != SEMILLA
                  and fila['id'].strip("'") in p.read_text(encoding='utf-8')]
@@ -466,11 +476,17 @@ class Arreglos(unittest.TestCase):
 
     def test_3_con_un_comodin_y_un_sitio_que_no_respondio_no_se_dice_cuales_faltan(self):
         """La raíz no responde (a lo mejor redirigía a www, que solo está bajo el comodín) y blog no tiene A: solo se
-        cierra lo de blog. Sin comodín, o si la raíz respondió (un 5xx), sí se dice cuál falta."""
+        cierra lo de blog. Un 5xx o un reto de la raíz tampoco dan su página (c3-2): ayer pudo redirigir a www. Sin
+        comodín sí se dice cuál falta."""
         raiz = 'https://%s/' % DOMINIO
+        reto = fixture('cloudflare_reto_403', FIXTURES_BORDE)
+        reto = visita.limpiar_visita({k: reto[k] for k in ('estado', 'cabeceras', 'cuerpo')})
         casos = (('comodín y sin respuesta', paginas('*.' + DOMINIO, BLOG), {'sin_respuesta': 'tiempo'}, None),
                  ('sin comodín', paginas(BLOG), {'sin_respuesta': 'tiempo'}, [DOMINIO]),
-                 ('comodín y 5xx', paginas('*.' + DOMINIO, BLOG), pagina_nginx(502), [DOMINIO]))
+                 ('comodín y 5xx', paginas('*.' + DOMINIO, BLOG), pagina_nginx(502), None),
+                 ('comodín y reto', paginas('*.' + DOMINIO, BLOG), reto, None),
+                 ('sin comodín y 5xx', paginas(BLOG), pagina_nginx(502), [DOMINIO]),
+                 ('sin comodín y reto', paginas(BLOG), reto, [DOMINIO]))
         for nombre, ct, raiz_responde, faltan in casos:
             with self.subTest(nombre):
                 res, _, _ = correr({raiz: raiz_responde}, zona={DOMINIO: a(IP)}, apis=Apis(ct=ct))
@@ -612,7 +628,7 @@ class Arreglos(unittest.TestCase):
             self.assertEqual((completa.revisados, len(completa.hallazgos)), (None, 4))
             for archivo in archivos:
                 bueno = archivo.read_text(encoding='utf-8')
-                for roto in (bueno[:len(bueno) // 2], '{"datos": 5}', '"x"'):
+                for roto in ('', '[]', '{}', bueno[:len(bueno) // 2], '{"datos": 5}', '"x"'):
                     with self.subTest(archivo=archivo.name, roto=roto[:12]):
                         archivo.write_text(roto, encoding='utf-8')
                         try:
@@ -695,7 +711,7 @@ class Confirmados(unittest.TestCase):
         cliente, reloj, horas = self.nvd_con_reloj([503, fixture('nvd_nginx_1.18.0'), fixture('nvd_nginx_1.18.0')])
         for n in (1, 2):
             cliente.api('nvd:%d' % n, 'https://services.nvd.nist.gov/x', 'la NVD', ritmo=True)
-        self.assertEqual(horas, [0.0, 6.0, 12.0])   # PAUSA_NVD entre peticiones, literal
+        self.assertEqual(horas, [0.0, 7.0, 14.0])   # PAUSA_NVD, literal: 6 s más 1 de margen (t3-1)
         self.assertEqual(cliente.consultas, 3)
         # Sin ritmo (endoflife.date) el reintento sigue a los 5 s
         cliente, reloj, horas = self.nvd_con_reloj([503, fixture('eol_nginx')])
@@ -720,7 +736,8 @@ class Confirmados(unittest.TestCase):
         for n in range(3):
             for cliente in clientes:
                 cliente.api('nvd:%d' % n, 'https://services.nvd.nist.gov/x', 'la NVD', ritmo=True)
-        self.assertEqual(horas, [0.0, 6.0, 12.0, 18.0, 24.0, 30.0])
+        self.assertEqual(horas, [0.0, 7.0, 14.0, 21.0, 28.0, 35.0])
+        self.assertGreater(horas[5] - horas[0], 30)   # t3-1: la sexta sale a más de 30 s de la primera, con margen
         # Los clientes de verdad (con el reloj del sistema) comparten el del módulo. Con reloj propio, no
         de_verdad = [visita.ClienteWeb(modo='vivo', carpeta=visita.carpeta_de(DOMINIO)) for _ in range(2)]
         self.assertTrue(all(c.ritmo_nvd is visita.RITMO_NVD for c in de_verdad))

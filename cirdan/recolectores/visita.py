@@ -90,7 +90,7 @@ MAX_URL = 2048               # caracteres de la URL de una redirección que se s
 INTENTOS_API = 2             # intentos por consulta a endoflife.date o a la NVD
 TIMEOUT_API = 20             # segundos por consulta a endoflife.date o a la NVD
 PAUSA_EOL = 1                # segundos entre una consulta a endoflife.date y la siguiente
-PAUSA_NVD = nvd.PAUSA_NVD    # segundos entre una consulta a la NVD y la siguiente (5 por 30 s sin llave)
+PAUSA_NVD = nvd.PAUSA_NVD    # segundos entre una consulta a la NVD y la siguiente (5 por 30 s sin llave, con margen)
 MAX_PRODUCTOS = 10           # productos que se consultan en endoflife.date por corrida
 MAX_CPE = 10                 # CPE que se consultan en la NVD por corrida
 MAX_BYTES_API = 8 * 1024 * 1024   # tope de una respuesta de Cert Spotter, endoflife.date o la NVD
@@ -105,8 +105,10 @@ MAX_CONSULTAS = (PAGINAS_CT * INTENTOS_CT + MAX_SITIOS * shodan.INTENTOS + MAX_S
 
 # Topes deterministas: lo que dejan fuera no impide grabar.
 TOPES = ('paginas', 'sitios', 'productos', 'cpe')
-# Motivos de una visita que no llegó a una respuesta final: el sitio pudo redirigir a un nombre que no se conoce.
-OPACOS = ('tiempo', 'red', 'certificado', 'tls', 'no_publica', 'grabacion', 'dns', 'sin_tiempo', 'redirecciones')
+# Motivos de una visita que no dio la página del sitio: pudo redirigir a un nombre que no se conoce. Un 5xx o un reto
+# cuentan, porque la raíz que hoy da 502 ayer redirigía a www. No son FALLAS_DE_RED: sí se graban.
+OPACOS = ('tiempo', 'red', 'certificado', 'tls', 'no_publica', 'grabacion', 'dns', 'sin_tiempo', 'redirecciones',
+          'reto', 'error_http')
 # Por qué un sitio no se pudo visitar (la clave 'sin_respuesta' de la visita). Solo estas cuentan como una falla de
 # la corrida (no se graba): las demás son un dato estable del sitio.
 FALLAS_DE_RED = ('tiempo', 'red')

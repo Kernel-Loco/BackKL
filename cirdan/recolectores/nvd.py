@@ -4,7 +4,7 @@
 No es un recolector y no hace peticiones: la visita web pide a la NVD las CVE del CPE con la versión de cada
 tecnología (url(), con cpeName e isVulnerable) y le pasa la respuesta a revisar() junto con la tecnología que dio
 huellas.analizar(). Las pruebas usan respuestas armadas a mano (pruebas/fixtures/huellas/) y nunca la API. Sin llave,
-la NVD permite 5 peticiones cada 30 s: PAUSA_NVD entre una y otra.
+la NVD permite 5 peticiones cada 30 s: PAUSA_NVD entre una y otra (6 s más 1 de margen).
 
 Cómo decide:
 - Solo tecnologías con CPE de las huellas, con versión de una huella que el sitio mostró (no implicada por otra) y
@@ -49,7 +49,9 @@ from cirdan.recolectores import contrato, huellas, shodan
 CODIGOS = {'known_vulnerability': 'medium'}   # la severidad del catálogo (semilla 004), la misma que shodan.py
 URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0?cpeName=%s&isVulnerable&noRejected'
 NOMBRE_FUENTE = 'NVD'
-PAUSA_NVD = 6                # segundos entre peticiones sin llave (5 cada 30 s)
+# Segundos entre el inicio de una petición sin llave y el de la siguiente. 5 cada 30 s son 6 s, más 1 de margen:
+# con 6 justos, la sexta llega a menos de 30 s de la primera si conecta más rápido que ella.
+PAUSA_NVD = 7
 MIN_CONFIANZA = 100
 MAX_CVE = shodan.MAX_CVE     # por tecnología, como por IP en shodan.py
 MAX_DESCRIPCION = 2000       # caracteres de la descripción en inglés de la NVD que van a cves.description

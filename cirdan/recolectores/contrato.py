@@ -469,26 +469,32 @@ class Grabadora:
       la carpeta, el siguiente guardado lo vuelve a intentar. Con `completar`,
       reutiliza lo grabado desde `desde` y vuelve a consultar lo demás.
     - 'reproducir': solo lee del disco y lanza SinGrabacion si falta una respuesta.
+    Un archivo vacío no se puede leer (ValueError): es una escritura que se cortó, no una respuesta sin datos. Con
+    `sobre`, tampoco uno sin {grabado, datos} (el formato anterior).
     """
 
-    def __init__(self, carpeta, modo='vivo', completar=False, desde=None, nueva=False, reloj=None, nombre=nombre_archivo):
+    def __init__(self, carpeta, modo='vivo', completar=False, desde=None, nueva=False, reloj=None,
+                 nombre=nombre_archivo, sobre=False):
         assert modo in MODOS, modo
         assert not completar or modo == 'grabar', 'completar solo aplica al grabar'
         self.carpeta, self.modo, self.completar, self.desde = Path(carpeta), modo, completar, desde
         self.nueva = nueva and modo == 'grabar'
         self.reloj = reloj or (lambda: datetime.now(timezone.utc))
-        self.nombre = nombre
+        self.nombre, self.sobre = nombre, sobre
         self.leidas = []           # (archivo, fecha de grabación) de cada respuesta tomada del disco
 
     def archivo(self, consulta):
         return self.carpeta / self.nombre(consulta)
 
     @staticmethod
-    def abrir(archivo):
-        """(datos, fecha de grabación). El formato anterior (solo los datos) usa la fecha del sistema."""
-        contenido = json.loads(archivo.read_text(encoding='utf-8') or '[]')
+    def abrir(archivo, sobre=False):
+        """(datos, fecha de grabación). El formato anterior (solo los datos) usa la fecha del sistema, salvo con
+        `sobre`, que lo rechaza. Un archivo vacío lanza ValueError (json.loads)."""
+        contenido = json.loads(archivo.read_text(encoding='utf-8'))
         if isinstance(contenido, dict) and 'datos' in contenido:
             return contenido['datos'], fecha_iso(contenido['grabado'])
+        if sobre:
+            raise ValueError('la grabación %s no trae {grabado, datos}' % archivo.name)
         return contenido, datetime.fromtimestamp(archivo.stat().st_mtime, timezone.utc)
 
     def de_disco(self, consulta):
@@ -497,11 +503,11 @@ class Grabadora:
         if self.modo == 'reproducir':
             if not archivo.exists():
                 raise SinGrabacion(SIN_GRABACION + consulta)
-            datos, fecha = self.abrir(archivo)
+            datos, fecha = self.abrir(archivo, self.sobre)
             self.leidas.append((archivo.name, fecha))
             return True, datos
         if self.completar and archivo.exists():
-            datos, fecha = self.abrir(archivo)
+            datos, fecha = self.abrir(archivo, self.sobre)
             if self.desde is None or fecha >= self.desde:
                 self.leidas.append((archivo.name, fecha))
                 return True, datos
