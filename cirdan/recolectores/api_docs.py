@@ -136,6 +136,9 @@ _DIGITOS = re.compile(r'[0-9]{7,}')                 # un teléfono o un número 
 # Un teléfono con sus separadores, también pegado a otro texto ('tel:55-0000-0000'): 10 dígitos o más con hasta 6
 # separadores entre uno y otro ('55 - 0000 - 0000'). El tope es para que una entrada hostil no cueste de más
 _TELEFONO = re.compile(r'[+(]{0,2}[0-9](?:(?:[\s()+.\-]|%2[0Bb]){0,6}[0-9]){9,}')
+# En el título se cambia solo el teléfono, así que no empieza a media palabra: los últimos dígitos de una CURP
+# seguidos de ' - 55 0000 0000' no son parte del teléfono, y la CURP entera la tapa _tapar
+_TELEFONO_SUELTO = re.compile(r'(?<![0-9A-Za-z])' + _TELEFONO.pattern, re.A)
 # Lo que cambia en cada respuesta de una misma página (un nonce, un token, una fecha en segundos): no va en su huella
 _CAMBIA = re.compile(r'[0-9A-Za-z+/=_\-]{16,}|[0-9]{6,}', re.A)
 _MUESTRA = re.compile(r'([A-Z]+) (.*?)((?: \((?:al menos )?(?:1 función|[0-9]+ funciones)\))?)', re.S)
@@ -275,7 +278,8 @@ def _titulo_visible(titulo):
     if not isinstance(titulo, str):
         return None
     titulo, a_medias = _recortar(titulo, _FIN_PALABRA)
-    titulo = _TELEFONO.sub(TAPADO, titulo)   # antes de partir en palabras: un teléfono puede ir escrito con espacios
+    # Antes de partir en palabras: un teléfono puede ir escrito con espacios
+    titulo = _TELEFONO_SUELTO.sub(TAPADO, titulo)
     palabras = re.split(r'(\s+)', titulo)
     if a_medias:
         palabras[-1] = TAPADO

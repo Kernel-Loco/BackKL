@@ -639,7 +639,7 @@ class Revision(unittest.TestCase):
                                    'GET /pedidos/{id}/autorizaciones-pendientes', 'GET /usuarios/\u2026'])
         self.assertNotIn(MARCA, repr((res.hallazgos, res.activos)))
 
-    def test_3_una_pagina_de_respaldo_que_nombra_a_swagger_ui_no_es_un_documento(self):
+    def test_3_una_pagina_que_nombra_a_swagger_ui_solo_cuenta_en_las_rutas_de_pagina(self):
         respaldo = b'<html><head><link href="/swagger-ui/swagger-ui.css"></head><body>Inicio</body></html>'
         res, _, _ = correr({url(API, r): (200, [], respaldo) for r in api_docs.RUTAS})
         # Solo cuenta en las rutas de página, y es un solo activo por sitio. El resultado no depende de en qué ruta
@@ -790,6 +790,11 @@ class Ronda3(unittest.TestCase):
         for titulo in ('Soporte 55 0000 0000 hoy', 'Soporte +52 (55) 0000 0000 hoy', 'Soporte 55.-.0000.-.0000 hoy',
                        'Soporte 55%20%20%200000%200000 hoy'):
             self.assertEqual(api_docs.leer(openapi3(info={'title': titulo}))['titulo'], 'Soporte … hoy')
+        # El teléfono no se come el final de una CURP, un RFC o un UUID que va antes: se tapan enteros
+        for dato in ('XEXX850101HDFRRN05', 'XEX850101AB1', '00000000-0000-4000-8000-000000000005'):
+            for sigue in (' - 55 0000 0000', ' 55 0000 0000', ' - 2026 - 11 - 09'):
+                visto = api_docs.leer(openapi3(info={'title': 'Soporte %s%s' % (dato, sigue)}))['titulo']
+                self.assertTrue(visto.startswith('Soporte …') and dato[:6] not in visto, visto)
         # Al reproducir se tapa otra vez: la grabación pudo hacerla una versión que tapaba menos
         grabado = dict(api_docs.leer(openapi3()), titulo='Pagos de a@acme-demo.mx',
                        muestra=['POST /usuarios/a@acme-demo.mx (3 funciones)', 'GET /salud'])
