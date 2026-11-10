@@ -114,7 +114,8 @@ def certificados(cliente, dominio, max_paginas=MAX_PAGINAS, **opciones):
     `max_paginas` o si se saltó una emisión que no es legible(). Al reproducir, una página que no se grabó es
     SinGrabacion, que hereda de FuenteNoResponde, así sale lo mismo que en vivo. Un archivo dañado de la grabación
     (crtsh.GrabacionDanada, también FuenteNoResponde) corta igual que una página que no llegó: sigue lo que ya se leyó
-    y ClienteCrtsh lo anota en `danados`, con lo que crtsh.recolectar no cierra nada y nombra el archivo.
+    y ClienteCrtsh lo anota en `danados`, con lo que crtsh.recolectar nombra el archivo y no cierra nada, salvo el por
+    vencer cuya fecha ya pasó (crtsh.DANADA).
     """
     emisiones, despues, raras = [], None, 0
     for _ in range(max_paginas):

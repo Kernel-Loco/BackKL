@@ -32,8 +32,10 @@ vencidos, porque cert_expired queda en sin_cobertura.
 Grabación dañada (RC-46). Al reproducir, un archivo vacío, cortado o ilegible (una respuesta de crt.sh, una
 página de Cert Spotter, un falla_ o un dns_) no es que la fuente no respondiera. El resultado trae lo que sí
 se pudo leer, revisados queda en [] para que el orquestador no cierre nada en ese escaneo, y el primer aviso
-nombra los archivos dañados (DANADA). Nunca queda 'failed' ni completo: si no se pudo leer nada, sale sin
-activos, con los tres códigos en sin_cobertura.
+nombra los archivos dañados (DANADA). La única excepción al cierre es la de siempre: un por vencer cuya fecha
+ya pasó se cierra en toda corrida de la fuente (RC-55, orquestador). Nunca queda 'failed' ni completo: si no se
+pudo leer nada, sale sin activos, con los tres códigos en sin_cobertura. Si el dañado es el dns_ de un nombre,
+no se sabe si resolvía y su certificado vencido no se reporta en esa corrida (DNS_DANADO).
 
     python -m cirdan.recolectores.crtsh olmardo.com
     python -m cirdan.recolectores.crtsh olmardo.com --con-parecidos     (solo cuando el equipo apruebe las variantes)
@@ -117,7 +119,8 @@ CrtshNoResponde = FuenteNoResponde  # el contrato (#13) define las excepciones d
 
 # Avisos de una grabación con archivos dañados (RC-46). DANADA va primero, para que no lo corte el tope de avisos.
 DANADA = ('La grabación tiene %s (%s). Se muestra lo que sí se pudo leer, pueden faltar subdominios y certificados, y '
-          'en este escaneo no se marca nada como resuelto')
+          'en este escaneo no se marca nada como resuelto, salvo un certificado por vencer cuya fecha ya pasó')
+DNS_DANADO = object()        # lo que da el DNS de un nombre cuyo dns_ grabado está dañado: su vencido no se reporta
 MAX_DANADOS = 5              # archivos dañados que nombra el aviso. De los demás dice cuántos son
 SIN_LEER = 'No se pudo leer ningún certificado de la grabación de este dominio'
 POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsqueda por nombre y pueden faltar '
@@ -126,7 +129,8 @@ POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsque
 
 class GrabacionDanada(FuenteNoResponde):
     """Un archivo de la grabación vacío, cortado o ilegible. Hereda de FuenteNoResponde para que la corrida siga con
-    lo demás, pero no es que la fuente no respondiera: los avisos no lo dicen así y la corrida no cierra nada."""
+    lo demás, pero no es que la fuente no respondiera: los avisos no lo dicen así y la corrida no cierra nada, salvo
+    el por vencer cuya fecha ya pasó (DANADA)."""
 
     def __init__(self, archivo):
         super().__init__('El archivo %s de la grabación está dañado (vacío, cortado o ilegible)' % archivo)
@@ -447,6 +451,8 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
     lo cubre un certificado comodín vigente de su dominio padre. Si no, el sitio ya no existe o usa el comodín, y el
     nombre queda solo como activo. Sin `resuelve` se da por hecho que resuelve. Un comodín vencido (*.nombre) siempre
     cuenta: no lo cubre el comodín del padre y su DNS no es el del nombre base.
+    Si `resuelve(nombre)` da DNS_DANADO (el dns_ grabado de ese nombre está dañado, RC-46), no se sabe si resolvía y
+    su vencido tampoco se reporta: el nombre queda solo como activo, sin el atributo resuelve.
     Con `anticipar` (al grabar) también consulta el DNS de los nombres que todavía no vencen o que un comodín cubre, así
     una reproducción de días después tiene las respuestas que necesite.
     """
@@ -492,6 +498,8 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
                 continue
             if dns is False:
                 activos[-1].atributos['resuelve'] = False
+                continue
+            if dns is DNS_DANADO:  # no se sabe si resolvía: abrir su vencido podría ser falso (RC-46)
                 continue
             titulo = 'Certificado vencido en %s' % nombre
             hallazgos.append(Hallazgo(
@@ -635,6 +643,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             valor = cliente.resuelve(nombre, control=dominio)
         except SinGrabacion:  # la grabación no trae ese DNS (por ejemplo, es de antes de que crt.sh lo consultara)
             valor = None
+        if valor is None and _nombre_grabado('dns:' + nombre) in danados():
+            return DNS_DANADO  # su dns_ está dañado: ya lo nombra el aviso DANADA y su vencido no se reporta
         if valor is None:
             desconocidos.append(nombre)
         return valor
@@ -690,7 +700,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
 def _danada(res, archivos):
     """El resultado de una corrida con archivos dañados en la grabación (RC-46): no se sabe qué dejó de verse, así que
     revisados queda en [] y el orquestador no cierra nada de esta fuente en ese escaneo (con None lo daría por completo
-    y cerraría lo que no salió). El aviso que nombra los archivos va primero."""
+    y cerraría lo que no salió). Queda la excepción de RC-55, que no depende de revisados: un por vencer cuya fecha ya
+    pasó se cierra en toda corrida, y el aviso lo dice. El aviso que nombra los archivos va primero."""
     res.revisados, res.sin_revisar = [], None
     nombres = ', '.join(archivos[:MAX_DANADOS])
     if len(archivos) > MAX_DANADOS:

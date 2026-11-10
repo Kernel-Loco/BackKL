@@ -462,11 +462,13 @@ class GrabarYReproducir(unittest.TestCase):
 
     def danada(self, res, *archivos):
         """Lo común de una corrida con archivos dañados (RC-46): ni failed ni completa, no cierra nada (revisados en
-        [], que el orquestador lee como «ninguna parte revisada») y el primer aviso nombra los archivos."""
+        [], que el orquestador lee como «ninguna parte revisada») y el primer aviso nombra los archivos y dice la
+        excepción: el orquestador sí cierra un por vencer cuya fecha ya pasó (punto J de la ronda 6)."""
         self.assertEqual((res.estado, res.error, res.revisados, res.sin_revisar), ('succeeded', '', [], None))
         cuantos = '1 archivo dañado' if len(archivos) == 1 else '%d archivos dañados' % len(archivos)
         self.assertEqual(res.avisos[0], crtsh.DANADA % (cuantos, ', '.join(archivos)))
-        self.assertIn('no se marca nada como resuelto', res.avisos[0])
+        self.assertTrue(res.avisos[0].endswith('no se marca nada como resuelto, salvo un certificado por vencer cuya '
+                                               'fecha ya pasó'), res.avisos[0])
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
         self.assertEqual(crtsh.codigo_salida(res), 2)
 
@@ -561,24 +563,23 @@ class GrabarYReproducir(unittest.TestCase):
 
     def test_3g_un_dns_o_una_falla_danados_tampoco_dejan_failed(self):
         """Resto de la regresión 2 de la ronda 4 (RC-46): dns_*.json y falla_*.json no pasan por pedir. Con uno dañado
-        el DNS queda sin saberse (el vencido se reporta, con su aviso) o crt.sh queda como no leído, y no se cierra
-        nada. Una página dañada del respaldo tampoco se lee como que Cert Spotter no la dio."""
+        el DNS queda sin saberse (el vencido de ese nombre no se reporta, punto C de la ronda 6) o crt.sh queda como no
+        leído, y no se cierra nada. Una página dañada del respaldo tampoco se lee como que Cert Spotter no la dio."""
         sin_comodin = EMISIONES[:3]   # sin el comodín 9004, que cubriría al vencido de dev
         dns = 'dns_dev.acme-demo.mx.json'
         with tempfile.TemporaryDirectory() as d:
             completa, _ = recolectar(RespaldoSimulado([sin_comodin, []], crtsh={'%.acme-demo.mx': SUBDOMINIOS}), d,
                                      'grabar', nueva=True)
             self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in completa.hallazgos})
+            sin_dev = [h for h in completa.hallazgos if (h.codigo, h.activo) != ('cert_expired', 'dev.acme-demo.mx')]
             for como in DANOS:
                 bueno = danar(Path(d) / dns, como)
                 res, cliente = recolectar(sin_red, d, 'reproducir')
                 (Path(d) / dns).write_bytes(bueno)
                 with self.subTest(archivo=dns, como=como):
                     self.danada(res, dns)
-                    self.assertEqual((res.activos, res.hallazgos, cliente.danados),
-                                     (completa.activos, completa.hallazgos, [dns]))
-                    self.assertEqual(res.avisos[1:], ['No se pudo comprobar en DNS si dev.acme-demo.mx resuelve. Se '
-                                                      'reporta su certificado vencido.'])
+                    self.assertEqual((res.activos, res.hallazgos, cliente.danados), (completa.activos, sin_dev, [dns]))
+                    self.assertEqual(res.avisos[1:], [])   # ni «No se pudo comprobar en DNS»: lo dice el primer aviso
         otra = emision('9005', ['otro.acme-demo.mx'], '2026-09-20T00:00:00Z', '2026-12-19T00:00:00Z')
         fallas = ['falla_subdominios_acme-demo.mx.json', 'falla_acme-demo.mx.json']
         pagina = 'certspotter_acme-demo.mx_despues_9004.json'
@@ -605,6 +606,34 @@ class GrabarYReproducir(unittest.TestCase):
                                          2 - len(archivos))   # la falla que sí se pudo leer se sigue diciendo
                         self.assertEqual(len(res.avisos), 4 - len(archivos))   # y la dañada solo en el primer aviso
                         self.assertEqual((res.activos, res.hallazgos), (vivo.activos, vivo.hallazgos))
+
+    def test_3i_con_el_dns_danado_de_un_nombre_que_no_resolvia_no_se_abre_su_vencido(self):
+        """Punto C de la ronda 6 (RC-46): el DNS grabado de dev era False (ya no resuelve) y por eso su certificado
+        vencido no era hallazgo. Con ese dns_ dañado no se sabe si resolvía: el vencido de dev no se reporta (antes
+        salía un cert_expired alto y falso) y dev queda como activo sin el atributo resuelve. Con revisados en [] el
+        que ya estuviera abierto tampoco se cierra. Lo demás sale igual que con la grabación sana."""
+        dns, de_dev = 'dns_dev.acme-demo.mx.json', ('cert_expired', 'dev.acme-demo.mx')
+        with tempfile.TemporaryDirectory() as d:
+            simulado = RespaldoSimulado([EMISIONES[:3], []], crtsh={'%.acme-demo.mx': SUBDOMINIOS},   # sin el comodín
+                                        sin_dns={'dev.acme-demo.mx'})
+            recolectar(simulado, d, 'grabar', nueva=True)
+            sano, _ = recolectar(sin_red, d, 'reproducir')
+            de_sano = {a.valor: a.atributos for a in sano.activos}
+            self.assertIs(de_sano['dev.acme-demo.mx']['resuelve'], False)   # el DNS grabado es False
+            self.assertNotIn(de_dev, {(h.codigo, h.activo) for h in sano.hallazgos})
+            self.assertTrue(sano.hallazgos)
+            for como in DANOS:
+                bueno = danar(Path(d) / dns, como)
+                res, cliente = recolectar(sin_red, d, 'reproducir')
+                (Path(d) / dns).write_bytes(bueno)
+                with self.subTest(como=como):
+                    self.danada(res, dns)
+                    self.assertNotIn(de_dev, {(h.codigo, h.activo) for h in res.hallazgos})
+                    self.assertEqual((res.hallazgos, res.avisos[1:], cliente.danados), (sano.hallazgos, [], [dns]))
+                    de_res = {a.valor: a.atributos for a in res.activos}
+                    self.assertNotIn('resuelve', de_res['dev.acme-demo.mx'])   # no se afirma que no resuelve
+                    self.assertEqual(de_res, de_sano | {'dev.acme-demo.mx': {
+                        k: v for k, v in de_sano['dev.acme-demo.mx'].items() if k != 'resuelve'}})
 
     def test_3h_si_no_se_pudo_leer_nada_por_un_archivo_danado_sale_sin_activos_y_no_failed(self):
         """RC-46: si lo único que había para leer está dañado, el resultado no trae activos pero tampoco queda failed:
