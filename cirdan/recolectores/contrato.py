@@ -209,6 +209,9 @@ def _errores_activo(a):
 
 def _host_de_url(valor):
     """El sitio de una URL https sin usuario, puerto, consulta ni fragmento, en minúsculas, o None si no es una."""
+    # urlsplit quita tabuladores y saltos de línea de toda la URL antes de leerla: con uno, o con un espacio, no es una
+    if not isinstance(valor, str) or any(c <= ' ' or c == '\x7f' for c in valor):
+        return None
     try:
         url = urllib.parse.urlsplit(valor)
         puerto = url.port

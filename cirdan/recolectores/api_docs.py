@@ -16,8 +16,9 @@ Qué se pide, todo dentro del Anexo A:
    piden sus demás rutas. Nunca se pide una URL que venga dentro de un documento (servers, host, basePath, la url de
    Swagger UI) ni otra ruta, ni se manda otro método.
 
-Cómo se cuenta (leer). Una función es un método HTTP de una ruta de `paths`. Declara autenticación si su `security`
-(la suya, y si no trae, la global del documento) es una lista con al menos un requisito y ninguno vacío. No la declara
+Cómo se cuenta (leer). Una función es un método HTTP, en minúsculas, de una ruta de `paths`. Declara autenticación
+si su `security` (la suya, y si no trae, la global del documento) es una lista con al menos un requisito y ninguno
+vacío. No la declara
 si no hay `security` ni propio ni global, si es una lista vacía o si trae un requisito vacío ({}), que deja entrar sin
 identificarse. Vale igual para Swagger 2.0 y OpenAPI 3.x. Solo se lee JSON: el repo no trae lector de YAML.
 
@@ -115,10 +116,13 @@ _VERSION = re.compile(r'[0-9][0-9A-Za-z.+-]{0,19}', re.A)
 _HUELLA_DOC = re.compile(r'[0-9a-f]{16}')
 # Lo que no se guarda de un texto del documento: controles, marcas de dirección y espacios invisibles (cambian cómo
 # se lee en el portal), mitades sueltas de un par (la base no las acepta), etiquetas, uso privado y los que nunca
-# serán un carácter. Es una lista fija y no la categoría de unicodedata, que cambia con la versión de Python (3.13
-# en una PC, 3.14 en el contenedor). U+200C, U+200D y U+00AD se quedan: los usan el persa, los emoji y el guion.
-_RARAS = re.compile('[\x00-\x1f\x7f-\x9f\u061c\u200b\u200e\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb'
-                    '\ud800-\udfff\ue000-\uf8ff\ufdd0-\ufdef\U000e0000-\U000e007f\U000f0000-\U0010ffff%s]'
+# serán un carácter, más los rellenos Hangul, que no se ven. Es una lista fija y no la categoría de unicodedata,
+# que cambia con la versión de Python (3.13 en una PC, 3.14 en el contenedor). U+200C, U+200D y U+00AD se quedan:
+# los usan el persa, los emoji y el guion.
+_RARAS = re.compile('[\x00-\x1f\x7f-\x9f\u061c\u115f\u1160\u180e\u3164\uffa0\u200b\u200e\u200f'
+                    '\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb'
+                    '\ud800-\udfff\ue000-\uf8ff\ufdd0-\ufdef\U00013430-\U0001343f\U0001bca0-\U0001bca3'
+                    '\U0001d173-\U0001d17a\U000e0000-\U000e007f\U000f0000-\U0010ffff%s]'
                     % ''.join(chr(plano * 0x10000 + fin) for plano in range(17) for fin in (0xFFFE, 0xFFFF)))
 _CORTE = re.compile(r'[?;#]')
 TAPADO = '…'
@@ -129,7 +133,12 @@ MAX_REVISADO = 40 * MAX_CRUDO
 # Lo que se tapa de un tramo de una ruta o de una palabra del título (_tapar), por su forma
 _CORREO = re.compile(r'.(?:@|%40).')
 _DIGITOS = re.compile(r'[0-9]{7,}')                 # un teléfono o un número de cuenta seguido
-_SEPARADORES_TEL = re.compile(r'(?:[\s()+.\-]|%2[0Bb])+')
+# Un teléfono con sus separadores, también pegado a otro texto ('tel:55-0000-0000'): 10 dígitos o más con hasta 2
+# separadores entre uno y otro
+_TELEFONO = re.compile(r'[+(]{0,2}[0-9](?:(?:[\s()+.\-]|%2[0Bb]){0,2}[0-9]){9,}')
+# Lo que cambia en cada respuesta de una misma página (un nonce, un token, una fecha en segundos): no va en su huella
+_CAMBIA = re.compile(r'[0-9A-Za-z+/=_\-]{16,}|[0-9]{6,}', re.A)
+_MUESTRA = re.compile(r'([A-Z]+) (.*?)((?: \((?:al menos )?(?:1 función|[0-9]+ funciones)\))?)', re.S)
 _CURP_RFC = re.compile(r'(?<![A-Za-z0-9])(?:[A-Z]{4}[0-9]{6}[HM][A-Z]{5}[0-9A-Z][0-9]|[A-ZÑ&]{3,4}[0-9]{6}[A-Z0-9]{3})'
                        r'(?![A-Za-z0-9])', re.I)
 _UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.I)
@@ -156,13 +165,15 @@ MOTIVOS = {'tiempo': 'no respondió a tiempo', 'red': 'la conexión falló',
            'reto': 'respondió con un reto o un límite de peticiones',
            'error_http': 'respondió con un error del servidor (5xx)',
            'grande': 'un documento pasa de %d MB y no se leyó' % (MAX_BYTES // (1024 * 1024)),
+           'cortado': 'una respuesta en JSON pasa de %d MB y no se sabe si es un documento'
+                      % (MAX_BYTES // (1024 * 1024)),
            'sin_tiempo': 'se acabó el tiempo de la corrida'}
 
 SIN_GRABACION_DOMINIO = ('api_docs: no hay grabación de la documentación de APIs de este dominio, no se pidió '
                          'ninguna ruta')
 PARCIAL = 'api_docs: cobertura parcial'
-NO_SE_GRABO = ('api_docs: la corrida tuvo fallas (la red, el tiempo o una respuesta que no se puede leer), no se '
-               'grabó y la grabación anterior sigue igual: repite --grabar más tarde')
+NO_SE_GRABO = ('api_docs: la corrida tuvo fallas (la red, el tiempo, un límite de peticiones o una respuesta que no '
+               'se puede leer), no se grabó y la grabación anterior sigue igual: repite --grabar más tarde')
 NOTA = 'Es lo que dice el documento: las funciones no se llamaron ni se probaron, y puede que sí pidan identificación.'
 TITULO_EXPUESTA = 'Documentación de un servicio web a la vista en %s'
 TITULO_AUTENTICACION = 'La documentación de %s no declara autenticación en %s'
@@ -179,19 +190,36 @@ def _texto(x, tope=MAX_TEXTO):
 
 
 def _delicado(tramo):
-    """True si un tramo de una ruta, o una palabra del título, parece por su forma un correo, un teléfono, una CURP,
-    un RFC o una llave. Una plantilla ({id}) y una palabra con guiones (oauth2-token-exchange) no."""
-    if _CORREO.search(tramo) or _DIGITOS.search(tramo) or _CURP_RFC.search(tramo) or _UUID.search(tramo):
-        return True
-    junto = _SEPARADORES_TEL.sub('', tramo)
-    if len(junto) >= 10 and junto.isascii() and junto.isdigit():   # un teléfono con sus separadores
+    """True si un tramo de una ruta, o una palabra del título, parece por su forma un correo, un teléfono, una
+    CURP, un RFC o una llave, también partida por guiones en piezas que no son palabras. Una plantilla ({id}) y una
+    palabra con guiones (oauth2-token-exchange) no."""
+    if (_CORREO.search(tramo) or _DIGITOS.search(tramo) or _CURP_RFC.search(tramo) or _UUID.search(tramo)
+            or _TELEFONO.search(tramo)):
         return True
     con_digito = any(c in '0123456789' for c in tramo)
     if (len(tramo) >= MIN_LLAVE and con_digito and any(c.isupper() for c in tramo)
             and any(c.islower() for c in tramo)):
         return True
-    return any((len(pieza) >= MIN_LLAVE or _HEX.fullmatch(pieza)) and any(c in '0123456789' for c in pieza)
-               for pieza in _PIEZAS.split(tramo))
+    piezas = _PIEZAS.split(tramo)
+    if any((len(pieza) >= MIN_LLAVE or _HEX.fullmatch(pieza)) and any(c in '0123456789' for c in pieza)
+           for pieza in piezas):
+        return True
+    return _llave_partida(piezas, MIN_LLAVE) is not None
+
+
+def _llave_partida(trozos, minimo):
+    """(i, j) de los primeros trozos seguidos que juntos parecen una llave partida por sus separadores: dos o más que
+    no se leen como palabras (_revuelto), con algún dígito y `minimo` caracteres entre todos. None si no hay."""
+    i = 0
+    while i < len(trozos):
+        j = i
+        while j < len(trozos) and _revuelto(trozos[j]):
+            j += 1
+        junto = ''.join(trozos[i:j])
+        if j - i >= 2 and len(junto) >= minimo and any(c in '0123456789' for c in junto):
+            return i, j
+        i = max(j, i + 1)
+    return None
 
 
 def _revuelto(tramo):
@@ -247,6 +275,7 @@ def _titulo_visible(titulo):
     if not isinstance(titulo, str):
         return None
     titulo, a_medias = _recortar(titulo, _FIN_PALABRA)
+    titulo = _TELEFONO.sub(TAPADO, titulo)   # antes de partir en palabras: un teléfono puede ir escrito con espacios
     palabras = re.split(r'(\s+)', titulo)
     if a_medias:
         palabras[-1] = TAPADO
@@ -258,21 +287,23 @@ def _muestra(abiertas):
     texto, porque se les tapó un tramo o se les quitó la consulta, van una vez con cuántas son.
 
     El texto visible de cada ruta se calcula una sola vez, y solo hasta juntar MAX_REVISADO caracteres de rutas: el
-    costo no crece con el documento. Si no alcanzó para todas, las demás no entran y la cuenta de cada texto es un
-    mínimo, y lo dice: '(al menos N funciones)'."""
+    costo no crece con el documento. Si no alcanzó para todas, las rutas que faltaron no entran y la cuenta de cada
+    texto es un mínimo, y lo dice: '(al menos N funciones)'."""
     cuentas, visibles, revisado, completa = {}, {}, 0, True
     for _, ruta, metodo in abiertas:
         visible = visibles.get(ruta)
         if visible is None:
             if revisado >= MAX_REVISADO:
-                completa = False
-                break
+                completa = False   # esta ruta no entra, pero las funciones de las ya revisadas sí se cuentan
+                continue
             revisado += min(len(ruta), 2 * MAX_CRUDO)   # lo más que _ruta_visible revisa de una ruta
             visible = visibles[ruta] = _ruta_visible(ruta)
         texto = '%s %s' % (metodo, visible)
         cuentas[texto] = cuentas.get(texto, 0) + 1
-    varias = '%s (%d funciones)' if completa else '%s (al menos %d funciones)'
-    return [texto if n == 1 else varias % (texto, n) for texto, n in list(cuentas.items())[:MAX_MUESTRA]]
+    if completa:
+        return [texto if n == 1 else '%s (%s)' % (texto, _funciones(n))
+                for texto, n in list(cuentas.items())[:MAX_MUESTRA]]
+    return ['%s (al menos %s)' % (texto, _funciones(n)) for texto, n in list(cuentas.items())[:MAX_MUESTRA]]
 
 
 def declara(seguridad):
@@ -298,7 +329,7 @@ def leer(documento):
     {'formato', 'version', 'titulo', 'operaciones', 'sin_declarar', 'muestra', 'huella'}: cuántas funciones (método
     y ruta) tiene, cuántas no declaran autenticación (declara) y hasta MAX_MUESTRA de esas (_muestra), primero las
     que crean, cambian o borran datos. `huella` distingue un documento de otro del mismo sitio. Lo que no tiene la forma
-    esperada (una ruta que no es un objeto, un método que no existe) se salta."""
+    esperada (una ruta que no es un objeto, un método que no existe o que no va en minúsculas) se salta."""
     if not isinstance(documento, dict):
         return None
     version = _version(documento)
@@ -312,7 +343,9 @@ def leer(documento):
         if not isinstance(ruta, str) or not ruta.startswith('/') or not isinstance(metodos, dict):
             continue
         for metodo, funcion in metodos.items():
-            if not isinstance(metodo, str) or metodo.lower() not in METODOS or not isinstance(funcion, dict):
+            # Solo en minúsculas, como lo pide OpenAPI: 'GET' no es una función. Así una ruta da a lo más
+            # len(METODOS) funciones, y la huella, que repite la ruta en cada una, no crece más que eso
+            if metodo not in METODOS or not isinstance(funcion, dict):
                 continue
             propia = funcion.get('security')
             # Si no viene, o viene en null, vale el general
@@ -329,8 +362,9 @@ def leer(documento):
 
 
 def _huella_cuerpo(texto):
-    """Huella de lo que se leyó de una página o de un documento que no cupo: dice si dos rutas dan lo mismo."""
-    return hashlib.sha256(texto.encode('utf-8', 'replace')).hexdigest()[:16]
+    """Huella de lo que se leyó de una página o de un documento que no cupo: dice si dos rutas dan lo mismo. No
+    cuenta lo que cambia en cada respuesta (_CAMBIA): con eso, la misma página en dos rutas serían dos activos."""
+    return hashlib.sha256(_CAMBIA.sub('', texto).encode('utf-8', 'replace')).hexdigest()[:16]
 
 
 def _tipo(cabeceras):
@@ -398,6 +432,16 @@ def _doc_valido(doc):
             and isinstance(doc.get('huella'), str) and bool(_HUELLA_DOC.fullmatch(doc['huella'])))
 
 
+def _muestra_limpia(texto):
+    """Un texto de la muestra ('POST /ruta (3 funciones)') con su ruta tapada otra vez y cortado a lo que cabe la
+    cuenta más larga."""
+    partes = _MUESTRA.fullmatch(texto)
+    if partes:
+        metodo, ruta, cuenta = partes.groups()
+        texto = '%s %s%s' % (metodo, '/'.join(_tapar(ruta.split('/'))), cuenta)
+    return _texto(texto, MAX_TEXTO + 48)
+
+
 def limpiar(datos):
     """La respuesta de una ruta con una de sus formas: {'rechazada': True} (443 cerrado), {'sin_respuesta': motivo},
     {'redirige': True, 'codigo'}, {'estado', 'reto'} o {'estado', 'doc'}. ValueError si no tiene ninguna (una
@@ -427,9 +471,10 @@ def limpiar(datos):
     if not _doc_valido(doc):
         raise ValueError('forma inesperada')
     if isinstance(doc, dict) and doc['formato'] in DOCUMENTOS:
-        doc = {'formato': doc['formato'], 'version': doc['version'], 'titulo': _texto(doc['titulo']),
+        # El título y la muestra se vuelven a tapar: una grabación de otra versión pudo tapar menos
+        doc = {'formato': doc['formato'], 'version': doc['version'], 'titulo': _titulo_visible(doc['titulo']),
                'operaciones': doc['operaciones'], 'sin_declarar': doc['sin_declarar'],
-               'muestra': [_texto(m, MAX_TEXTO + 48) for m in doc['muestra']], 'huella': doc['huella']}
+               'muestra': [_muestra_limpia(m) for m in doc['muestra']], 'huella': doc['huella']}
     elif isinstance(doc, dict):
         doc = dict({'formato': doc['formato']}, **({'huella': doc['huella']} if doc.get('huella') else {}))
     return {'estado': estado, 'doc': doc}
@@ -515,7 +560,8 @@ class ClienteApiDocs(shodan.ClienteShodan):
         if datos.get('sin_respuesta') == 'tiempo' and limite < TIMEOUT_RUTA:
             # No tuvo sus TIMEOUT_RUTA segundos: lo que se acabó fue la corrida, no es que el sitio no responda
             raise SinTiempo('api_docs: se acabó el tiempo de la corrida mientras se pedía %s' % url)
-        if datos.get('sin_respuesta') in FALLAS_DE_RED:
+        # Un 429 es de este momento, no un dato del sitio: cuenta como falla y con --grabar no pisa lo grabado
+        if datos.get('sin_respuesta') in FALLAS_DE_RED or ('reto' in datos and datos['estado'] == 429):
             self.fallas += 1
         self._grabar(consulta, datos)
         return datos
@@ -563,6 +609,7 @@ class _Sitio:
         self.estado = None       # 'sin_a', 'no_publica', 'sin_https', 'revisado' o 'sin_revisar', si se llegó a saber
         self.docs = []           # (ruta, doc) de cada ruta que dio un documento o la página de documentación
         self.falta = None        # el motivo de MOTIVOS si quedó sin revisar
+        self.aviso = None        # el detalle de su reto o límite de peticiones, si dio uno
 
     def sin_revisar(self, motivo):
         if self.falta is None:
@@ -571,7 +618,7 @@ class _Sitio:
 
 def _pedir_rutas(res, cliente, sitio):
     """Pide las RUTAS de un sitio, en orden, y deja en `sitio` lo que respondieron. SinTiempo sale de aquí."""
-    errores = 0
+    errores, respaldo = 0, set()
     for i, ruta in enumerate(RUTAS):
         if cliente.restante() < MIN_RESTANTE:
             raise SinTiempo('api_docs: se acabó el tiempo de la corrida')
@@ -589,9 +636,10 @@ def _pedir_rutas(res, cliente, sitio):
         if 'reto' in respuesta:
             reto = respuesta['reto']
             quien = borde.PROVEEDORES.get(reto.get('proveedor'))
-            res.avisos.append('api_docs: %s respondió con un reto o un límite de peticiones%s (%s): su documentación '
-                              'queda sin revisar, no en 0' % (sitio.nombre, ' de %s' % quien if quien else '',
-                                                              respuesta['estado']))
+            # Va después de los avisos de resumen (_revisar): el orquestador solo guarda los primeros
+            sitio.aviso = ('api_docs: %s respondió con un reto o un límite de peticiones%s (%s): su documentación '
+                           'queda sin revisar, no en 0' % (sitio.nombre, ' de %s' % quien if quien else '',
+                                                           respuesta['estado']))
             sitio.sin_revisar('reto')
             return
         if respuesta.get('redirige'):
@@ -603,10 +651,16 @@ def _pedir_rutas(res, cliente, sitio):
                 break
             continue
         doc = respuesta.get('doc')
-        if not doc or (doc['formato'] == 'ui' and ruta not in RUTAS_UI):
+        if not doc:
+            continue
+        if doc['formato'] == 'ui' and (ruta not in RUTAS_UI or (doc.get('huella') and doc['huella'] in respaldo)):
+            # Una página donde se espera un documento JSON es la de respaldo del sitio (una SPA la sirve en cualquier
+            # ruta). La misma página en una ruta de RUTAS_UI tampoco es la documentación
+            if ruta not in RUTAS_UI and doc.get('huella'):
+                respaldo.add(doc['huella'])
             continue
         if doc['formato'] == 'cortado':
-            sitio.sin_revisar('grande')   # no se sabe si es documentación: ni se reporta ni se da por revisado
+            sitio.sin_revisar('cortado')   # no se sabe si es documentación: ni se reporta ni se da por revisado
             continue
         if doc['formato'] == 'grande':
             sitio.sin_revisar('grande')   # está a la vista, pero sus funciones no se contaron
@@ -759,7 +813,7 @@ def _revisar(res, cliente, dominio, ahora):
     for host in sorted(sitios, key=lambda h: (h != dominio, h)):
         sitio = sitios[host]
         # Un sitio a medias y sin documentos no se reporta: lo guardado de una corrida anterior sigue igual
-        if sitio.docs or sitio.estado in ('revisado', 'sin_https'):
+        if sitio.docs or sitio.estado in ('revisado', 'sin_https', 'sin_a', 'no_publica'):
             _reportar(res, sitio, dominio, ahora)
 
     # 4. Cobertura
@@ -769,7 +823,7 @@ def _revisar(res, cliente, dominio, ahora):
     for h in faltan:
         por_motivo.setdefault(sitios[h].falta, []).append(h)
     for motivo, hosts in sorted(por_motivo.items()):
-        if motivo not in ('reto', 'sin_tiempo', 'dns'):   # esos ya tienen su aviso
+        if motivo not in ('sin_tiempo', 'dns'):   # esos ya tienen su aviso
             res.avisos.append('api_docs: %s sin revisar: %s (%s)' % (visita._cuantos(len(hosts), 'sitio', 'sitios'),
                                                                    MOTIVOS[motivo], visita._lista(sorted(hosts))))
     lista = faltan if todos_los_nombres else None
@@ -781,6 +835,7 @@ def _revisar(res, cliente, dominio, ahora):
     res.revisados, res.sin_revisar, res.sin_cobertura = revisados, sin_revisar, sin_cobertura
     if revisados is not None or sin_cobertura:
         res.avisos.append('%s, se revisaron %d de %d sitios' % (PARCIAL, len(hechos), len(sitios)))
+    res.avisos.extend(s.aviso for s in sitios.values() if s.aviso)   # el detalle, después de los resúmenes
     if cliente.modo == 'grabar' and cliente.degradada(parcial):
         res.avisos.insert(0, NO_SE_GRABO)
     else:

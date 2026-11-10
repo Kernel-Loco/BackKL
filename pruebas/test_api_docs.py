@@ -7,6 +7,7 @@ la red. Cada clase lleva el punto del Hecho cuando de RC-118 que cubre.
 Uso, desde la raíz del repo:
   python -m unittest pruebas/test_api_docs.py
 """
+import itertools
 import json
 import re
 import shutil
@@ -301,6 +302,11 @@ class Autorizados(unittest.TestCase):
         res, cliente, _ = correr({}, zona=zona, ct=paginas(API, 'viejo.' + DOMINIO))
         self.assertEqual(cliente.visitar.urls, esperadas(DOMINIO))
         self.assertEqual((res.revisados, res.sin_revisar, res.sin_cobertura), (None, None, []))
+        # Sí se reportan, con su estado: si antes tenían documentación, el activo no se queda diciendo que la tiene
+        for nombre, estado in ((API, 'no_publica'), ('viejo.' + DOMINIO, 'sin_a')):
+            self.assertEqual(activo(res, nombre).atributos['api_docs'],
+                             {'fuente': 'api_docs', 'estado': estado, 'documentos': []})
+        self.assertEqual(contrato.validar(res, codigos=set(api_docs.CODIGOS)), [])
 
     def test_4_el_contrato_no_acepta_un_api_doc_de_otro_sitio(self):
         def errores(valor, atributos):
@@ -311,7 +317,10 @@ class Autorizados(unittest.TestCase):
         for valor in ('https://api.otra-empresa.com/openapi.json', 'http://%s/openapi.json' % API,
                       'https://%s:8443/openapi.json' % API, 'https://u:p@%s/openapi.json' % API,
                       'https://%s/openapi.json?x=1' % API, 'https://%s' % API, '/openapi.json',
-                      'https://%s@api.otra-empresa.com/openapi.json' % API):
+                      'https://%s@api.otra-empresa.com/openapi.json' % API,
+                      # urlsplit quita los tabuladores y los saltos de línea antes de leer la URL
+                      'https://%s/open\tapi.json' % API, 'https://%s/openapi.json\n' % API,
+                      'ht\ntps://%s/openapi.json' % API, 'https://%s/open api.json' % API):
             self.assertTrue(any('URL https' in e for e in errores(valor, {'host': API})), valor)
         self.assertTrue(any("'host'" in e for e in errores(url(API, '/openapi.json'), {})))
         self.assertIn('api_doc', contrato.TIPOS_ACTIVO)
@@ -479,11 +488,27 @@ class Cobertura(unittest.TestCase):
         self.assertTrue(any('Cloudflare' in x and 'sin revisar, no en 0' in x for x in res.avisos))
         self.assertEqual(contrato.validar(res, codigos=set(api_docs.CODIGOS)), [])
         self.assertEqual(api_docs.codigo_salida(res), 2)
+        # Los resúmenes van antes que el detalle de cada sitio: el orquestador solo guarda los primeros avisos
+        self.assertIn('1 sitio sin revisar: %s' % api_docs.MOTIVOS['reto'], res.avisos[0])
+        self.assertTrue(res.avisos[1].startswith(api_docs.PARCIAL))
+        self.assertIn('Cloudflare', res.avisos[2])
 
     def test_2_un_429_tambien(self):
         res, cliente, _ = correr({url(API, '/swagger.json'): (429, [], b'')})
         self.assertEqual(cliente.visitar.urls[-1], url(API, '/swagger.json'))
         self.assertEqual(partes(res.sin_revisar), [API])
+        # Un 429 es de este momento: con --grabar no se graba y lo grabado antes sigue igual. Un reto del WAF sí es
+        # un dato del sitio y se graba
+        for respuesta, se_graba in (((429, [], b''), False), ((403, [('cf-mitigated', 'challenge')], b''), True)):
+            with tempfile.TemporaryDirectory() as d:
+                carpeta = Path(d) / DOMINIO
+                correr({}, modo='grabar', carpeta=carpeta)
+                antes = sorted(p.name for p in carpeta.glob('*.json'))
+                self.assertTrue(antes)
+                res, _, _ = correr({url(API, '/swagger.json'): respuesta}, modo='grabar', carpeta=carpeta)
+                self.assertEqual(api_docs.NO_SE_GRABO in res.avisos, not se_graba)
+                if not se_graba:
+                    self.assertEqual(sorted(p.name for p in carpeta.glob('*.json')), antes)
 
     def test_3_lo_encontrado_antes_de_la_falla_si_se_reporta(self):
         res, _, _ = correr({url(API, '/openapi.json'): (200, [], openapi3()),
@@ -617,8 +642,14 @@ class Revision(unittest.TestCase):
     def test_3_una_pagina_de_respaldo_que_nombra_a_swagger_ui_no_es_un_documento(self):
         respaldo = b'<html><head><link href="/swagger-ui/swagger-ui.css"></head><body>Inicio</body></html>'
         res, _, _ = correr({url(API, r): (200, [], respaldo) for r in api_docs.RUTAS})
+        # La misma página donde se espera un documento JSON es la de respaldo del sitio: no cuenta en ninguna ruta
+        self.assertEqual(([x for x in res.activos if x.tipo == 'api_doc'], res.hallazgos), ([], []))
+        self.assertEqual(activo(res, API).atributos['api_docs']['estado'], 'revisado')
+        # Solo en las rutas de página sí cuenta, y es un solo activo por sitio aunque cada respuesta traiga su nonce
+        pagina = '<html><head><script nonce="%s">var t=%d</script></head><body id="swagger-ui"></body></html>'
+        res, _, _ = correr({url(API, r): (200, [], (pagina % ('CIRDANfake%020d' % i, 1762700000 + i)).encode())
+                            for i, r in enumerate(api_docs.RUTAS_UI)})
         docs = [x for x in res.activos if x.tipo == 'api_doc']
-        # Solo cuenta en las dos rutas de página, y es un solo activo por sitio
         self.assertEqual([(x.valor, x.atributos['tambien_en']) for x in docs],
                          [(url(API, '/api-docs'), [url(API, '/swagger-ui/'), url(API, '/docs')])])
         self.assertEqual(len(hallazgos(res, 'exposed_api_docs')), 1)
@@ -640,6 +671,9 @@ class Revision(unittest.TestCase):
                             url(API, '/v3/api-docs'): {'estado': 200, 'doc': {'formato': 'cortado'}}})
         self.assertEqual(([x.valor for x in res.activos if x.tipo == 'api_doc'], partes(res.sin_revisar)),
                          ([url(API, '/openapi.json')], [API]))
+        # Y el motivo no dice que sea un documento: no se sabe
+        self.assertEqual(activo(res, API).atributos['api_docs']['sin_revisar'], api_docs.MOTIVOS['cortado'])
+        self.assertIn('no se sabe', api_docs.MOTIVOS['cortado'])
         res, _, _ = correr({url(API, '/v3/api-docs'): {'estado': 200, 'doc': {'formato': 'grande'}}})
         self.assertEqual(contrato.validar(res, codigos=set(api_docs.CODIGOS)), [])
         self.assertEqual([h.codigo for h in res.hallazgos], ['exposed_api_docs'])
@@ -727,6 +761,8 @@ class Ronda3(unittest.TestCase):
                             ('/proveedores/XEX850101AB1/facturas', '/proveedores/\u2026/facturas'),   # forma de RFC
                             ('/sms/5500000000', '/sms/\u2026'),
                             ('/sms/+52-55-0000-0000', '/sms/\u2026'),
+                            ('/sms/tel:55-0000-0000', '/sms/\u2026'),                       # con un prefijo pegado
+                            ('/llaves/CIRDAN-FAKE-Ab1C-dE2f-Gh3I-jK4l-Mn5O', '/llaves/\u2026'),   # partida por guiones
                             ('/sesiones/00000000-0000-4000-8000-000000000000', '/sesiones/\u2026'),
                             ('/archivos/00ff00ff00ff00ff', '/archivos/\u2026'),
                             ('/usuarios/a@b', '/usuarios/\u2026')):
@@ -739,8 +775,20 @@ class Ronda3(unittest.TestCase):
         self.assertEqual(doc['titulo'], 'Pagos v2 (2026-11-09) de \u2026 tel \u2026 llave \u2026/x')
         self.assertIsNone(api_docs.leer(openapi3(info={'title': 7}))['titulo'])
         # El principio de una llave no queda a la vista por el corte del texto
-        larga = api_docs.leer(openapi3(info={'title': 'a ' * 395 + 'CIRDAN1FAKE' + 'x' * 40}))['titulo']
-        self.assertNotIn('CIRDAN', larga)
+        for antes in (95, 395):   # la llave empieza dentro de lo que se guarda (MAX_TEXTO) y donde se corta lo revisado
+            larga = api_docs.leer(openapi3(info={'title': 'a ' * antes + 'CIRDAN1FAKE' + 'x' * 40}))['titulo']
+            self.assertNotIn('CIRDAN', larga)
+        self.assertTrue(api_docs.leer(openapi3(info={'title': 'a ' * 95 + 'CIRDAN1FAKE' + 'x' * 40}))['titulo']
+                        .endswith('a …'))
+        # Un teléfono escrito con espacios, que al partir el título en palabras quedaría en pedazos
+        for titulo in ('Soporte 55 0000 0000 hoy', 'Soporte +52 (55) 0000 0000 hoy'):
+            self.assertEqual(api_docs.leer(openapi3(info={'title': titulo}))['titulo'], 'Soporte … hoy')
+        # Al reproducir se tapa otra vez: la grabación pudo hacerla una versión que tapaba menos
+        grabado = dict(api_docs.leer(openapi3()), titulo='Pagos de a@acme-demo.mx',
+                       muestra=['POST /usuarios/a@acme-demo.mx (3 funciones)', 'GET /salud'])
+        limpio = api_docs.limpiar({'estado': 200, 'doc': grabado})['doc']
+        self.assertEqual((limpio['titulo'], limpio['muestra']),
+                         ('Pagos de …', ['POST /usuarios/… (3 funciones)', 'GET /salud']))
 
     def test_3_un_tramo_legitimo_no_se_tapa(self):
         for ruta in ('/auth/oauth2-token-exchange', '/auth/oauth2-device-authorization', '/v1/s3-presigned-upload-url',
@@ -784,6 +832,8 @@ class Ronda3(unittest.TestCase):
                 self.assertEqual(api_docs._texto(texto), texto)
         raro = 'a\u202eb\u200bc\ufeffd\udc00e\ue000f\U000e0041g\ufffeh\U0001ffffi\x00j\u2028k'
         self.assertEqual(api_docs._texto(raro), 'a?b?c?d?e?f?g?h?i?j?k')
+        # Los que no se ven y antes pasaban: el separador mongol, los rellenos Hangul y los de formato musical
+        self.assertEqual(api_docs._texto('a᠎bㅤcᅟdﾠe\U0001d173f\U0001bca0g'), 'a?b?c?d?e?f?g')
         self.assertFalse(hasattr(api_docs, 'unicodedata'))   # sus categor\u00edas cambian con la versi\u00f3n de Python
 
     def test_7_una_pagina_solo_cuenta_si_la_respuesta_es_html(self):
@@ -816,18 +866,29 @@ class Ronda3(unittest.TestCase):
         # Los conteos siguen exactos: solo la cuenta de cada texto de la muestra es un mínimo, y lo dice
         self.assertEqual((doc['operaciones'], doc['sin_declarar']), (2300 * 8, 2300 * 8))
         self.assertTrue(doc['muestra'])
+        # De las rutas que sí se revisaron salen sus 8 métodos, también los que no cambian datos
+        self.assertEqual(sorted(texto.split(' ')[0] for texto in doc['muestra']),
+                         sorted(m.upper() for m in api_docs.METODOS))
         for texto in doc['muestra']:
-            self.assertRegex(texto, r'^(DELETE|PATCH|POST|PUT) /\S* \(al menos \d+ funciones\)$')
+            self.assertRegex(texto, r'^[A-Z]+ /\S* \(al menos \d+ funciones\)$')
         self.assertEqual(api_docs.limpiar({'estado': 200, 'doc': doc})['doc'], doc)
-        # Lo mismo con cada método en mayúsculas y minúsculas, que multiplica las funciones de cada ruta
+        # Un método solo cuenta en minúsculas, como lo pide OpenAPI: sus variantes con mayúsculas no multiplican las
+        # funciones de una ruta
         variantes = {v: {} for v in ('get', 'GET', 'Get', 'gEt', 'geT', 'post', 'POST', 'Post', 'pOst', 'poSt')}
         paths = {'/x%d' % i + '/a' * 398: variantes for i in range(900)}
         inicio = time.perf_counter()
         doc = api_docs.leer(openapi3(paths=paths))
         self.assertLess(time.perf_counter() - inicio, 8)
-        self.assertEqual((doc['operaciones'], doc['sin_declarar']), (9000, 9000))
+        self.assertEqual((doc['operaciones'], doc['sin_declarar']), (1800, 1800))
         visible = ('/x0' + '/a' * 398)[:api_docs.MAX_TEXTO]
-        self.assertEqual(doc['muestra'][0], 'POST %s (al menos 5 funciones)' % visible)
+        self.assertEqual(doc['muestra'][0], 'POST %s (al menos 1 función)' % visible)
+        # Así la huella, que repite la ruta en cada función, no pasa de 8 veces el tamaño de la ruta más larga
+        todas = {''.join(letras): {} for letras in itertools.product(*((c, c.upper()) for c in 'options'))}
+        todas.update({m: {} for m in api_docs.METODOS})
+        inicio = time.perf_counter()
+        doc = api_docs.leer(openapi3(paths={'/' + 'a' * 1500000: todas}))
+        self.assertLess(time.perf_counter() - inicio, 8)
+        self.assertEqual((doc['operaciones'], doc['sin_declarar']), (8, 8))
 
     def test_9_un_documento_grande_normal_conserva_la_cuenta_exacta_de_la_muestra(self):
         paths = {'/clientes/c%d@acme-demo.mx/pedidos' % i: {'post': {}, 'get': {}} for i in range(700)}
@@ -838,7 +899,22 @@ class Ronda3(unittest.TestCase):
                                           'GET /clientes/…/pedidos (700 funciones)', 'GET /salud'])
         # La cuenta más larga que puede salir cabe en lo que limpiar deja de cada texto de la muestra
         largo = 'OPTIONS /%s (al menos 9999999 funciones)' % ('a' * (api_docs.MAX_TEXTO - 1))
-        self.assertEqual(api_docs._texto(largo, api_docs.MAX_TEXTO + 48), largo)
+        self.assertEqual(api_docs.limpiar({'estado': 200, 'doc': dict(doc, muestra=[largo])})['doc']['muestra'],
+                         [largo])
+        # Con más rutas de las que se revisan (MAX_REVISADO), las funciones de las rutas ya revisadas sí se cuentan,
+        # también las que no cambian datos, y toda cuenta dice que es un mínimo, aunque sea de 1
+        paths = {'/clientes/c%d@acme-demo.mx/pedidos' % i: {'post': {}, 'get': {}} for i in range(1000)}
+        paths.update({'/salud': {'get': {}}, '/clientes/c0@acme-demo.mx/pagos': {'post': {}},
+                      '/clientes/c999@acme-demo.mx/pagos': {'post': {}}})
+        doc = api_docs.leer(openapi3(paths=paths))
+        self.assertEqual((doc['operaciones'], doc['sin_declarar'], len(doc['muestra'])), (2003, 2003, 3))
+        self.assertEqual(doc['muestra'][0], 'POST /clientes/…/pagos (al menos 1 función)')
+        cuentas = [re.fullmatch(r'(POST|GET) /clientes/…/pedidos \(al menos (\d+) funciones\)', texto)
+                   for texto in doc['muestra'][1:]]
+        self.assertEqual([c.group(1) for c in cuentas], ['POST', 'GET'])
+        self.assertEqual(cuentas[0].group(2), cuentas[1].group(2))
+        self.assertTrue(800 < int(cuentas[0].group(2)) < 1000)
+        self.assertEqual(api_docs.limpiar({'estado': 200, 'doc': doc})['doc'], doc)
 
     def test_10_un_security_general_enorme_se_revisa_una_vez_y_no_en_cada_funcion(self):
         # 50,000 requisitos generales y 32,000 funciones vacías en unos 700 KB: antes eran más de 60 s de CPU, porque
