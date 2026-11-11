@@ -106,7 +106,14 @@ PAUSA_PARECIDOS = 2          # segundos entre consultas de variantes, para no sa
 # variantes x (2 de pausa + 2 intentos de 20 + 5 de espera)): el peor caso de la corrida sigue en 1055 s, debajo de
 # TOPE_CORRIDA del orquestador. Con menos de MINIMO_VARIANTE por delante no se hace otra petición, y las variantes que
 # ya no caben quedan sin consultar (SIN_TIEMPO), salvo las que salen del disco.
+# Si casi todas tardan, el primer intento de 20 s se perdería en cada una. Por eso, cuando la respuesta de una variante
+# tarda más de 20 s, las siguientes esperan 45 s desde el primer intento (10 variantes de 35 s: 62 + 9 x 37 = 395 s, y
+# antes solo respondían 7). Si con 45 s una variante falla su primer intento, crt.sh se cuelga en vez de tardar y
+# esperar más solo gasta el presupuesto: vuelven a 20 s y así se quedan el resto de la corrida (_ritmo). Ese primer
+# intento largo que falla pasa a lo más una vez. Donde pierde contra 20 y 45 fijos: si crt.sh tarda casi 45 s en el
+# primer intento y el reintento habría salido rápido, cada variante cuesta hasta 20 s más y caben menos.
 TIMEOUTS_VARIANTE = (20, 45)  # segundos del primer y del segundo intento de cada variante
+NORMAL, LENTO, FIJO = 'normal', 'lento', 'fijo'  # ritmo de las variantes: 20 y 45 s, 45 y 45 s, o 20 y 45 ya fijos
 PRESUPUESTO_VARIANTES = 470  # segundos para todas las variantes de una corrida
 MINIMO_VARIANTE = 20         # segundos que debe tener por delante una petición de variante (el plazo de antes)
 FALLA = 'falla:'             # consulta que graba que crt.sh no respondió y se usó Cert Spotter
@@ -162,7 +169,12 @@ CrtshNoResponde = FuenteNoResponde  # el contrato (#13) define las excepciones d
 
 
 class SinTiempo(FuenteNoResponde):
-    """El presupuesto de tiempo no alcanzó para hacer la consulta: no se le preguntó a la fuente."""
+    """El presupuesto de tiempo no alcanzó. Con `intentos` en 0 no se le preguntó a la fuente. Con más, la fuente no
+    respondió a esos intentos y no hubo tiempo para el que faltaba: no dice que la fuente esté saturada."""
+
+    def __init__(self, mensaje, intentos=0):
+        super().__init__(mensaje)
+        self.intentos = intentos
 
 
 # Avisos de una grabación con archivos dañados (RC-46). DANADA va primero, para que no lo corte el tope de avisos.
@@ -176,6 +188,8 @@ SIN_MARCA = ('No se buscaron dominios parecidos de %s: solo se buscan cuando el 
 SIN_VARIANTES = ('Sin la respuesta de %%%s%% no se consultaron las %s de %s: los dominios parecidos quedan sin '
                  'revisar en esta corrida')
 SIN_TIEMPO = 'Se acabó el tiempo de las variantes (%d s): quedaron sin consultar %s (%s)'
+SIN_REINTENTO = ('Se acabó el tiempo de las variantes (%d s): crt.sh no respondió al primer intento de %s y no hubo '
+                 'tiempo para el segundo (%s)')
 POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsqueda por nombre y pueden faltar '
                      'subdominios')
 
@@ -236,6 +250,7 @@ class ClienteCrtsh:
         self.dormir = dormir or time.sleep
         self.cronometro = cronometro or time.monotonic
         self.consultas = 0
+        self.ultima = None         # (intentos, segundos de la respuesta) de la última consulta, si respondió por la red
         self.danados = []          # archivos de la grabación que no se pudieron leer, sin repetir (RC-46)
         self._dns_funciona = {}    # nombre de control -> si el DNS responde, una vez por corrida
 
@@ -315,8 +330,12 @@ class ClienteCrtsh:
         respuesta con la que `valida(datos)` da False cuenta como una que no llegó, no se graba y no se reintenta.
         Un archivo de la grabación vacío, cortado o ilegible lanza GrabacionDanada (_de_disco).
         Con `plazo` (un valor de `cronometro()`), cada petición espera a lo más lo que falta para el plazo y no se
-        hace si le quedan menos de MINIMO_VARIANTE segundos: así pausa, peticiones y esperas no pasan del plazo. Si
-        ni la primera cabe, lanza SinTiempo sin consultar. Lo que sale del disco no gasta tiempo y siempre se lee."""
+        hace si le quedan menos de MINIMO_VARIANTE segundos: así pausa, peticiones y esperas no pasan del plazo. Lo
+        que falta se vuelve a medir después de la pausa y antes de cada intento. Si ni la primera cabe, lanza SinTiempo
+        sin consultar. Si el tiempo se acaba después de un intento sin respuesta, lanza SinTiempo con esos `intentos`.
+        Lo que sale del disco no gasta tiempo y siempre se lee.
+        `ultima` queda con (intentos, segundos que tardó la respuesta) si respondió por la red, y con None si no."""
+        self.ultima = None
         del_disco, datos = self._de_disco(consulta)
         if del_disco:
             return datos
@@ -324,13 +343,18 @@ class ClienteCrtsh:
             raise SinTiempo('no quedó tiempo para consultar %s' % (texto or consulta))
         if pausa:
             self.dormir(pausa)
-        ultimo, hechos = '', 0
+        ultimo, hechos, sin_tiempo = '', 0, False
         for n in range(intentos):
             espera = timeout[min(n, len(timeout) - 1)] if isinstance(timeout, tuple) else timeout or self.timeout
             if plazo is not None:
-                espera = min(espera, plazo - self.cronometro())
+                queda = plazo - self.cronometro()  # la pausa o la espera pudieron durar de más
+                if queda < MINIMO_VARIANTE:
+                    sin_tiempo = True
+                    break
+                espera = min(espera, queda)
             self.consultas += 1
             hechos += 1
+            inicio = self.cronometro()
             try:
                 cuerpo = self.transporte(url, espera)
                 datos = json.loads(cuerpo or b'[]')
@@ -351,12 +375,19 @@ class ClienteCrtsh:
                 if n < intentos - 1:
                     pausa_intento = ESPERAS[min(n, len(ESPERAS) - 1)]
                     if plazo is not None and plazo - self.cronometro() < pausa_intento + MINIMO_VARIANTE:
+                        sin_tiempo = True
                         break  # otro intento no cabe en el plazo
                     self.dormir(pausa_intento)
                 continue
+            self.ultima = (hechos, self.cronometro() - inicio)
             self.grabadora.guardar(consulta, datos)  # fuera del try: un error del disco no es una falla de la fuente
             return datos
+        if sin_tiempo and not hechos:  # no se le preguntó: no es una falla de la fuente ni toca lo grabado
+            raise SinTiempo('no quedó tiempo para consultar %s' % (texto or consulta))
         self.grabadora.descartar(consulta)  # una respuesta de una grabación anterior no debe pasar por la de hoy
+        if sin_tiempo:
+            raise SinTiempo('%s no respondió a %s después de %d %s (%s) y no quedó tiempo para otro' % (
+                fuente, texto or consulta, hechos, 'intento' if hechos == 1 else 'intentos', ultimo), hechos)
         raise CrtshNoResponde('%s no respondió a %s después de %d %s (%s)' % (
             fuente, texto or consulta, hechos, 'intento' if hechos == 1 else 'intentos', ultimo))
 
@@ -826,7 +857,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             # variantes gastaría hasta 20 consultas del cupo, sobre nombres de terceros, para tirar sus respuestas.
             res.avisos.append(SIN_VARIANTES % (etiqueta, _cuantos(len(candidatos), 'variante', 'variantes'), dominio))
             candidatos = []
-        seguidas, respondieron, sin_tiempo = 0, [], []
+        seguidas, respondieron, sin_tiempo, sin_reintento, ritmo = 0, [], [], [], NORMAL
         plazo = cliente.cronometro() + PRESUPUESTO_VARIANTES
         for i, candidato in enumerate(candidatos):
             if seguidas >= FALLAS_SEGUIDAS:
@@ -835,8 +866,9 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                 sin_respuesta += candidatos[i:]
                 break
             try:
-                encontrados = cliente.consultar(candidato, intentos=INTENTOS_PARECIDOS, timeout=TIMEOUTS_VARIANTE,
-                                                pausa=PAUSA_PARECIDOS, plazo=plazo)
+                encontrados = cliente.consultar(candidato, intentos=INTENTOS_PARECIDOS, pausa=PAUSA_PARECIDOS,
+                                                timeout=_timeouts_variante(ritmo), plazo=plazo)
+                ritmo = _ritmo(ritmo, cliente.ultima)
                 seguidas = 0
                 respondidas += 1
                 respondieron.append(candidato)
@@ -844,17 +876,23 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                 res.avisos.append(str(e))
                 sin_respuesta.append(candidato)
                 continue
-            except SinTiempo:  # no se le preguntó a crt.sh: no cuenta como saturación, y las que siguen se leen
-                sin_tiempo.append(candidato)  # igual si están en el disco (--grabar --completar)
-                sin_respuesta.append(candidato)
+            except SinTiempo as e:  # la cortó el tiempo: no cuenta como saturación de crt.sh, y las que siguen se
+                (sin_reintento if e.intentos else sin_tiempo).append(candidato)  # leen igual si están en el disco
+                sin_respuesta.append(candidato)  # (--grabar --completar)
                 continue
             except CrtshNoResponde as e:
                 res.avisos.append(str(e))
                 sin_respuesta.append(candidato)
                 seguidas += 1
+                if ritmo == LENTO:  # el primer intento largo no sirvió (_ritmo)
+                    ritmo = FIJO
                 continue
             tipo = 'otro_tld' if candidato.split('.', 1)[0] == etiqueta else 'error_tipografico'
             por_tipo.append((tipo, _con_fechas(encontrados), lambda n, k=candidato: registrable(n) == k))
+        if sin_reintento:
+            res.avisos.append(SIN_REINTENTO % (PRESUPUESTO_VARIANTES,
+                                               _cuantos(len(sin_reintento), 'variante', 'variantes'),
+                                               ', '.join(sin_reintento)))
         if sin_tiempo:
             res.avisos.append(SIN_TIEMPO % (PRESUPUESTO_VARIANTES, _cuantos(len(sin_tiempo), 'variante', 'variantes'),
                                             ', '.join(sin_tiempo)))
@@ -911,6 +949,28 @@ def _zona(fecha):
     """'UTC' o el desfase de una fecha con zona, como 'UTC-06:00'. Dentro del contenedor de la API la hora local es UTC."""
     z = fecha.strftime('%z')
     return 'UTC' if z in ('', '+0000') else 'UTC%s:%s' % (z[:3], z[3:5])
+
+
+def _timeouts_variante(ritmo):
+    """Segundos de cada intento de una variante: TIMEOUTS_VARIANTE, o el del segundo intento desde el primero si
+    crt.sh viene lento en esta corrida (ritmo LENTO)."""
+    return (TIMEOUTS_VARIANTE[1],) * INTENTOS_PARECIDOS if ritmo == LENTO else TIMEOUTS_VARIANTE
+
+
+def _ritmo(ritmo, ultima):
+    """El ritmo de las variantes que siguen. `ultima` es (intentos, segundos que tardó la respuesta) de la variante
+    que acaba de responder, o None si salió del disco: eso no dice nada de crt.sh y nada cambia.
+    De NORMAL pasa a LENTO cuando una respuesta tarda más que el primer timeout. En LENTO se queda mientras las
+    variantes respondan al primer intento: esperar más no cuesta cuando crt.sh responde. Si en LENTO una variante
+    necesita el reintento, el primer intento largo no sirvió: pasa a FIJO, 20 y 45 s para el resto de la corrida."""
+    if ultima is None:
+        return ritmo
+    intentos, segundos = ultima
+    if ritmo == LENTO and intentos > 1:
+        return FIJO
+    if ritmo == NORMAL and segundos > TIMEOUTS_VARIANTE[0]:
+        return LENTO
+    return ritmo
 
 
 def _cuantos(n, singular, plural):
