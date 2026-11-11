@@ -99,6 +99,16 @@ FALLAS_SEGUIDAS = 3          # si tantas variantes seguidas fallan, crt.sh está
 INTENTOS = 3                 # intentos HTTP por consulta dentro de una corrida (no es scan_source_runs.attempt)
 ESPERAS = (5, 15)            # segundos entre intentos; crt.sh suele recuperarse en segundos
 PAUSA_PARECIDOS = 2          # segundos entre consultas de variantes, para no saturar crt.sh
+# Tiempo de las variantes. crt.sh tarda con algunas: el 11 nov olmardo.com.mx dio timeout 2 veces con 20 s y respondió
+# en unos 35 s. El primer intento espera 20 s, como antes, y el segundo hasta 45 (TIMEOUTS_VARIANTE): una variante que
+# se cuelga y responde al reintento cuesta lo mismo que antes, y una lenta responde en el segundo. Todas las variantes
+# juntas (pausas, peticiones y esperas entre intentos) caben en PRESUPUESTO_VARIANTES, los mismos 470 s de antes (10
+# variantes x (2 de pausa + 2 intentos de 20 + 5 de espera)): el peor caso de la corrida sigue en 1055 s, debajo de
+# TOPE_CORRIDA del orquestador. Con menos de MINIMO_VARIANTE por delante no se hace otra petición, y las variantes que
+# ya no caben quedan sin consultar (SIN_TIEMPO), salvo las que salen del disco.
+TIMEOUTS_VARIANTE = (20, 45)  # segundos del primer y del segundo intento de cada variante
+PRESUPUESTO_VARIANTES = 470  # segundos para todas las variantes de una corrida
+MINIMO_VARIANTE = 20         # segundos que debe tener por delante una petición de variante (el plazo de antes)
 FALLA = 'falla:'             # consulta que graba que crt.sh no respondió y se usó Cert Spotter
 ORIGEN = 'crtsh'             # de dónde salió el certificado, en atributos y evidencia (el otro es Cert Spotter)
 
@@ -150,6 +160,11 @@ MESES = ('ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', '
 
 CrtshNoResponde = FuenteNoResponde  # el contrato (#13) define las excepciones de todas las fuentes
 
+
+class SinTiempo(FuenteNoResponde):
+    """El presupuesto de tiempo no alcanzó para hacer la consulta: no se le preguntó a la fuente."""
+
+
 # Avisos de una grabación con archivos dañados (RC-46). DANADA va primero, para que no lo corte el tope de avisos.
 DANADA = ('La grabación tiene %s (%s). Se muestra lo que sí se pudo leer, pueden faltar subdominios y certificados, y '
           'en este escaneo no se marca nada como resuelto, salvo un certificado por vencer cuya fecha ya pasó')
@@ -160,6 +175,7 @@ SIN_MARCA = ('No se buscaron dominios parecidos de %s: solo se buscan cuando el 
              'dominio registrable, con un sufijo que Cirdan conoce y fuera de un hosting compartido')
 SIN_VARIANTES = ('Sin la respuesta de %%%s%% no se consultaron las %s de %s: los dominios parecidos quedan sin '
                  'revisar en esta corrida')
+SIN_TIEMPO = 'Se acabó el tiempo de las variantes (%d s): quedaron sin consultar %s (%s)'
 POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsqueda por nombre y pueden faltar '
                      'subdominios')
 
@@ -204,19 +220,21 @@ class ClienteCrtsh:
     contrato (#13)."""
 
     def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, transporte=None, dormir=None, timeout=45,
-                 completar=False, desde=None, reloj=None, nueva=False, resolver=None):
+                 completar=False, desde=None, reloj=None, nueva=False, resolver=None, cronometro=None):
         """`completar` (solo al grabar) reutiliza lo grabado desde `desde`, el inicio de la grabación en curso,
         y vuelve a consultar lo demás, incluidas las respuestas de grabaciones anteriores.
         `nueva` (solo al grabar) vacía la carpeta y escribe la marca de inicio con la primera respuesta válida de
         crt.sh o Cert Spotter: si ninguno responde, la grabación anterior queda intacta.
         `resolver(nombre)` dice si un nombre resuelve en DNS (True, False o None si no se pudo saber). Si no se pasa,
-        se usa el del transporte cuando lo trae (el simulado de las pruebas) o la consulta DNS del sistema."""
+        se usa el del transporte cuando lo trae (el simulado de las pruebas) o la consulta DNS del sistema.
+        `cronometro()` da segundos que solo avanzan (time.monotonic): mide el presupuesto de las variantes."""
         self.modo, self.carpeta, self.timeout = modo, Path(carpeta), timeout
         self.grabadora = Grabadora(carpeta, modo, completar=completar, desde=desde, nueva=nueva, reloj=reloj,
                                    nombre=_nombre_grabado)
         self.transporte = transporte or _descargar
         self.resolver = resolver or getattr(self.transporte, 'resolver', None) or _resolver_dns
         self.dormir = dormir or time.sleep
+        self.cronometro = cronometro or time.monotonic
         self.consultas = 0
         self.danados = []          # archivos de la grabación que no se pudieron leer, sin repetir (RC-46)
         self._dns_funciona = {}    # nombre de control -> si el DNS responde, una vez por corrida
@@ -261,15 +279,17 @@ class ClienteCrtsh:
             self.grabadora.guardar(consulta, valor)
         return valor
 
-    def consultar(self, consulta, intentos=INTENTOS, timeout=None, pausa=0, **extra):
+    def consultar(self, consulta, intentos=INTENTOS, timeout=None, pausa=0, plazo=None, **extra):
         """Una consulta a crt.sh. `pausa`: segundos de espera antes de consultar, no aplica si la respuesta sale del disco.
+        `timeout`: segundos de cada petición, o una tupla con los de cada intento. `plazo`: valor de `cronometro()`
+        que la consulta no debe pasar (ver pedir).
 
         Al reproducir, si la grabación dice que crt.sh no respondió a esta consulta, lanza CrtshNoResponde con el mismo
         error, así el respaldo de Cert Spotter se repite igual que en vivo. Si el archivo de la respuesta o el de su
         falla está dañado, lanza GrabacionDanada."""
         url = URL + '?' + urllib.parse.urlencode(dict(q=consulta, output='json', **extra))
         try:
-            datos = self.pedir(consulta, url, 'crt.sh', intentos, timeout, pausa)
+            datos = self.pedir(consulta, url, 'crt.sh', intentos, timeout, pausa, plazo=plazo)
         except SinGrabacion as falta:
             try:
                 _, error = self._de_disco(FALLA + consulta)
@@ -288,23 +308,31 @@ class ClienteCrtsh:
             self.grabadora.guardar(FALLA + consulta, str(error))
 
     def pedir(self, consulta, url, fuente='crt.sh', intentos=INTENTOS, timeout=None, pausa=0, sin_reintento=(),
-              texto=None, valida=None):
+              texto=None, valida=None, plazo=None):
         """La lista JSON de `url` con reintentos. Sale del disco si la grabación la trae y, al grabar, se guarda.
         Lo usan crt.sh y su respaldo Cert Spotter (certspotter.py). Un código HTTP de `sin_reintento` corta los
         intentos, por ejemplo el 429 de Cert Spotter. `texto` se muestra en el error en lugar de `consulta`. Una
         respuesta con la que `valida(datos)` da False cuenta como una que no llegó, no se graba y no se reintenta.
-        Un archivo de la grabación vacío, cortado o ilegible lanza GrabacionDanada (_de_disco)."""
+        Un archivo de la grabación vacío, cortado o ilegible lanza GrabacionDanada (_de_disco).
+        Con `plazo` (un valor de `cronometro()`), cada petición espera a lo más lo que falta para el plazo y no se
+        hace si le quedan menos de MINIMO_VARIANTE segundos: así pausa, peticiones y esperas no pasan del plazo. Si
+        ni la primera cabe, lanza SinTiempo sin consultar. Lo que sale del disco no gasta tiempo y siempre se lee."""
         del_disco, datos = self._de_disco(consulta)
         if del_disco:
             return datos
+        if plazo is not None and plazo - self.cronometro() < pausa + MINIMO_VARIANTE:
+            raise SinTiempo('no quedó tiempo para consultar %s' % (texto or consulta))
         if pausa:
             self.dormir(pausa)
         ultimo, hechos = '', 0
         for n in range(intentos):
+            espera = timeout[min(n, len(timeout) - 1)] if isinstance(timeout, tuple) else timeout or self.timeout
+            if plazo is not None:
+                espera = min(espera, plazo - self.cronometro())
             self.consultas += 1
             hechos += 1
             try:
-                cuerpo = self.transporte(url, timeout or self.timeout)
+                cuerpo = self.transporte(url, espera)
                 datos = json.loads(cuerpo or b'[]')
                 if not isinstance(datos, list):
                     raise ValueError('respuesta inesperada')
@@ -321,7 +349,10 @@ class ClienteCrtsh:
                 if isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code not in (408, 429):
                     break  # la fuente sí respondió y otro intento daría lo mismo
                 if n < intentos - 1:
-                    self.dormir(ESPERAS[min(n, len(ESPERAS) - 1)])
+                    pausa_intento = ESPERAS[min(n, len(ESPERAS) - 1)]
+                    if plazo is not None and plazo - self.cronometro() < pausa_intento + MINIMO_VARIANTE:
+                        break  # otro intento no cabe en el plazo
+                    self.dormir(pausa_intento)
                 continue
             self.grabadora.guardar(consulta, datos)  # fuera del try: un error del disco no es una falla de la fuente
             return datos
@@ -795,7 +826,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             # variantes gastaría hasta 20 consultas del cupo, sobre nombres de terceros, para tirar sus respuestas.
             res.avisos.append(SIN_VARIANTES % (etiqueta, _cuantos(len(candidatos), 'variante', 'variantes'), dominio))
             candidatos = []
-        seguidas, respondieron = 0, []
+        seguidas, respondieron, sin_tiempo = 0, [], []
+        plazo = cliente.cronometro() + PRESUPUESTO_VARIANTES
         for i, candidato in enumerate(candidatos):
             if seguidas >= FALLAS_SEGUIDAS:
                 res.avisos.append('crt.sh saturado: se omitieron %d variantes (%s)' % (
@@ -803,13 +835,17 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                 sin_respuesta += candidatos[i:]
                 break
             try:
-                encontrados = cliente.consultar(candidato, intentos=INTENTOS_PARECIDOS, timeout=20,
-                                                pausa=PAUSA_PARECIDOS)
+                encontrados = cliente.consultar(candidato, intentos=INTENTOS_PARECIDOS, timeout=TIMEOUTS_VARIANTE,
+                                                pausa=PAUSA_PARECIDOS, plazo=plazo)
                 seguidas = 0
                 respondidas += 1
                 respondieron.append(candidato)
             except SinGrabacion as e:  # falta en la grabación: no cuenta como saturación de crt.sh
                 res.avisos.append(str(e))
+                sin_respuesta.append(candidato)
+                continue
+            except SinTiempo:  # no se le preguntó a crt.sh: no cuenta como saturación, y las que siguen se leen
+                sin_tiempo.append(candidato)  # igual si están en el disco (--grabar --completar)
                 sin_respuesta.append(candidato)
                 continue
             except CrtshNoResponde as e:
@@ -819,6 +855,9 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                 continue
             tipo = 'otro_tld' if candidato.split('.', 1)[0] == etiqueta else 'error_tipografico'
             por_tipo.append((tipo, _con_fechas(encontrados), lambda n, k=candidato: registrable(n) == k))
+        if sin_tiempo:
+            res.avisos.append(SIN_TIEMPO % (PRESUPUESTO_VARIANTES, _cuantos(len(sin_tiempo), 'variante', 'variantes'),
+                                            ', '.join(sin_tiempo)))
         if respondidas and not sin_marca:
             vistos = set()
             # Sin tope de parecidos: todo el que pasa el filtro se reporta. Un tope en el recolector dejaba fuera
