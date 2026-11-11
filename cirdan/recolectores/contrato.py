@@ -390,8 +390,9 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
     Si el dominio no es un nombre válido, no llama al recolector. El resultado tiene que ser del dominio
     autorizado y de la fuente del recolector. Primero se valida y luego se filtra por alcance, así un activo
     mal formado deja la fuente en 'failed' en lugar de perderse.
-    A recolectar() solo le pasa dominio, cliente, ahora y propios. Lo que un recolector apaga por defecto, como
-    la búsqueda de dominios parecidos de crt.sh, nunca se prende desde un escaneo.
+    A recolectar() le pasa dominio, cliente, ahora y propios, más las opciones que el recolector declare en
+    EN_ESCANEO (un diccionario, ninguna si no lo trae). Así crt.sh busca dominios parecidos en cada escaneo
+    (#109, RC-226). Un EN_ESCANEO que no es un diccionario de opciones deja la fuente en 'failed'.
     """
     fuente = getattr(recolector, 'FUENTE', '') or getattr(recolector, '__name__', '?')
     fuente = fuente if isinstance(fuente, str) else '?'
@@ -404,8 +405,12 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
     if not NOMBRE_VALIDO.fullmatch(autorizado):  # también evita que '..' o '/' saquen la carpeta de grabaciones
         return fallido('dominio inválido: %s' % repr(dominio)[:100])
     try:
+        opciones = getattr(recolector, 'EN_ESCANEO', None)
+        opciones = {} if opciones is None else opciones  # [], '' o 0 no son un diccionario: failed, no se ignoran
+        if not isinstance(opciones, dict) or set(opciones) & {'dominio', 'cliente', 'ahora', 'propios'}:
+            return fallido('EN_ESCANEO debe ser un diccionario de opciones de recolectar()')
         cliente = recolector.crear_cliente(modo, autorizado)
-        res = recolector.recolectar(autorizado, cliente, ahora=ahora, propios=propios)
+        res = recolector.recolectar(autorizado, cliente, ahora=ahora, propios=propios, **opciones)
     except Exception as e:  # un recolector con errores no tumba el escaneo
         return fallido(_texto_error(e), getattr(cliente, 'consultas', 0))
     if not isinstance(res, Resultado):

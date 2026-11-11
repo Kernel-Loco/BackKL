@@ -63,8 +63,11 @@ TXT_DETALLE = {
 }
 FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
 
-# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 16 minutos solo de HTTP (sus 2 búsquedas y
-# las 4 páginas de Cert Spotter, cada consulta con 3 intentos), y el DNS de los nombres vencidos no tiene tope.
+# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 18 minutos solo de HTTP: 1055 s en el peor
+# caso, con crt.sh arriba y lento (155 s de cada una de sus 2 búsquedas con 3 intentos de 45 s, 180 s de las 4 páginas
+# de Cert Spotter con 2 intentos de 20 s, 95 s de %marca% con 2 intentos de 45 s y 47 s de cada una de las 10 variantes
+# con 2 intentos de 20 s, #109, RC-226). Quedan 145 s antes de TOPE_CORRIDA, y el DNS de los nombres vencidos no tiene
+# tope.
 # Por eso, mientras corre una fuente, un hilo aparte marca vida cada LATIDO, hasta TOPE_CORRIDA: una corrida
 # colgada para siempre deja de marcar y el escaneo se da por caído pasado ABANDONO.
 LATIDO = 60                           # segundos entre marcas
@@ -598,8 +601,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
     se muestran como 0 hallazgos, o si revisó solo una parte de lo suyo (revisados, en stats.sources_partial).
-    crt.sh nunca busca dominios parecidos desde aquí, porque consulta
-    variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
+    crt.sh busca dominios parecidos en cada escaneo, solo en los registros de certificados (#109, RC-226): si
+    ninguna de esas búsquedas responde, si no responde la de %marca% o si el dominio no tiene marca (un subdominio,
+    un sufijo que crtsh.py no conoce o un hosting), lookalike_domain queda en sin_cobertura, nunca en 0. Si solo
+    falta la respuesta de alguna variante, ct_logs da revisados y va en stats.sources_partial. Devuelve
+    un resumen.
     En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
     ct_logs y subfinder cuenta una vez. En assets van una sola vez, con sus atributos unidos.
     new_findings cuenta los hallazgos que el escaneo dejó abiertos y antes no lo estaban: los que insertó y los que
@@ -618,7 +624,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         fuentes = fuentes if fuentes is not None else fuentes_activas(c)
         catalogo = {f['code']: f for f in c.execute(
             'SELECT id::text, code, keep_raw_payload FROM data_sources WHERE code = ANY(%s)', (fuentes,)).fetchall()}
-        propios = [r['fqdn'] for r in c.execute('SELECT fqdn::text FROM domains WHERE fqdn <> %s', (fqdn,)).fetchall()]
+        # Solo los dominios vigentes de la organización cuentan como propios (#109, RC-226). Uno dado de baja
+        # ('removed') puede ser hoy de un tercero, y uno sin verificar ('pending_verification') no probó ser suyo:
+        # darlo de alta no debe esconder ni resolver un dominio parecido.
+        propios = [r['fqdn'] for r in c.execute(
+            "SELECT fqdn::text FROM domains WHERE fqdn <> %s AND status IN ('verified', 'paused')", (fqdn,)).fetchall()]
         domain = c.execute('SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
         if not domain:
             raise ValueError('dominio no encontrado para el escaneo: %s' % fqdn)
