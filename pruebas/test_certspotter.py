@@ -406,14 +406,38 @@ class Respaldo(unittest.TestCase):
         self.assertEqual(contrato.validar(caido, codigos=set(crtsh.CODIGOS)), [])
         por_nombre, _ = recolectar(CrtshSimulado(fallas=crtsh.INTENTOS, respuestas={'acme-demo.mx': SUBDOMINIOS + [comodin]}))
         self.assertTrue({api, dev, www} <= set(por_nombre.revisados), por_nombre.revisados)
-        # Un dominio parecido (solo en la terminal) lleva su dominio como parte, que revisados no trae
-        res, _ = recolectar(CrtshSimulado(fallas=crtsh.INTENTOS, respuestas={
-            'acme-demo.mx': SUBDOMINIOS, 'acme-dem0.mx': [cert(30, ['acme-dem0.mx'], '2026-10-01T00:00:00',
-                                                               '2026-12-30T00:00:00')]}), parecidos=True)
-        parecido = next(h for h in res.hallazgos if h.codigo == 'lookalike_domain')
+        # Un dominio parecido lleva su dominio como parte. B2 y H9 de RC-226: con cobertura parcial de certificados,
+        # revisados trae también los dominios parecidos que la corrida sí revisó (los que dejó %marca%, aunque su
+        # certificado sea viejo, las variantes que respondieron y el dominio propio), para que el orquestador cierre
+        # el que ya no salió. La variante que no respondió no va.
+        class SinUnaVariante(CrtshSimulado):
+            def __call__(self, url, timeout):
+                if 'q=acme-demo.net' in url:
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        viejo = cert(31, ['acme-demo-viejo.com'], '2025-01-01T00:00:00', '2025-04-01T00:00:00')
+        res, _ = recolectar(SinUnaVariante(fallas=crtsh.INTENTOS, respuestas={
+            'acme-demo.mx': SUBDOMINIOS, '%acme-demo%': [viejo],
+            'acme-dem0.mx': [cert(30, ['acme-dem0.mx'], '2026-10-01T00:00:00', '2026-12-30T00:00:00')]}), parecidos=True)
+        parecido, = [h for h in res.hallazgos if h.codigo == 'lookalike_domain']
         self.assertEqual(parecido.partes, ['acme-dem0.mx'])
-        self.assertNotIn('acme-dem0.mx', res.revisados)
+        self.assertTrue({'acme-dem0.mx', 'acme-demo-viejo.com', 'acme-demo.com', 'acme-demo.com.mx', api} <=
+                        set(res.revisados), res.revisados)
+        self.assertNotIn('acme-demo.net', res.revisados)
+        self.assertNotIn('acme-demo.mx', res.revisados)
+        self.assertEqual(res.omitidos, [crtsh._huella('lookalike_domain', 'acme-demo.mx', 'acme-demo.net')])
+        self.assertEqual(res.revisados, sorted(res.revisados))
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        # Sin la respuesta de %marca% no hay cobertura de parecidos y revisados no trae ninguno
+        class SinMarca(CrtshSimulado):
+            def __call__(self, url, timeout):
+                if 'q=%25acme-demo%25' in url:
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        sin_marca, _ = recolectar(SinMarca(fallas=crtsh.INTENTOS, respuestas={'acme-demo.mx': SUBDOMINIOS}),
+                                  parecidos=True)
+        self.assertEqual(sin_marca.sin_cobertura, ['lookalike_domain'])
+        self.assertTrue(sin_marca.revisados and all('@' in p for p in sin_marca.revisados), sin_marca.revisados)
 
 
 class GrabarYReproducir(unittest.TestCase):
@@ -560,6 +584,26 @@ class GrabarYReproducir(unittest.TestCase):
         self.assertFalse([a for a in res.avisos if 'no respondió' in a], res.avisos)
         self.assertTrue(res.activos)
         self.assertIn('acme-demo.mx · crt.sh y Cert Spotter · succeeded', crtsh.resumen(res, cliente)[0])
+
+    def test_3h_la_busqueda_de_la_marca_danada_no_es_que_crtsh_no_respondiera(self):
+        """G2 de la ronda 3 de RC-226: al reproducir, si el archivo de %marca% está dañado no hubo red. Las variantes
+        se leen igual (no sale el aviso SIN_VARIANTES), los parecidos quedan sin cobertura y no se cierra nada."""
+        marca = 'contiene_acme-demo.json'
+        with tempfile.TemporaryDirectory() as d:
+            completa, _ = recolectar(CrtshSimulado(), d, 'grabar', nueva=True, parecidos=True)
+            self.assertIn('lookalike_domain', {h.codigo for h in completa.hallazgos})
+            for como in DANOS:
+                bueno = danar(Path(d) / marca, como)
+                res, cliente = recolectar(sin_red, d, 'reproducir', parecidos=True)
+                (Path(d) / marca).write_bytes(bueno)
+                with self.subTest(como=como):
+                    self.danada(res, marca)
+                    self.assertEqual((res.sin_cobertura, res.omitidos, res.consultas), (['lookalike_domain'], [], 0))
+                    self.assertNotIn('lookalike_domain', {h.codigo for h in res.hallazgos})
+                    self.assertEqual(res.avisos[1:], [])  # ni «Sin la respuesta de %acme-demo%» ni «no respondió»
+                    leidas = {Path(a).name for a, _ in cliente.leidas}
+                    self.assertTrue({'acme-dem0.mx.json', 'acme-demo.net.json'} <= leidas, leidas)  # las variantes sí
+                    self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_3g_un_dns_o_una_falla_danados_tampoco_dejan_failed(self):
         """Resto de la regresión 2 de la ronda 4 (RC-46): dns_*.json y falla_*.json no pasan por pedir. Con uno dañado

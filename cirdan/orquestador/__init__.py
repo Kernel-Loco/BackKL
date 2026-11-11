@@ -603,7 +603,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     se muestran como 0 hallazgos, o si revisó solo una parte de lo suyo (revisados, en stats.sources_partial).
     crt.sh busca dominios parecidos en cada escaneo, solo en los registros de certificados (#109, RC-226): si
     ninguna de esas búsquedas responde, si no responde la de %marca% o si el dominio no tiene marca (un subdominio,
-    un sufijo que crtsh.py no conoce o un hosting), lookalike_domain queda en sin_cobertura, nunca en 0. Devuelve
+    un sufijo que crtsh.py no conoce o un hosting), lookalike_domain queda en sin_cobertura, nunca en 0. Si solo
+    falta la respuesta de alguna variante, ct_logs da revisados y va en stats.sources_partial. Devuelve
     un resumen.
     En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
     ct_logs y subfinder cuenta una vez. En assets van una sola vez, con sus atributos unidos.

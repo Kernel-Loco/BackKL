@@ -866,9 +866,9 @@ class Orquestador(unittest.TestCase):
                                          conn=self.conn)
 
     def test_3c3_una_variante_sin_respuesta_mantiene_abierto_su_parecido(self):
-        """B4 de RC-226, con base. Si %marca% responde y la variante acme-dem0.mx no, su huella va en omitidos: el
-        escaneo no queda parcial por eso y el parecido que abrió un escaneo anterior sigue abierto. Cuando crt.sh
-        vuelve a responder y ya no tiene certificados de esa variante, se cierra."""
+        """B4 de RC-226, con base. Si %marca% responde y la variante acme-dem0.mx no, su huella va en omitidos y el
+        parecido que abrió un escaneo anterior sigue abierto. El escaneo queda parcial (B3 de la ronda 4): le faltó
+        una de las búsquedas. Cuando crt.sh vuelve a responder y ya no tiene certificados de esa variante, se cierra."""
         class SinLaVariante(CrtshSimulado):
             def __call__(self, url, timeout):
                 q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
@@ -889,10 +889,47 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
         self.assertEqual(resumen['sources'][0]['hallazgos'], 6)  # los 7 de siempre menos el de la variante
         self.assertEqual(estado(), ['open'])  # no saber si sigue ahí no es que ya no esté
+        self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
         sin_certificado = CrtshSimulado()
         del sin_certificado.respuestas['acme-dem0.mx']
-        self.escanear_ct(sin_certificado)
+        _, resumen = self.escanear_ct(sin_certificado)
         self.assertEqual(estado(), ['resolved'])  # crt.sh respondió y ya no lo trae: ahora sí se cierra
+        self.assertNotIn('sources_partial', resumen['stats'])
+
+    def test_3c5_con_certificados_parciales_un_parecido_que_ya_no_sale_se_cierra(self):
+        """B2 y H9 de la ronda 4 de RC-226, con base. Si Cert Spotter no responde, pueden faltar certificados y el
+        escaneo queda parcial, pero la búsqueda de parecidos sí se hizo completa: el parecido de una variante que
+        respondió y ya no tiene certificado se cierra. El de una variante que no respondió sigue abierto, y los que
+        siguen saliendo también."""
+        class SinCertSpotter(CrtshSimulado):
+            def __init__(self, caida=None):
+                super().__init__()
+                self.caida = caida
+
+            def __call__(self, url, timeout):
+                partes = crtsh.urllib.parse.urlparse(url)
+                q = crtsh.urllib.parse.parse_qs(partes.query).get('q')
+                if partes.netloc == 'api.certspotter.com' or (q and q[0] == self.caida):
+                    raise crtsh.urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+
+        def estado(parecido):
+            huella = bytes.fromhex(crtsh._huella('lookalike_domain', 'acme-demo.mx', parecido))
+            return [f['status'] for f in self.conn.execute(
+                'SELECT status FROM findings WHERE fingerprint = %s', (huella,)).fetchall()]
+        self.exige_cupo('ct_logs', 3 * crtsh.MAX_CONSULTAS)
+        self.escanear_ct(CrtshSimulado())
+        self.assertEqual((estado('acme-dem0.mx'), estado('acme-demo-login.com')), (['open'], ['open']))
+        caida = SinCertSpotter(caida='acme-dem0.mx')  # certificados parciales y la variante sin respuesta
+        _, resumen = self.escanear_ct(caida)
+        self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
+        self.assertEqual((estado('acme-dem0.mx'), estado('acme-demo-login.com')), (['open'], ['open']))
+        sin_certificado = SinCertSpotter()  # certificados parciales, y la variante responde sin certificados
+        del sin_certificado.respuestas['acme-dem0.mx']
+        _, resumen = self.escanear_ct(sin_certificado)
+        self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
+        self.assertNotIn('rules_without_coverage', resumen['stats'])
+        self.assertEqual((estado('acme-dem0.mx'), estado('acme-demo-login.com')), (['resolved'], ['open']))
 
     def test_3c4_solo_los_dominios_vigentes_de_la_organizacion_cuentan_como_propios(self):
         """B1 de RC-226. Un dominio dado de baja o sin verificar no es propio: su parecido se sigue reportando y no

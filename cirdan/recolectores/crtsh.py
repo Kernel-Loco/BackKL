@@ -33,7 +33,10 @@ certificado (_parte) y uno de dominio parecido, el dominio parecido. Si pueden f
 la búsqueda por nombre, o Cert Spotter no respondió, no estaba grabado o no dio todas sus páginas),
 revisados lleva las partes de todos los certificados que llegaron y sin_revisar queda en None: así el
 orquestador no cierra lo de un certificado que esta corrida no vio. En el respaldo no van los ya
-vencidos, porque cert_expired queda en sin_cobertura.
+vencidos, porque cert_expired queda en sin_cobertura. Si a los parecidos les faltó la respuesta de alguna
+variante la corrida también es parcial y da revisados. Con revisados y cobertura de parecidos van además los
+dominios parecidos que sí se revisaron, para que el orquestador cierre el que ya no salió (ronda 4 de RC-226).
+Una corrida reporta a lo más MAX_PARECIDOS parecidos: la huella de los demás va en omitidos, con un aviso.
 
 Grabación dañada (RC-46). Al reproducir, un archivo vacío, cortado o ilegible (una respuesta de crt.sh, una
 página de Cert Spotter, un falla_ o un dns_) no es que la fuente no respondiera. El resultado trae lo que sí
@@ -92,6 +95,7 @@ FRACCION_POR_VENCER = 3      # ...y le queda menos de 1/3 de su vida (los de vid
 VENTANA_VENCIDOS_DIAS = 365  # vencido hace más de esto ya no es hallazgo; el subdominio queda como activo
 VENTANA_PARECIDOS_DIAS = 90  # un dominio parecido cuenta si tiene un certificado vigente o vencido hace menos de esto
 MAX_CANDIDATOS = 10          # variantes que se consultan al buscar parecidos (política de uso ético, 1.5)
+MAX_PARECIDOS = 20           # dominios parecidos que reporta una corrida. Los demás van en omitidos, con un aviso
 INTENTOS_PARECIDOS = 2       # intentos HTTP de %marca% y de cada variante
 FALLAS_SEGUIDAS = 3          # si tantas variantes seguidas fallan, crt.sh está saturado y se dejan las demás
 INTENTOS = 3                 # intentos HTTP por consulta dentro de una corrida (no es scan_source_runs.attempt)
@@ -131,6 +135,9 @@ SUFIJOS_DOBLES = {
 HOSTINGS = {'github.io', 'gitlab.io', 'netlify.app', 'vercel.app', 'pages.dev', 'web.app',
             'firebaseapp.com', 'herokuapp.com', 'onrender.com', 'blogspot.com', 'wixsite.com',
             'weebly.com', 'wordpress.com', 'myshopify.com'}
+# TLD de país que además son una palabra con la que empiezan nombres de proveedores (no-ip.org, is-a.dev,
+# in-berlin.de, at-band-camp.net): con uno de estos, el dominio autorizado pegado con un guion no cuenta (_lleva_marca).
+TLD_PALABRA = {'no', 'is', 'in', 'at', 'to', 'it', 'me', 'my', 'be', 'by', 'so', 'us', 'do', 'am', 'as', 'co'}
 TLD_PRINCIPALES = ('com', 'mx', 'com.mx', 'net')
 TLD_SECUNDARIOS = ('org', 'co', 'io', 'info', 'online', 'site')
 HOMOGLIFOS = {'o': '0', 'l': '1', 'i': 'l', 'm': 'rn', 'w': 'vv', 'e': '3', 'a': '4', 's': '5'}
@@ -155,6 +162,8 @@ SIN_MARCA = ('No se buscaron dominios parecidos de %s: solo se buscan cuando el 
              'dominio registrable, con un sufijo que Cirdan conoce y fuera de un hosting compartido')
 SIN_VARIANTES = ('Sin la respuesta de %%%s%% no se consultaron las %s de %s: los dominios parecidos quedan sin '
                  'revisar en esta corrida')
+TOPE_PARECIDOS = ('Se reportan %d dominios parecidos y quedan %d sin reportar por el tope de la corrida: primero van '
+                  'las variantes del dominio y después los de certificado más reciente')
 POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsqueda por nombre y pueden faltar '
                      'subdominios')
 
@@ -384,8 +393,22 @@ def _marca(dominio):
     return etiqueta
 
 
+def _como_palabra(etiqueta, texto):
+    """Si la marca está en `texto` como palabra: de cada lado tiene el borde de la etiqueta, un guion o un dígito
+    (acme-demo-login, mi-acme-demo, acme-demo2). Pegada a otras letras no cuenta (H2 de la ronda 3): 'plata' no está
+    como palabra en 'plataforma' ni 'andes' en 'fernandes'."""
+    i = texto.find(etiqueta)
+    while i >= 0:
+        antes, despues = texto[:i], texto[i + len(etiqueta):]
+        if not antes[-1:].isalpha() and not despues[:1].isalpha():
+            return True
+        i = texto.find(etiqueta, i + 1)
+    return False
+
+
 def _lleva_marca(nombre, etiqueta, dominio):
-    """Si un nombre que trajo %marca% cuenta como parecido. Cuenta con la marca en la primera etiqueta de su dominio
+    """Si un nombre que trajo %marca% cuenta como parecido. Cuenta con la marca como palabra (_como_palabra) en la
+    primera etiqueta de su dominio
     registrable (acme-demo-login.com, y acme-demo.github.io como el sitio acme-demo.github.io, nunca como github.io),
     o con el dominio autorizado completo metido como subdominio de un dominio ajeno (acme-demo.mx.cuenta-segura.net,
     que se reporta como cuenta-segura.net). El dominio autorizado tiene que quedar completo a la izquierda del dominio
@@ -395,12 +418,14 @@ def _lleva_marca(nombre, etiqueta, dominio):
     También cuenta el dominio autorizado completo pegado con un guion al dominio registrable del nombre (H1 de la
     ronda 3): acme-demo.mx-login.com se reporta como mx-login.com y acme-demo.com.mx-seguro.net como mx-seguro.net.
     El guion tiene que estar en la primera etiqueta del dominio registrable: acme-demo.mx-login.com.kg, con un sufijo
-    desconocido, o acme-demo.mx-login.otro.org no cuentan, para no culpar a un sufijo ni a un proveedor."""
+    desconocido, o acme-demo.mx-login.otro.org no cuentan, para no culpar a un sufijo ni a un proveedor. Tampoco
+    cuenta si el TLD del dominio autorizado está en TLD_PALABRA (G1 de la ronda 3): olmardo.no-ip.org para olmardo.no
+    es un cliente de no-ip.org, no un parecido."""
     reg = registrable(nombre)
     izquierda, primera = '.' + nombre[:len(nombre) - len(reg)], reg.split('.', 1)[0]
     cabeza, _, cola = dominio.rpartition('.')
-    return (etiqueta in primera or '.%s.' % dominio in izquierda
-            or (primera.startswith(cola + '-') and izquierda.endswith('.%s.' % cabeza)))
+    return (_como_palabra(etiqueta, primera) or '.%s.' % dominio in izquierda
+            or (cola not in TLD_PALABRA and primera.startswith(cola + '-') and izquierda.endswith('.%s.' % cabeza)))
 
 
 def _nombres(cert):
@@ -591,10 +616,11 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
     return activos, hallazgos
 
 
-def _parecidos(dominio, certs_por_tipo, propios, ahora):
+def _parecidos(dominio, certs_por_tipo, propios, ahora, vistos=None):
     """Un hallazgo por dominio registrable parecido con certificados recientes. `certs_por_tipo` trae
     (tipo, certificados, filtro): el filtro deja solo los nombres que se parecen, porque un mismo
-    certificado puede cubrir dominios ajenos (por ejemplo los compartidos de una CDN)."""
+    certificado puede cubrir dominios ajenos (por ejemplo los compartidos de una CDN). En `vistos`, si se pasa un
+    conjunto, quedan todos los dominios parecidos que se revisaron, también los de certificados viejos."""
     grupos = {}
     for tipo, certs, filtro in certs_por_tipo:
         for c in certs:
@@ -606,6 +632,8 @@ def _parecidos(dominio, certs_por_tipo, propios, ahora):
                 g['nombres'].add(nombre)
                 g['certs'][c.get('id')] = c
 
+    if vistos is not None:
+        vistos.update(grupos)
     hallazgos = []
     limite = ahora - timedelta(days=VENTANA_PARECIDOS_DIAS)
     for reg in sorted(grupos):
@@ -640,7 +668,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
     sin_cobertura.
     Tampoco se busca nada, y queda igual con un aviso, si el dominio no es su propio dominio registrable (un
     subdominio, o un sufijo de dos niveles que no está en SUFIJOS_DOBLES, como acme.com.kg): sus variantes serían de
-    otra marca (_marca). De lo que trae %marca% solo cuenta el nombre con la marca en su dominio registrable o con el
+    otra marca (_marca). De lo que trae %marca% solo cuenta el nombre con la marca como palabra en su dominio
+    registrable o con el
     dominio autorizado completo dentro de un dominio ajeno o pegado a él con un guion (_lleva_marca).
     `propios` son los otros dominios de la misma empresa, que nunca cuentan como parecidos.
     """
@@ -757,6 +786,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             except SinGrabacion as e:  # falta en la grabación: las variantes se leen igual, sin red, y el aviso
                 res.avisos.append(str(e))  # de cada faltante dice qué completar con --grabar --completar
                 sin_marca = True
+            except GrabacionDanada:  # tampoco hubo red (G2 de la ronda 3): las variantes se leen y el archivo
+                sin_marca = True     # dañado ya lo nombra el aviso DANADA
             except CrtshNoResponde as e:
                 res.avisos.append(str(e))
                 sin_marca = sin_variantes = True
@@ -766,7 +797,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             # variantes gastaría hasta 20 consultas del cupo, sobre nombres de terceros, para tirar sus respuestas.
             res.avisos.append(SIN_VARIANTES % (etiqueta, _cuantos(len(candidatos), 'variante', 'variantes'), dominio))
             candidatos = []
-        seguidas = 0
+        seguidas, respondieron = 0, []
         for i, candidato in enumerate(candidatos):
             if seguidas >= FALLAS_SEGUIDAS:
                 res.avisos.append('crt.sh saturado: se omitieron %d variantes (%s)' % (
@@ -778,6 +809,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                                                 pausa=PAUSA_PARECIDOS)
                 seguidas = 0
                 respondidas += 1
+                respondieron.append(candidato)
             except SinGrabacion as e:  # falta en la grabación: no cuenta como saturación de crt.sh
                 res.avisos.append(str(e))
                 sin_respuesta.append(candidato)
@@ -790,12 +822,35 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             tipo = 'otro_tld' if candidato.split('.', 1)[0] == etiqueta else 'error_tipografico'
             por_tipo.append((tipo, _con_fechas(encontrados), lambda n, k=candidato: registrable(n) == k))
         if respondidas and not sin_marca:
-            res.hallazgos += _parecidos(dominio, por_tipo, propios_set, ahora)
+            vistos = set()
+            hallados = _parecidos(dominio, por_tipo, propios_set, ahora, vistos)
+            if len(hallados) > MAX_PARECIDOS:
+                # Tope (H2 de la ronda 3): una marca que es una palabra común no llena el escaneo. Primero van las
+                # variantes del dominio y después los de certificado más reciente. Los demás siguen ahí: su huella va
+                # en omitidos, no se guardan y, si ya estaban abiertos, no se cierran.
+                orden = sorted(hallados, key=lambda h: h.evidencia['vence'], reverse=True)
+                orden.sort(key=lambda h: h.evidencia['tipo_parecido'] == 'contiene_marca')
+                dentro = {h.huella for h in orden[:MAX_PARECIDOS]}
+                res.omitidos += [h.huella for h in hallados if h.huella not in dentro]
+                res.avisos.append(TOPE_PARECIDOS % (MAX_PARECIDOS, len(hallados) - MAX_PARECIDOS))
+                hallados = [h for h in hallados if h.huella in dentro]
+            res.hallazgos += hallados
             # Una variante que no respondió no es que ya no tenga certificado: su huella va en omitidos y el orquestador
             # no cierra el parecido que un escaneo anterior dejó abierto, ni guarda uno que nunca se reportó (#23).
             dadas = {h.huella for h in res.hallazgos}
             res.omitidos += [h for h in (_huella('lookalike_domain', dominio, c) for c in sin_respuesta)
                              if h not in dadas and h not in res.omitidos]
+            # Una búsqueda de parecidos sin respuesta deja la corrida parcial (B3 y H10): con revisados el escaneo
+            # termina 'partial' en vez de completo con 1 de 11 búsquedas.
+            if sin_respuesta and res.revisados is None:
+                res.revisados = _revisados(dominio, certs, ahora)
+            # Con cobertura parcial deciden las partes (B2 y H9): van los dominios parecidos que esta corrida sí
+            # revisó, así el orquestador cierra el que ya no tiene certificado reciente o ya es de la empresa. Son los
+            # que dejó el filtro de cada búsqueda, las variantes que respondieron y los otros dominios de la empresa.
+            # El de una variante sin respuesta no se cierra: su huella va en omitidos.
+            if res.revisados is not None:
+                propio = registrable(dominio)
+                res.revisados = sorted(set(res.revisados) | vistos | set(respondieron) | (propios_set - {propio}))
     # Sin búsquedas, sin ninguna respuesta o sin la de %marca% no es lo mismo que 0 parecidos: cobertura parcial, sin
     # hallazgos de este código en la corrida, y el orquestador no cierra los que ya estaban abiertos.
     if (not respondidas or sin_marca) and 'lookalike_domain' not in res.sin_cobertura:
