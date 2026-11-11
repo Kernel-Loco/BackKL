@@ -911,14 +911,16 @@ class Orquestador(unittest.TestCase):
         t = CrtshSimulado()
         with mock.patch.object(orquestador, 'ejecutar', ejecutar):
             s, _ = self.escanear_ct(t)
-        self.assertEqual(vistos, [['acme-demo-pagos.com', 'acme-portal.mx', 'acme-tienda.mx']])
+        # de la semilla: acme-portal.mx y acme-tienda.mx (verified) y old-example.net (paused). partner-example.com,
+        # sin verificar, no va
+        self.assertEqual(vistos, [['acme-demo-pagos.com', 'acme-portal.mx', 'acme-tienda.mx', 'old-example.net']])
         consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
         self.assertIn('acme-dem0.mx', consultas)  # el dado de baja se sigue consultando como variante
         parecidos = [f['d'] for f in self.conn.execute(
             "SELECT f.evidence->>'dominio_parecido' AS d FROM findings f JOIN scoring_rules r ON r.id = f.rule_id "
             "WHERE f.last_scan_id = %s AND r.code = 'lookalike_domain' AND f.status = 'open' ORDER BY 1",
             (s.scan_id,)).fetchall()]
-        self.assertEqual(parecidos, ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo.com.mx'])
+        self.assertEqual(sorted(parecidos), ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo.com.mx'])
 
     def test_3d_en_vivo_la_fuente_que_falla_se_reintenta_en_el_mismo_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))

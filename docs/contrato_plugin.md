@@ -101,7 +101,7 @@ Todas son búsquedas en crt.sh, a lo más 11 por escaneo:
    - el mismo nombre con los TLD `org`, `co`, `io`, `info`, `online` y `site`,
    - y, si la marca tiene 5 letras o más, una letra omitida, dos letras vecinas cambiadas de lugar y una letra repetida.
 
-Nunca se consulta como variante el dominio autorizado ni otro dominio de la misma empresa. En un escaneo, los otros dominios de la empresa son los de su organización en estado `verified` o `paused`. Uno dado de baja (`removed`) o sin verificar (`pending_verification`) no cuenta como propio: darlo de alta no esconde ni cierra un dominio parecido.
+Nunca se consulta como variante el dominio autorizado. En un escaneo tampoco se consulta otro dominio de la misma empresa: la terminal no los conoce y no los excluye. En un escaneo, los otros dominios de la empresa son los de su organización en estado `verified` o `paused`. Uno dado de baja (`removed`) o sin verificar (`pending_verification`) no cuenta como propio: darlo de alta no esconde ni cierra un dominio parecido.
 
 Solo se buscan parecidos cuando el dominio autorizado es su propio dominio registrable. El código saca el dominio registrable con la lista corta `SUFIJOS_DOBLES` de `crtsh.py`, sin la lista pública de sufijos. Con un subdominio (`api.acme.mx`) o con un sufijo de dos niveles que no está en esa lista (`acme.com.gt`) la marca saldría mal (`com`) y las variantes serían `com.com` o `com.mx`, que no son del dominio autorizado. En ese caso no se hace ninguna de las 11 búsquedas, queda un aviso y `lookalike_domain` va en `sin_cobertura`.
 
@@ -175,7 +175,7 @@ El recolector de documentación de APIs (#63, fuente `api_docs`) se graba con `p
 4. Una prueba sin red que compruebe `validar(resultado, codigos=<los del catálogo>) == []`.
 5. Los títulos en español, y nada que no sea observación pasiva.
 6. Si en una corrida no puede revisar alguno de sus códigos, lo pone en `sin_cobertura` en lugar de dejarlo en 0 hallazgos.
-7. Si alguna consulta sale del dominio autorizado, como los dominios parecidos de crt.sh, va apagada por defecto en `recolectar()` y sus códigos quedan en `sin_cobertura`. Solo se prende en los escaneos con `EN_ESCANEO`, cuando la política de uso ético la cubre y ErnestoDL aprobó por escrito lo que consulta, como en [Dominios parecidos](#dominios-parecidos-qué-se-consulta-109-rc-226).
+7. Si alguna consulta sale del dominio autorizado, como los dominios parecidos de crt.sh, va apagada por defecto en `recolectar()` y sus códigos quedan en `sin_cobertura`. Solo se prende en los escaneos con `EN_ESCANEO` y en la terminal del recolector, cuando la política de uso ético la cubre y ErnestoDL aprobó por escrito lo que consulta, como en [Dominios parecidos](#dominios-parecidos-qué-se-consulta-109-rc-226).
 
 ## Lo que no es de este contrato
 

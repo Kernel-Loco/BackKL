@@ -60,7 +60,8 @@ y --completar vuelve a probar crt.sh sin repetir la consulta a Cert Spotter. Si 
 sus certificados se unen a los de Cert Spotter grabados y la grabación deja de ser respaldo. Código de
 salida: 0 bien, 1 si el resultado queda en 'failed', 2 si quedan avisos (grabación incompleta o dañada,
 variantes sin respuesta, Cert Spotter sin responder o respaldo de Cert Spotter). Con el respaldo de
-Cert Spotter el código 2 es lo esperado.
+Cert Spotter el código 2 es lo esperado, y también con un dominio sin marca (_marca), que siempre deja su aviso:
+ahí solo --sin-parecidos da 0.
 """
 import argparse
 import hashlib

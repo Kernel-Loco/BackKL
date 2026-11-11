@@ -666,6 +666,7 @@ class Ejecutar(unittest.TestCase):
             consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
             self.assertEqual(consultas, ['%.' + dominio], dominio)
             self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']), res.error)
+            self.assertEqual(res.avisos, [crtsh.SIN_MARCA % dominio])  # se pidió buscarlos y no hay marca
             self.assertEqual(self.parecidos(res), [], dominio)
         t = CrtshSimulado()
         with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
