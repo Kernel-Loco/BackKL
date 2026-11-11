@@ -24,6 +24,7 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))  # también corre como python pruebas/test_catalogo_reglas.py
 from cirdan.recolectores import REGISTRO, cargar, certspotter, contrato, ejemplo  # noqa: E402
+from cirdan.score import subcategorias  # noqa: E402
 
 # Lee todas las migraciones y semillas de db/, así una migración o una semilla nueva entra sola.
 ARCHIVOS_SQL = sorted(RAIZ.glob('db/migraciones/*.sql')) + sorted(RAIZ.glob('db/semillas/*.sql'))
@@ -317,6 +318,29 @@ class Recolectores(unittest.TestCase):
     def test_2_sin_cobertura_de_cert_spotter_tiene_regla(self):
         for codigo in certspotter.SIN_COBERTURA:
             self.assertTrue(codigo in POR_CODIGO, 'certspotter.SIN_COBERTURA tiene %r, que no tiene regla' % codigo)
+
+
+class Subcategorias(unittest.TestCase):
+    """Mapa de subcategorías y KRI (#114, RC-232) contra las semillas y los recolectores."""
+
+    def test_14_cada_regla_tiene_subcategoria_de_su_categoria(self):
+        self.assertEqual(subcategorias.revisar([(r[3], r[4]) for r in REGLAS], CATEGORIAS), [])   # de todos los juegos
+
+    def test_15_las_fuentes_de_cada_kri_son_las_que_emiten_sus_reglas(self):
+        codigos_sub = {clave: set(codigos) for clave, _, _, codigos in subcategorias.SUBCATEGORIAS}
+        for kri, _, subs, fuentes in subcategorias.KRIS:
+            suyos = set().union(*(codigos_sub[s] for s in subs)) if subs else set()
+            emiten = sorted(f for f in REGISTRO if f != 'ejemplo' and suyos & set(cargar(f).CODIGOS))
+            self.assertEqual(sorted(fuentes), emiten, 'fuentes del KRI %s' % kri)
+
+    def test_16_emiten_dice_la_fuente_que_revisa_cada_regla_de_un_kri(self):
+        self.assertEqual(subcategorias.revisar(), [])
+        codigos_sub = {clave: set(codigos) for clave, _, _, codigos in subcategorias.SUBCATEGORIAS}
+        de_kri = set().union(*(codigos_sub[s] for _, _, subs, _ in subcategorias.KRIS for s in subs))
+        for fuente, codigos in subcategorias.EMITEN:
+            modulo = cargar(fuente)
+            revisa = (set(modulo.CODIGOS) | set(getattr(modulo, 'SIN_LLAVE', ()))) & de_kri
+            self.assertEqual(set(codigos), revisa, 'reglas de %s en EMITEN' % fuente)
 
 
 class Reglas(unittest.TestCase):

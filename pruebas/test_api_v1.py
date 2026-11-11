@@ -12,6 +12,7 @@ import json
 import unittest
 from pathlib import Path
 
+from cirdan.score import criterio, subcategorias
 from pruebas import sesion
 from pruebas.test_aislamiento import psql
 
@@ -82,6 +83,105 @@ class ApiV1(unittest.TestCase):
 
     def test_3_score_igual_al_contrato(self):
         self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), ejemplo('score.json'))
+
+    def test_3b_cada_regla_de_la_base_tiene_subcategoria_y_cada_kri_apunta_a_una_que_existe(self):
+        # De base (#114, RC-232): lee las reglas de todos los juegos que hay en la base, no las semillas del repo.
+        ok, out, err = psql('SELECT DISTINCT code, category FROM scoring_rules ORDER BY 1, 2;', user='postgres')
+        self.assertTrue(ok, err)
+        reglas = [tuple(linea.split('|')) for linea in out.splitlines()]   # pares de todos los juegos
+        self.assertGreaterEqual(len(reglas), 30)
+        self.assertEqual(subcategorias.revisar(reglas, criterio.CATEGORIAS), [])
+        ok, out, err = psql('SELECT code FROM data_sources ORDER BY 1;', user='postgres')
+        self.assertTrue(ok, err)
+        for kri, _, _, fuentes in subcategorias.KRIS:
+            self.assertEqual([f for f in fuentes if f not in out.splitlines()], [], 'fuentes del KRI %s' % kri)
+
+    def test_3c_un_kri_con_su_fuente_caida_sale_sin_cobertura(self):
+        # La corrida de ct_logs del escaneo del score de acme-demo.mx pasa a failed y vuelve a succeeded al terminar.
+        corrida = "UPDATE scan_source_runs SET status = '%s' WHERE id = '61000000-0000-4000-8000-000000000001';"
+        antes = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+        kri = {k['kri']: k for k in antes['kris']}
+        self.assertEqual((kri['certificates']['status'], kri['certificates']['findings'],
+                          kri['certificates']['max_severity'], kri['certificates']['penalty']), ('ok', 1, 'high', 20.0))
+        ok, _, err = psql(corrida % 'failed', user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            caida = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+            kri = {k['kri']: k for k in caida['kris']}
+            for clave in ('certificates', 'impersonation'):   # los dos se alimentan de ct_logs
+                self.assertEqual((kri[clave]['status'], kri[clave]['findings'], kri[clave]['max_severity'],
+                                  kri[clave]['penalty'], kri[clave]['sources_failed']),
+                                 ('no_coverage', None, None, None, ['ct_logs']), clave)
+            self.assertEqual((kri['email']['status'], kri['email']['findings']), ('ok', 1))   # dns sí respondió
+            # exposición: shodan respondió y api_docs no corrió en ese escaneo, así que no sale ok
+            self.assertEqual((kri['service_exposure']['status'], kri['service_exposure']['sources_not_run']),
+                             ('partial', ['api_docs']))
+            self.assertEqual(kri['reputation']['status'], 'no_source_yet')
+            # la letra, el score, la alerta y las subcategorías no cambian: salen del score guardado
+            for campo in ('score', 'grade', 'band', 'alert', 'subcategories', 'categories'):
+                self.assertEqual(caida[campo], antes[campo], campo)
+        finally:
+            ok, _, err = psql(corrida % 'succeeded', user='postgres')
+            self.assertTrue(ok, err)
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), antes)
+
+    def test_3c2_el_score_usa_la_cobertura_que_guardo_el_escaneo(self):
+        # /score pasa rules_without_coverage y sources_partial de scans.stats a los KRI. El escaneo del score de
+        # acme-demo.mx no los trae en la semilla: se le ponen y se le quitan al terminar.
+        escaneo = "WHERE id = '60000000-0000-4000-8000-000000000001';"
+        antes = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+        cobertura = ('{"rules_without_coverage": ["exposed_iot_device", "exposed_ot_device", "dmarc_missing"], '
+                     '"sources_partial": ["ct_logs"]}')
+        ok, _, err = psql("UPDATE scans SET stats = stats || '%s'::jsonb %s" % (cobertura, escaneo), user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            con = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+            kri = {k['kri']: k for k in con['kris']}
+            # las reglas sin cobertura van al KRI que las tiene, en el orden del mapa
+            self.assertEqual((kri['service_exposure']['status'], kri['service_exposure']['rules_without_coverage']),
+                             ('partial', ['exposed_ot_device', 'exposed_iot_device']))
+            self.assertEqual((kri['email']['status'], kri['email']['rules_without_coverage'], kri['email']['findings']),
+                             ('partial', ['dmarc_missing'], 1))
+            # ct_logs revisó solo una parte: sus dos KRI pasan de ok a partial y conservan sus conteos
+            for clave, hallazgos in (('certificates', 1), ('impersonation', 0)):
+                self.assertEqual((kri[clave]['status'], kri[clave]['sources_partial'], kri[clave]['findings']),
+                                 ('partial', ['ct_logs'], hallazgos), clave)
+            for campo in ('score', 'grade', 'band', 'alert', 'subcategories', 'categories', 'partial_coverage'):
+                self.assertEqual(con[campo], antes[campo], campo)
+        finally:
+            ok, _, err = psql("UPDATE scans SET stats = stats - 'rules_without_coverage' - 'sources_partial' "
+                              + escaneo, user='postgres')
+            self.assertTrue(ok, err)
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), antes)
+
+    def test_3d_letra_en_dominios_historico_y_pesos_y_la_alerta_sigue_con_el_score(self):
+        for d in self.get(self.acme, '/api/v1/domains')['items']:
+            self.assertEqual(d['grade'], None if d['score'] is None else criterio.letra(d['score']), d['fqdn'])
+        for p in self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')['items']:
+            self.assertEqual(p['grade'], criterio.letra(p['score']), p['score_id'])
+        pesos = self.get(self.acme, '/api/v1/scoring/weights')
+        self.assertEqual([(g['from'], g['to'], g['grade']) for g in pesos['grades']], list(criterio.LETRAS))
+        score = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')   # 60, letra D, umbral 60
+        self.assertEqual((score['grade'], score['alert']), ('D', {'threshold': 60, 'triggered': True}))
+        self.assertIsInstance(score['alert']['threshold'], int)   # el umbral es un número de 0 a 100, no una letra
+        # con el umbral de la empresa en 61 el score sigue en 60 y en D, pero ya no dispara: manda el número
+        umbral = ("UPDATE organizations SET alert_score_threshold = %d "
+                  "WHERE id = '20000000-0000-4000-8000-000000000001';")
+        ok, _, err = psql(umbral % 61, user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            con_61 = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+            self.assertEqual((con_61['score'], con_61['grade'], con_61['alert']),
+                             (60, 'D', {'threshold': 61, 'triggered': False}))
+        finally:
+            ok, _, err = psql(umbral % 60, user='postgres')
+            self.assertTrue(ok, err)
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), score)
+        # acme-tienda.mx tiene score 0 y su escaneo no guardó corridas: letra A, pero ningún KRI sale en cero
+        tienda = self.get(self.acme, '/api/v1/domains/acme-tienda.mx/score')
+        self.assertEqual((tienda['score'], tienda['grade']), (0, 'A'))
+        self.assertEqual([(k['status'], k['findings']) for k in tienda['kris']],
+                         [('no_coverage', None)] * 4 + [('no_source_yet', None)])
 
     def test_4_explicacion_y_pesos(self):
         exp = sin_propuestos(self.get(self.acme, '/api/v1/findings/80000000-0000-4000-8000-000000000001/explanation'))

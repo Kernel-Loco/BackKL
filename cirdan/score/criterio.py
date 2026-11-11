@@ -15,6 +15,15 @@ BANDAS = (
     (60, 79, 'high', 'alto'),
     (80, 100, 'critical', 'crítico'),
 )
+# (desde, hasta, letra): A es menos riesgo y F es más (#114, RC-232). No hay E. Los cortes siguen a las bandas:
+# A y B parten el bajo a la mitad, C es medio, D es alto y F es crítico.
+LETRAS = (
+    (0, 19, 'A'),
+    (20, 39, 'B'),
+    (40, 59, 'C'),
+    (60, 79, 'D'),
+    (80, 100, 'F'),
+)
 CATEGORIAS = ('infrastructure', 'digital_identity', 'configuration', 'data_leaks')
 UMBRAL_ALERTA = 60                       # organizations.alert_score_threshold por defecto
 PISO_UN_CRITICO = 60                     # un hallazgo crítico vigente: el dominio queda al menos en alto
@@ -36,6 +45,15 @@ def nombre_banda(score):
     """Nombre en español de la banda de un score: bajo, medio, alto o crítico."""
     codigo = banda(score)
     return next(nombre for _, _, c, nombre in BANDAS if c == codigo)
+
+
+def letra(score):
+    """Letra de la A a la F del score final de un dominio, ya con la regla de piso (#114)."""
+    codigo = banda(score)   # valida el rango y que sea un entero con banda
+    for desde, hasta, calificacion in LETRAS:
+        if desde <= score <= hasta:
+            return calificacion
+    raise ValueError('score sin letra: %r (banda %s)' % (score, codigo))
 
 
 def cuenta_para_piso(severidad, estado):

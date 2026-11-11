@@ -18,10 +18,10 @@ Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo
 |---|---|---|
 | `GET /api/v1/domains` | [`dominios.json`](api_v1/dominios.json) | Dominios de la empresa con su autorización, TXT, si se pueden escanear, score y conteo de hallazgos abiertos |
 | `GET /api/v1/domains/{fqdn}/findings` | [`hallazgos.json`](api_v1/hallazgos.json) | Hallazgos abiertos del dominio, de más a menos severo. Todavía no hay filtro `?status` |
-| `GET /api/v1/domains/{fqdn}/score` | [`score.json`](api_v1/score.json) | El score más reciente con su desglose por categoría |
+| `GET /api/v1/domains/{fqdn}/score` | [`score.json`](api_v1/score.json) | El score más reciente con su letra (`grade`), su desglose por categoría, sus hallazgos por subcategoría (`subcategories`) y los 5 KRI con su cobertura (`kris`, #114) |
 | `GET /api/v1/domains/{fqdn}/score/history` | [`historico.json`](api_v1/historico.json) | Todos los scores del dominio, del más viejo al más nuevo |
 | `GET /api/v1/findings/{id}/explanation` | [`explicacion.json`](api_v1/explicacion.json) | Por qué el hallazgo tiene su severidad y cuánto suma al score |
-| `GET /api/v1/scoring/weights` | [`pesos.json`](api_v1/pesos.json) | El juego de reglas activo: pesos, bandas, piso, umbral y reglas |
+| `GET /api/v1/scoring/weights` | [`pesos.json`](api_v1/pesos.json) | El juego de reglas activo: pesos, bandas, letras (`grades`, #114), piso, umbral y reglas |
 | `GET /api/v1/domains/{fqdn}/action-plan` | — | Acciones abiertas agrupadas por regla, con su recomendación y reducción estimada de score (#42) |
 | `POST /api/v1/domains/{fqdn}/action-plan/simulate` | — | Score contrafactual al resolver varias acciones, sin guardar cambios (#70) |
 | `GET /api/v1/domains/{fqdn}/action-plan/export?formato=csv\|json` | — | Descarga el plan; CSV UTF-8 con BOM y escape contra fórmulas |
@@ -61,7 +61,7 @@ Para que un integrador lea la API sin la sesión del portal. Las crea, lista y r
 | `authorization.status` | `valid`, `expired`, `revoked` o `missing`. Se toma la autorización vigente y, si no hay, la que vence más tarde. Una que todavía no entra en vigor cuenta como `missing` |
 | `txt.status` | `verified` si la última consulta encontró el registro, `missing` si no |
 | `scan_eligibility` | `can_scan` es `true` solo con autorización `valid`, TXT `verified` y dominio `verified`. Si es `false`, `reasons` dice por qué: `authorization_missing`, `authorization_not_started`, `authorization_expired`, `authorization_revoked`, `txt_not_verified` o `domain_paused`. El orquestador (#22) vuelve a consultar el TXT justo antes de escanear, así que esto es lo que el portal muestra, no el permiso final |
-| `score`, `band` | El score más reciente y su banda (#29). `null` si nunca se ha escaneado |
+| `score`, `band`, `grade` | El score más reciente, su banda (#29) y su letra de la A a la F (#114). `null` si nunca se ha escaneado |
 | `open_findings` | Hallazgos abiertos por severidad |
 
 ## Hallazgo (`hallazgos.json`)
@@ -84,6 +84,7 @@ Para que un integrador lea la API sin la sesión del portal. Las crea, lista y r
 | Campo | Qué es |
 |---|---|
 | `score`, `band` | El score final y su banda |
+| `grade` | La letra del score final, ya con el piso: A de 0 a 19, B de 20 a 39, C de 40 a 59, D de 60 a 79 y F de 80 a 100. No hay E. Va en `score.json` y en cada punto del histórico (#114, [`criterio_criticidad.md`](criterio_criticidad.md)). Con `partial_coverage` en `true` lleva el mismo aviso que el score |
 | `weighted`, `floor`, `floor_applied` | La suma ponderada, el piso por hallazgos críticos y si el piso subió el score. El portal muestra el aviso del piso cuando `floor_applied` es `true` (#29) |
 | `floor_message` | Explicación en español del piso cuando aplica; `null` si el ponderado ya alcanza el mínimo |
 | `critical_open` | Hallazgos que cuentan para el piso: `critical` y `open` o `accepted_risk` |
@@ -96,7 +97,15 @@ Para que un integrador lea la API sin la sesión del portal. Las crea, lista y r
 | `categories` | En `score.json`, una fila por categoría con nota, banda y peso, en el orden del reto. En `historico.json`, un objeto `{categoría: nota}` para graficar |
 | `new_findings`, `resolved_findings` | Solo en el histórico: hallazgos nuevos y resueltos por el escaneo de ese punto, de `scans.stats`. Nuevos son los que el escaneo insertó y los que reabrió porque estaban resueltos. Resueltos son los que su fuente respondió y ya no dio, nunca los de una fuente caída ni lo que se queda abierto por `omitidos`, por `sin_cobertura` de una fuente que revisó todo o, en una corrida parcial, porque queda sin partes o trae una que no se revisó, salvo un `cert_expiring_soon` cuyo certificado ya venció (detalle en `docs/contrato_plugin.md`). Un escaneo cerrado antes de que el orquestador los contara (RC-55) no los guardó y da `null`, no 0. Lo que guardaron las fuentes de un escaneo que terminó `failed` o que el orquestador dio por caído no cuenta en ningún punto. Dan 0 en un recálculo (`reason` distinto de `scan`), que no encuentra ni resuelve hallazgos. El portal muestra un guion en los recálculos y en `null`. Con `partial_coverage` muestra los conteos, que no cuentan lo de la fuente que falló, lo de un código en `sin_cobertura` de una fuente que revisó todo ni lo que salió de una parte (repo, IP o certificado) que existe y no se revisó, salvo un `cert_expiring_soon` ya vencido. Los puntos de `historico.json` no los traen |
 | `weekly_changes` | Solo en el histórico: resumen cuando el escaneo tuvo activos o hallazgos nuevos, o cuando el inventario creció más de 20 % frente al escaneo anterior completado/parcial de los últimos 7 días. `new_asset` y `new_finding` indican novedades en ese escaneo; `assets_growth_over_20_percent` usa los conteos `assets` de ambos escaneos y exige superar estrictamente 20 %. `assets_growth_percent` es `null` si no existe un escaneo anterior o si el anterior queda fuera de 7 días; cuando existe, sus identificador y fecha se incluyen como referencia. En recálculos y puntos sin novedades, el campo completo es `null`. Los activos nuevos se cuentan por su primera fecha de observación dentro del intervalo del escaneo; no se exponen sus nombres aquí |
-| `alert` | El umbral de la empresa y si este score dispara `score.above_threshold` |
+| `subcategories` | Solo en `score.json` (#114): una fila por subcategoría del mapa, en su orden, con `category`, `subcategory` (la clave), `name`, `findings` (hallazgos vigentes en ese score) y `penalty` (lo que suman sus aportes de `score_contributions`). Salen todas, también las que están en 0. Si un aporte es de una regla que el mapa no conoce o tiene en otra categoría, va en una fila `other` de la categoría de su regla. Si esa regla es de un KRI, su aporte sigue contando en el KRI |
+| `kris` | Solo en `score.json` (#114): los 5 KRI, en su orden. `kri` es la clave y `name` el nombre. `status` es `ok` (todas sus fuentes corrieron completas y ninguna regla suya quedó sin cobertura), `partial` (hay datos pero no de todo), `no_coverage` (alguna de sus fuentes corrió y no respondió en el escaneo del score, ninguna corrió o ninguna regla suya se revisó, porque quedó sin cobertura o porque su fuente no corrió) o `no_source_yet` (aún no tiene fuente, como `reputation`). `findings`, `max_severity` y `penalty` son sus hallazgos vigentes, su severidad más alta y lo que suman. Con `no_coverage` o `no_source_yet` los tres van en `null`, nunca en cero: el portal no los pinta como sin riesgo. Con `ok` o `partial` y sin hallazgos, `max_severity` es `null`, y solo con `ok` un cero quiere decir que no se encontró nada: con `partial` el portal pone aviso. `subcategories` y `sources` dicen qué junta y qué fuentes lo alimentan, `sources_failed` cuáles no respondieron, `sources_not_run` cuáles no corrieron en ese escaneo, `sources_partial` cuáles revisaron solo una parte y `rules_without_coverage` qué reglas suyas quedaron sin cobertura en ese escaneo (no trae las de una fuente que no corrió). `sources_partial` va por fuente, no por regla. Los KRI no cubren todo el score |
+| `kri_map_version` | Solo en `score.json`: versión del mapa de subcategorías y KRI (`cirdan/score/subcategorias.py`) |
+| `alert` | El umbral de la empresa y si este score dispara `score.above_threshold`. Usa el score de 0 a 100, no la letra |
+
+Los `kris` de `score.json` son los de la semilla de demo (`db/semillas/001_datos_demo.sql`, que no se edita), y `pruebas/test_api_v1.py` los compara con lo que la API devuelve con esa semilla. Por eso tienen dos cosas que un escaneo real no da:
+
+- Certificados cuenta el `cert_expired` de dev.acme-demo.mx, que la semilla atribuye a `shodan` (ver `hallazgos.json`). En un escaneo real esa regla solo la emite `ct_logs`. Un KRI junta sus aportes por código de regla, sin mirar qué fuente trajo el hallazgo.
+- Exposición de servicios sale con `rules_without_coverage` vacío y el score con `partial_coverage` en `false`, porque el escaneo sembrado no guarda `rules_without_coverage` en `scans.stats`. En un escaneo real `shodan` deja siempre `exposed_iot_device` y `exposed_ot_device` sin cobertura (`SIN_LLAVE` en `cirdan/recolectores/shodan.py`), así que esas dos reglas salen en `rules_without_coverage` del KRI y el score sale con `partial_coverage` en `true`.
 
 ## Explicación (`explicacion.json`)
 
@@ -113,7 +122,7 @@ Los textos de la regla salen del catálogo `scoring_rule_texts` (#30), uno por c
 
 ## Pesos (`pesos.json`)
 
-Los del juego de reglas v1 de la base: infraestructura 30 %, identidad digital 20 %, configuración 20 % y fugas de datos 30 %, con las bandas, el piso y el umbral de `cirdan/score/criterio.py`. Emilio los confirmó para este contrato, por eso `validated_by` dice `Emilio`. Si cambian, se crea el juego v2 (#32) y se actualizan este archivo y la semilla.
+Los del juego de reglas v1 de la base: infraestructura 30 %, identidad digital 20 %, configuración 20 % y fugas de datos 30 %, con las bandas, las letras (`grades`, #114), el piso y el umbral de `cirdan/score/criterio.py`. Emilio los confirmó para este contrato, por eso `validated_by` dice `Emilio`. Si cambian, se crea el juego v2 (#32) y se actualizan este archivo y la semilla.
 La API real devuelve `validated_by` en `null`, porque la semilla no lo llena.
 
 `rules` trae las 30 reglas del juego v1 en orden de id: las 7 de la semilla 001 y las 23 de la semilla 004 (#14 a #20 y las previstas de #62 a #64). `pruebas/test_api_v1.py` las compara una por una con la API.
