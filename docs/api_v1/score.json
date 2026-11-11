@@ -37,11 +37,11 @@
     {"category": "data_leaks", "subcategory": "public_storage", "name": "Almacenamiento público", "findings": 0, "penalty": 0.0}
   ],
   "kris": [
-    {"kri": "certificates", "name": "Certificados", "status": "ok", "subcategories": ["certificates"], "sources": ["ct_logs"], "sources_failed": [], "sources_not_run": [], "rules_without_coverage": [], "findings": 1, "max_severity": "high", "penalty": 20.0},
-    {"kri": "service_exposure", "name": "Exposición de servicios", "status": "ok", "subcategories": ["exposed_services", "exposed_apis"], "sources": ["shodan", "api_docs"], "sources_failed": [], "sources_not_run": ["api_docs"], "rules_without_coverage": [], "findings": 0, "max_severity": null, "penalty": 0.0},
-    {"kri": "email", "name": "Correo", "status": "ok", "subcategories": ["email"], "sources": ["dns"], "sources_failed": [], "sources_not_run": [], "rules_without_coverage": [], "findings": 1, "max_severity": "medium", "penalty": 10.0},
-    {"kri": "impersonation", "name": "Suplantación", "status": "ok", "subcategories": ["impersonation"], "sources": ["ct_logs"], "sources_failed": [], "sources_not_run": [], "rules_without_coverage": [], "findings": 0, "max_severity": null, "penalty": 0.0},
-    {"kri": "reputation", "name": "Reputación", "status": "no_source_yet", "subcategories": [], "sources": [], "sources_failed": [], "sources_not_run": [], "rules_without_coverage": [], "findings": null, "max_severity": null, "penalty": null}
+    {"kri": "certificates", "name": "Certificados", "status": "ok", "subcategories": ["certificates"], "sources": ["ct_logs"], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": 1, "max_severity": "high", "penalty": 20.0},
+    {"kri": "service_exposure", "name": "Exposición de servicios", "status": "partial", "subcategories": ["exposed_services", "exposed_apis"], "sources": ["shodan", "api_docs"], "sources_failed": [], "sources_not_run": ["api_docs"], "sources_partial": [], "rules_without_coverage": [], "findings": 0, "max_severity": null, "penalty": 0.0},
+    {"kri": "email", "name": "Correo", "status": "ok", "subcategories": ["email"], "sources": ["dns"], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": 1, "max_severity": "medium", "penalty": 10.0},
+    {"kri": "impersonation", "name": "Suplantación", "status": "ok", "subcategories": ["impersonation"], "sources": ["ct_logs"], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": 0, "max_severity": null, "penalty": 0.0},
+    {"kri": "reputation", "name": "Reputación", "status": "no_source_yet", "subcategories": [], "sources": [], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": null, "max_severity": null, "penalty": null}
   ],
   "kri_map_version": 1,
   "alert": {"threshold": 60, "triggered": true}

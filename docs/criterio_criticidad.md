@@ -87,15 +87,16 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 
 **Los KRI no cubren todo el score.** Una regla puede quedar sin KRI y sigue contando en su categoría y en el score. Hoy quedan fuera de los KRI el software vulnerable, el registro del dominio, los correos expuestos, la configuración de servidores y toda la categoría de fugas de datos.
 
-**Un KRI sin datos nunca se pinta como sin riesgo.** Su estado (`status`) es uno de tres:
+**Un KRI sin datos completos nunca se pinta como sin riesgo.** Su estado (`status`) es uno de cuatro:
 
-- `ok`: todas sus fuentes que corrieron en el escaneo del score terminaron bien. Si alguna de sus fuentes no corrió en ese escaneo, por ejemplo `api_docs` mientras siga apagada, va en `sources_not_run`. Las reglas suyas que el escaneo dejó sin cobertura van en `rules_without_coverage`.
-- `no_coverage` (sin cobertura): alguna de sus fuentes corrió y no respondió, o ninguna corrió. Sus hallazgos, su severidad y su suma van en `null`, no en cero.
+- `ok`: todas sus fuentes corrieron completas en el escaneo del score y ninguna regla suya quedó sin cobertura. Solo aquí un cero quiere decir que no se encontró nada.
+- `partial` (cobertura parcial): hay datos, pero no de todo. Alguna de sus fuentes no corrió en ese escaneo (`sources_not_run`, por ejemplo `api_docs` mientras siga apagada), revisó solo una parte (`sources_partial`) o dejó alguna regla suya sin cobertura (`rules_without_coverage`). Trae sus hallazgos, su severidad y su suma, y el portal lo muestra con aviso: un cero aquí no es sin riesgo.
+- `no_coverage` (sin cobertura): alguna de sus fuentes corrió y no respondió (`sources_failed`), ninguna corrió, o todas sus reglas quedaron sin cobertura aunque la fuente respondiera, como Correo cuando el dominio no existe en el DNS. Sus hallazgos, su severidad y su suma van en `null`, no en cero.
 - `no_source_yet` (sin fuente todavía): el KRI aún no tiene fuente. Así sale Reputación hasta que RC-234 esté en dev. También va en `null`.
 
-Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado.
+Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado. Si un aporte es de una regla que el mapa no conoce, o que otro juego de reglas puso en otra categoría, va en una fila `other` (Sin clasificar) de la categoría de su regla y no cuenta en ningún KRI, para que las subcategorías sigan sumando la nota.
 
-Para agregar un código de regla, ponlo en una subcategoría de su categoría y sube `VERSION`. `pruebas/test_catalogo_reglas.py` falla sin base si una regla de las semillas no tiene subcategoría, si su subcategoría es de otra categoría o si las fuentes de un KRI no son las que emiten sus reglas. `pruebas/test_api_v1.py` revisa lo mismo contra las reglas que de verdad hay en la base.
+Para agregar un código de regla, ponlo en una subcategoría de su categoría y sube `VERSION`. `pruebas/test_catalogo_reglas.py` falla sin base si una regla de las semillas no tiene subcategoría, si su subcategoría es de otra categoría o si las fuentes de un KRI no son las que emiten sus reglas. `pruebas/test_api_v1.py` revisa contra la base que cada regla de cada juego tenga subcategoría de su categoría y que las fuentes de cada KRI existan en `data_sources`.
 
 ## Qué hace crítico a un hallazgo
 

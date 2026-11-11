@@ -129,9 +129,9 @@ class SubcategoriasYKri(unittest.TestCase):
 
     def test_6_fuente_que_no_corrio(self):
         _, kris = sub.resumen([], {'shodan': 'succeeded'})
-        exposicion = self.kri(kris, 'service_exposure')   # api_docs no corrió, shodan sí: hay datos y se dice cuál faltó
+        exposicion = self.kri(kris, 'service_exposure')   # api_docs no corrió, shodan sí: hay datos, pero a medias
         self.assertEqual((exposicion['status'], exposicion['findings'], exposicion['max_severity'],
-                          exposicion['sources_not_run']), ('ok', 0, None, ['api_docs']))
+                          exposicion['sources_not_run']), ('partial', 0, None, ['api_docs']))
         correo = self.kri(kris, 'email')                  # su única fuente no corrió
         self.assertEqual((correo['status'], correo['findings']), ('no_coverage', None))
 
@@ -143,9 +143,53 @@ class SubcategoriasYKri(unittest.TestCase):
 
     def test_8_reglas_sin_cobertura_de_un_kri(self):
         _, kris = sub.resumen([], TODAS, sin_cobertura=['lookalike_domain', 'cert_expired', 'outdated_software'])
-        self.assertEqual(self.kri(kris, 'impersonation')['rules_without_coverage'], ['lookalike_domain'])
-        self.assertEqual(self.kri(kris, 'certificates')['rules_without_coverage'], ['cert_expired'])
-        self.assertEqual(self.kri(kris, 'email')['rules_without_coverage'], [])
+        suplantacion = self.kri(kris, 'impersonation')   # ct_logs respondió, pero su única regla no se revisó
+        self.assertEqual((suplantacion['status'], suplantacion['findings'], suplantacion['penalty'],
+                          suplantacion['rules_without_coverage']), ('no_coverage', None, None, ['lookalike_domain']))
+        certificados = self.kri(kris, 'certificates')    # una de sus dos reglas sí se revisó: a medias, no ok
+        self.assertEqual((certificados['status'], certificados['findings'], certificados['rules_without_coverage']),
+                         ('partial', 0, ['cert_expired']))
+        self.assertEqual((self.kri(kris, 'email')['status'], self.kri(kris, 'email')['rules_without_coverage']), ('ok', []))
+        # correo con NXDOMAIN: dns responde y deja sus 4 reglas sin cobertura
+        _, kris = sub.resumen([], TODAS, sin_cobertura=['spf_missing', 'spf_allow_all', 'dmarc_missing', 'dmarc_policy_none'])
+        self.assertEqual((self.kri(kris, 'email')['status'], self.kri(kris, 'email')['findings']), ('no_coverage', None))
+
+    def test_8b_fuente_que_reviso_solo_una_parte(self):
+        _, kris = sub.resumen(APORTES, TODAS, a_medias=['shodan', 'github'])
+        exposicion = self.kri(kris, 'service_exposure')
+        self.assertEqual((exposicion['status'], exposicion['findings'], exposicion['sources_partial']),
+                         ('partial', 2, ['shodan']))
+        self.assertEqual(self.kri(kris, 'certificates')['status'], 'ok')
+
+    def test_8c_ningun_estado_sin_datos_completos_sale_ok_en_cero(self):
+        casos = [({}, (), ()), ({'ct_logs': 'failed'}, (), ()), (TODAS, ['lookalike_domain'], ()), (TODAS, (), ['ct_logs']),
+                 ({'shodan': 'succeeded', 'ct_logs': 'succeeded'}, (), ())]
+        for corridas, sin_cobertura, a_medias in casos:
+            for k in sub.resumen([], corridas, sin_cobertura, a_medias)[1]:
+                completo = (k['sources'] and not k['sources_failed'] and not k['sources_not_run']
+                            and not k['sources_partial'] and not k['rules_without_coverage'])
+                self.assertEqual(k['status'] == 'ok', bool(completo), (k['kri'], corridas, sin_cobertura, a_medias))
+                self.assertEqual(k['findings'] is None, k['status'] in ('no_coverage', 'no_source_yet'), k['kri'])
+
+    def test_8d_revisar_avisa_de_un_kri_que_apunta_a_una_subcategoria_que_no_existe(self):
+        bueno = sub.KRIS
+        try:
+            sub.KRIS = bueno + (('nuevo', 'Nuevo', ('no_existe',), ('dns',)),)
+            self.assertEqual(sub.revisar(), ['el KRI nuevo apunta a la subcategoría no_existe, que no existe'])
+        finally:
+            sub.KRIS = bueno
+        self.assertEqual(sub.revisar(), [])
+
+    def test_8e_un_codigo_en_dos_juegos_con_categorias_distintas(self):
+        pares = [('cert_expired', 'infrastructure'), ('cert_expired', 'configuration')]
+        self.assertIn('cert_expired es de configuration y su subcategoría certificates es de infrastructure',
+                      sub.revisar(pares))
+        # su aporte no se pierde: va a 'other' de la categoría de su regla y deja de contar en el KRI
+        subs, kris = sub.resumen([aporte('cert_expired', 'configuration', 'high', 20)], TODAS)
+        self.assertEqual(subs[-1], {'category': 'configuration', 'subcategory': 'other', 'name': 'Sin clasificar',
+                                    'findings': 1, 'penalty': 20.0})
+        self.assertEqual(sum(s['penalty'] for s in subs), 20.0)
+        self.assertEqual(self.kri(kris, 'certificates')['findings'], 0)
 
     def test_9_un_aporte_de_una_regla_que_el_mapa_no_conoce_no_se_pierde(self):
         subs, _ = sub.resumen(APORTES + [aporte('regla_nueva', 'data_leaks', 'low', 8)], TODAS)

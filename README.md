@@ -479,7 +479,7 @@ Las pruebas del límite están en `pruebas/test_orquestador.py` y piden la migra
 Más alto = más riesgo. Bandas 0 a 39 bajo, 40 a 59 medio, 60 a 79 alto y 80 a 100 crítico, ancladas al ejemplo del reto (68 = riesgo alto). Regla de piso: un hallazgo crítico vigente deja el dominio al menos en 60, y dos o más, al menos en 80. La alerta se crea cuando el score llega al umbral o lo pasa. Cada score lleva además una letra de la A a la F (A de 0 a 19, B de 20 a 39, C de 40 a 59, D de 60 a 79 y F de 80 a 100), y `GET /api/v1/domains/{fqdn}/score` agrupa sus hallazgos en subcategorías y en 5 KRI con el mapa de `cirdan/score/subcategorias.py` (#114). El criterio completo, con ejemplos y quién usa qué, está en `docs/criterio_criticidad.md`, y su código en `cirdan/score/criterio.py`.
 
 ```bash
-python -m unittest -v pruebas/test_criterio.py   # 27 pruebas, sin base de datos
+python -m unittest -v pruebas/test_criterio.py   # 31 pruebas, sin base de datos
 ```
 
 El motor de score de #31 calcula aportes por hallazgo, notas por categoría, ponderado y piso crítico. La fórmula acordada y el texto que explica el piso están en `docs/criterio_criticidad.md`.

@@ -86,9 +86,9 @@ class ApiV1(unittest.TestCase):
 
     def test_3b_cada_regla_de_la_base_tiene_subcategoria_y_cada_kri_apunta_a_una_que_existe(self):
         # De base (#114, RC-232): lee las reglas de todos los juegos que hay en la base, no las semillas del repo.
-        ok, out, err = psql('SELECT DISTINCT code, category FROM scoring_rules ORDER BY 1;', user='postgres')
+        ok, out, err = psql('SELECT DISTINCT code, category FROM scoring_rules ORDER BY 1, 2;', user='postgres')
         self.assertTrue(ok, err)
-        reglas = dict(linea.split('|') for linea in out.splitlines())
+        reglas = [tuple(linea.split('|')) for linea in out.splitlines()]   # pares de todos los juegos
         self.assertGreaterEqual(len(reglas), 30)
         self.assertEqual(subcategorias.revisar(reglas, criterio.CATEGORIAS), [])
         ok, out, err = psql('SELECT code FROM data_sources ORDER BY 1;', user='postgres')
@@ -113,6 +113,9 @@ class ApiV1(unittest.TestCase):
                                   kri[clave]['penalty'], kri[clave]['sources_failed']),
                                  ('no_coverage', None, None, None, ['ct_logs']), clave)
             self.assertEqual((kri['email']['status'], kri['email']['findings']), ('ok', 1))   # dns sí respondió
+            # exposición: shodan respondió y api_docs no corrió en ese escaneo, así que no sale ok
+            self.assertEqual((kri['service_exposure']['status'], kri['service_exposure']['sources_not_run']),
+                             ('partial', ['api_docs']))
             self.assertEqual(kri['reputation']['status'], 'no_source_yet')
             # la letra, el score, la alerta y las subcategorías no cambian: salen del score guardado
             for campo in ('score', 'grade', 'band', 'alert', 'subcategories', 'categories'):
@@ -132,6 +135,11 @@ class ApiV1(unittest.TestCase):
         score = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')   # 60, letra D, umbral 60
         self.assertEqual((score['grade'], score['alert']), ('D', {'threshold': 60, 'triggered': True}))
         self.assertIsInstance(score['alert']['threshold'], int)   # el umbral es un número de 0 a 100, no una letra
+        # acme-tienda.mx tiene score 0 y su escaneo no guardó corridas: letra A, pero ningún KRI sale en cero
+        tienda = self.get(self.acme, '/api/v1/domains/acme-tienda.mx/score')
+        self.assertEqual((tienda['score'], tienda['grade']), (0, 'A'))
+        self.assertEqual([(k['status'], k['findings']) for k in tienda['kris']],
+                         [('no_coverage', None)] * 4 + [('no_source_yet', None)])
 
     def test_4_explicacion_y_pesos(self):
         exp = sin_propuestos(self.get(self.acme, '/api/v1/findings/80000000-0000-4000-8000-000000000001/explanation'))

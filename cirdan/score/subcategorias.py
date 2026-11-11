@@ -43,7 +43,7 @@ KRIS = (
 )
 
 SIN_CLASIFICAR = ('other', 'Sin clasificar')   # solo si llega un aporte de una regla que el mapa no conoce
-ESTADOS_KRI = ('ok', 'no_coverage', 'no_source_yet')
+ESTADOS_KRI = ('ok', 'partial', 'no_coverage', 'no_source_yet')
 ORDEN_SEVERIDAD = ('low', 'medium', 'high', 'critical')
 
 _POR_CODIGO = {codigo: (clave, categoria) for clave, categoria, _, codigos in SUBCATEGORIAS for codigo in codigos}
@@ -57,9 +57,12 @@ def subcategoria(codigo):
 def revisar(reglas=None, categorias=None):
     """Errores del mapa, lista vacía si está bien.
 
-    `reglas`: {código: categoría} del catálogo. Si llega, cada código debe tener subcategoría de su categoría
-    y el mapa no puede nombrar códigos que no existen. `categorias`: las válidas (criterio.CATEGORIAS).
+    `reglas`: pares (código, categoría) del catálogo, de todos los juegos de reglas. Si llegan, cada par debe
+    tener subcategoría de su categoría y el mapa no puede nombrar códigos que no existen. Un {código: categoría}
+    también sirve. `categorias`: las válidas (criterio.CATEGORIAS).
     """
+    if isinstance(reglas, dict):
+        reglas = reglas.items()
     errores = []
     claves = [s[0] for s in SUBCATEGORIAS]
     errores += ['subcategoría repetida: %s' % c for c in sorted(set(c for c in claves if claves.count(c) > 1))]
@@ -79,13 +82,14 @@ def revisar(reglas=None, categorias=None):
         if bool(subs) != bool(fuentes):
             errores.append('el KRI %s tiene subcategorías sin fuentes o fuentes sin subcategorías' % clave)
     if reglas is not None:
-        for codigo, categoria in sorted(reglas.items()):
+        reglas = sorted(set(reglas))
+        for codigo, categoria in reglas:
             if codigo not in _POR_CODIGO:
                 errores.append('el código de regla %s no tiene subcategoría' % codigo)
             elif _POR_CODIGO[codigo][1] != categoria:
                 errores.append('%s es de %s y su subcategoría %s es de %s' % (
                     codigo, categoria, _POR_CODIGO[codigo][0], _POR_CODIGO[codigo][1]))
-        errores += ['el mapa nombra %s, que no es una regla del catálogo' % c for c in sorted(set(codigos) - set(reglas))]
+        errores += ['el mapa nombra %s, que no es una regla del catálogo' % c for c in sorted(set(codigos) - {c for c, _ in reglas})]
     return errores
 
 
@@ -93,20 +97,30 @@ def _suma(aportes):
     return round(float(sum(a['penalty'] for a in aportes)), 2)
 
 
-def resumen(aportes, corridas, sin_cobertura=()):
+def _clave(aporte):
+    """Subcategoría del aporte. Si el mapa no conoce su código o lo tiene en otra categoría, va a 'other'."""
+    clave, categoria = _POR_CODIGO.get(aporte['code'], (None, None))
+    return clave if categoria == aporte['category'] else SIN_CLASIFICAR[0]
+
+
+def resumen(aportes, corridas, sin_cobertura=(), a_medias=()):
     """Subcategorías y KRI de un score.
 
     `aportes`: los de `score_contributions` del score, cada uno con code, category, severity y penalty. Son la
     foto de los hallazgos vigentes cuando se calculó. `corridas`: {fuente: estado} de `scan_source_runs` del
-    escaneo del score. `sin_cobertura`: códigos de `scans.stats.rules_without_coverage`.
+    escaneo del score. `sin_cobertura` y `a_medias`: `rules_without_coverage` y `sources_partial` de `scans.stats`.
 
-    Un KRI queda 'no_coverage' si alguna de sus fuentes corrió y no terminó 'succeeded', o si ninguna corrió.
-    Ahí y en 'no_source_yet' sus conteos van en None, nunca en cero. Con 'ok' dice además qué fuentes suyas no
-    corrieron en ese escaneo y qué reglas suyas quedaron sin cobertura.
+    Estado de un KRI:
+    - 'no_source_yet': todavía no tiene fuentes.
+    - 'no_coverage': alguna de sus fuentes corrió y no terminó 'succeeded', ninguna corrió, o todas sus reglas
+      quedaron sin cobertura. Sus conteos van en None, nunca en cero.
+    - 'partial': hay datos pero no de todo: alguna fuente suya no corrió o revisó solo una parte, o alguna regla
+      suya quedó sin cobertura. Trae conteos, y un cero aquí no quiere decir sin riesgo.
+    - 'ok': todas sus fuentes corrieron completas y ninguna regla suya quedó sin cobertura.
     """
     por_sub = {}
     for a in aportes:
-        por_sub.setdefault((a['category'], subcategoria(a['code']) or SIN_CLASIFICAR[0]), []).append(a)
+        por_sub.setdefault((a['category'], _clave(a)), []).append(a)
     subcategorias = [{'category': categoria, 'subcategory': clave, 'name': nombre,
                       'findings': len(por_sub.get((categoria, clave), ())),
                       'penalty': _suma(por_sub.get((categoria, clave), ()))}
@@ -121,15 +135,23 @@ def resumen(aportes, corridas, sin_cobertura=()):
     for clave, nombre, subs, fuentes in KRIS:
         caidas = [f for f in fuentes if f in corridas and corridas[f] != 'succeeded']
         sin_correr = [f for f in fuentes if f not in corridas]
-        estado = ('no_source_yet' if not fuentes
-                  else 'no_coverage' if caidas or len(sin_correr) == len(fuentes) else 'ok')
+        parciales = [f for f in fuentes if f in a_medias and f not in caidas and f not in sin_correr]
         suyos = [a for s in subs for a in por_sub.get((categoria_sub[s], s), ())]
         codigos = [c for s in subs for c in codigos_sub[s]]
+        sin_revisar = [c for c in codigos if c in sin_cobertura]
+        if not fuentes:
+            estado = 'no_source_yet'
+        elif caidas or len(sin_correr) == len(fuentes) or len(sin_revisar) == len(codigos):
+            estado = 'no_coverage'
+        elif sin_correr or parciales or sin_revisar:
+            estado = 'partial'
+        else:
+            estado = 'ok'
         item = {'kri': clave, 'name': nombre, 'status': estado, 'subcategories': list(subs), 'sources': list(fuentes),
-                'sources_failed': caidas, 'sources_not_run': sin_correr,
-                'rules_without_coverage': [c for c in codigos if c in sin_cobertura],
+                'sources_failed': caidas, 'sources_not_run': sin_correr, 'sources_partial': parciales,
+                'rules_without_coverage': sin_revisar,
                 'findings': None, 'max_severity': None, 'penalty': None}
-        if estado == 'ok':
+        if estado in ('ok', 'partial'):
             item['findings'] = len(suyos)
             item['penalty'] = _suma(suyos)
             if suyos:

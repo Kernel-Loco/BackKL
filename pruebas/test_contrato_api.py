@@ -90,9 +90,11 @@ class Score(unittest.TestCase):
         self.assertEqual([k['kri'] for k in SCORE['kris']], [k[0] for k in subcategorias.KRIS])
         for k in SCORE['kris']:
             self.assertIn(k['status'], subcategorias.ESTADOS_KRI)
-            if k['status'] != 'ok':   # sin cobertura o sin fuente nunca se pinta en cero
+            if k['status'] in ('no_coverage', 'no_source_yet'):   # nunca se pinta en cero
                 self.assertEqual((k['findings'], k['max_severity'], k['penalty']), (None, None, None), k['kri'])
         self.assertEqual(next(k for k in SCORE['kris'] if k['kri'] == 'reputation')['status'], 'no_source_yet')
+        for p in HISTORICO['items']:
+            self.assertEqual(p['grade'], criterio.letra(p['score']), p['score_id'])
 
     def test_3_alerta(self):
         self.assertEqual(SCORE['alert']['triggered'], criterio.dispara_alerta(SCORE['score'], SCORE['alert']['threshold']))

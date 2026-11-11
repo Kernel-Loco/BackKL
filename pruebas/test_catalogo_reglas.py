@@ -324,7 +324,7 @@ class Subcategorias(unittest.TestCase):
     """Mapa de subcategorías y KRI (#114, RC-232) contra las semillas y los recolectores."""
 
     def test_14_cada_regla_tiene_subcategoria_de_su_categoria(self):
-        self.assertEqual(subcategorias.revisar({r[3]: r[4] for r in REGLAS}, CATEGORIAS), [])
+        self.assertEqual(subcategorias.revisar([(r[3], r[4]) for r in REGLAS], CATEGORIAS), [])   # de todos los juegos
 
     def test_15_las_fuentes_de_cada_kri_son_las_que_emiten_sus_reglas(self):
         codigos_sub = {clave: set(codigos) for clave, _, _, codigos in subcategorias.SUBCATEGORIAS}

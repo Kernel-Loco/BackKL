@@ -324,7 +324,9 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
         corridas = {r['source']: r['status']
                     for r in conn.execute(SCORE_CORRIDAS_SQL, (rows[-1]['scan_id'],)).fetchall()}
     base, weights = _score_base(rows[-1], critical_open)
-    subs, kris = subcategorias.resumen(aportes, corridas, (rows[-1]['stats'] or {}).get('rules_without_coverage') or ())
+    stats = rows[-1]['stats'] or {}
+    subs, kris = subcategorias.resumen(aportes, corridas, stats.get('rules_without_coverage') or (),
+                                       stats.get('sources_partial') or ())
     categories = [{'category': c, 'score': rows[-1]['category_scores'][c], 'band': criterio.banda(rows[-1]['category_scores'][c]),
                    'weight': weights[c]} for c in criterio.CATEGORIAS]
     return {'domain': fqdn, **base, 'categories': categories,
