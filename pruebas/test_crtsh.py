@@ -339,9 +339,9 @@ class DominiosParecidos(unittest.TestCase):
             self.assertEqual([h.clave for h in sin_propio.hallazgos if h.codigo == 'lookalike_domain'],
                              sorted([clave, propio]), dominio)  # sin darlo de alta, el pegado propio sí sale
 
-    def test_8e_la_marca_cuenta_como_palabra_y_hay_un_tope_de_parecidos(self):
-        """H2 de la ronda 3 de RC-226: la marca pegada a otras letras no cuenta ('plata' en plataforma.com), y una
-        corrida reporta a lo más MAX_PARECIDOS: los demás van en omitidos, con un aviso, y no dejan la corrida parcial."""
+    def test_8e_la_marca_cuenta_como_palabra_y_no_hay_tope_de_parecidos(self):
+        """H2 de la ronda 3 de RC-226: la marca pegada a otras letras no cuenta ('plata' en plataforma.com). No hay
+        tope de parecidos: todo el que pasa el filtro se reporta, ninguno va en omitidos ni deja aviso."""
         for nombre, cuenta in (('plataforma.com', False), ('www.plataformadigital.mx', False), ('laplata.com', False),
                                ('plata-pagos.com', True), ('mi-plata.mx', True), ('plata2.com', True),
                                ('1plata.com', True), ('pagos-plata-mx.com', True), ('plata.net', True),
@@ -361,18 +361,13 @@ class DominiosParecidos(unittest.TestCase):
                               '2026-09-10T00:00:00', '2026-12-30T00:00:00')], 'p1ata.mx': [variante]})
             return crtsh.recolectar('plata.mx', crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None), AHORA,
                                     parecidos=True)
-        justo = correr(crtsh.MAX_PARECIDOS - 1)  # 19 de %marca% y la variante: cabe todo
-        self.assertEqual((len(justo.hallazgos), justo.omitidos, justo.avisos), (crtsh.MAX_PARECIDOS, [], []))
-        res = correr(crtsh.MAX_PARECIDOS + 5)
-        claves = [h.clave for h in res.hallazgos]
-        self.assertEqual(len(claves), crtsh.MAX_PARECIDOS)
-        self.assertNotIn('plataforma.com', claves)
-        self.assertIn('p1ata.mx', claves)  # la variante va primero aunque su certificado sea el más viejo
-        fuera = ['plata-%02d.com' % i for i in range(6)]  # los 6 de certificado más viejo
-        self.assertEqual(sorted(set('plata-%02d.com' % i for i in range(25)) - set(claves)), fuera)
-        self.assertEqual(sorted(res.omitidos), sorted(crtsh._huella('lookalike_domain', 'plata.mx', f) for f in fuera))
-        self.assertEqual(res.avisos, [crtsh.TOPE_PARECIDOS % (crtsh.MAX_PARECIDOS, 6)])
-        self.assertEqual((res.sin_cobertura, res.revisados), ([], None))  # un tope no deja la corrida parcial
+        res = correr(25)
+        claves = sorted(h.clave for h in res.hallazgos)
+        # los 25 de %marca% y la variante, aunque su certificado sea el más viejo. plataforma.com no
+        self.assertEqual(claves, sorted(['p1ata.mx'] + ['plata-%02d.com' % i for i in range(25)]))
+        self.assertEqual((res.omitidos, res.avisos), ([], []))
+        self.assertEqual((res.sin_cobertura, res.revisados), ([], None))
+        self.assertFalse(hasattr(crtsh, 'MAX_PARECIDOS'))
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_8f_un_tld_que_es_palabra_no_acusa_a_un_proveedor(self):

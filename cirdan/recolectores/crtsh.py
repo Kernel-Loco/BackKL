@@ -36,7 +36,6 @@ orquestador no cierra lo de un certificado que esta corrida no vio. En el respal
 vencidos, porque cert_expired queda en sin_cobertura. Si a los parecidos les faltó la respuesta de alguna
 variante la corrida también es parcial y da revisados. Con revisados y cobertura de parecidos van además los
 dominios parecidos que sí se revisaron, para que el orquestador cierre el que ya no salió (ronda 4 de RC-226).
-Una corrida reporta a lo más MAX_PARECIDOS parecidos: la huella de los demás va en omitidos, con un aviso.
 
 Grabación dañada (RC-46). Al reproducir, un archivo vacío, cortado o ilegible (una respuesta de crt.sh, una
 página de Cert Spotter, un falla_ o un dns_) no es que la fuente no respondiera. El resultado trae lo que sí
@@ -95,7 +94,6 @@ FRACCION_POR_VENCER = 3      # ...y le queda menos de 1/3 de su vida (los de vid
 VENTANA_VENCIDOS_DIAS = 365  # vencido hace más de esto ya no es hallazgo; el subdominio queda como activo
 VENTANA_PARECIDOS_DIAS = 90  # un dominio parecido cuenta si tiene un certificado vigente o vencido hace menos de esto
 MAX_CANDIDATOS = 10          # variantes que se consultan al buscar parecidos (política de uso ético, 1.5)
-MAX_PARECIDOS = 20           # dominios parecidos que reporta una corrida. Los demás van en omitidos, con un aviso
 INTENTOS_PARECIDOS = 2       # intentos HTTP de %marca% y de cada variante
 FALLAS_SEGUIDAS = 3          # si tantas variantes seguidas fallan, crt.sh está saturado y se dejan las demás
 INTENTOS = 3                 # intentos HTTP por consulta dentro de una corrida (no es scan_source_runs.attempt)
@@ -162,8 +160,6 @@ SIN_MARCA = ('No se buscaron dominios parecidos de %s: solo se buscan cuando el 
              'dominio registrable, con un sufijo que Cirdan conoce y fuera de un hosting compartido')
 SIN_VARIANTES = ('Sin la respuesta de %%%s%% no se consultaron las %s de %s: los dominios parecidos quedan sin '
                  'revisar en esta corrida')
-TOPE_PARECIDOS = ('Se reportan %d dominios parecidos y quedan %d sin reportar por el tope de la corrida: primero van '
-                  'las variantes del dominio y después los de certificado más reciente')
 POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsqueda por nombre y pueden faltar '
                      'subdominios')
 
@@ -823,18 +819,9 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             por_tipo.append((tipo, _con_fechas(encontrados), lambda n, k=candidato: registrable(n) == k))
         if respondidas and not sin_marca:
             vistos = set()
-            hallados = _parecidos(dominio, por_tipo, propios_set, ahora, vistos)
-            if len(hallados) > MAX_PARECIDOS:
-                # Tope (H2 de la ronda 3): una marca que es una palabra común no llena el escaneo. Primero van las
-                # variantes del dominio y después los de certificado más reciente. Los demás siguen ahí: su huella va
-                # en omitidos, no se guardan y, si ya estaban abiertos, no se cierran.
-                orden = sorted(hallados, key=lambda h: h.evidencia['vence'], reverse=True)
-                orden.sort(key=lambda h: h.evidencia['tipo_parecido'] == 'contiene_marca')
-                dentro = {h.huella for h in orden[:MAX_PARECIDOS]}
-                res.omitidos += [h.huella for h in hallados if h.huella not in dentro]
-                res.avisos.append(TOPE_PARECIDOS % (MAX_PARECIDOS, len(hallados) - MAX_PARECIDOS))
-                hallados = [h for h in hallados if h.huella in dentro]
-            res.hallazgos += hallados
+            # Sin tope de parecidos: todo el que pasa el filtro se reporta. Un tope en el recolector dejaba fuera
+            # variantes y certificados recién emitidos, y no sabe qué marcó ya el cliente (ronda 4 de RC-226).
+            res.hallazgos += _parecidos(dominio, por_tipo, propios_set, ahora, vistos)
             # Una variante que no respondió no es que ya no tenga certificado: su huella va en omitidos y el orquestador
             # no cierra el parecido que un escaneo anterior dejó abierto, ni guarda uno que nunca se reportó (#23).
             dadas = {h.huella for h in res.hallazgos}
