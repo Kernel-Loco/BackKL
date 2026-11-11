@@ -151,7 +151,7 @@ class LlavesApi(unittest.TestCase):
         code, body = get(toda['key'], '/api/v1/domains')
         self.assertEqual(code, 200)
         self.assertEqual(sorted(d['fqdn'] for d in body['items']),
-                         ['acme-demo.mx', 'acme-portal.mx', 'acme-tienda.mx', 'partner-example.com'])
+                         ['acme-demo.mx', 'acme-portal.mx', 'acme-tienda.mx', 'old-example.net', 'partner-example.com'])
 
         una = self.crear(self.alex, 'tienda', domain='acme-tienda.mx')
         self.assertEqual(una['domain'], 'acme-tienda.mx')

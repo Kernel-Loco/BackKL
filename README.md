@@ -7,7 +7,7 @@ Backend de LowTide (nombre clave Cirdan, que sigue en el paquete, la base y los 
 | Carpeta | Qué tiene |
 |---|---|
 | `cirdan/api/` | API en FastAPI y la página `/demo` (solo con `DEMO_EXPLORER=true`) |
-| `cirdan/auth/` | Inicio de sesión (#25): contraseña con argon2id, MFA con TOTP, sesiones en Valkey y cuentas de demo |
+| `cirdan/auth/` | Inicio de sesión (#25): contraseña con argon2id, MFA con TOTP, sesiones en Valkey y cuentas de demo. También las llaves de API para integradores (#87, `api_keys.py`) |
 | `cirdan/ml/` | Dataset semisintético del ML (#33, RC-65): plantillas, características del reto, armado del lote y acuerdo entre etiquetadores. El método está en `docs/dataset_ml.md` |
 | `cirdan/orquestador/` | Orquestador de escaneos (#22): solo escanea con autorización vigente y TXT verificado |
 | `cirdan/recolectores/` | Contrato de plugin (#13), recolectores OSINT pasivos (crt.sh con Cert Spotter, #14 y #14b, subfinder en modo pasivo, #14b, DNS con SPF y DMARC, #15, secretos y correos en GitHub, #16, servicios y CVE con Shodan InternetDB, #17, registrador y vencimiento del dominio con RDAP y WHOIS por el puerto 43 como respaldo, #15b, la visita web, #18, documentación de APIs a la vista, #63, y uno de ejemplo para pruebas), la ubicación de las IP con la base local de DB-IP Lite (`geoip.py`, #15b, no es un recolector), el CDN o WAF delante de un sitio (`borde.py`, #18, tampoco es un recolector), las tecnologías web por huellas de Wappalyzer, la versión sin soporte con endoflife.date y las CVE por versión con la NVD (`huellas.py`, `soporte.py` y `nvd.py`, #18, tampoco son recolectores) y sus respuestas grabadas para el respaldo de las demos (hoy solo está la del recolector de ejemplo) |
@@ -123,6 +123,14 @@ docker compose exec api python -m cirdan.auth.demo codigo jordan.tate@acme-demo.
 | `GET /api/v1/domains/txt` | Registro TXT de cada dominio (solo Admin) |
 
 Con los datos demo de Acme responden igual que los JSON de `docs/api_v1/` (lo revisa `pruebas/test_api_v1.py`). Los hallazgos de un escaneo traen guardadas las características del reto en la evidencia (#23). Para los de la semilla, que no las traen, la API las calcula con las mismas reglas del contrato. La semilla `003_titulos_espanol.sql` pone en español los títulos de los hallazgos demo.
+
+**Llaves de API para integradores (#87, RC-129)**, en `cirdan/api/llaves.py` y `cirdan/auth/api_keys.py`. El Administrador de una empresa con plan Business o Enterprise crea una llave en `POST /api/v1/api-keys`, con alcance a un dominio o a toda la empresa y vigencia de 1 a 90 días. La llave completa (`lt_...`) sale una sola vez, en esa respuesta: la base guarda solo el prefijo y su SHA-256. `GET /api/v1/api-keys` las lista con su último uso y `DELETE /api/v1/api-keys/{id}` la revoca. El integrador la manda en `Authorization: Bearer <llave>` y con ella lee los `GET` de datos de `/api/v1` con el mismo aislamiento por empresa: la empresa sale de la fila de la llave, que la función `api_key_lookup()` de la migración 016 busca por su hash, y de ahí en adelante RLS filtra como con la sesión. Una llave revocada, vencida o de una empresa sin plan con API responde 401, y la de un dominio no ve los otros dominios de su empresa (404). Las escrituras siguen pidiendo la sesión del portal. Una base que ya existe necesita la 016 antes de reconstruir la API (`db/README.md`). Detalle en `docs/contrato_api_v1.md`.
+
+```bash
+python -m unittest -v pruebas/test_llaves_api.py
+```
+
+Son 13 pruebas contra la API y la base levantadas por `docker compose`, con las cuentas de demo. Los nombres de sus llaves llevan `CIRDAN_FAKE_` y al terminar las borra.
 
 `cirdan/api/explorer.py` agrega la página `/demo` y los 2 endpoints que usa, `GET /db/tables` y `GET /db/tables/{table}/rows`. Solo existen con `DEMO_EXPLORER=true` (ver Vista visual de la base). Piden sesión y toman la empresa de la sesión, como el resto de la API. Las tablas solo las ve el rol Admin, como `GET /api/v1/domains/txt`, porque traen usuarios, bitácora y valores TXT. Ninguna ruta acepta ya `X-Organization` (RC-58).
 
