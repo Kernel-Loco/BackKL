@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_contrato_api.py
 from cirdan.recolectores import contrato  # noqa: E402
-from cirdan.score import criterio, motor  # noqa: E402
+from cirdan.score import criterio, motor, subcategorias  # noqa: E402
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
 
@@ -49,6 +49,7 @@ class Pesos(unittest.TestCase):
     def test_2_bandas_piso_y_umbral_del_criterio(self):
         self.assertEqual([(b['from'], b['to'], b['band']) for b in PESOS['bands']],
                          [(d, h, c) for d, h, c, _ in criterio.BANDAS])
+        self.assertEqual([(g['from'], g['to'], g['grade']) for g in PESOS['grades']], list(criterio.LETRAS))
         self.assertEqual(PESOS['floor']['one_critical'], criterio.PISO_UN_CRITICO)
         self.assertEqual(PESOS['floor']['two_or_more_critical'], criterio.PISO_VARIOS_CRITICOS)
         self.assertEqual(tuple(PESOS['floor']['counts_statuses']), criterio.ESTADOS_VIGENTES)
@@ -75,6 +76,23 @@ class Score(unittest.TestCase):
         for c in SCORE['categories']:
             self.assertEqual(c['weight'], PESOS['category_weights'][c['category']])
             self.assertEqual(c['band'], criterio.banda(c['score']))
+
+    def test_2b_letra_subcategorias_y_kri(self):
+        self.assertEqual(SCORE['grade'], criterio.letra(SCORE['score']))
+        self.assertEqual(SCORE['kri_map_version'], subcategorias.VERSION)
+        self.assertEqual([(s['category'], s['subcategory']) for s in SCORE['subcategories']],
+                         [(cat, clave) for clave, cat, _, _ in subcategorias.SUBCATEGORIAS])
+        for cat in SCORE['categories']:   # sin tope de 100 en el ejemplo, las subcategorías suman la nota de su categoría
+            self.assertEqual(sum(s['penalty'] for s in SCORE['subcategories'] if s['category'] == cat['category']),
+                             cat['score'], cat['category'])
+        self.assertEqual(sum(s['findings'] for s in SCORE['subcategories']),
+                         sum(1 for h in HALLAZGOS['items'] if h['status'] in criterio.ESTADOS_VIGENTES))
+        self.assertEqual([k['kri'] for k in SCORE['kris']], [k[0] for k in subcategorias.KRIS])
+        for k in SCORE['kris']:
+            self.assertIn(k['status'], subcategorias.ESTADOS_KRI)
+            if k['status'] != 'ok':   # sin cobertura o sin fuente nunca se pinta en cero
+                self.assertEqual((k['findings'], k['max_severity'], k['penalty']), (None, None, None), k['kri'])
+        self.assertEqual(next(k for k in SCORE['kris'] if k['kri'] == 'reputation')['status'], 'no_source_yet')
 
     def test_3_alerta(self):
         self.assertEqual(SCORE['alert']['triggered'], criterio.dispara_alerta(SCORE['score'], SCORE['alert']['threshold']))
@@ -174,6 +192,7 @@ class Dominios(unittest.TestCase):
     def test_1_banda_del_score(self):
         for d in DOMINIOS['items']:
             self.assertEqual(d['band'], None if d['score'] is None else criterio.banda(d['score']), d['fqdn'])
+            self.assertEqual(d['grade'], None if d['score'] is None else criterio.letra(d['score']), d['fqdn'])
 
     def test_2_solo_se_escanea_con_autorizacion_vigente_y_txt_verificado(self):
         for d in DOMINIOS['items']:
@@ -186,7 +205,7 @@ class Dominios(unittest.TestCase):
 
     def test_3_cuadra_con_score_y_hallazgos(self):
         d = next(d for d in DOMINIOS['items'] if d['fqdn'] == SCORE['domain'])
-        self.assertEqual((d['score'], d['band']), (SCORE['score'], SCORE['band']))
+        self.assertEqual((d['score'], d['band'], d['grade']), (SCORE['score'], SCORE['band'], SCORE['grade']))
         conteo = {s: 0 for s in contrato.SEVERIDADES}
         for h in HALLAZGOS['items']:
             conteo[h['severity']] += h['status'] == 'open'

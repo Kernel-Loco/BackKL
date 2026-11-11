@@ -12,6 +12,7 @@ import json
 import unittest
 from pathlib import Path
 
+from cirdan.score import criterio, subcategorias
 from pruebas import sesion
 from pruebas.test_aislamiento import psql
 
@@ -82,6 +83,55 @@ class ApiV1(unittest.TestCase):
 
     def test_3_score_igual_al_contrato(self):
         self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), ejemplo('score.json'))
+
+    def test_3b_cada_regla_de_la_base_tiene_subcategoria_y_cada_kri_apunta_a_una_que_existe(self):
+        # De base (#114, RC-232): lee las reglas de todos los juegos que hay en la base, no las semillas del repo.
+        ok, out, err = psql('SELECT DISTINCT code, category FROM scoring_rules ORDER BY 1;', user='postgres')
+        self.assertTrue(ok, err)
+        reglas = dict(linea.split('|') for linea in out.splitlines())
+        self.assertGreaterEqual(len(reglas), 30)
+        self.assertEqual(subcategorias.revisar(reglas, criterio.CATEGORIAS), [])
+        ok, out, err = psql('SELECT code FROM data_sources ORDER BY 1;', user='postgres')
+        self.assertTrue(ok, err)
+        for kri, _, _, fuentes in subcategorias.KRIS:
+            self.assertEqual([f for f in fuentes if f not in out.splitlines()], [], 'fuentes del KRI %s' % kri)
+
+    def test_3c_un_kri_con_su_fuente_caida_sale_sin_cobertura(self):
+        # La corrida de ct_logs del escaneo del score de acme-demo.mx pasa a failed y vuelve a succeeded al terminar.
+        corrida = "UPDATE scan_source_runs SET status = '%s' WHERE id = '61000000-0000-4000-8000-000000000001';"
+        antes = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+        kri = {k['kri']: k for k in antes['kris']}
+        self.assertEqual((kri['certificates']['status'], kri['certificates']['findings'],
+                          kri['certificates']['max_severity'], kri['certificates']['penalty']), ('ok', 1, 'high', 20.0))
+        ok, _, err = psql(corrida % 'failed', user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            caida = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+            kri = {k['kri']: k for k in caida['kris']}
+            for clave in ('certificates', 'impersonation'):   # los dos se alimentan de ct_logs
+                self.assertEqual((kri[clave]['status'], kri[clave]['findings'], kri[clave]['max_severity'],
+                                  kri[clave]['penalty'], kri[clave]['sources_failed']),
+                                 ('no_coverage', None, None, None, ['ct_logs']), clave)
+            self.assertEqual((kri['email']['status'], kri['email']['findings']), ('ok', 1))   # dns sí respondió
+            self.assertEqual(kri['reputation']['status'], 'no_source_yet')
+            # la letra, el score, la alerta y las subcategorías no cambian: salen del score guardado
+            for campo in ('score', 'grade', 'band', 'alert', 'subcategories', 'categories'):
+                self.assertEqual(caida[campo], antes[campo], campo)
+        finally:
+            ok, _, err = psql(corrida % 'succeeded', user='postgres')
+            self.assertTrue(ok, err)
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), antes)
+
+    def test_3d_letra_en_dominios_historico_y_pesos_y_la_alerta_sigue_con_el_score(self):
+        for d in self.get(self.acme, '/api/v1/domains')['items']:
+            self.assertEqual(d['grade'], None if d['score'] is None else criterio.letra(d['score']), d['fqdn'])
+        for p in self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')['items']:
+            self.assertEqual(p['grade'], criterio.letra(p['score']), p['score_id'])
+        pesos = self.get(self.acme, '/api/v1/scoring/weights')
+        self.assertEqual([(g['from'], g['to'], g['grade']) for g in pesos['grades']], list(criterio.LETRAS))
+        score = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')   # 60, letra D, umbral 60
+        self.assertEqual((score['grade'], score['alert']), ('D', {'threshold': 60, 'triggered': True}))
+        self.assertIsInstance(score['alert']['threshold'], int)   # el umbral es un número de 0 a 100, no una letra
 
     def test_4_explicacion_y_pesos(self):
         exp = sin_propuestos(self.get(self.acme, '/api/v1/findings/80000000-0000-4000-8000-000000000001/explanation'))

@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_criterio.py
 from cirdan.score import criterio as c  # noqa: E402
+from cirdan.score import subcategorias as sub  # noqa: E402
 
 PESOS_V1 = {'infrastructure': 0.30, 'digital_identity': 0.20, 'configuration': 0.20, 'data_leaks': 0.30}  # db/semillas/001_datos_demo.sql
 
@@ -30,6 +31,126 @@ class Bandas(unittest.TestCase):
         for malo in (-1, 101):
             with self.assertRaises(ValueError):
                 c.banda(malo)
+
+
+class Letras(unittest.TestCase):
+    """Calificación de la A a la F (#114, RC-232)."""
+
+    def test_1_cortes(self):
+        casos = {0: 'A', 19: 'A', 20: 'B', 39: 'B', 40: 'C', 59: 'C', 60: 'D', 79: 'D', 80: 'F', 100: 'F'}
+        for score, esperado in casos.items():
+            self.assertEqual(c.letra(score), esperado, score)
+
+    def test_2_cada_letra_cae_en_una_sola_banda(self):
+        bandas = {'A': 'low', 'B': 'low', 'C': 'medium', 'D': 'high', 'F': 'critical'}
+        for score in range(101):
+            self.assertEqual(bandas[c.letra(score)], c.banda(score), score)
+        self.assertEqual([l for _, _, l in c.LETRAS], ['A', 'B', 'C', 'D', 'F'])   # no hay E
+
+    def test_3_regla_de_piso(self):
+        limpio = notas(0, 0, 0, 0)
+        self.assertEqual(c.letra(c.score_dominio(limpio, PESOS_V1, criticos=0)['score']), 'A')
+        self.assertEqual(c.letra(c.score_dominio(limpio, PESOS_V1, criticos=1)['score']), 'D')   # un crítico: al menos D
+        self.assertEqual(c.letra(c.score_dominio(limpio, PESOS_V1, criticos=2)['score']), 'F')   # dos: F
+        self.assertEqual(c.letra(c.score_dominio(limpio, PESOS_V1, criticos=5)['score']), 'F')
+        # con un crítico y notas que ya dan crítico, la letra sale del score final, no del piso
+        self.assertEqual(c.letra(c.score_dominio(notas(100, 100, 100, 100), PESOS_V1, criticos=1)['score']), 'F')
+
+    def test_4_fuera_de_rango(self):
+        for malo in (-1, 101, 39.5):
+            with self.assertRaises(ValueError):
+                c.letra(malo)
+
+    def test_5_la_alerta_sigue_con_el_score_no_con_la_letra(self):
+        # 60 y 79 son D: con umbral 70 uno dispara y el otro no
+        self.assertEqual((c.letra(60), c.letra(79)), ('D', 'D'))
+        self.assertEqual((c.dispara_alerta(60, 70), c.dispara_alerta(79, 70)), (False, True))
+
+
+def aporte(code, category, severity, penalty):
+    return {'code': code, 'category': category, 'severity': severity, 'penalty': penalty}
+
+
+APORTES = [aporte('cert_expired', 'infrastructure', 'high', 20), aporte('cert_expiring_soon', 'infrastructure', 'medium', 10),
+           aporte('exposed_rdp', 'infrastructure', 'high', 25), aporte('exposed_api_docs', 'infrastructure', 'medium', 10),
+           aporte('dmarc_missing', 'configuration', 'medium', 10), aporte('lookalike_domain', 'digital_identity', 'medium', 15),
+           aporte('breach_exposure', 'data_leaks', 'critical', 40)]
+TODAS = {f: 'succeeded' for f in ('ct_logs', 'dns', 'shodan', 'api_docs', 'whois')}
+
+
+class SubcategoriasYKri(unittest.TestCase):
+    """Vista de subcategorías y KRI (#114, RC-232), sin base."""
+
+    def kri(self, kris, clave):
+        return next(k for k in kris if k['kri'] == clave)
+
+    def test_1_el_mapa_esta_bien_armado(self):
+        self.assertEqual(sub.revisar(categorias=c.CATEGORIAS), [])
+        self.assertEqual([k[1] for k in sub.KRIS],
+                         ['Certificados', 'Exposición de servicios', 'Correo', 'Suplantación', 'Reputación'])
+        self.assertIsInstance(sub.VERSION, int)
+
+    def test_2_revisar_avisa_de_un_codigo_sin_subcategoria_o_de_otra_categoria(self):
+        self.assertEqual(sub.revisar({'cert_expired': 'infrastructure', 'regla_nueva': 'data_leaks'})[0],
+                         'el código de regla regla_nueva no tiene subcategoría')
+        self.assertIn('cert_expired es de data_leaks y su subcategoría certificates es de infrastructure',
+                      sub.revisar({'cert_expired': 'data_leaks'}))
+
+    def test_3_cuenta_y_suma_por_subcategoria(self):
+        subs, _ = sub.resumen(APORTES, TODAS)
+        por = {s['subcategory']: s for s in subs}
+        self.assertEqual((por['certificates']['findings'], por['certificates']['penalty']), (2, 30.0))
+        self.assertEqual((por['exposed_secrets']['findings'], por['exposed_secrets']['penalty']), (0, 0.0))
+        self.assertEqual(sum(s['findings'] for s in subs), len(APORTES))
+        self.assertEqual([(s['category'], s['subcategory']) for s in subs], [(s[1], s[0]) for s in sub.SUBCATEGORIAS])
+
+    def test_4_un_kri_junta_subcategorias_y_una_regla_sin_kri_sigue_en_su_categoria(self):
+        subs, kris = sub.resumen(APORTES, TODAS)
+        exposicion = self.kri(kris, 'service_exposure')   # exposed_services y exposed_apis
+        self.assertEqual((exposicion['status'], exposicion['findings'], exposicion['max_severity'], exposicion['penalty']),
+                         ('ok', 2, 'high', 35.0))
+        self.assertEqual(self.kri(kris, 'certificates')['max_severity'], 'high')
+        # la brecha no está en ningún KRI: los KRI no cubren todo el score, pero sí cuenta en su subcategoría
+        self.assertLess(sum(k['findings'] for k in kris if k['findings']), len(APORTES))
+        self.assertEqual(next(s for s in subs if s['subcategory'] == 'breaches')['findings'], 1)
+        self.assertEqual(self.kri(kris, 'email')['findings'], 1)
+        self.assertEqual(self.kri(kris, 'impersonation')['penalty'], 15.0)
+
+    def test_5_fuente_caida_es_sin_cobertura_no_cero(self):
+        for estado in ('failed', 'retrying', 'running', 'pending'):
+            _, kris = sub.resumen(APORTES, dict(TODAS, ct_logs=estado))
+            for clave in ('certificates', 'impersonation'):   # los dos se alimentan de ct_logs
+                k = self.kri(kris, clave)
+                self.assertEqual((k['status'], k['findings'], k['max_severity'], k['penalty'], k['sources_failed']),
+                                 ('no_coverage', None, None, None, ['ct_logs']), (clave, estado))
+            self.assertEqual(self.kri(kris, 'email')['status'], 'ok')
+        _, kris = sub.resumen([], dict(TODAS, shodan='failed'))   # con una de sus dos fuentes caída ya no hay cobertura
+        self.assertEqual(self.kri(kris, 'service_exposure')['status'], 'no_coverage')
+
+    def test_6_fuente_que_no_corrio(self):
+        _, kris = sub.resumen([], {'shodan': 'succeeded'})
+        exposicion = self.kri(kris, 'service_exposure')   # api_docs no corrió, shodan sí: hay datos y se dice cuál faltó
+        self.assertEqual((exposicion['status'], exposicion['findings'], exposicion['max_severity'],
+                          exposicion['sources_not_run']), ('ok', 0, None, ['api_docs']))
+        correo = self.kri(kris, 'email')                  # su única fuente no corrió
+        self.assertEqual((correo['status'], correo['findings']), ('no_coverage', None))
+
+    def test_7_reputacion_sin_fuente_todavia(self):
+        for corridas in ({}, TODAS):
+            k = self.kri(sub.resumen(APORTES, corridas)[1], 'reputation')
+            self.assertEqual((k['status'], k['findings'], k['max_severity'], k['penalty'], k['sources']),
+                             ('no_source_yet', None, None, None, []))
+
+    def test_8_reglas_sin_cobertura_de_un_kri(self):
+        _, kris = sub.resumen([], TODAS, sin_cobertura=['lookalike_domain', 'cert_expired', 'outdated_software'])
+        self.assertEqual(self.kri(kris, 'impersonation')['rules_without_coverage'], ['lookalike_domain'])
+        self.assertEqual(self.kri(kris, 'certificates')['rules_without_coverage'], ['cert_expired'])
+        self.assertEqual(self.kri(kris, 'email')['rules_without_coverage'], [])
+
+    def test_9_un_aporte_de_una_regla_que_el_mapa_no_conoce_no_se_pierde(self):
+        subs, _ = sub.resumen(APORTES + [aporte('regla_nueva', 'data_leaks', 'low', 8)], TODAS)
+        self.assertEqual(subs[-1], {'category': 'data_leaks', 'subcategory': 'other', 'name': 'Sin clasificar',
+                                    'findings': 1, 'penalty': 8.0})
 
 
 class Piso(unittest.TestCase):

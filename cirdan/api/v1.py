@@ -22,7 +22,7 @@ from cirdan.auth.deps import Session, current_session, in_scope, require_roles, 
 from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import audit, transaction
-from cirdan.score import cambios, comparacion, configuracion, criterio, motor, plan as plan_accion
+from cirdan.score import cambios, comparacion, configuracion, criterio, motor, plan as plan_accion, subcategorias
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
@@ -182,6 +182,7 @@ def _domain(r):
         'txt': {'status': txt, 'checked_at': r['txt_checked_at']},
         'scan_eligibility': {'can_scan': not reasons, 'reasons': reasons},
         'score': r['score'], 'band': criterio.banda(r['score']) if r['score'] is not None else None,
+        'grade': criterio.letra(r['score']) if r['score'] is not None else None,
         'open_findings': counts, 'last_scan_at': r['last_scan_at'], 'next_scan_at': r['next_scan_at'],
     }
 
@@ -280,11 +281,25 @@ SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.category_scores, 
 '''
 
 
+SCORE_APORTES_SQL = '''
+SELECT r.code, r.category, x.severity, x.penalty
+  FROM score_contributions x JOIN scoring_rules r ON r.id = x.rule_id
+ WHERE x.score_id = %s::uuid
+'''
+
+SCORE_CORRIDAS_SQL = '''
+SELECT ds.code AS source, r.status
+  FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id
+ WHERE r.scan_id = %s::uuid
+'''
+
+
 def _score_base(row, critical_open):
     weights = {k: float(v) for k, v in row['category_weights'].items()}
     calc = criterio.score_dominio(row['category_scores'], weights, critical_open)
     return {
         'score_id': row['score_id'], 'score': row['score'], 'band': criterio.banda(row['score']),
+        'grade': criterio.letra(row['score']),
         'weighted': calc['ponderado'], 'floor': calc['piso'], 'floor_applied': row['score'] > calc['ponderado'],
         'critical_open': critical_open, 'method': row['method'], 'rule_set_version': row['rule_set_version'],
         'reason': row['reason'], 'partial_coverage': row['partial_coverage'], 'computed_at': row['computed_at'],
@@ -304,10 +319,16 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
             "SELECT count(*) AS n FROM findings WHERE domain_id = %s AND severity = 'critical' AND status = ANY(%s)",
             (domain_id, list(criterio.ESTADOS_VIGENTES))).fetchone()['n']
         threshold = conn.execute('SELECT alert_score_threshold AS t FROM organizations').fetchone()['t']
+        # Subcategorías y KRI (#114): los aportes de este score y las corridas de su escaneo, sin columnas nuevas.
+        aportes = conn.execute(SCORE_APORTES_SQL, (rows[-1]['score_id'],)).fetchall()
+        corridas = {r['source']: r['status']
+                    for r in conn.execute(SCORE_CORRIDAS_SQL, (rows[-1]['scan_id'],)).fetchall()}
     base, weights = _score_base(rows[-1], critical_open)
+    subs, kris = subcategorias.resumen(aportes, corridas, (rows[-1]['stats'] or {}).get('rules_without_coverage') or ())
     categories = [{'category': c, 'score': rows[-1]['category_scores'][c], 'band': criterio.banda(rows[-1]['category_scores'][c]),
                    'weight': weights[c]} for c in criterio.CATEGORIAS]
     return {'domain': fqdn, **base, 'categories': categories,
+            'subcategories': subs, 'kris': kris, 'kri_map_version': subcategorias.VERSION,
             'alert': {'threshold': threshold, 'triggered': criterio.dispara_alerta(base['score'], threshold)}}
 
 
@@ -638,6 +659,7 @@ def scoring_weights(session: Session = Depends(session_or_api_key)):
         'rule_set_version': rs['version'], 'is_active': True, 'activated_at': rs['activated_at'],
         'validated_by': rs['validated_by'], 'category_weights': {k: float(v) for k, v in rs['category_weights'].items()},
         'bands': [{'band': c, 'from': d, 'to': h} for d, h, c, _ in criterio.BANDAS],
+        'grades': [{'grade': g, 'from': d, 'to': h} for d, h, g in criterio.LETRAS],
         'floor': {'one_critical': criterio.PISO_UN_CRITICO, 'two_or_more_critical': criterio.PISO_VARIOS_CRITICOS,
                   'counts_statuses': list(criterio.ESTADOS_VIGENTES)},
         'alert_threshold_default': criterio.UMBRAL_ALERTA,

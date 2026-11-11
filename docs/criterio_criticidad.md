@@ -19,6 +19,20 @@ Responde al comentario 10 del socio formador en la revisión del 2 de octubre: �
 
 Las bandas están ancladas al ejemplo del reto: un dominio con 68 está en **riesgo alto**. El reto muestra ese 68 con barras de 80, 55, 40 y 90 y no publica sus pesos. Con los pesos v1 esas barras darían 70, que también es alto. El ancla es la banda, no el número exacto. Las notas de cada categoría usan las mismas bandas para su color en el portal.
 
+## Letras de la A a la F (#114)
+
+Cada score lleva además una letra, que se entiende más rápido que el número. A es menos riesgo y F es más. No hay E. La letra sale del score final, ya con la regla de piso, y nunca contradice a la banda: A y B parten el bajo a la mitad.
+
+| Letra | Score | Banda |
+|---|---|---|
+| A | 0 a 19 | Bajo |
+| B | 20 a 39 | Bajo |
+| C | 40 a 59 | Medio |
+| D | 60 a 79 | Alto |
+| F | 80 a 100 | Crítico |
+
+Por el piso, un dominio con un hallazgo crítico vigente tiene al menos D, y con dos o más tiene F. La letra es solo otra forma de leer el score: la alerta y el umbral siguen con el número de 0 a 100. Si el score tiene cobertura parcial (`partial_coverage`), la letra lleva el mismo aviso que el score. Las notas por categoría no llevan letra.
+
 ## Cómo se calcula el score de un dominio
 
 1. El motor de score (#31) calcula la nota de cada categoría con las reglas del catálogo (#30). Con `method = 'ml'` (#36), la severidad de cada hallazgo sale del clasificador con la correspondencia de la sección «Severidad de cada hallazgo», y el ponderado y el piso se aplican igual. Si el clasificador no supera a las reglas (#34), el score sigue con `method = 'rules'`.
@@ -39,6 +53,49 @@ El ponderado es un promedio. Un dominio con todas sus categorías limpias y una 
 - Hallazgos con severidad vigente `critical` (`findings.severity`).
 - Con estado `open` o `accepted_risk`. Un riesgo aceptado sigue contando en el score (#80). Los `resolved` y los `false_positive` no cuentan.
 - El piso aplica al score global del dominio. Las notas por categoría no tienen piso.
+
+## Subcategorías y KRI (#114)
+
+Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: se calculan al leer con los aportes que el score guardó en `score_contributions` y con las corridas de `scan_source_runs` de su escaneo. El mapa vive en `cirdan/score/subcategorias.py` y lleva versión (`VERSION`, hoy 1).
+
+**Subcategorías.** Cada código de regla del catálogo (#30) cae en una subcategoría de su categoría. De cada una, la API da cuántos hallazgos vigentes tiene y cuánto suman sus aportes. Las subcategorías de una categoría suman su nota, salvo que la nota haya llegado al tope de 100.
+
+| Categoría | Subcategoría | Clave | Reglas |
+|---|---|---|---|
+| Infraestructura | Certificados | `certificates` | `cert_expired`, `cert_expiring_soon` |
+| Infraestructura | Exposición de servicios | `exposed_services` | `exposed_rdp`, `exposed_remote_admin`, `exposed_file_sharing`, `exposed_database`, `exposed_ot_device`, `exposed_iot_device`, `exposed_service` |
+| Infraestructura | Documentación de APIs expuesta | `exposed_apis` | `exposed_api_docs`, `api_auth_not_declared` |
+| Infraestructura | Software vulnerable o sin soporte | `vulnerable_software` | `outdated_software`, `known_vulnerability` |
+| Infraestructura | Registro del dominio | `domain_registration` | `domain_expiring_soon` |
+| Identidad digital | Suplantación | `impersonation` | `lookalike_domain` |
+| Identidad digital | Correos expuestos | `exposed_emails` | `email_in_public_commits`, `personal_email_exposed`, `email_pattern_exposed` |
+| Configuración | Correo | `email` | `spf_missing`, `spf_allow_all`, `dmarc_missing`, `dmarc_policy_none` |
+| Configuración | Configuración de servidores | `server_configuration` | `server_version_disclosed`, `subdomain_takeover_risk` |
+| Fugas de datos | Brechas de datos | `breaches` | `breach_exposure`, `breach_exposure_old`, `breach_exposure_no_passwords` |
+| Fugas de datos | Secretos expuestos | `exposed_secrets` | `secret_in_public_repo`, `secret_in_container_image` |
+| Fugas de datos | Almacenamiento público | `public_storage` | `public_bucket` |
+
+**KRI.** Encima de las 4 categorías van 5 indicadores clave de riesgo. Cada uno junta subcategorías, aunque sean de categorías distintas, y dice qué fuentes lo alimentan. De cada KRI la API da sus hallazgos vigentes, su severidad más alta, que le da el color en el portal, y lo que suman sus aportes.
+
+| KRI | Clave | Subcategorías | Fuentes |
+|---|---|---|---|
+| Certificados | `certificates` | `certificates` | `ct_logs` |
+| Exposición de servicios | `service_exposure` | `exposed_services`, `exposed_apis` | `shodan`, `api_docs` |
+| Correo | `email` | `email` | `dns` |
+| Suplantación | `impersonation` | `impersonation` | `ct_logs` |
+| Reputación | `reputation` | Ninguna todavía | Ninguna todavía |
+
+**Los KRI no cubren todo el score.** Una regla puede quedar sin KRI y sigue contando en su categoría y en el score. Hoy quedan fuera de los KRI el software vulnerable, el registro del dominio, los correos expuestos, la configuración de servidores y toda la categoría de fugas de datos.
+
+**Un KRI sin datos nunca se pinta como sin riesgo.** Su estado (`status`) es uno de tres:
+
+- `ok`: todas sus fuentes que corrieron en el escaneo del score terminaron bien. Si alguna de sus fuentes no corrió en ese escaneo, por ejemplo `api_docs` mientras siga apagada, va en `sources_not_run`. Las reglas suyas que el escaneo dejó sin cobertura van en `rules_without_coverage`.
+- `no_coverage` (sin cobertura): alguna de sus fuentes corrió y no respondió, o ninguna corrió. Sus hallazgos, su severidad y su suma van en `null`, no en cero.
+- `no_source_yet` (sin fuente todavía): el KRI aún no tiene fuente. Así sale Reputación hasta que RC-234 esté en dev. También va en `null`.
+
+Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado.
+
+Para agregar un código de regla, ponlo en una subcategoría de su categoría y sube `VERSION`. `pruebas/test_catalogo_reglas.py` falla sin base si una regla de las semillas no tiene subcategoría, si su subcategoría es de otra categoría o si las fuentes de un KRI no son las que emiten sus reglas. `pruebas/test_api_v1.py` revisa lo mismo contra las reglas que de verdad hay en la base.
 
 ## Qué hace crítico a un hallazgo
 
@@ -85,12 +142,13 @@ La v1 usa ExtraTrees sobre 425 filas etiquetadas por un LLM, con una partición 
 | #33b a #33d Etiquetado a ciegas | Las definiciones de severidad para etiquetar alta, media y baja |
 | #34 Clasificador y #36 Integración del ML | Las clases alta, media y baja y su correspondencia con las severidades |
 | RC-17 Portal | La banda y su nombre junto al score global del dashboard, y el aviso del piso cuando aplica |
+| #114 Letras, subcategorías y KRI | `letra()` y el mapa de `cirdan/score/subcategorias.py`. El portal muestra la letra junto al score, agrupa los hallazgos por subcategoría y pone los 5 KRI encima de las 4 categorías |
 | #41 Portal | El nombre de la severidad de cada hallazgo en el panel «por qué es crítico», que la explica con SHAP (#35). La banda del dominio no va en ese panel |
 | #65 Alertas | `dispara_alerta()` |
 
 ## Código
 
-`cirdan/score/criterio.py` implementa las bandas, el piso, el ponderado y la alerta. Las pruebas están en `pruebas/test_criterio.py`:
+`cirdan/score/criterio.py` implementa las bandas, las letras, el piso, el ponderado y la alerta, y `cirdan/score/subcategorias.py` el mapa de subcategorías y KRI. Las pruebas están en `pruebas/test_criterio.py`:
 
 ```bash
 python -m unittest -v pruebas/test_criterio.py
