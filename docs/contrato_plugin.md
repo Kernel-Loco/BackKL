@@ -93,15 +93,17 @@ En cada escaneo `ct_logs` busca dominios parecidos al autorizado que ya tienen u
 
 Todas son búsquedas en crt.sh, a lo más 11 por escaneo:
 
-1. `%marca%`: los certificados cuyo nombre contiene la marca. La marca es la primera etiqueta del dominio registrable, por ejemplo `olmardo` en olmardo.com. Solo se busca si tiene 5 letras o más, porque una marca corta trae demasiado ruido.
-2. Hasta 10 variantes del dominio registrable, las de `candidatos_parecidos()`. Salen en este orden y se cortan en 10:
+1. `%marca%`: los certificados cuyo nombre contiene la marca. La marca es la primera etiqueta del dominio registrable, por ejemplo `olmardo` en olmardo.com. Solo se busca si tiene 5 letras o más, porque una marca corta trae demasiado ruido. De lo que trae solo cuenta el nombre que lleva la marca en su propio dominio registrable: `olmardo.github.io` no se reporta como `github.io`, y tampoco cuenta la marca puesta como subdominio de otro dominio.
+2. Hasta 10 variantes del dominio registrable, las de `candidatos_parecidos()`. Salen en este orden y se cortan en 10 (`MAX_CANDIDATOS`), aunque quien llame pida más:
    - el mismo nombre con los TLD `com`, `mx`, `com.mx` y `net`,
    - el nombre sin guion, si lo tiene,
    - un homoglifo por letra, en la primera vez que aparece: `o` por `0`, `l` por `1`, `i` por `l`, `m` por `rn`, `w` por `vv`, `e` por `3`, `a` por `4` y `s` por `5`,
    - el mismo nombre con los TLD `org`, `co`, `io`, `info`, `online` y `site`,
    - y, si la marca tiene 5 letras o más, una letra omitida, dos letras vecinas cambiadas de lugar y una letra repetida.
 
-Nunca se consulta como variante el dominio autorizado ni otro dominio de la misma empresa.
+Nunca se consulta como variante el dominio autorizado ni otro dominio de la misma empresa. En un escaneo, los otros dominios de la empresa son los de su organización en estado `verified` o `paused`. Uno dado de baja (`removed`) o sin verificar (`pending_verification`) no cuenta como propio: darlo de alta no esconde ni cierra un dominio parecido.
+
+Solo se buscan parecidos cuando el dominio autorizado es su propio dominio registrable. El código saca el dominio registrable con la lista corta `SUFIJOS_DOBLES` de `crtsh.py`, sin la lista pública de sufijos. Con un subdominio (`api.acme.mx`) o con un sufijo de dos niveles que no está en esa lista (`acme.com.gt`) la marca saldría mal (`com`) y las variantes serían `com.com` o `com.mx`, que no son del dominio autorizado. En ese caso no se hace ninguna de las 11 búsquedas, queda un aviso y `lookalike_domain` va en `sin_cobertura`.
 
 Para olmardo.com son estas 11: `%olmardo%`, `olmardo.mx`, `olmardo.com.mx`, `olmardo.net`, `0lmardo.com`, `o1mardo.com`, `olrnardo.com`, `olm4rdo.com`, `olmardo.org`, `olmardo.co` y `olmardo.io`.
 

@@ -48,6 +48,7 @@ SUBDOMINIOS = [
 ]
 CONTIENE_MARCA = [
     cert(20, ['acme-demo-login.com', 'www.acme-demo-login.com'], '2026-09-30T00:00:00', '2026-12-29T00:00:00'),
+    # la marca como subdominio de otro dominio: no está en su dominio registrable -> no cuenta (RC-226)
     cert(21, ['acme-demo.mx.cuenta-segura.net'], '2026-08-01T00:00:00', '2026-10-30T00:00:00'),
     # certificado compartido de una CDN: solo cuenta el nombre parecido, no los ajenos
     cert(22, ['sni.cdn-ejemplo.com', 'acme-demo-pagos.com', 'tienda-ajena.com'], '2026-09-10T00:00:00', '2026-12-09T00:00:00'),
@@ -150,14 +151,14 @@ class DominiosParecidos(unittest.TestCase):
         self.parecidos = {h.evidencia['dominio_parecido']: h for h in self.res.hallazgos if h.codigo == 'lookalike_domain'}
 
     def test_1_encuentra_los_parecidos_recientes(self):
-        self.assertEqual(sorted(self.parecidos), ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com',
-                                                  'cuenta-segura.net'])
+        self.assertEqual(sorted(self.parecidos), ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com'])
         self.assertEqual(self.parecidos['acme-dem0.mx'].evidencia['tipo_parecido'], 'error_tipografico')
-        self.assertEqual(self.parecidos['cuenta-segura.net'].evidencia['nombres'], ['acme-demo.mx.cuenta-segura.net'])
+        self.assertEqual(self.parecidos['acme-demo-login.com'].evidencia['nombres'],
+                         ['acme-demo-login.com', 'www.acme-demo-login.com'])
 
     def test_2_no_cuenta_propios_viejos_ni_ajenos_de_la_cdn(self):
         for fuera in ('acme-demo.com.mx', 'acme-demo-viejo.com', 'cdn-ejemplo.com', 'tienda-ajena.com', 'ajeno.org',
-                      'acme-demo.mx'):
+                      'acme-demo.mx', 'cuenta-segura.net'):
             self.assertNotIn(fuera, self.parecidos)
 
     def test_3_el_hallazgo_es_del_dominio_de_la_empresa(self):
@@ -209,6 +210,53 @@ class DominiosParecidos(unittest.TestCase):
         with self.assertRaises(SystemExit) as salida, contextlib.redirect_stderr(io.StringIO()):
             crtsh._main(['acme-demo.mx', '--con-parecidos', '--sin-parecidos'])
         self.assertEqual(salida.exception.code, 2)
+        ayuda = io.StringIO()  # la terminal no recibe los dominios propios: la ayuda avisa que no los excluye
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(ayuda):
+            crtsh._main(['--help'])
+        self.assertIn('no los excluye', ' '.join(ayuda.getvalue().split()))
+
+    def test_7_sin_marca_no_se_busca_ningun_parecido(self):
+        """A1 de RC-226. registrable() solo conoce SUFIJOS_DOBLES: de acme.com.gt la etiqueta saldría 'com' y se
+        consultarían com.com o com.mx, que no son variantes del dominio autorizado. Con un dominio que no es su
+        propio dominio registrable no se consulta nada de parecidos y lookalike_domain queda sin cobertura."""
+        for dominio in ('acme.com.gt', 'api.acme-demo.mx', 'tienda.acme.com.mx'):
+            t = CrtshSimulado(respuestas={
+                '%.' + dominio: [cert(50, ['www.' + dominio], '2026-09-20T00:00:00', '2026-12-19T00:00:00')]})
+            cliente = crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None)
+            res = crtsh.recolectar(dominio, cliente, AHORA, parecidos=True, max_candidatos=50)
+            self.assertEqual([consulta(u) for u in t.urls], ['%.' + dominio], dominio)  # ni %com% ni com.com
+            self.assertEqual((res.estado, res.sin_cobertura, res.omitidos), ('succeeded', ['lookalike_domain'], []),
+                             dominio)
+            self.assertEqual(res.avisos, [crtsh.SIN_MARCA % dominio], dominio)
+            self.assertNotIn('lookalike_domain', {h.codigo for h in res.hallazgos}, dominio)
+            self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [], dominio)
+            self.assertEqual(crtsh.candidatos_parecidos(dominio), [], dominio)
+            self.assertIsNone(crtsh._marca(dominio), dominio)
+        self.assertEqual(crtsh.candidatos_parecidos('com.mx'), [])  # un sufijo solo tampoco tiene marca
+        self.assertEqual((crtsh._marca('acme.com.mx'), crtsh._marca('acme-demo.mx')), ('acme', 'acme-demo'))
+        self.assertEqual(crtsh.candidatos_parecidos('acme.com.mx')[:3], ['acme.com', 'acme.mx', 'acme.net'])
+
+    def test_8_la_marca_tiene_que_estar_en_el_dominio_registrable(self):
+        """A2 de RC-226: acme-demo.github.io traído por %acme-demo% no es un parecido de github.io."""
+        vigente = ('2026-09-10T00:00:00', '2026-12-09T00:00:00')
+        marca = [cert(60, ['acme-demo.github.io'], *vigente), cert(61, ['acme-demo.mx.cuenta-segura.net'], *vigente),
+                 cert(62, ['www.acme-demo-login.com'], *vigente), cert(63, ['miacme-demo.com.mx'], *vigente)]
+        t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': marca})
+        res = recolectar(t, parecidos=True)
+        self.assertEqual(res.sin_cobertura, [])
+        self.assertEqual(sorted(h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'),
+                         ['acme-demo-login.com', 'miacme-demo.com.mx'])
+
+    def test_9_nunca_mas_de_diez_variantes(self):
+        """A3 de RC-226: el tope de 10 es fijo, aunque quien llame pida más. Es lo que cuenta MAX_CONSULTAS."""
+        diez = crtsh.candidatos_parecidos('acme-demo.mx')
+        self.assertEqual(crtsh.candidatos_parecidos('acme-demo.mx', 50), diez)
+        self.assertEqual(crtsh.candidatos_parecidos('acme-demo.mx', 3), diez[:3])
+        self.assertEqual(crtsh.candidatos_parecidos('acme-demo.mx', -1), [])
+        t = CrtshSimulado()
+        res = recolectar(t, parecidos=True, max_candidatos=50)
+        self.assertEqual([consulta(u) for u in t.urls][2:], [v for v in diez if v != 'acme-demo.com.mx'])
+        self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
 
 
 class FallasYGrabacion(unittest.TestCase):
@@ -253,6 +301,29 @@ class FallasYGrabacion(unittest.TestCase):
         variantes = [u for u in t.urls if 'q=%25' not in u]
         self.assertEqual(len(variantes), crtsh.FALLAS_SEGUIDAS * 2)  # 2 intentos por variante
         self.assertIn('crt.sh saturado', res.avisos[-1])
+
+    def test_4c_las_variantes_sin_respuesta_van_en_omitidos_tambien_las_del_corte(self):
+        """B4 de RC-226. Si %marca% responde y las variantes no, hay cobertura y van en omitidos las huellas de las 3
+        que fallaron y de las que se dejaron de probar por el corte: el orquestador no cierra su parecido."""
+        class SinVariantes(CrtshSimulado):
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
+                if q and not q[0].startswith('%'):
+                    self.urls.append(url)
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        t = SinVariantes()
+        res = recolectar(t, parecidos=True)
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        probadas = [consulta(u) for u in t.urls if 'q=%25' not in u]
+        self.assertEqual(probadas, [v for v in variantes[:crtsh.FALLAS_SEGUIDAS]
+                                    for _ in range(crtsh.INTENTOS_PARECIDOS)])
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', []))
+        self.assertEqual(sorted(res.omitidos),
+                         sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in variantes))
+        self.assertEqual(sorted(h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'),
+                         ['acme-demo-login.com', 'acme-demo-pagos.com'])  # lo de %marca% sí se reporta
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_4b_grabar_y_reproducir_sin_red(self):
         with tempfile.TemporaryDirectory() as d:
@@ -303,6 +374,23 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertTrue(res.avisos)
         self.assertTrue(all(a.startswith(crtsh.SIN_GRABACION) for a in res.avisos))
         self.assertEqual(crtsh.codigo_salida(res), 2)
+
+    def test_8b_una_variante_sin_grabar_va_en_omitidos_si_otra_busqueda_respondio(self):
+        """B4 de RC-226. Al reproducir, la variante que falta en la grabación no cuenta como saturación ni quita la
+        cobertura si %marca% está grabada: su huella va en omitidos y lo demás se reporta."""
+        with tempfile.TemporaryDirectory() as d:
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=CrtshSimulado(), dormir=lambda s: None)
+            vivo = crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            (Path(d) / 'acme-dem0.mx.json').unlink()
+            res = crtsh.recolectar('acme-demo.mx', crtsh.ClienteCrtsh(modo='reproducir', carpeta=d), AHORA,
+                                   propios=['acme-demo.com.mx'], parecidos=True)
+        del_0 = next(h.huella for h in vivo.hallazgos if h.clave == 'acme-dem0.mx')
+        self.assertEqual((res.estado, res.sin_cobertura, res.omitidos), ('succeeded', [], [del_0]))
+        self.assertEqual([a for a in res.avisos if a.startswith(crtsh.SIN_GRABACION)], res.avisos)
+        self.assertEqual(len(res.avisos), 1)
+        self.assertEqual(sorted(h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'),
+                         ['acme-demo-login.com', 'acme-demo-pagos.com'])
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_9_completar_vuelve_a_consultar_lo_de_grabaciones_anteriores(self):
         inicio = datetime(2026, 10, 15, 18, 0, tzinfo=timezone.utc)

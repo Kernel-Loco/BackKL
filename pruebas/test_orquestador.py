@@ -815,13 +815,13 @@ class Orquestador(unittest.TestCase):
         self.assertEqual([n for n in t.dns if not n.endswith('acme-demo.mx')], [])  # ni su DNS
         self.assertNotIn('rules_without_coverage', resumen['stats'])
         self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 7)  # el vencido, el que vence pronto y 5 parecidos
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 6)  # el vencido, el que vence pronto y 4 parecidos
         parecidos = self.conn.execute(
             "SELECT f.evidence->>'dominio_parecido' AS d, a.value AS activo FROM findings f "
             "JOIN scoring_rules r ON r.id = f.rule_id JOIN assets a ON a.id = f.asset_id "
             "WHERE f.last_scan_id = %s AND r.code = 'lookalike_domain' AND f.status = 'open' ORDER BY 1",
             (s.scan_id,)).fetchall()
-        esperados = ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com', 'acme-demo.com.mx', 'cuenta-segura.net']
+        esperados = ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com', 'acme-demo.com.mx']
         self.assertEqual(sorted((p['d'], p['activo']) for p in parecidos), [(p, 'acme-demo.mx') for p in esperados])
         # el dominio parecido solo va en la evidencia: nunca entra a assets
         self.assertIsNone(self.uno('SELECT 1 FROM assets WHERE value = ANY(%s)', esperados))
@@ -846,14 +846,79 @@ class Orquestador(unittest.TestCase):
         def abiertos():
             return self.uno("SELECT count(*) AS n FROM findings f JOIN scoring_rules r ON r.id = f.rule_id "
                             "WHERE r.code = 'lookalike_domain' AND f.status = 'open' AND f.evidence->>'origen' = 'crtsh'")['n']
+        self.exige_cupo('ct_logs', 2 * crtsh.MAX_CONSULTAS)  # dos escaneos en vivo, cada uno reserva su máximo
         antes = abiertos()
         escanear(CrtshSimulado())
-        self.assertEqual(abiertos(), antes + 5)
+        self.assertEqual(abiertos(), antes + 4)
         resumen = escanear(SinParecidos())
         self.assertEqual(resumen['status'], 'partial')
         self.assertEqual(resumen['stats']['rules_without_coverage'], ['lookalike_domain'])
         self.assertEqual(resumen['sources'][0]['hallazgos'], 2)
-        self.assertEqual(abiertos(), antes + 5)  # nunca '0 parecidos': siguen abiertos
+        self.assertEqual(abiertos(), antes + 4)  # nunca '0 parecidos': siguen abiertos
+
+    def escanear_ct(self, t):
+        """Un escaneo en vivo de acme-demo.mx solo con ct_logs y un crt.sh simulado: nada sale a la red."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+            return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
+                                         conn=self.conn)
+
+    def test_3c3_una_variante_sin_respuesta_mantiene_abierto_su_parecido(self):
+        """B4 de RC-226, con base. Si %marca% responde y la variante acme-dem0.mx no, su huella va en omitidos: el
+        escaneo no queda parcial por eso y el parecido que abrió un escaneo anterior sigue abierto. Cuando crt.sh
+        vuelve a responder y ya no tiene certificados de esa variante, se cierra."""
+        class SinLaVariante(CrtshSimulado):
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
+                if q and q[0] == 'acme-dem0.mx':
+                    raise crtsh.urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        huella = bytes.fromhex(crtsh._huella('lookalike_domain', 'acme-demo.mx', 'acme-dem0.mx'))
+
+        def estado():
+            return [f['status'] for f in self.conn.execute(
+                'SELECT status FROM findings WHERE fingerprint = %s', (huella,)).fetchall()]
+        self.exige_cupo('ct_logs', 3 * crtsh.MAX_CONSULTAS)
+        self.assertEqual(estado(), [])
+        self.escanear_ct(CrtshSimulado())
+        self.assertEqual(estado(), ['open'])
+        _, resumen = self.escanear_ct(SinLaVariante())
+        self.assertNotIn('rules_without_coverage', resumen['stats'])
+        self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 5)  # los 6 de siempre menos el de la variante
+        self.assertEqual(estado(), ['open'])  # no saber si sigue ahí no es que ya no esté
+        sin_certificado = CrtshSimulado()
+        del sin_certificado.respuestas['acme-dem0.mx']
+        self.escanear_ct(sin_certificado)
+        self.assertEqual(estado(), ['resolved'])  # crt.sh respondió y ya no lo trae: ahora sí se cierra
+
+    def test_3c4_solo_los_dominios_vigentes_de_la_organizacion_cuentan_como_propios(self):
+        """B1 de RC-226. Un dominio dado de baja o sin verificar no es propio: su parecido se sigue reportando y no
+        deja de consultarse como variante. Uno verificado o en pausa sí lo es."""
+        for fqdn, estado in (('acme-dem0.mx', 'removed'), ('acme-demo-login.com', 'pending_verification'),
+                             ('acme-demo-pagos.com', 'paused')):
+            self.conn.execute('INSERT INTO domains (organization_id, fqdn, status, txt_token) VALUES (%s, %s, %s, %s)',
+                              (ACME, fqdn, estado, 'rc226-' + estado))
+        vistos = []
+        real = orquestador.ejecutar
+
+        def ejecutar(*a, **k):
+            vistos.append(sorted(k.get('propios') or ()))
+            return real(*a, **k)
+        self.exige_cupo('ct_logs', crtsh.MAX_CONSULTAS)
+        t = CrtshSimulado()
+        with mock.patch.object(orquestador, 'ejecutar', ejecutar):
+            s, _ = self.escanear_ct(t)
+        self.assertEqual(vistos, [['acme-demo-pagos.com', 'acme-portal.mx', 'acme-tienda.mx']])
+        consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
+        self.assertIn('acme-dem0.mx', consultas)  # el dado de baja se sigue consultando como variante
+        parecidos = [f['d'] for f in self.conn.execute(
+            "SELECT f.evidence->>'dominio_parecido' AS d FROM findings f JOIN scoring_rules r ON r.id = f.rule_id "
+            "WHERE f.last_scan_id = %s AND r.code = 'lookalike_domain' AND f.status = 'open' ORDER BY 1",
+            (s.scan_id,)).fetchall()]
+        self.assertEqual(parecidos, ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo.com.mx'])
 
     def test_3d_en_vivo_la_fuente_que_falla_se_reintenta_en_el_mismo_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))

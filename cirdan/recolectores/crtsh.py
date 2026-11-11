@@ -14,7 +14,9 @@ parecido ni se le hace ninguna petición, y Cert Spotter no los busca. El orques
 escaneo, porque contrato.ejecutar() pasa EN_ESCANEO, y la terminal también, salvo con --sin-parecidos.
 recolectar() la deja apagada por defecto para quien lo llame directo. Si no se buscan, o si ninguna búsqueda
 responde, lookalike_domain queda en sin_cobertura: cobertura parcial, nunca 0 parecidos. --con-parecidos se sigue
-aceptando y hace lo mismo que no ponerlo.
+aceptando y hace lo mismo que no ponerlo. Tampoco se buscan, con un aviso, si el dominio no es su propio dominio
+registrable (_marca). La terminal no recibe los otros dominios de la empresa y no los excluye: uno propio puede salir
+como parecido. En un escaneo el orquestador sí pasa los dominios verificados o en pausa de la organización.
 
 Modos: 'vivo' consulta crt.sh; 'grabar' además guarda cada respuesta en
 cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/; 'reproducir' solo lee esas respuestas, sin red
@@ -134,6 +136,8 @@ DANADA = ('La grabación tiene %s (%s). Se muestra lo que sí se pudo leer, pued
 DNS_DANADO = object()        # lo que da el DNS de un nombre cuyo dns_ grabado está dañado: su vencido no se reporta
 MAX_DANADOS = 5              # archivos dañados que nombra el aviso. De los demás dice cuántos son
 SIN_LEER = 'No se pudo leer ningún certificado de la grabación de este dominio'
+SIN_MARCA = ('No se buscaron dominios parecidos de %s: solo se buscan cuando el dominio autorizado es su propio '
+             'dominio registrable, con un sufijo que Cirdan conoce')
 POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsqueda por nombre y pueden faltar '
                      'subdominios')
 
@@ -347,6 +351,16 @@ def registrable(nombre):
     return '.'.join(partes[-2:])
 
 
+def _marca(dominio):
+    """La etiqueta que se busca como marca, o None si no se puede saber cuál es. registrable() solo conoce
+    SUFIJOS_DOBLES: de acme.com.gt saca com.gt, con la etiqueta 'com', y sus variantes (com.com, com.mx) no se parecen
+    al dominio autorizado. Por eso solo hay marca cuando el dominio autorizado es su propio dominio registrable.
+    Tampoco la hay en un subdominio (api.acme.mx) ni en un sufijo solo (com.mx)."""
+    if dominio in SUFIJOS_DOBLES or '.' not in dominio or registrable(dominio) != dominio:
+        return None
+    return dominio.split('.', 1)[0]
+
+
 def _nombres(cert):
     """Nombres válidos del certificado, sin repetir, en minúsculas y con la marca de comodín aparte."""
     nombres = {}
@@ -424,9 +438,13 @@ def _unir(certs, otros, dominio):
 
 def candidatos_parecidos(dominio, maximo=MAX_CANDIDATOS):
     """Variantes de un dominio, en orden de probabilidad: TLD más comunes, sin guion, homoglifos, otros TLD,
-    letras omitidas, letras cambiadas de lugar y letras repetidas. Nunca incluye el dominio original."""
-    base = registrable(dominio)
-    etiqueta, sufijo = base.split('.', 1)
+    letras omitidas, letras cambiadas de lugar y letras repetidas. Nunca incluye el dominio original ni da más de
+    MAX_CANDIDATOS, aunque `maximo` pida más: es el tope de la política de uso ético y el que cuenta MAX_CONSULTAS.
+    Sin marca (_marca) no hay variantes: de acme.com.gt saldrían com.com o com.mx, que no se le parecen."""
+    etiqueta = _marca(dominio)
+    if etiqueta is None:
+        return []
+    base, sufijo = dominio, dominio.split('.', 1)[1]
     vistos, salida = {base}, []
 
     def agregar(nombre):
@@ -450,7 +468,7 @@ def candidatos_parecidos(dominio, maximo=MAX_CANDIDATOS):
             agregar('%s.%s' % (etiqueta[:i] + etiqueta[i + 1] + etiqueta[i] + etiqueta[i + 2:], sufijo))
         for i in range(len(etiqueta)):
             agregar('%s.%s' % (etiqueta[:i + 1] + etiqueta[i] + etiqueta[i + 1:], sufijo))
-    return salida[:maximo]
+    return salida[:max(0, min(maximo, MAX_CANDIDATOS))]
 
 
 # ---------------------------------------------------------------- análisis
@@ -576,6 +594,9 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
     `parecidos` consulta en crt.sh %marca% y las variantes de candidatos_parecidos(), que pueden ser de terceros, y
     solo ahí: nunca resuelve su DNS ni les hace peticiones. Aquí va apagado por defecto. Lo prenden los escaneos
     (EN_ESCANEO) y la terminal. Sin esa búsqueda, o si ninguna responde, lookalike_domain queda en sin_cobertura.
+    Tampoco se busca nada, y queda igual con un aviso, si el dominio no es su propio dominio registrable (un
+    subdominio, o un sufijo de dos niveles que no está en SUFIJOS_DOBLES, como acme.com.gt): sus variantes serían de
+    otra marca (_marca). De lo que trae %marca% solo cuenta el nombre con la marca en su dominio registrable.
     `propios` son los otros dominios de la misma empresa, que nunca cuentan como parecidos.
     """
     dominio = dominio.strip().lower().rstrip('.')
@@ -673,15 +694,19 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
     # Dominios parecidos (#109, RC-226): solo se buscan en crt.sh. Nunca se resuelve su DNS ni se les pide nada.
     respondidas = 0        # búsquedas de parecidos que sí respondieron
     sin_marca = False      # %marca% no respondió: no se sabe qué parecidos por contenido hay
-    if parecidos and not respaldo:  # con crt.sh caído no se buscan: lookalike_domain queda en sin_cobertura
+    etiqueta = _marca(dominio) if parecidos and not respaldo else None
+    if parecidos and not respaldo and etiqueta is None:  # ninguna consulta: no hay de qué buscar parecidos
+        res.avisos.append(SIN_MARCA % dominio)
+    if etiqueta is not None:  # con crt.sh caído no se buscan: lookalike_domain queda en sin_cobertura
         propios_set = {registrable(dominio)} | {registrable(p.lower()) for p in propios} | {p.lower() for p in propios}
-        etiqueta = registrable(dominio).split('.', 1)[0]
         por_tipo, sin_respuesta = [], []
         if len(etiqueta) >= 5:  # con etiquetas cortas la búsqueda por contenido trae demasiado ruido
+            # Solo cuenta el nombre con la marca en su dominio registrable: olmardo.github.io no es un parecido de
+            # github.io. Tampoco cuenta la marca puesta como subdominio de otro dominio (acme.mx.otro.net).
             try:
                 por_tipo.append(('contiene_marca',
                                  _con_fechas(cliente.consultar('%' + etiqueta + '%', intentos=INTENTOS_PARECIDOS)),
-                                 lambda n, e=etiqueta: e in n))
+                                 lambda n, e=etiqueta: e in registrable(n)))
                 respondidas += 1
             except CrtshNoResponde as e:
                 res.avisos.append(str(e))
@@ -834,7 +859,10 @@ def _main(argv=None):
     # En Windows, cuando la salida no es la consola (Git Bash, una tubería), Python usa cp1252 y los acentos se rompen.
     if (getattr(sys.stdout, 'encoding', '') or '').lower().replace('-', '') != 'utf8' and hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
-    p = argparse.ArgumentParser(description='Subdominios, certificados y dominios parecidos desde crt.sh')
+    p = argparse.ArgumentParser(
+        description='Subdominios, certificados y dominios parecidos desde crt.sh',
+        epilog='La terminal no sabe qué otros dominios son de la empresa y no los excluye: uno propio, como la versión '
+               '.mx del mismo nombre, puede salir como dominio parecido. En un escaneo el orquestador sí los excluye.')
     p.add_argument('dominio')
     p.add_argument('--grabar', action='store_true',
                    help='empieza una grabación nueva en cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/')
