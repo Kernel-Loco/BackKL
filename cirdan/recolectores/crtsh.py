@@ -12,8 +12,9 @@ de candidatos_parecidos(), que pueden ser de terceros. ErnestoDL aprobó esa lis
 docs/contrato_plugin.md. Solo se buscan en los registros de certificados: nunca se resuelve el DNS de un dominio
 parecido ni se le hace ninguna petición, y Cert Spotter no los busca. El orquestador (#22) la pide en cada
 escaneo, porque contrato.ejecutar() pasa EN_ESCANEO, y la terminal también, salvo con --sin-parecidos.
-recolectar() la deja apagada por defecto para quien lo llame directo. Si no se buscan, o si ninguna búsqueda
-responde, lookalike_domain queda en sin_cobertura: cobertura parcial, nunca 0 parecidos. --con-parecidos se sigue
+recolectar() la deja apagada por defecto para quien lo llame directo. Si no se buscan, si ninguna búsqueda responde
+o si no responde la de %marca%, lookalike_domain queda en sin_cobertura: cobertura parcial, nunca 0 parecidos. Si
+crt.sh no responde a %marca%, las variantes no se consultan, con un aviso (SIN_VARIANTES). --con-parecidos se sigue
 aceptando y hace lo mismo que no ponerlo. Tampoco se buscan, con un aviso, si el dominio no es su propio dominio
 registrable o es un nombre de un hosting de HOSTINGS (_marca). La terminal no recibe los otros dominios de la empresa y no los excluye: uno propio puede salir
 como parecido. En un escaneo el orquestador sí pasa los dominios verificados o en pausa de la organización.
@@ -152,6 +153,8 @@ MAX_DANADOS = 5              # archivos dañados que nombra el aviso. De los dem
 SIN_LEER = 'No se pudo leer ningún certificado de la grabación de este dominio'
 SIN_MARCA = ('No se buscaron dominios parecidos de %s: solo se buscan cuando el dominio autorizado es su propio '
              'dominio registrable, con un sufijo que Cirdan conoce y fuera de un hosting compartido')
+SIN_VARIANTES = ('Sin la respuesta de %%%s%% no se consultaron las %s de %s: los dominios parecidos quedan sin '
+                 'revisar en esta corrida')
 POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsqueda por nombre y pueden faltar '
                      'subdominios')
 
@@ -388,9 +391,16 @@ def _lleva_marca(nombre, etiqueta, dominio):
     que se reporta como cuenta-segura.net). El dominio autorizado tiene que quedar completo a la izquierda del dominio
     registrable del nombre: olmardo.com.kg, con un sufijo que no está en SUFIJOS_DOBLES, no sale como com.kg. La marca
     sola como subdominio de otro dominio (acme-demo.sharepoint.com) no cuenta: culparía a un dominio ajeno por un
-    nombre que cualquiera puede elegir."""
+    nombre que cualquiera puede elegir.
+    También cuenta el dominio autorizado completo pegado con un guion al dominio registrable del nombre (H1 de la
+    ronda 3): acme-demo.mx-login.com se reporta como mx-login.com y acme-demo.com.mx-seguro.net como mx-seguro.net.
+    El guion tiene que estar en la primera etiqueta del dominio registrable: acme-demo.mx-login.com.kg, con un sufijo
+    desconocido, o acme-demo.mx-login.otro.org no cuentan, para no culpar a un sufijo ni a un proveedor."""
     reg = registrable(nombre)
-    return etiqueta in reg.split('.', 1)[0] or '.%s.' % dominio in '.' + nombre[:len(nombre) - len(reg)]
+    izquierda, primera = '.' + nombre[:len(nombre) - len(reg)], reg.split('.', 1)[0]
+    cabeza, _, cola = dominio.rpartition('.')
+    return (etiqueta in primera or '.%s.' % dominio in izquierda
+            or (primera.startswith(cola + '-') and izquierda.endswith('.%s.' % cabeza)))
 
 
 def _nombres(cert):
@@ -625,11 +635,13 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
 
     `parecidos` consulta en crt.sh %marca% y las variantes de candidatos_parecidos(), que pueden ser de terceros, y
     solo ahí: nunca resuelve su DNS ni les hace peticiones. Aquí va apagado por defecto. Lo prenden los escaneos
-    (EN_ESCANEO) y la terminal. Sin esa búsqueda, o si ninguna responde, lookalike_domain queda en sin_cobertura.
+    (EN_ESCANEO) y la terminal. Sin esa búsqueda, si ninguna responde o si no responde la de %marca% (ahí las
+    variantes ya no se consultan, salvo al reproducir una grabación a la que le falta), lookalike_domain queda en
+    sin_cobertura.
     Tampoco se busca nada, y queda igual con un aviso, si el dominio no es su propio dominio registrable (un
     subdominio, o un sufijo de dos niveles que no está en SUFIJOS_DOBLES, como acme.com.kg): sus variantes serían de
     otra marca (_marca). De lo que trae %marca% solo cuenta el nombre con la marca en su dominio registrable o con el
-    dominio autorizado completo dentro de un dominio ajeno (_lleva_marca).
+    dominio autorizado completo dentro de un dominio ajeno o pegado a él con un guion (_lleva_marca).
     `propios` son los otros dominios de la misma empresa, que nunca cuentan como parecidos.
     """
     dominio = dominio.strip().lower().rstrip('.')
@@ -727,6 +739,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
     # Dominios parecidos (#109, RC-226): solo se buscan en crt.sh. Nunca se resuelve su DNS ni se les pide nada.
     respondidas = 0        # búsquedas de parecidos que sí respondieron
     sin_marca = False      # %marca% no respondió: no se sabe qué parecidos por contenido hay
+    sin_variantes = False  # y no fue por faltar en la grabación: las variantes no se consultan
     etiqueta = _marca(dominio) if parecidos and not respaldo else None
     if parecidos and not respaldo and etiqueta is None:  # ninguna consulta: no hay de qué buscar parecidos
         res.avisos.append(SIN_MARCA % dominio)
@@ -741,10 +754,18 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                                  _con_fechas(cliente.consultar('%' + etiqueta + '%', intentos=INTENTOS_PARECIDOS)),
                                  lambda n, e=etiqueta: _lleva_marca(n, e, dominio)))
                 respondidas += 1
+            except SinGrabacion as e:  # falta en la grabación: las variantes se leen igual, sin red, y el aviso
+                res.avisos.append(str(e))  # de cada faltante dice qué completar con --grabar --completar
+                sin_marca = True
             except CrtshNoResponde as e:
                 res.avisos.append(str(e))
-                sin_marca = True
+                sin_marca = sin_variantes = True
         candidatos = [c for c in candidatos_parecidos(dominio, max_candidatos) if c not in propios_set]
+        if sin_variantes:
+            # Sin %marca% el código queda sin cobertura y no puede traer hallazgos (contrato.validar): consultar las
+            # variantes gastaría hasta 20 consultas del cupo, sobre nombres de terceros, para tirar sus respuestas.
+            res.avisos.append(SIN_VARIANTES % (etiqueta, _cuantos(len(candidatos), 'variante', 'variantes'), dominio))
+            candidatos = []
         seguidas = 0
         for i, candidato in enumerate(candidatos):
             if seguidas >= FALLAS_SEGUIDAS:

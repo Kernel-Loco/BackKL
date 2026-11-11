@@ -573,8 +573,12 @@ class Ejecutar(unittest.TestCase):
         self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']))
         self.assertEqual(self.parecidos(res), [])
         self.assertEqual({h.codigo for h in res.hallazgos}, {'cert_expired', 'cert_expiring_soon'})  # lo demás sigue
-        self.assertIn('crt.sh saturado', res.avisos[-1])  # tras 3 variantes seguidas sin respuesta deja las demás
-        self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
+        # H3 de la ronda 3: sin %marca% no se consulta ninguna variante. Solo salen sus 2 intentos, no 6 más.
+        self.assertEqual([crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls],
+                         ['%.acme-demo.mx'] + ['%acme-demo%'] * crtsh.INTENTOS_PARECIDOS)
+        self.assertEqual(res.avisos[-1], crtsh.SIN_VARIANTES % ('acme-demo', '9 variantes', 'acme-demo.mx'))
+        self.assertIn('crt.sh no respondió a %acme-demo%', res.avisos[-2])
+        self.assertEqual((res.consultas, res.omitidos), (1 + crtsh.INTENTOS_PARECIDOS + 1, []))  # y 1 de Cert Spotter
         self.assertIn('Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).', crtsh.resumen(res))
 
         caido = self.escanear(RespaldoSimulado())  # crt.sh caído del todo: respaldo de Cert Spotter, sin parecidos
@@ -606,10 +610,17 @@ class Ejecutar(unittest.TestCase):
         self.assertIn(del_0, res.omitidos)
         self.assertEqual(sum('no respondió a acme-' in a for a in res.avisos), 2)
 
-        sin_marca = self.escanear(Sin({'%acme-demo%'}))
+        t = Sin({'%acme-demo%'})
+        sin_marca = self.escanear(t)
         self.assertEqual((sin_marca.estado, sin_marca.sin_cobertura, sin_marca.omitidos),
                          ('succeeded', ['lookalike_domain'], []))
-        self.assertEqual(self.parecidos(sin_marca), [])  # acme-dem0.mx sí respondió, pero el código no tiene cobertura
+        self.assertEqual(self.parecidos(sin_marca), [])
+        # H3 de la ronda 3: acme-dem0.mx habría respondido, pero sin %marca% el código no tiene cobertura y su
+        # respuesta se tiraría: ya no se consulta ninguna variante, y el aviso lo dice. Sin no anota las que tumba.
+        self.assertEqual([crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls],
+                         ['%.acme-demo.mx'])
+        self.assertEqual(sin_marca.avisos[-1], crtsh.SIN_VARIANTES % ('acme-demo', '9 variantes', 'acme-demo.mx'))
+        self.assertEqual(contrato.validar(sin_marca, codigos=set(crtsh.CODIGOS)), [])
 
     def test_16d_al_reproducir_una_grabacion_sin_parecidos_quedan_sin_cobertura(self):
         """Una grabación de antes de #109 no trae %marca% ni las variantes: al reproducir es cobertura parcial con el
@@ -624,6 +635,7 @@ class Ejecutar(unittest.TestCase):
                 res = contrato.ejecutar(cargar('ct_logs'), 'acme-demo.mx', modo='reproducir', ahora=AHORA,
                                         codigos=set(crtsh.CODIGOS))
         self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', ['lookalike_domain'], 0))
+        # Lo que falta en una grabación no gasta consultas: se nombran los 11 faltantes para --completar (H3 no aplica)
         self.assertEqual(sum(a.startswith(contrato.SIN_GRABACION) for a in res.avisos), 1 + crtsh.MAX_CANDIDATOS)
 
     def test_16e_las_opciones_del_escaneo_las_declara_el_recolector(self):
