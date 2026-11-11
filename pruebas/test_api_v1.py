@@ -446,7 +446,16 @@ class ApiV1(unittest.TestCase):
         self.addCleanup(self.psql_o_falla, borrar, 'quedó un escaneo en curso de beta-corp.mx')
         estado, cuerpo = self.beta.get('/api/v1/domains/beta-corp.mx/export/siem')[:2]
         self.assertEqual(estado, 409, cuerpo)
-        self.psql_o_falla(borrar, 'quedó un escaneo en curso de beta-corp.mx')
+        # Sin marca de vida en 30 minutos (la API se reinició a mitad), la exportación lo da por caído, como GET /scans.
+        ok, _, err = psql("UPDATE scans SET updated_at = now() - interval '31 minutes' WHERE id = %s;" % escaneo,
+                          user='postgres')
+        self.assertTrue(ok, err)
+        with self.beta.opener.open(url, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+        ok, salida, err = psql('SELECT status FROM scans WHERE id = %s;' % escaneo, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(salida.strip(), 'failed')
+        self.psql_o_falla(borrar, 'quedó un escaneo de prueba de beta-corp.mx')
         with self.beta.opener.open(url, timeout=10) as r:
             self.assertEqual(r.status, 200)
         # Acme tiene el plan starter, sin API ni SIEM. Un dominio de otra empresa responde 404 y sin sesión, 401.

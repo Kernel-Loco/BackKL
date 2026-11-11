@@ -595,8 +595,13 @@ def export_action_plan(fqdn: str, formato: str = Query(default='json'),
 # de tipo email no sale de la base.
 
 SIEM_FINDINGS_SQL = '''
-WITH ultimos AS (SELECT ds.id FROM domain_scores ds JOIN domains dd ON dd.id = ds.domain_id
-                  WHERE dd.fqdn = %(fqdn)s AND ds.reason = 'scan' ORDER BY ds.computed_at DESC, ds.id LIMIT 2)
+WITH ultimos AS (SELECT ds.id, ds.computed_at FROM domain_scores ds JOIN domains dd ON dd.id = ds.domain_id
+                  WHERE dd.fqdn = %(fqdn)s AND ds.reason = 'scan' ORDER BY ds.computed_at DESC, ds.id LIMIT 2),
+     caidos AS (SELECT r.source_id FROM scans cs JOIN domains dd ON dd.id = cs.domain_id
+                  JOIN scan_source_runs r ON r.scan_id = cs.id AND r.status = 'succeeded'
+                 WHERE dd.fqdn = %(fqdn)s AND cs.finished_at IS NOT NULL
+                   AND cs.queued_at > (SELECT min(u.computed_at) FROM ultimos u)
+                   AND NOT EXISTS (SELECT 1 FROM domain_scores x WHERE x.scan_id = cs.id))
 SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
        coalesce(sc_score.severity, f.severity) AS severity, f.status, cv.cve_id, c.cvss_base_score AS cvss,
        CASE WHEN a.asset_type = 'email' THEN NULL ELSE a.value END AS asset, a.asset_type,
@@ -606,6 +611,7 @@ SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
        sc.finished_at AS scan_finished_at,
        CASE WHEN (SELECT count(*) FROM score_contributions x
                    WHERE x.finding_id = f.id AND x.score_id IN (SELECT u.id FROM ultimos u)) = 2
+                 AND f.source_id NOT IN (SELECT k.source_id FROM caidos k)
             THEN 'recurring' ELSE 'new' END AS recurrence
   FROM findings f
   JOIN domains d       ON d.id = f.domain_id
@@ -629,9 +635,15 @@ SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
 '''
 # recurrence: cada score de escaneo guarda en score_contributions un aporte por hallazgo vigente (open o accepted_risk),
 # así que un hallazgo que está en los dos últimos scores de escaneo del dominio ya venía de antes ('recurring') y
-# cualquier otro es 'new': uno que apareció o se reabrió en el último escaneo, o después de su score (un escaneo que
-# dieron por caído no guarda score). No usa detected_at, que no cambia al reabrir, ni last_scan_id, que no avanza si
-# la fuente del hallazgo falla. Los scores con otro motivo (correction, intel_update, rules_change) no cuentan.
+# cualquier otro es 'new': uno que apareció o se reabrió en el último escaneo, o después de su score. No usa
+# detected_at, que no cambia al reabrir, ni last_scan_id, que no avanza si la fuente del hallazgo falla. Los scores con
+# otro motivo (correction, intel_update, rules_change) no cuentan.
+# Un escaneo que terminó sin score (abandonar_vencidos o marcar_fallido) no deja foto, pero sus fuentes que respondieron
+# ya guardaron: pudieron cerrar un hallazgo que el siguiente escaneo reabrió, y el reabrir no deja rastro (el upsert del
+# orquestador limpia resolved_at). Por eso, si después del más viejo de esos dos scores hubo un escaneo así en el que la
+# fuente del hallazgo respondió ('caidos'), el hallazgo sale 'new': se prefiere repetir una alerta a perderla. Sale así
+# hasta el segundo escaneo con score que siga, y un crítico que abrió el escaneo caído alerta otra vez después del
+# siguiente. Una fuente que falló en el escaneo caído no tocó sus hallazgos y no cuenta.
 # Antes de RC-46 el orquestador no llenaba findings.cve_id y la CVE quedaba solo en evidence['cve']: por eso el
 # coalesce. La severidad sale del último score del dominio y no del último que contó el hallazgo: uno resuelto y
 # reabierto después de ese score lleva su severidad de regla y no la de un score viejo.
@@ -666,12 +678,18 @@ SELECT p.api_and_siem FROM organizations o JOIN plans p ON p.id = o.plan_id WHER
 def export_siem(fqdn: str, session: Session = Depends(current_session)):
     # REPEATABLE READ: las consultas ven una sola foto, así un escaneo que cierra a la mitad no mezcla dos escaneos.
     # Con uno activo esa foto ya traería lo que guardaron sus fuentes (cada una confirma sola, en el orquestador) junto
-    # al escaneo y al score anteriores: no se exporta hasta que cierre o lo den por caído (abandonar_vencidos), con los
-    # mismos estados que el índice único de scans.
-    with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
+    # al escaneo y al score anteriores: no se exporta hasta que cierre o lo den por caído, con los mismos estados que el
+    # índice único de scans. Uno sin marca de vida en 30 minutos (la API se reinició a mitad) se da por caído antes, como
+    # en GET /scans, en su propia transacción READ COMMITTED: dentro de la foto, el UPDATE chocaría con la marca de vida
+    # que el escaneo escribió después (error de serialización) en vez de esperarla.
+    with transaction(session.org_id) as conn:
         plan = conn.execute(SIEM_PLAN_SQL).fetchone()
         if not plan or not plan['api_and_siem']:
             raise HTTPException(403, 'El plan de la empresa no incluye la salida a SIEM')
+        dominio = conn.execute('SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
+        if dominio:
+            orquestador.abandonar_vencidos(conn, session.org_id, domain_id=dominio['id'])
+    with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
         dominio = conn.execute('SELECT fqdn::text, now() AS ahora FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
         if not dominio:
             raise HTTPException(404, 'Dominio no encontrado para esta organización')

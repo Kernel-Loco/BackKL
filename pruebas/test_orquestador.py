@@ -315,13 +315,20 @@ class Orquestador(unittest.TestCase):
     def test_2h2_la_salida_a_siem_da_por_recurrente_solo_lo_que_aporto_a_los_dos_ultimos_scores(self):
         """recurrence de la salida a SIEM (#98, RC-212). Cada score de escaneo guarda un aporte por hallazgo vigente:
         recurring si el hallazgo está en los dos últimos scores de escaneo del dominio y new si no, como uno resuelto
-        que se reabre o uno cuya fuente falló después de abrirlo. Un score de otro motivo (correction) no cuenta.
-        Los scores llevan computed_at fijo, porque en esta transacción now() es el mismo para todos."""
+        que se reabre (está en el último y no en el anterior). Un score de otro motivo (correction) no cuenta.
+        solo_viejo es la brecha 80...0001, que también aportó al score de la semilla a0...01: con 'todos los scores' en
+        vez de 'los dos últimos' saldría recurring. Un escaneo caído entre los dos scores en el que la fuente de 'uno'
+        respondió pudo cerrarlo, y el último reabrirlo: sale new. Si esa fuente falló en el caído, sigue recurring.
+        Los scores y el escaneo caído llevan momentos fijos, porque en esta transacción now() es el mismo para todos."""
         abiertos = self.conn.execute(
-            "SELECT f.id::text, f.rule_id, f.severity, f.domain_id FROM findings f JOIN domains d ON d.id = f.domain_id "
+            "SELECT f.id::text, f.rule_id, f.severity, f.domain_id, f.source_id FROM findings f "
+            "JOIN domains d ON d.id = f.domain_id "
             "WHERE d.fqdn = 'acme-demo.mx' AND f.status = 'open' ORDER BY f.id LIMIT 4").fetchall()
         self.assertEqual(len(abiertos), 4)
-        uno, solo_nuevo, solo_viejo, ninguno = abiertos
+        solo_viejo, uno, solo_nuevo, ninguno = abiertos
+        self.assertEqual(solo_viejo['id'], '80000000-0000-4000-8000-000000000001')
+        self.assertIsNotNone(self.uno("SELECT 1 FROM score_contributions WHERE finding_id = %s "
+                                      "AND score_id = 'a0000000-0000-4000-8000-000000000001'", solo_viejo['id']))
         escaneo = self.uno("SELECT s.id FROM scans s JOIN domains d ON d.id = s.domain_id "
                            "WHERE d.fqdn = 'acme-demo.mx' ORDER BY s.queued_at DESC LIMIT 1")['id']
 
@@ -337,8 +344,26 @@ class Orquestador(unittest.TestCase):
         score('2099-01-01T00:00:00+00:00', 'scan', [uno, solo_viejo])
         score('2099-01-02T00:00:00+00:00', 'scan', [uno, solo_nuevo])
         score('2099-01-03T00:00:00+00:00', 'correction', abiertos)
-        filas = {f['id']: f['recurrence'] for f in self.conn.execute(api_v1.SIEM_FINDINGS_SQL, {'fqdn': 'acme-demo.mx'})}
-        self.assertEqual([filas[f['id']] for f in abiertos], ['recurring', 'new', 'new', 'new'])
+
+        def recurrencia():
+            filas = {f['id']: f['recurrence']
+                     for f in self.conn.execute(api_v1.SIEM_FINDINGS_SQL, {'fqdn': 'acme-demo.mx'})}
+            return [filas[f['id']] for f in abiertos]
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Un escaneo caído (sin score) entre los dos scores de escaneo
+        caido = self.solicitar('acme-demo.mx', responde(TXT_ACME)).scan_id
+        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2099-01-01T12:00:00+00:00', "
+                          "finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s", (caido,))
+        corrida = ('INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status) VALUES (%s, %s, %s, %s) '
+                   'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status')
+        self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'failed'))
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'succeeded'))
+        self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
+        # Antes del más viejo de los dos scores ya no cuenta: ese score es posterior y tiene la foto
+        self.conn.execute("UPDATE scans SET queued_at = '2098-12-31T12:00:00+00:00', "
+                          "finished_at = '2098-12-31T13:00:00+00:00' WHERE id = %s", (caido,))
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
 
     def test_2i_no_cuentan_la_fuente_caida_sin_cobertura_ni_lo_que_decidio_el_cliente(self):
         _, f = self.escanear_ejemplo()
