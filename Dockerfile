@@ -20,11 +20,11 @@ COPY --chmod=0644 requirements.txt /
 # - Dependabot no vigila esta versión: se sube a mano, con la versión de las dos URL, los dos hash y NOTICE.
 # - ADD --checksum pide BuildKit con el frontend del Dockerfile 1.6 o más. Por eso la primera línea pide
 #   docker/dockerfile:1, que exige el frontend 1.x y toma el más nuevo de esa rama. No fija una versión.
-FROM python:3.14-slim AS subfinder-zip-amd64
+FROM python:3.15-slim AS subfinder-zip-amd64
 ADD --checksum=sha256:a39c3e5c7a26ef3c430915c4d6cbf7716a00f26769a75e9405aba796142eba37 \
     https://github.com/projectdiscovery/subfinder/releases/download/v2.17.0/subfinder_2.17.0_linux_amd64.zip /tmp/subfinder.zip
 
-FROM python:3.14-slim AS subfinder-zip-arm64
+FROM python:3.15-slim AS subfinder-zip-arm64
 ADD --checksum=sha256:24913d49dddc1d3a5e99a4a7580da5be980959b9415b96f52c4f7f4124392190 \
     https://github.com/projectdiscovery/subfinder/releases/download/v2.17.0/subfinder_2.17.0_linux_arm64.zip /tmp/subfinder.zip
 
@@ -40,11 +40,11 @@ RUN python -c "import os, pathlib, zipfile; z = zipfile.ZipFile('/tmp/subfinder.
 # El release se compila con CGO_ENABLED=0 y corre en python:3.14-slim. El release llama x64 a amd64.
 # Dependabot tampoco vigila esta versión: se sube a mano, con las dos URL, los dos hash y NOTICE, y con la imagen
 # nueva se vuelve a generar cirdan/recolectores/gitleaks_cirdan.toml (ver cirdan/recolectores/gitleaks_reglas.py).
-FROM python:3.14-slim AS gitleaks-tar-amd64
+FROM python:3.15-slim AS gitleaks-tar-amd64
 ADD --checksum=sha256:5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba \
     https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz /tmp/gitleaks.tar.gz
 
-FROM python:3.14-slim AS gitleaks-tar-arm64
+FROM python:3.15-slim AS gitleaks-tar-arm64
 ADD --checksum=sha256:654c935542c89f565aabe7bf7c6c500830f116c114f0aeb509d2460c1ac2e6da \
     https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_arm64.tar.gz /tmp/gitleaks.tar.gz
 
@@ -53,7 +53,7 @@ ADD --checksum=sha256:654c935542c89f565aabe7bf7c6c500830f116c114f0aeb509d2460c1a
 FROM gitleaks-tar-${TARGETARCH} AS gitleaks
 RUN python -c "import os, pathlib, tarfile; t = tarfile.open('/tmp/gitleaks.tar.gz'); d = pathlib.Path('/out/licencia'); d.mkdir(parents=True); pathlib.Path('/out/gitleaks').write_bytes(t.extractfile(t.getmember('gitleaks')).read()); (d / 'LICENSE').write_bytes(t.extractfile(t.getmember('LICENSE')).read()); os.chmod(d, 0o755); os.chmod(d / 'LICENSE', 0o644)"
 
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
