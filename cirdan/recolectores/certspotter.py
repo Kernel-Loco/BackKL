@@ -36,7 +36,7 @@ ORIGEN = 'certspotter'       # va en los atributos y la evidencia: de dónde sal
 PREFIJO = 'certspotter:'     # consulta de la grabadora: certspotter_<dominio>.json
 MAX_PAGINAS = 4              # cada página es una consulta del límite por hora (unas 10), la vacía que cierra también
 SIN_REINTENTO = (429,)       # límite por hora alcanzado: reintentar a los 5 o 15 s solo gasta cupo
-COMPLEMENTO = {'intentos': 2, 'timeout': 20}  # con crt.sh arriba, como las variantes de parecidos de crtsh.py
+COMPLEMENTO = {'intentos': 2, 'timeout': 20}  # con crt.sh arriba: un Cert Spotter lento no detiene el escaneo
 SIN_COBERTURA = ['cert_expired', 'lookalike_domain']
 SOLO = ('Los subdominios y certificados vigentes salen de Cert Spotter (SSLMate), que no da certificados vencidos ni '
         'dominios parecidos')

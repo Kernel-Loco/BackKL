@@ -65,9 +65,9 @@ FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
 
 # Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 18 minutos solo de HTTP: 1055 s en el peor
 # caso, con crt.sh arriba y lento (155 s de cada una de sus 2 búsquedas con 3 intentos de 45 s, 180 s de las 4 páginas
-# de Cert Spotter con 2 intentos de 20 s, 95 s de %marca% con 2 intentos de 45 s y 47 s de cada una de las 10 variantes
-# con 2 intentos de 20 s, #109, RC-226). Quedan 145 s antes de TOPE_CORRIDA, y el DNS de los nombres vencidos no tiene
-# tope.
+# de Cert Spotter con 2 intentos de 20 s, 95 s de %marca% con 2 intentos de 45 s y 470 s de las 10 variantes, que es
+# PRESUPUESTO_VARIANTES de crtsh.py, con hasta 45 s por petición, #109, RC-226). Quedan 145 s antes de TOPE_CORRIDA,
+# y el DNS de los nombres vencidos no tiene tope.
 # Por eso, mientras corre una fuente, un hilo aparte marca vida cada LATIDO, hasta TOPE_CORRIDA: una corrida
 # colgada para siempre deja de marcar y el escaneo se da por caído pasado ABANDONO.
 LATIDO = 60                           # segundos entre marcas

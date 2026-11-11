@@ -495,6 +495,99 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(len(variantes), crtsh.FALLAS_SEGUIDAS * 2)  # 2 intentos por variante
         self.assertIn('crt.sh saturado', res.avisos[-1])
 
+    def _con_cronometro(self, tarda):
+        """Corre los parecidos de acme-demo.mx con un cronómetro falso. `tarda(variante, intento)` dice cuántos
+        segundos tarda crt.sh con esa petición: si pasa del timeout que recibe el transporte, es un timeout.
+        Devuelve el resultado, las peticiones de variantes (variante, timeout) y los segundos que duraron."""
+        reloj, pedidas, intentos = [0.0], [], {}
+
+        class Lento(CrtshSimulado):
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
+                if not q or q[0].startswith('%'):
+                    return super().__call__(url, timeout)
+                intentos[q[0]] = intentos.get(q[0], 0) + 1
+                pedidas.append((q[0], timeout))
+                segundos = tarda(q[0], intentos[q[0]])
+                if segundos > timeout:
+                    reloj[0] += timeout
+                    raise TimeoutError('timed out')
+                reloj[0] += segundos
+                return super().__call__(url, timeout)
+
+        def dormir(s):
+            reloj[0] += s
+        cliente = crtsh.ClienteCrtsh(transporte=Lento(), dormir=dormir, cronometro=lambda: reloj[0])
+        res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, parecidos=True, propios=['acme-demo.com.mx'])
+        return res, pedidas, reloj[0]
+
+    def test_4d_una_variante_de_35_segundos_responde(self):
+        """El 11 nov olmardo.com.mx tardó unos 35 s y con 20 s de timeout dejaba el escaneo parcial. Cada petición
+        de una variante lleva TIMEOUT_VARIANTE y la lenta responde al primer intento."""
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        lenta = variantes[1]
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 35 if v == lenta else 1)
+        self.assertEqual(crtsh.TIMEOUT_VARIANTE, 45)
+        self.assertEqual(pedidas, [(v, crtsh.TIMEOUT_VARIANTE) for v in variantes])  # una petición por variante
+        self.assertEqual((res.estado, res.sin_cobertura, res.omitidos), ('succeeded', [], []))
+        self.assertFalse([a for a in res.avisos if 'no respondió' in a or 'tiempo de las variantes' in a])
+        self.assertIsNone(res.revisados)  # corrida completa: el escaneo no termina 'partial' por la variante lenta
+        self.assertEqual(duro, len(variantes) * crtsh.PAUSA_PARECIDOS + 35 + len(variantes) - 1)
+
+    def test_4e_las_variantes_no_pasan_de_su_presupuesto(self):
+        """Con crt.sh lento en todas las variantes (un timeout y luego 40 s), las variantes juntas no pasan de
+        PRESUPUESTO_VARIANTES: las que no caben quedan sin consultar, con su aviso y su huella en omitidos, ninguna
+        petición recibe menos de MINIMO_VARIANTE ni más de TIMEOUT_VARIANTE y nunca hay más de 2 por variante."""
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 100 if n == 1 else 40)
+        self.assertLessEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
+        self.assertTrue(all(crtsh.MINIMO_VARIANTE <= t <= crtsh.TIMEOUT_VARIANTE for _, t in pedidas), pedidas)
+        consultadas = list(dict.fromkeys(v for v, _ in pedidas))
+        self.assertEqual(consultadas, variantes[:5])  # 5 x (2 + 45 + 5 + 40) = 460 s, y en 10 s no cabe otra
+        self.assertTrue(all([v for v, _ in pedidas].count(v) == crtsh.INTENTOS_PARECIDOS for v in consultadas))
+        faltan = variantes[5:]
+        self.assertEqual(res.avisos[-1], crtsh.SIN_TIEMPO % (
+            crtsh.PRESUPUESTO_VARIANTES, '%d variantes' % len(faltan), ', '.join(faltan)))
+        self.assertEqual(sorted(res.omitidos),
+                         sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in faltan))
+        self.assertIsNotNone(res.revisados)  # faltaron variantes: el escaneo termina 'partial'
+        # crt.sh colgado en todas: corta a las FALLAS_SEGUIDAS variantes, también dentro del presupuesto
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000)
+        self.assertEqual(len(pedidas), crtsh.FALLAS_SEGUIDAS * crtsh.INTENTOS_PARECIDOS)
+        self.assertLessEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
+        self.assertIn('crt.sh saturado', res.avisos[-1])
+        # la última petición se recorta a lo que queda y no se duerme una espera que ya no cabe
+        ultima = variantes[-1]
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v == ultima or n == 1 else 1)
+        cada_una = crtsh.PAUSA_PARECIDOS + crtsh.TIMEOUT_VARIANTE + crtsh.ESPERAS[0] + 1  # un timeout y responde en 1 s
+        resto = crtsh.PRESUPUESTO_VARIANTES - (len(variantes) - 1) * cada_una - crtsh.PAUSA_PARECIDOS
+        self.assertTrue(crtsh.MINIMO_VARIANTE <= resto < crtsh.TIMEOUT_VARIANTE, resto)
+        self.assertEqual(pedidas[-1], (ultima, resto))
+        self.assertEqual([v for v, _ in pedidas].count(ultima), 1)
+        self.assertEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
+
+    def test_4f_el_peor_caso_de_tiempo_documentado(self):
+        """El peor caso de una corrida, que citan el orquestador y docs/contrato_plugin.md, sale de las constantes:
+        1055 s, debajo de TOPE_CORRIDA. Si cambia un timeout o el presupuesto, cambian los textos y se revisa el tope."""
+        from cirdan.recolectores import certspotter
+        general = crtsh.ClienteCrtsh(transporte=CrtshSimulado()).timeout
+        busqueda = crtsh.INTENTOS * general + sum(crtsh.ESPERAS[:crtsh.INTENTOS - 1])
+        pagina = (certspotter.COMPLEMENTO['intentos'] * certspotter.COMPLEMENTO['timeout']
+                  + sum(crtsh.ESPERAS[:certspotter.COMPLEMENTO['intentos'] - 1]))
+        marca = crtsh.INTENTOS_PARECIDOS * general + sum(crtsh.ESPERAS[:crtsh.INTENTOS_PARECIDOS - 1])
+        peor = 2 * busqueda + certspotter.MAX_PAGINAS * pagina + marca + crtsh.PRESUPUESTO_VARIANTES
+        self.assertEqual((busqueda, pagina, marca, crtsh.PRESUPUESTO_VARIANTES, peor), (155, 45, 95, 470, 1055))
+        raiz = Path(crtsh.__file__).resolve().parents[2]
+        orquestador = (raiz / 'cirdan' / 'orquestador' / '__init__.py').read_text(encoding='utf-8')
+        tope = int(re.search(r'^TOPE_CORRIDA = timedelta\(minutes=(\d+)\)', orquestador, re.M).group(1)) * 60
+        self.assertLess(peor, tope)
+        self.assertIn('%d s en el peor' % peor, orquestador)
+        self.assertIn('Quedan %d s antes de TOPE_CORRIDA' % (tope - peor), orquestador)
+        doc = (raiz / 'docs' / 'contrato_plugin.md').read_text(encoding='utf-8')
+        self.assertIn('hasta %d segundos (`TIMEOUT_VARIANTE`)' % crtsh.TIMEOUT_VARIANTE, doc)
+        self.assertIn('tienen %d segundos (`PRESUPUESTO_VARIANTES`)' % crtsh.PRESUPUESTO_VARIANTES, doc)
+        self.assertIn('sigue en %d segundos' % peor, doc)
+
     def test_4c_las_variantes_sin_respuesta_van_en_omitidos_tambien_las_del_corte(self):
         """B4 de RC-226. Si %marca% responde y las variantes no, hay cobertura y van en omitidos las huellas de las 3
         que fallaron y de las que se dejaron de probar por el corte: el orquestador no cierra su parecido."""
