@@ -574,7 +574,7 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(len(pedidas), crtsh.FALLAS_SEGUIDAS * crtsh.INTENTOS_PARECIDOS)
         self.assertLessEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
         self.assertIn('crt.sh saturado', res.avisos[-1])
-        # el último intento se recorta a lo que queda (35 s) y el presupuesto se gasta exacto
+        # el último intento se recorta a lo que queda (42 s) y el presupuesto se gasta exacto
         ultima = variantes[-1]
         caida = variantes[-2]
         res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v in (caida, ultima) or n == 1 else 20)

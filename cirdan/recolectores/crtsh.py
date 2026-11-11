@@ -110,7 +110,8 @@ PAUSA_PARECIDOS = 2          # segundos entre consultas de variantes, para no sa
 # tarda más de 20 s, las siguientes esperan 45 s desde el primer intento (10 variantes de 35 s: 62 + 9 x 37 = 395 s, y
 # antes solo respondían 7). Si con 45 s una variante falla su primer intento, crt.sh se cuelga en vez de tardar y
 # esperar más solo gasta el presupuesto: vuelven a 20 s y así se quedan el resto de la corrida (_ritmo). Ese primer
-# intento largo que falla pasa a lo más una vez, así que una corrida gasta a lo más 25 s más que con 20 y 45 fijos.
+# intento largo que falla pasa a lo más una vez. Donde pierde contra 20 y 45 fijos: si crt.sh tarda casi 45 s en el
+# primer intento y el reintento habría salido rápido, cada variante cuesta hasta 20 s más y caben menos.
 TIMEOUTS_VARIANTE = (20, 45)  # segundos del primer y del segundo intento de cada variante
 NORMAL, LENTO, FIJO = 'normal', 'lento', 'fijo'  # ritmo de las variantes: 20 y 45 s, 45 y 45 s, o 20 y 45 ya fijos
 PRESUPUESTO_VARIANTES = 470  # segundos para todas las variantes de una corrida
