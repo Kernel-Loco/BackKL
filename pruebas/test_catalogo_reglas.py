@@ -333,6 +333,15 @@ class Subcategorias(unittest.TestCase):
             emiten = sorted(f for f in REGISTRO if f != 'ejemplo' and suyos & set(cargar(f).CODIGOS))
             self.assertEqual(sorted(fuentes), emiten, 'fuentes del KRI %s' % kri)
 
+    def test_16_emiten_dice_la_fuente_que_revisa_cada_regla_de_un_kri(self):
+        self.assertEqual(subcategorias.revisar(), [])
+        codigos_sub = {clave: set(codigos) for clave, _, _, codigos in subcategorias.SUBCATEGORIAS}
+        de_kri = set().union(*(codigos_sub[s] for _, _, subs, _ in subcategorias.KRIS for s in subs))
+        for fuente, codigos in subcategorias.EMITEN:
+            modulo = cargar(fuente)
+            revisa = (set(modulo.CODIGOS) | set(getattr(modulo, 'SIN_LLAVE', ()))) & de_kri
+            self.assertEqual(set(codigos), revisa, 'reglas de %s en EMITEN' % fuente)
+
 
 class Reglas(unittest.TestCase):
 

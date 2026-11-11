@@ -162,14 +162,53 @@ class SubcategoriasYKri(unittest.TestCase):
         self.assertEqual(self.kri(kris, 'certificates')['status'], 'ok')
 
     def test_8c_ningun_estado_sin_datos_completos_sale_ok_en_cero(self):
-        casos = [({}, (), ()), ({'ct_logs': 'failed'}, (), ()), (TODAS, ['lookalike_domain'], ()), (TODAS, (), ['ct_logs']),
-                 ({'shodan': 'succeeded', 'ct_logs': 'succeeded'}, (), ())]
-        for corridas, sin_cobertura, a_medias in casos:
-            for k in sub.resumen([], corridas, sin_cobertura, a_medias)[1]:
-                completo = (k['sources'] and not k['sources_failed'] and not k['sources_not_run']
-                            and not k['sources_partial'] and not k['rules_without_coverage'])
-                self.assertEqual(k['status'] == 'ok', bool(completo), (k['kri'], corridas, sin_cobertura, a_medias))
-                self.assertEqual(k['findings'] is None, k['status'] in ('no_coverage', 'no_source_yet'), k['kri'])
+        # lo esperado va escrito a mano, en el orden de sub.KRIS: certificados, exposición, correo, suplantación
+        # y reputación
+        nc, sf = 'no_coverage', 'no_source_yet'
+        casos = [
+            (({}, (), ()), (nc, nc, nc, nc, sf)),
+            (({'ct_logs': 'failed'}, (), ()), (nc, nc, nc, nc, sf)),
+            ((TODAS, ['lookalike_domain'], ()), ('ok', 'ok', 'ok', nc, sf)),
+            ((TODAS, ['cert_expired'], ()), ('partial', 'ok', 'ok', 'ok', sf)),
+            ((TODAS, (), ['ct_logs']), ('partial', 'ok', 'ok', 'partial', sf)),
+            (({'shodan': 'succeeded', 'ct_logs': 'succeeded'}, (), ()), ('ok', 'partial', nc, 'ok', sf)),
+            ((TODAS, (), ()), ('ok', 'ok', 'ok', 'ok', sf)),
+        ]
+        for (corridas, sin_cobertura, a_medias), esperado in casos:
+            kris = sub.resumen([], corridas, sin_cobertura, a_medias)[1]
+            self.assertEqual(tuple(k['status'] for k in kris), esperado, (corridas, sin_cobertura, a_medias))
+            for k in kris:
+                self.assertEqual(k['findings'], 0 if k['status'] in ('ok', 'partial') else None, k['kri'])
+
+    def test_8f_reglas_de_una_fuente_que_no_corrio_cuentan_como_sin_revisar(self):
+        # shodan respondió sin poder revisar nada (reproducir sin grabación) y api_docs no corrió: ningún dato real
+        de_shodan = ['exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database',
+                     'exposed_service', 'known_vulnerability', 'exposed_iot_device', 'exposed_ot_device',
+                     'outdated_software']
+        _, kris = sub.resumen([], {'shodan': 'succeeded'}, sin_cobertura=de_shodan)
+        k = self.kri(kris, 'service_exposure')
+        self.assertEqual((k['status'], k['findings'], k['max_severity'], k['penalty'], k['sources_not_run']),
+                         ('no_coverage', None, None, None, ['api_docs']))
+        self.assertEqual(len(k['rules_without_coverage']), 7)   # solo las que dio el escaneo, no las de api_docs
+        # con una sola regla de shodan revisada ya hay un dato: a medias
+        _, kris = sub.resumen([], {'shodan': 'succeeded'}, sin_cobertura=de_shodan[1:])
+        k = self.kri(kris, 'service_exposure')
+        self.assertEqual((k['status'], k['findings']), ('partial', 0))
+        # sin llave de Shodan sus 2 reglas de IoT y OT nunca se revisan: aun con las dos fuentes completas no sale ok
+        _, kris = sub.resumen([], TODAS, sin_cobertura=['exposed_iot_device', 'exposed_ot_device', 'outdated_software'])
+        self.assertEqual(self.kri(kris, 'service_exposure')['status'], 'partial')
+
+    def test_8g_revisar_avisa_de_una_regla_de_un_kri_sin_fuente_en_emiten(self):
+        bueno = sub.EMITEN
+        try:
+            sub.EMITEN = tuple((f, tuple(c for c in codigos if c != 'spf_missing')) for f, codigos in bueno)
+            self.assertEqual(sub.revisar(), ['la regla spf_missing del KRI email debe estar en EMITEN con una sola '
+                                             'fuente del KRI'])
+            sub.EMITEN = bueno + (('shodan', ('cert_expired',)),)   # dos fuentes para una regla
+            self.assertEqual(len(sub.revisar()), 1)
+        finally:
+            sub.EMITEN = bueno
+        self.assertEqual(sub.revisar(), [])
 
     def test_8d_revisar_avisa_de_un_kri_que_apunta_a_una_subcategoria_que_no_existe(self):
         bueno = sub.KRIS
@@ -184,12 +223,13 @@ class SubcategoriasYKri(unittest.TestCase):
         pares = [('cert_expired', 'infrastructure'), ('cert_expired', 'configuration')]
         self.assertIn('cert_expired es de configuration y su subcategoría certificates es de infrastructure',
                       sub.revisar(pares))
-        # su aporte no se pierde: va a 'other' de la categoría de su regla y deja de contar en el KRI
+        # su aporte no se pierde: va a 'other' de la categoría de su regla y sigue contando en su KRI, que no sale en 0
         subs, kris = sub.resumen([aporte('cert_expired', 'configuration', 'high', 20)], TODAS)
         self.assertEqual(subs[-1], {'category': 'configuration', 'subcategory': 'other', 'name': 'Sin clasificar',
                                     'findings': 1, 'penalty': 20.0})
         self.assertEqual(sum(s['penalty'] for s in subs), 20.0)
-        self.assertEqual(self.kri(kris, 'certificates')['findings'], 0)
+        k = self.kri(kris, 'certificates')
+        self.assertEqual((k['status'], k['findings'], k['max_severity'], k['penalty']), ('ok', 1, 'high', 20.0))
 
     def test_9_un_aporte_de_una_regla_que_el_mapa_no_conoce_no_se_pierde(self):
         subs, _ = sub.resumen(APORTES + [aporte('regla_nueva', 'data_leaks', 'low', 8)], TODAS)

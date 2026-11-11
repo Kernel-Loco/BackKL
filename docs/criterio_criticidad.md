@@ -91,12 +91,18 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 
 - `ok`: todas sus fuentes corrieron completas en el escaneo del score y ninguna regla suya quedó sin cobertura. Solo aquí un cero quiere decir que no se encontró nada.
 - `partial` (cobertura parcial): hay datos, pero no de todo. Alguna de sus fuentes no corrió en ese escaneo (`sources_not_run`, por ejemplo `api_docs` mientras siga apagada), revisó solo una parte (`sources_partial`) o dejó alguna regla suya sin cobertura (`rules_without_coverage`). Trae sus hallazgos, su severidad y su suma, y el portal lo muestra con aviso: un cero aquí no es sin riesgo.
-- `no_coverage` (sin cobertura): alguna de sus fuentes corrió y no respondió (`sources_failed`), ninguna corrió, o todas sus reglas quedaron sin cobertura aunque la fuente respondiera, como Correo cuando el dominio no existe en el DNS. Sus hallazgos, su severidad y su suma van en `null`, no en cero.
+- `no_coverage` (sin cobertura): alguna de sus fuentes corrió y no respondió (`sources_failed`), ninguna corrió, o ninguna regla suya se revisó aunque la fuente respondiera, como Correo cuando el dominio no existe en el DNS. Una regla no se revisó si quedó sin cobertura o si la fuente que la revisa no corrió: Exposición de servicios sale así cuando `shodan` responde sin poder revisar nada y `api_docs` no corrió. Sus hallazgos, su severidad y su suma van en `null`, no en cero.
 - `no_source_yet` (sin fuente todavía): el KRI aún no tiene fuente. Así sale Reputación hasta que RC-234 esté en dev. También va en `null`.
 
-Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado. Si un aporte es de una regla que el mapa no conoce, o que otro juego de reglas puso en otra categoría, va en una fila `other` (Sin clasificar) de la categoría de su regla y no cuenta en ningún KRI, para que las subcategorías sigan sumando la nota.
+Tres límites de los estados:
 
-Para agregar un código de regla, ponlo en una subcategoría de su categoría y sube `VERSION`. `pruebas/test_catalogo_reglas.py` falla sin base si una regla de las semillas no tiene subcategoría, si su subcategoría es de otra categoría o si las fuentes de un KRI no son las que emiten sus reglas. `pruebas/test_api_v1.py` revisa contra la base que cada regla de cada juego tenga subcategoría de su categoría y que las fuentes de cada KRI existan en `data_sources`.
+- Con una fuente caída el KRI sale `no_coverage` aunque otra fuente suya sí haya encontrado algo. Así lo pide la tarjeta: una fuente que no respondió sale sin cobertura.
+- Exposición de servicios no sale `ok` mientras falte la llave de Shodan (#8) o `api_docs` siga apagada. Sin la llave, `exposed_iot_device` y `exposed_ot_device` quedan sin cobertura en todo escaneo, así que lo más que alcanza es `partial`.
+- `sources_partial` va por fuente y no por regla. Si a `ct_logs` solo le faltó la respuesta de una variante de dominios parecidos, Certificados también sale `partial`, aunque sus dos reglas se revisaron completas. `scans.stats` no guarda a qué regla le faltó la parte.
+
+Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado. Si un aporte es de una regla que el mapa no conoce, o que otro juego de reglas puso en otra categoría, va en una fila `other` (Sin clasificar) de la categoría de su regla, para que las subcategorías sigan sumando la nota. Los KRI juntan sus aportes por código de regla: el de una regla que el mapa no conoce no cuenta en ningún KRI, y el de una regla de un KRI que otro juego puso en otra categoría sigue contando en su KRI.
+
+Para agregar un código de regla, ponlo en una subcategoría de su categoría y sube `VERSION`. Si es de un KRI, ponlo también en `EMITEN` con la fuente que lo revisa. `pruebas/test_catalogo_reglas.py` falla sin base si una regla de las semillas no tiene subcategoría, si su subcategoría es de otra categoría, si las fuentes de un KRI no son las que emiten sus reglas o si `EMITEN` no dice la fuente de cada regla de un KRI. `pruebas/test_api_v1.py` revisa contra la base que cada regla de cada juego tenga subcategoría de su categoría y que las fuentes de cada KRI existan en `data_sources`.
 
 ## Qué hace crítico a un hallazgo
 

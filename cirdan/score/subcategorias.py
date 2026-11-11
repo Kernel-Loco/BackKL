@@ -42,7 +42,18 @@ KRIS = (
     ('reputation', 'Reputación', (), ()),
 )
 
-SIN_CLASIFICAR = ('other', 'Sin clasificar')   # solo si llega un aporte de una regla que el mapa no conoce
+# Qué fuente revisa cada regla de un KRI, para saber cuáles quedaron sin revisar cuando la fuente no corrió.
+# Trae también las reglas que shodan no puede revisar sin su llave (SIN_LLAVE de shodan.py).
+EMITEN = (
+    ('ct_logs', ('cert_expired', 'cert_expiring_soon', 'lookalike_domain')),
+    ('shodan', ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database', 'exposed_ot_device',
+                'exposed_iot_device', 'exposed_service')),
+    ('api_docs', ('exposed_api_docs', 'api_auth_not_declared')),
+    ('dns', ('spf_missing', 'spf_allow_all', 'dmarc_missing', 'dmarc_policy_none')),
+)
+
+# Fila de un aporte de una regla que el mapa no conoce o que su juego de reglas puso en otra categoría.
+SIN_CLASIFICAR = ('other', 'Sin clasificar')
 ESTADOS_KRI = ('ok', 'partial', 'no_coverage', 'no_source_yet')
 ORDEN_SEVERIDAD = ('low', 'medium', 'high', 'critical')
 
@@ -73,6 +84,7 @@ def revisar(reglas=None, categorias=None):
             errores.append('la subcategoría %s tiene la categoría %r' % (clave, categoria))
         if not nombre or not de_la_sub:
             errores.append('la subcategoría %s no tiene nombre o no tiene códigos' % clave)
+    codigos_sub = {s[0]: s[3] for s in SUBCATEGORIAS}
     kris = [k[0] for k in KRIS]
     errores += ['KRI repetido: %s' % k for k in sorted(set(k for k in kris if kris.count(k) > 1))]
     for clave, nombre, subs, fuentes in KRIS:
@@ -81,6 +93,12 @@ def revisar(reglas=None, categorias=None):
             errores.append('el KRI %s no tiene nombre' % clave)
         if bool(subs) != bool(fuentes):
             errores.append('el KRI %s tiene subcategorías sin fuentes o fuentes sin subcategorías' % clave)
+        for s in subs:
+            for codigo in codigos_sub.get(s, ()):
+                de = [f for f, suyos in EMITEN if codigo in suyos]
+                if len(de) != 1 or de[0] not in fuentes:
+                    errores.append('la regla %s del KRI %s debe estar en EMITEN con una sola fuente del KRI' % (
+                        codigo, clave))
     if reglas is not None:
         reglas = sorted(set(reglas))
         for codigo, categoria in reglas:
@@ -112,11 +130,17 @@ def resumen(aportes, corridas, sin_cobertura=(), a_medias=()):
 
     Estado de un KRI:
     - 'no_source_yet': todavía no tiene fuentes.
-    - 'no_coverage': alguna de sus fuentes corrió y no terminó 'succeeded', ninguna corrió, o todas sus reglas
-      quedaron sin cobertura. Sus conteos van en None, nunca en cero.
+    - 'no_coverage': alguna de sus fuentes corrió y no terminó 'succeeded', ninguna corrió, o ninguna regla suya
+      se revisó: cada una quedó sin cobertura o es de una fuente que no corrió. Sus conteos van en None, nunca en
+      cero. Una sola fuente caída basta, aunque otra sí haya encontrado algo (así lo pide la tarjeta).
     - 'partial': hay datos pero no de todo: alguna fuente suya no corrió o revisó solo una parte, o alguna regla
       suya quedó sin cobertura. Trae conteos, y un cero aquí no quiere decir sin riesgo.
     - 'ok': todas sus fuentes corrieron completas y ninguna regla suya quedó sin cobertura.
+
+    `sources_partial` va por fuente, no por regla: si a ct_logs solo le faltó una variante de dominios parecidos,
+    Certificados también sale 'partial' aunque sus dos reglas se revisaron completas. Es el límite de `scans.stats`.
+    Los aportes de un KRI se juntan por código de regla: si un juego puso una regla suya en otra categoría, en las
+    subcategorías va a 'other' y en su KRI sigue contando.
     """
     por_sub = {}
     for a in aportes:
@@ -130,18 +154,20 @@ def resumen(aportes, corridas, sin_cobertura=(), a_medias=()):
                       for (categoria, clave), lista in sorted(por_sub.items()) if clave == SIN_CLASIFICAR[0]]
 
     codigos_sub = {clave: codigos for clave, _, _, codigos in SUBCATEGORIAS}
-    categoria_sub = {clave: categoria for clave, categoria, _, _ in SUBCATEGORIAS}
+    fuente_de = {codigo: fuente for fuente, codigos in EMITEN for codigo in codigos}
     kris = []
     for clave, nombre, subs, fuentes in KRIS:
         caidas = [f for f in fuentes if f in corridas and corridas[f] != 'succeeded']
         sin_correr = [f for f in fuentes if f not in corridas]
         parciales = [f for f in fuentes if f in a_medias and f not in caidas and f not in sin_correr]
-        suyos = [a for s in subs for a in por_sub.get((categoria_sub[s], s), ())]
         codigos = [c for s in subs for c in codigos_sub[s]]
+        suyos = [a for a in aportes if a['code'] in codigos]
         sin_revisar = [c for c in codigos if c in sin_cobertura]
+        # las reglas de una fuente que no corrió tampoco se revisaron, aunque no vengan en sin_cobertura
+        sin_dato = [c for c in codigos if c in sin_cobertura or fuente_de.get(c) in sin_correr]
         if not fuentes:
             estado = 'no_source_yet'
-        elif caidas or len(sin_correr) == len(fuentes) or len(sin_revisar) == len(codigos):
+        elif caidas or len(sin_correr) == len(fuentes) or len(sin_dato) == len(codigos):
             estado = 'no_coverage'
         elif sin_correr or parciales or sin_revisar:
             estado = 'partial'
