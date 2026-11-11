@@ -2,6 +2,8 @@
 
     python -m unittest -v pruebas/test_criterio.py
 """
+import hashlib
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -62,9 +64,14 @@ class Letras(unittest.TestCase):
                 c.letra(malo)
 
     def test_5_la_alerta_sigue_con_el_score_no_con_la_letra(self):
-        # 60 y 79 son D: con umbral 70 uno dispara y el otro no
-        self.assertEqual((c.letra(60), c.letra(79)), ('D', 'D'))
-        self.assertEqual((c.dispara_alerta(60, 70), c.dispara_alerta(79, 70)), (False, True))
+        # 60, 69, 70 y 79 son D: con umbral 70, que no es corte de letra, dos disparan y dos no
+        self.assertEqual([c.letra(s) for s in (60, 69, 70, 79)], ['D'] * 4)
+        self.assertEqual([c.dispara_alerta(s, 70) for s in (60, 69, 70, 79)], [False, False, True, True])
+        # y con letras distintas el resultado puede ser el mismo: 59 es C y 60 es D, con umbral 50 disparan los dos
+        self.assertEqual((c.letra(59), c.letra(60)), ('C', 'D'))
+        self.assertEqual((c.dispara_alerta(59, 50), c.dispara_alerta(60, 50)), (True, True))
+        # el umbral por omisión es un número, no una letra
+        self.assertIsInstance(c.UMBRAL_ALERTA, int)
 
 
 def aporte(code, category, severity, penalty):
@@ -89,6 +96,17 @@ class SubcategoriasYKri(unittest.TestCase):
         self.assertEqual([k[1] for k in sub.KRIS],
                          ['Certificados', 'Exposición de servicios', 'Correo', 'Suplantación', 'Reputación'])
         self.assertIsInstance(sub.VERSION, int)
+
+    def test_1b_cambiar_el_mapa_pide_subir_la_version(self):
+        # Huella de SUBCATEGORIAS, KRIS y EMITEN por versión. Si cambias el mapa, sube VERSION y agrega aquí su
+        # huella nueva (la que imprime el mensaje de esta prueba), sin borrar las anteriores.
+        huellas = {1: '21dcfebaeb77bdcadd33c3342b5f34cffa11c2be9ac7b50252d52d368994a8cb'}
+        mapa = json.dumps([sub.SUBCATEGORIAS, sub.KRIS, sub.EMITEN], ensure_ascii=False, sort_keys=True)
+        huella = hashlib.sha256(mapa.encode('utf-8')).hexdigest()
+        self.assertIn(sub.VERSION, huellas, 'VERSION %d no tiene huella en esta prueba: %s' % (sub.VERSION, huella))
+        self.assertEqual(huellas[sub.VERSION], huella,
+                         'el mapa cambió y VERSION sigue en %d: súbela y anota la huella nueva' % sub.VERSION)
+        self.assertEqual(sorted(huellas), list(range(1, sub.VERSION + 1)))
 
     def test_2_revisar_avisa_de_un_codigo_sin_subcategoria_o_de_otra_categoria(self):
         self.assertEqual(sub.revisar({'cert_expired': 'infrastructure', 'regla_nueva': 'data_leaks'})[0],

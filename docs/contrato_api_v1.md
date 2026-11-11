@@ -18,10 +18,10 @@ Lo que devuelve la API v1 de Cirdan (`cirdan/api/v1.py`), con un JSON de ejemplo
 |---|---|---|
 | `GET /api/v1/domains` | [`dominios.json`](api_v1/dominios.json) | Dominios de la empresa con su autorización, TXT, si se pueden escanear, score y conteo de hallazgos abiertos |
 | `GET /api/v1/domains/{fqdn}/findings` | [`hallazgos.json`](api_v1/hallazgos.json) | Hallazgos abiertos del dominio, de más a menos severo. Todavía no hay filtro `?status` |
-| `GET /api/v1/domains/{fqdn}/score` | [`score.json`](api_v1/score.json) | El score más reciente con su desglose por categoría |
+| `GET /api/v1/domains/{fqdn}/score` | [`score.json`](api_v1/score.json) | El score más reciente con su letra (`grade`), su desglose por categoría, sus hallazgos por subcategoría (`subcategories`) y los 5 KRI con su cobertura (`kris`, #114) |
 | `GET /api/v1/domains/{fqdn}/score/history` | [`historico.json`](api_v1/historico.json) | Todos los scores del dominio, del más viejo al más nuevo |
 | `GET /api/v1/findings/{id}/explanation` | [`explicacion.json`](api_v1/explicacion.json) | Por qué el hallazgo tiene su severidad y cuánto suma al score |
-| `GET /api/v1/scoring/weights` | [`pesos.json`](api_v1/pesos.json) | El juego de reglas activo: pesos, bandas, piso, umbral y reglas |
+| `GET /api/v1/scoring/weights` | [`pesos.json`](api_v1/pesos.json) | El juego de reglas activo: pesos, bandas, letras (`grades`, #114), piso, umbral y reglas |
 | `GET /api/v1/domains/{fqdn}/action-plan` | — | Acciones abiertas agrupadas por regla, con su recomendación y reducción estimada de score (#42) |
 | `POST /api/v1/domains/{fqdn}/action-plan/simulate` | — | Score contrafactual al resolver varias acciones, sin guardar cambios (#70) |
 | `GET /api/v1/domains/{fqdn}/action-plan/export?formato=csv\|json` | — | Descarga el plan; CSV UTF-8 con BOM y escape contra fórmulas |
@@ -101,6 +101,11 @@ Para que un integrador lea la API sin la sesión del portal. Las crea, lista y r
 | `kris` | Solo en `score.json` (#114): los 5 KRI, en su orden. `kri` es la clave y `name` el nombre. `status` es `ok` (todas sus fuentes corrieron completas y ninguna regla suya quedó sin cobertura), `partial` (hay datos pero no de todo), `no_coverage` (alguna de sus fuentes corrió y no respondió en el escaneo del score, ninguna corrió o ninguna regla suya se revisó, porque quedó sin cobertura o porque su fuente no corrió) o `no_source_yet` (aún no tiene fuente, como `reputation`). `findings`, `max_severity` y `penalty` son sus hallazgos vigentes, su severidad más alta y lo que suman. Con `no_coverage` o `no_source_yet` los tres van en `null`, nunca en cero: el portal no los pinta como sin riesgo. Con `ok` o `partial` y sin hallazgos, `max_severity` es `null`, y solo con `ok` un cero quiere decir que no se encontró nada: con `partial` el portal pone aviso. `subcategories` y `sources` dicen qué junta y qué fuentes lo alimentan, `sources_failed` cuáles no respondieron, `sources_not_run` cuáles no corrieron en ese escaneo, `sources_partial` cuáles revisaron solo una parte y `rules_without_coverage` qué reglas suyas quedaron sin cobertura en ese escaneo (no trae las de una fuente que no corrió). `sources_partial` va por fuente, no por regla. Los KRI no cubren todo el score |
 | `kri_map_version` | Solo en `score.json`: versión del mapa de subcategorías y KRI (`cirdan/score/subcategorias.py`) |
 | `alert` | El umbral de la empresa y si este score dispara `score.above_threshold`. Usa el score de 0 a 100, no la letra |
+
+Los `kris` de `score.json` son los de la semilla de demo (`db/semillas/001_datos_demo.sql`, que no se edita), y `pruebas/test_api_v1.py` los compara con lo que la API devuelve con esa semilla. Por eso tienen dos cosas que un escaneo real no da:
+
+- Certificados cuenta el `cert_expired` de dev.acme-demo.mx, que la semilla atribuye a `shodan` (ver `hallazgos.json`). En un escaneo real esa regla solo la emite `ct_logs`. Un KRI junta sus aportes por código de regla, sin mirar qué fuente trajo el hallazgo.
+- Exposición de servicios sale con `rules_without_coverage` vacío y el score con `partial_coverage` en `false`, porque el escaneo sembrado no guarda `rules_without_coverage` en `scans.stats`. En un escaneo real `shodan` deja siempre `exposed_iot_device` y `exposed_ot_device` sin cobertura (`SIN_LLAVE` en `cirdan/recolectores/shodan.py`), así que esas dos reglas salen en `rules_without_coverage` del KRI y el score sale con `partial_coverage` en `true`.
 
 ## Explicación (`explicacion.json`)
 

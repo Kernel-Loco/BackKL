@@ -97,7 +97,7 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 Tres límites de los estados:
 
 - Con una fuente caída el KRI sale `no_coverage` aunque otra fuente suya sí haya encontrado algo. Así lo pide la tarjeta: una fuente que no respondió sale sin cobertura.
-- Exposición de servicios no sale `ok` mientras falte la llave de Shodan (#8) o `api_docs` siga apagada. Sin la llave, `exposed_iot_device` y `exposed_ot_device` quedan sin cobertura en todo escaneo, así que lo más que alcanza es `partial`.
+- Exposición de servicios no sale `ok` mientras `shodan.py` no tenga la API de host de Shodan o `api_docs` siga apagada. `exposed_iot_device` y `exposed_ot_device` quedan sin cobertura en todo escaneo, con la llave de Shodan o sin ella (`SIN_LLAVE` en `cirdan/recolectores/shodan.py`. La llave sola no los prende, ver `docs/servicios_externos.md`), así que lo más que alcanza es `partial`.
 - `sources_partial` va por fuente y no por regla. Si a `ct_logs` solo le faltó la respuesta de una variante de dominios parecidos, Certificados también sale `partial`, aunque sus dos reglas se revisaron completas. `scans.stats` no guarda a qué regla le faltó la parte.
 
 Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado. Si un aporte es de una regla que el mapa no conoce, o que otro juego de reglas puso en otra categoría, va en una fila `other` (Sin clasificar) de la categoría de su regla, para que las subcategorías sigan sumando la nota. Los KRI juntan sus aportes por código de regla: el de una regla que el mapa no conoce no cuenta en ningún KRI, y el de una regla de un KRI que otro juego puso en otra categoría sigue contando en su KRI.
