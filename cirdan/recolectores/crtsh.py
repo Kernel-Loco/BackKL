@@ -15,7 +15,7 @@ escaneo, porque contrato.ejecutar() pasa EN_ESCANEO, y la terminal también, sal
 recolectar() la deja apagada por defecto para quien lo llame directo. Si no se buscan, o si ninguna búsqueda
 responde, lookalike_domain queda en sin_cobertura: cobertura parcial, nunca 0 parecidos. --con-parecidos se sigue
 aceptando y hace lo mismo que no ponerlo. Tampoco se buscan, con un aviso, si el dominio no es su propio dominio
-registrable (_marca). La terminal no recibe los otros dominios de la empresa y no los excluye: uno propio puede salir
+registrable o es un nombre de un hosting de HOSTINGS (_marca). La terminal no recibe los otros dominios de la empresa y no los excluye: uno propio puede salir
 como parecido. En un escaneo el orquestador sí pasa los dominios verificados o en pausa de la organización.
 
 Modos: 'vivo' consulta crt.sh; 'grabar' además guarda cada respuesta en
@@ -127,8 +127,8 @@ SUFIJOS_DOBLES = {
     'com.my', 'co.id', 'com.ph', 'com.vn', 'co.th'}
 # Hostings donde cada cliente recibe su propio subdominio: ahí el dominio registrable es el nombre completo del
 # cliente (acme-demo.github.io), nunca el del hosting. Es una lista corta, no la lista pública de sufijos.
-HOSTINGS = {'github.io', 'gitlab.io', 'netlify.app', 'vercel.app', 'pages.dev', 'workers.dev', 'web.app',
-            'firebaseapp.com', 'herokuapp.com', 'azurewebsites.net', 'onrender.com', 'blogspot.com', 'wixsite.com',
+HOSTINGS = {'github.io', 'gitlab.io', 'netlify.app', 'vercel.app', 'pages.dev', 'web.app',
+            'firebaseapp.com', 'herokuapp.com', 'onrender.com', 'blogspot.com', 'wixsite.com',
             'weebly.com', 'wordpress.com', 'myshopify.com'}
 TLD_PRINCIPALES = ('com', 'mx', 'com.mx', 'net')
 TLD_SECUNDARIOS = ('org', 'co', 'io', 'info', 'online', 'site')
@@ -151,7 +151,7 @@ DNS_DANADO = object()        # lo que da el DNS de un nombre cuyo dns_ grabado e
 MAX_DANADOS = 5              # archivos dañados que nombra el aviso. De los demás dice cuántos son
 SIN_LEER = 'No se pudo leer ningún certificado de la grabación de este dominio'
 SIN_MARCA = ('No se buscaron dominios parecidos de %s: solo se buscan cuando el dominio autorizado es su propio '
-             'dominio registrable, con un sufijo que Cirdan conoce')
+             'dominio registrable, con un sufijo que Cirdan conoce y fuera de un hosting compartido')
 POR_NOMBRE_DANADA = ('No se pudo leer la grabación de %%.%s. Se usó la búsqueda por nombre y pueden faltar '
                      'subdominios')
 
@@ -369,7 +369,7 @@ def registrable(nombre):
 
 def _marca(dominio):
     """La etiqueta que se busca como marca, o None si no se puede saber cuál es. registrable() solo conoce
-    SUFIJOS_DOBLES: de acme.com.kg saca com.kg, con la etiqueta 'com', y sus variantes (com.com, com.mx) no se parecen
+    SUFIJOS_DOBLES y HOSTINGS: de acme.com.kg saca com.kg, con la etiqueta 'com', y sus variantes (com.com, com.mx) no se parecen
     al dominio autorizado. Por eso solo hay marca cuando el dominio autorizado es su propio dominio registrable.
     Tampoco la hay en un subdominio (api.acme.mx), en un sufijo solo (com.mx, github.io) ni en un nombre de un
     hosting de HOSTINGS (acme.github.io): sus variantes serían sitios de otros clientes del hosting."""
@@ -385,9 +385,12 @@ def _lleva_marca(nombre, etiqueta, dominio):
     """Si un nombre que trajo %marca% cuenta como parecido. Cuenta con la marca en la primera etiqueta de su dominio
     registrable (acme-demo-login.com, y acme-demo.github.io como el sitio acme-demo.github.io, nunca como github.io),
     o con el dominio autorizado completo metido como subdominio de un dominio ajeno (acme-demo.mx.cuenta-segura.net,
-    que se reporta como cuenta-segura.net). La marca sola como subdominio de otro dominio (acme-demo.sharepoint.com)
-    no cuenta: culparía a un dominio ajeno por un nombre que cualquiera puede elegir."""
-    return etiqueta in registrable(nombre).split('.', 1)[0] or '.%s.' % dominio in '.' + nombre
+    que se reporta como cuenta-segura.net). El dominio autorizado tiene que quedar completo a la izquierda del dominio
+    registrable del nombre: olmardo.com.kg, con un sufijo que no está en SUFIJOS_DOBLES, no sale como com.kg. La marca
+    sola como subdominio de otro dominio (acme-demo.sharepoint.com) no cuenta: culparía a un dominio ajeno por un
+    nombre que cualquiera puede elegir."""
+    reg = registrable(nombre)
+    return etiqueta in reg.split('.', 1)[0] or '.%s.' % dominio in '.' + nombre[:len(nombre) - len(reg)]
 
 
 def _nombres(cert):

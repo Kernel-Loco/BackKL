@@ -49,7 +49,7 @@ SUBDOMINIOS = [
 ]
 CONTIENE_MARCA = [
     cert(20, ['acme-demo-login.com', 'www.acme-demo-login.com'], '2026-09-30T00:00:00', '2026-12-29T00:00:00'),
-    # la marca como subdominio de otro dominio: no está en su dominio registrable -> no cuenta (RC-226)
+    # el dominio autorizado completo dentro de un dominio ajeno: se reporta como cuenta-segura.net (RC-226, R1)
     cert(21, ['acme-demo.mx.cuenta-segura.net'], '2026-08-01T00:00:00', '2026-10-30T00:00:00'),
     # certificado compartido de una CDN: solo cuenta el nombre parecido, no los ajenos
     cert(22, ['sni.cdn-ejemplo.com', 'acme-demo-pagos.com', 'tienda-ajena.com'], '2026-09-10T00:00:00', '2026-12-09T00:00:00'),
@@ -255,13 +255,14 @@ class DominiosParecidos(unittest.TestCase):
                  cert(64, ['acme-demo-login.netlify.app'], *vigente), cert(65, ['acme-demo.sharepoint.com'], *vigente),
                  cert(66, ['www.acme-demo.com.gt'], *vigente), cert(67, ['acme-demo.org.ar'], *vigente),
                  cert(68, ['acme-demo.co.za'], *vigente), cert(69, ['xacme-demo.mx.otro.org'], *vigente),
-                 cert(70, ['acme-demo.com.kg'], *vigente)]
+                 cert(70, ['acme-demo.com.kg'], *vigente), cert(71, ['acme-demo-pagos.github.io'], *vigente)]
         t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': marca})
         res = recolectar(t, parecidos=True)
         self.assertEqual(res.sin_cobertura, [])
         parecidos = {h.clave: h for h in res.hallazgos if h.codigo == 'lookalike_domain'}
         self.assertEqual(sorted(parecidos), [
-            'acme-demo-login.com', 'acme-demo-login.netlify.app', 'acme-demo.co.za', 'acme-demo.com.gt',
+            'acme-demo-login.com', 'acme-demo-login.netlify.app', 'acme-demo-pagos.github.io', 'acme-demo.co.za',
+            'acme-demo.com.gt',
             'acme-demo.github.io', 'acme-demo.org.ar', 'cuenta-segura.net', 'miacme-demo.com.mx'])
         self.assertEqual(parecidos['cuenta-segura.net'].evidencia['nombres'], ['acme-demo.mx.cuenta-segura.net'])
         self.assertEqual(parecidos['acme-demo.github.io'].evidencia['nombres'],
@@ -272,7 +273,7 @@ class DominiosParecidos(unittest.TestCase):
         t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': marca})
         res = recolectar(t, parecidos=True, propios=['acme-demo.github.io'])
         claves = {h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'}
-        self.assertEqual((('acme-demo.github.io' in claves), ('acme-demo-login.netlify.app' in claves)), (False, True))
+        self.assertEqual((('acme-demo.github.io' in claves), ('acme-demo-pagos.github.io' in claves)), (False, True))
 
     def test_8c_sufijos_y_hostings(self):
         """R1 y R2 de RC-226: registrable() con los sufijos de dos niveles y con los hostings, y la marca."""
@@ -291,8 +292,20 @@ class DominiosParecidos(unittest.TestCase):
         for nombre, cuenta in (('acme-demo.mx.cuenta-segura.net', True), ('login.acme-demo.mx.otro.org', True),
                                ('acme-demo.mx', True), ('acme-demo.sharepoint.com', False),
                                ('xacme-demo.mx.otro.org', False), ('acme-demo.mxx.otro.org', False),
-                               ('acme-demo-pagos.com', True), ('tienda.github.io', False)):
+                               ('acme-demo-pagos.com', True), ('tienda.github.io', False),
+                               ('acme-demo.mx.com', False), ('acme-demo.mx.sitio.com.kg', True),
+                               ('acme-demo.mx.github.io', False), ('acme-demo.mx.sitio.github.io', True)):
             self.assertEqual(crtsh._lleva_marca(nombre, 'acme-demo', 'acme-demo.mx'), cuenta, nombre)
+        # Un sufijo nunca sale como parecido: el dominio autorizado tiene que quedar a la izquierda del registrable.
+        for nombre in ('olmardo.com.kg', 'olmardo.com.de', 'olmardo.com.github.io', 'www.olmardo.com.kg'):
+            self.assertFalse(crtsh._lleva_marca(nombre, 'olmardo', 'olmardo.com'), nombre)
+        vigente = ('2026-09-10T00:00:00', '2026-12-09T00:00:00')
+        t = CrtshSimulado(respuestas={'%.olmardo.com': [], '%olmardo%': [
+            cert(80, ['olmardo.com.kg'], *vigente), cert(81, ['olmardo.com.de'], *vigente),
+            cert(82, ['olmardo.com.github.io'], *vigente), cert(83, ['olmardo.com.otro.net'], *vigente)]})
+        cliente = crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None)
+        res = crtsh.recolectar('olmardo.com', cliente, AHORA, parecidos=True)
+        self.assertEqual([h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'], ['otro.net'])
 
     def test_9_nunca_mas_de_diez_variantes(self):
         """A3 de RC-226: el tope de 10 es fijo, aunque quien llame pida más. Es lo que cuenta MAX_CONSULTAS."""
