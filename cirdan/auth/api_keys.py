@@ -52,7 +52,14 @@ def buscar(llave):
             return None
         if fila['touch']:
             conn.execute("SELECT set_config('app.current_org', %s, true)", (str(fila['organization_id']),))
-            conn.execute("UPDATE api_keys SET last_used_at = now() WHERE id = %s "
-                         "AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')",
-                         (fila['key_id'],))
+            tocada = conn.execute(
+                "UPDATE api_keys SET last_used_at = now() WHERE id = %s AND revoked_at IS NULL AND expires_at > now() "
+                "AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute') RETURNING 1",
+                (fila['key_id'],)).fetchone()
+            if not tocada:
+                # Otra petición guardó el uso en este minuto, o la llave se revocó mientras este UPDATE
+                # esperaba su candado. Se busca otra vez: una revocación ya confirmada aquí ya se ve.
+                fila = conn.execute('SELECT * FROM api_key_lookup(%s)', (huella(llave),)).fetchone()
+                if not fila or LECTURA not in fila['scopes']:
+                    return None
     return fila

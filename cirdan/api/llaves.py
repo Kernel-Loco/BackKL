@@ -11,7 +11,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from cirdan.auth import api_keys
+from cirdan.auth import api_keys, sessions
 from cirdan.auth.deps import Session, client_ip, require_roles
 from cirdan.db import audit, transaction
 
@@ -21,6 +21,7 @@ admin = require_roles('admin')
 DIAS_MAXIMO = 90      # igual que el CHECK de api_keys.expires_at
 LLAVES_VIGENTES = 20  # por empresa, sin contar las revocadas ni las vencidas
 SIN_PLAN = 'Tu plan no incluye la API. Está disponible en los planes Business y Enterprise.'
+SIN_SESION = 'Tu sesión terminó. Vuelve a iniciar sesión.'
 NO_ENCONTRADA = 'Llave no encontrada'
 
 
@@ -53,9 +54,16 @@ def create_api_key(body: LlaveIn, request: Request, response: Response, session:
     nombre = _texto(body.name, 'name')
     fqdn = _texto(body.domain, 'domain') if body.domain is not None else None
     with transaction(session.org_id) as conn:
-        # FOR UPDATE sobre la empresa: dos altas a la vez no pasan del tope de llaves vigentes.
+        # El rol de la sesión es el del día en que se inició. Una llave dura hasta 90 días, así que aquí
+        # se vuelve a leer en la base: una cuenta desactivada o que ya no es Admin no deja una llave.
+        if not conn.execute("SELECT 1 FROM users WHERE id = %s AND is_active AND role = 'admin'",
+                            (session.user_id,)).fetchone():
+            sessions.delete(session.token)
+            raise HTTPException(401, SIN_SESION)
+        # Candado sobre la empresa: dos altas a la vez no pasan del tope de llaves vigentes. NO KEY UPDATE
+        # y no UPDATE, para no chocar con las FK hacia organizations (la de audit_log entre ellas).
         plan = conn.execute('SELECT p.api_and_siem FROM organizations o JOIN plans p ON p.id = o.plan_id '
-                            'FOR UPDATE OF o').fetchone()
+                            'FOR NO KEY UPDATE OF o').fetchone()
         if not plan or not plan['api_and_siem']:
             raise HTTPException(403, SIN_PLAN)
         domain_id = None

@@ -63,7 +63,7 @@ Table users [note: 'Usuarios del portal con rol y MFA (argon2 + TOTP). Las sesio
   last_login_at timestamptz
 }
 
-Table api_keys [note: 'Llaves de la API REST, con alcance a un dominio o a toda la organización. Solo se guarda el hash: la llave completa se muestra una vez. Se crean, listan y revocan en /api/v1/api-keys (#87, RC-129, cirdan/api/llaves.py), solo un Admin y con un plan que incluye API. La migración 016 deja a cirdan_app UPDATE solo sobre last_used_at, revoked_at y updated_at, y un trigger impide quitar o cambiar revoked_at.'] {
+Table api_keys [note: 'Llaves de la API REST, con alcance a un dominio o a toda la organización. Solo se guarda el hash: la llave completa se muestra una vez. Se crean, listan y revocan en /api/v1/api-keys (#87, RC-129, cirdan/api/llaves.py), solo un Admin y con un plan que incluye API. La migración 016 deja a cirdan_app UPDATE solo sobre last_used_at, revoked_at y updated_at e INSERT sin id, created_at, last_used_at, revoked_at ni updated_at, y un trigger impide quitar o cambiar revoked_at.'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
   domain_id uuid [ref: > domains.id, note: 'Llave por dominio. NULL = todos los dominios (solo la crea un Admin). FK compuesta (organization_id, domain_id)']

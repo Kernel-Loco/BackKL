@@ -15,6 +15,7 @@ Ninguna pide un escaneo.
 import hashlib
 import re
 import unittest
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from pruebas import sesion
@@ -184,6 +185,65 @@ class LlavesApi(unittest.TestCase):
             code, _ = self.alex.post(LLAVES, {'name': 'CIRDAN_FAKE_ajeno', 'domain': dominio})
             self.assertEqual(code, 404, dominio)
 
+    def test_3b_la_comparacion_no_muestra_lo_que_hoy_es_de_otro_dominio(self):
+        # El upsert por huella puede pasar un hallazgo a otro dominio de la empresa. Su aporte sigue en el score
+        # de acme-demo.mx, pero el activo, el título y el estado de hoy ya son de acme-tienda.mx: la llave de
+        # acme-demo.mx no los recibe. Se regresa al terminar, como en la prueba 9e de test_api_v1.py.
+        poner_plan(ACME, 'business')
+        toda = self.crear(self.alex, 'toda')['key']
+        una = self.crear(self.alex, 'demo', domain='acme-demo.mx')['key']
+        url = ('/api/v1/domains/acme-demo.mx/score/compare?desde=a0000000-0000-4000-8000-000000000001'
+               '&hasta=a0000000-0000-4000-8000-000000000004')
+        code, antes = get(una, url)
+        self.assertEqual(code, 200, antes)
+        self.assertEqual(antes, get(toda, url)[1], 'sin hallazgos movidos, las dos llaves ven lo mismo')
+        original = next(i for i in antes['items'] if i['change'] == 'new')
+        movido = original['finding_id']
+        self.assertTrue(original['asset'] and original['status_now'])
+        activo = scalar("SELECT asset_id FROM findings WHERE id = '%s';" % movido, user='postgres')
+        evidencia = scalar("SELECT evidence FROM findings WHERE id = '%s';" % movido, user='postgres')
+        temporal = '70000000-0000-4000-8000-000000000129'
+        postgres('''
+            INSERT INTO assets (id, organization_id, domain_id, asset_type, value, attributes, first_seen_at, last_seen_at)
+            SELECT '%s', d.organization_id, d.id, 'domain', 'rc129-prueba.acme-tienda.mx', '{}', now(), now()
+              FROM domains d WHERE d.fqdn = 'acme-tienda.mx' ON CONFLICT (id) DO NOTHING;
+            UPDATE findings f SET domain_id = a.domain_id, asset_id = a.id,
+                   evidence = '{"title": "CIRDAN_FAKE_titulo_de_tienda"}' FROM assets a
+             WHERE a.id = '%s' AND f.id = '%s';
+        ''' % (temporal, temporal, movido))
+        try:
+            code, despues = get(una, url)
+            self.assertEqual(code, 200, despues)
+            self.assertEqual((despues['summary'], despues['total']), (antes['summary'], antes['total']))
+            item = next(i for i in despues['items'] if i['finding_id'] == movido)
+            self.assertEqual((item['asset'], item['asset_type'], item['status_now']), (None, None, None))
+            self.assertEqual(item['title'], item['rule_code'])
+            # Lo que el score guardó de ese hallazgo sí es de acme-demo.mx y no cambia.
+            for campo in ('change', 'rule_code', 'category', 'severity_to', 'penalty_to'):
+                self.assertEqual(item[campo], original[campo], campo)
+            self.assertNotIn('tienda', str(despues))
+            # Los demás renglones siguen completos.
+            self.assertEqual([i for i in despues['items'] if i['finding_id'] != movido],
+                             [i for i in antes['items'] if i['finding_id'] != movido])
+            for formato in ('csv', 'json'):
+                descarga = urllib.request.Request(
+                    sesion.BASE + url.replace('/compare?', '/compare/export?formato=%s&' % formato),
+                    headers={'Authorization': 'Bearer ' + una})
+                with urllib.request.urlopen(descarga, timeout=10) as r:
+                    texto = r.read().decode('utf-8')
+                self.assertIn(movido, texto, formato)
+                self.assertNotIn('tienda', texto, formato)
+            # La llave de toda la empresa y la sesión sí ven el hallazgo como está hoy.
+            for body in (get(toda, url)[1], self.alex.get(url)[1]):
+                item = next(i for i in body['items'] if i['finding_id'] == movido)
+                self.assertEqual((item['asset'], item['title'], item['status_now']),
+                                 ('rc129-prueba.acme-tienda.mx', 'CIRDAN_FAKE_titulo_de_tienda', original['status_now']))
+        finally:
+            postgres("UPDATE findings SET domain_id = (SELECT id FROM domains WHERE fqdn = 'acme-demo.mx'), "
+                     "asset_id = '%s', evidence = '%s' WHERE id = '%s'; DELETE FROM assets WHERE id = '%s';"
+                     % (activo, evidencia.replace("'", "''"), movido, temporal))
+        self.assertEqual(get(una, url)[1], antes)
+
     # ------------------------------------------------------------ revocada, vencida y otra empresa
 
     def test_4_una_llave_revocada_responde_401(self):
@@ -339,6 +399,26 @@ class LlavesApi(unittest.TestCase):
         for nombre in ('', '   ', 'x' * 81, 'CIRDAN_FAKE_\u0007'):
             self.assertEqual(self.dana.post(LLAVES, {'name': nombre})[0], 422, repr(nombre))
 
+    def test_10b_una_sesion_vieja_de_admin_no_crea_llaves(self):
+        # La sesión guarda el rol del día en que se inició. Si después le quitan el rol o desactivan la cuenta,
+        # esa cookie ya no crea una llave de 90 días: responde 401 y la sesión se borra.
+        dana = "email = '%s'" % DANA
+        for cambio in ("role = 'manager'", 'is_active = false'):
+            vieja = sesion.login(DANA)
+            self.assertEqual(vieja.get(LLAVES)[0], 200)
+            postgres("UPDATE users SET %s WHERE %s;" % (cambio, dana))
+            try:
+                code, error = vieja.post(LLAVES, {'name': 'CIRDAN_FAKE_sesion-vieja'})
+            finally:
+                postgres("UPDATE users SET role = 'admin', is_active = true WHERE %s;" % dana)
+            self.assertEqual((code, error['detail']), (401, SIN_SESION), cambio)
+            self.assertEqual(vieja.get(LLAVES)[0], 401, cambio)
+        self.assertEqual(scalar("SELECT count(*) FROM api_keys;", user='postgres'), '0')
+        self.assertEqual(scalar("SELECT count(*) FROM audit_log WHERE action = 'api_key.created' "
+                                "AND details->>'name' = 'CIRDAN_FAKE_sesion-vieja';", user='postgres'), '0')
+        # Con la cuenta otra vez en regla, la sesión de siempre sigue creando.
+        self.crear(self.dana, 'en-regla')
+
     def test_11_solo_con_un_plan_que_incluye_la_api(self):
         # Acme es Starter: no crea.
         code, error = self.alex.post(LLAVES, {'name': 'CIRDAN_FAKE_starter'})
@@ -378,6 +458,13 @@ class LlavesApi(unittest.TestCase):
         self.assertEqual(self.dana.request('DELETE', LLAVES + '/' + llave_id)[0], 204)
         self.crear(self.dana, 'despues-de-revocar')
         self.assertEqual(self.dana.post(LLAVES, {'name': 'CIRDAN_FAKE_de-mas'})[0], 409)
+        vigente = next(i['id'] for i in self.dana.get(LLAVES)[1]['items'] if i['status'] == 'active')
+        postgres("UPDATE api_keys SET created_at = now() - interval '91 days', expires_at = now() - interval '1 day' "
+                 "WHERE id = '%s';" % vigente)
+        self.crear(self.dana, 'despues-de-vencer')
+        self.assertEqual(self.dana.post(LLAVES, {'name': 'CIRDAN_FAKE_de-mas'})[0], 409)
+        self.assertEqual(scalar("SELECT count(*) FILTER (WHERE revoked_at IS NULL AND expires_at > now()) || ',' || count(*) "
+                                "FROM api_keys;", user='postgres'), '20,22')
 
     # ------------------------------------------------------------ la base
 
@@ -410,6 +497,24 @@ class LlavesApi(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('permission denied', err)
         self.assertEqual(self.estado(body['key']), 200)
+        # Al crearla tampoco elige created_at: con una fecha futura el CHECK de 90 días la dejaría durar años.
+        # Lo mismo con las demás columnas que la API no escribe al crear.
+        insertar = ("BEGIN; INSERT INTO api_keys (organization_id, name, key_prefix, key_hash, scopes, created_by, expires_at%s) "
+                    "VALUES ('" + BETA + "', 'CIRDAN_FAKE_columnas', 'lt_fffffffe', '\\x02', '{read}', "
+                    "'30000000-0000-4000-8000-000000000004', %s%s); ROLLBACK;")
+        for columna, valor, vence in (('created_at', "now() + interval '365 days'", "now() + interval '455 days'"),
+                                      ('created_at', "now() - interval '1 day'", "now() + interval '1 day'"),
+                                      ('id', "'%s'" % UUID_CUALQUIERA, "now() + interval '1 day'"),
+                                      ('last_used_at', 'now()', "now() + interval '1 day'"),
+                                      ('revoked_at', 'NULL', "now() + interval '1 day'"),
+                                      ('updated_at', 'now()', "now() + interval '1 day'")):
+            ok, _, err = psql(insertar % (', ' + columna, vence, ', ' + valor), org=BETA)
+            self.assertFalse(ok, columna)
+            self.assertIn('permission denied', err, columna)
+        # Con las columnas de la API sí entra (y se deshace).
+        ok, _, err = psql(insertar % ('', "now() + interval '90 days'", ''), org=BETA)
+        self.assertTrue(ok, err)
+        self.assertEqual(scalar("SELECT count(*) FROM api_keys WHERE name = 'CIRDAN_FAKE_columnas';", user='postgres'), '0')
 
 
 if __name__ == '__main__':

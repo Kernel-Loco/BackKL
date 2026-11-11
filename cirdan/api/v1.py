@@ -409,16 +409,23 @@ SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.reason, ds.partia
   FROM domain_scores ds WHERE ds.domain_id = %s AND ds.id = ANY(%s::uuid[])
 '''
 
+# El aporte (severidad, puntos y regla) es del score del dominio y siempre sale. El título, el activo y
+# el estado se leen del hallazgo de hoy, y el upsert por huella puede haberlo movido a otro dominio de
+# la empresa: una llave de un solo dominio (%(solo)s) no los recibe de un hallazgo que ya no es suyo.
 COMPARE_CONTRIBUTIONS_SQL = '''
 SELECT x.score_id::text, f.id::text AS finding_id, x.severity, x.penalty,
-       coalesce(f.evidence->>'title', r.code) AS title, r.code AS rule_code, r.category,
-       a.value AS asset, a.asset_type, f.status
+       CASE WHEN v.visible THEN coalesce(f.evidence->>'title', r.code) ELSE r.code END AS title,
+       r.code AS rule_code, r.category,
+       CASE WHEN v.visible THEN a.value END AS asset,
+       CASE WHEN v.visible THEN a.asset_type END AS asset_type,
+       CASE WHEN v.visible THEN f.status END AS status
   FROM score_contributions x
   JOIN domain_scores ds ON ds.id = x.score_id
   JOIN findings f       ON f.id = x.finding_id  -- sin f.domain_id: el upsert por huella puede haberlo movido
   JOIN assets a         ON a.id = f.asset_id
   JOIN scoring_rules r  ON r.id = x.rule_id
- WHERE ds.domain_id = %s AND x.score_id = ANY(%s::uuid[])
+ CROSS JOIN LATERAL (SELECT %(solo)s::uuid IS NULL OR f.domain_id = %(solo)s::uuid AS visible) v
+ WHERE ds.domain_id = %(domain_id)s AND x.score_id = ANY(%(scores)s::uuid[])
 '''
 
 
@@ -436,7 +443,8 @@ def _comparacion(session, fqdn, desde, hasta):
         scores = {r['score_id']: r for r in conn.execute(COMPARE_SCORES_SQL, (domain_id, [desde, hasta])).fetchall()}
         if desde not in scores or hasta not in scores:
             raise HTTPException(404, 'Escaneo no encontrado')
-        aportes = conn.execute(COMPARE_CONTRIBUTIONS_SQL, (domain_id, [desde, hasta])).fetchall()
+        aportes = conn.execute(COMPARE_CONTRIBUTIONS_SQL, {'domain_id': domain_id, 'scores': [desde, hasta],
+                                                           'solo': session.domain_id}).fetchall()
     items, resumen = comparacion.comparar([a for a in aportes if a['score_id'] == desde],
                                           [a for a in aportes if a['score_id'] == hasta])
     return {'domain': fqdn, 'from': scores[desde], 'to': scores[hasta], 'summary': resumen,
