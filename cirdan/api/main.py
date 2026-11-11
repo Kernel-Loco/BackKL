@@ -4,7 +4,9 @@ Entra como el rol de la aplicación `cirdan_app` (sin superusuario ni BYPASSRLS)
 de quien llama sale de su sesión (cookie httpOnly `lt_session`, #25): cada petición fija
 `app.current_org` con ella y Row-Level Security hace el resto, así que ninguna consulta
 filtra por organización. Ninguna ruta toma la empresa de un encabezado. El explorador de /demo
-y /db solo existe con DEMO_EXPLORER=true y también pide sesión (RC-58).
+y /db solo existe con DEMO_EXPLORER=true y también pide sesión (RC-58). Los GET de datos de
+/api/v1 también aceptan una llave de API en `Authorization: Bearer` (#87, RC-129): ahí la empresa
+sale de la fila de la llave, que se busca por su hash.
 
     docker compose up -d            (o, fuera de Docker: python -m uvicorn cirdan.api.main:app --port 8000)
     Documentación: http://127.0.0.1:8000/docs
@@ -17,6 +19,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from cirdan.auth.deps import Session, current_session
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
+from cirdan.api.llaves import router as api_keys_router
 from cirdan.api.v1 import router as v1_router
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import ORIGENES_LOCALES, config
@@ -69,6 +72,7 @@ async def error_no_manejado(request: Request, exc: Exception):
 
 app.include_router(auth_router)
 app.include_router(scans_router)
+app.include_router(api_keys_router)
 app.include_router(v1_router)
 
 # Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas

@@ -2,6 +2,11 @@
 
 Todo con sesión: la empresa sale de la cookie y RLS filtra en la base. Las bandas, el ponderado y
 el piso salen del criterio de criticidad (cirdan/score/criterio.py, #29).
+
+Los GET de datos también aceptan una llave de API (#87, RC-129) con session_or_api_key. La empresa
+sale de la llave y RLS filtra igual. Una llave de un solo dominio además pasa por in_scope(): toda
+ruta nueva que acepte llave y lea datos de un dominio tiene que revisarlo, porque RLS aísla por
+empresa, no por dominio.
 """
 import json
 import uuid
@@ -13,7 +18,7 @@ from fastapi.responses import Response
 from psycopg.types.json import Jsonb
 
 from cirdan import orquestador
-from cirdan.auth.deps import Session, current_session, require_roles
+from cirdan.auth.deps import Session, current_session, in_scope, require_roles, session_or_api_key
 from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import audit, transaction
@@ -117,7 +122,7 @@ def _marcos(f):
 
 def _domain_id(session, fqdn):
     rows = _query(session, 'SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,))
-    if not rows:
+    if not rows or not in_scope(session, rows[0]['id']):  # fuera del alcance de la llave se ve igual que ajeno
         raise HTTPException(404, 'Dominio no encontrado para esta organización')
     return rows[0]['id']
 
@@ -196,8 +201,8 @@ def txt_records(session: Session = Depends(require_roles('admin'))):
 
 
 @router.get('/domains', summary='Dominios con autorización, TXT, si se pueden escanear, score y hallazgos abiertos')
-def domains(session: Session = Depends(current_session)):
-    items = [_domain(r) for r in _query(session, DOMAINS_SQL)]
+def domains(session: Session = Depends(session_or_api_key)):
+    items = [_domain(r) for r in _query(session, DOMAINS_SQL) if in_scope(session, r['id'])]
     return {'items': items, 'total': len(items)}
 
 
@@ -253,7 +258,7 @@ def _finding(f):
 
 
 @router.get('/domains/{fqdn}/findings', summary='Hallazgos abiertos del dominio, de más a menos severo')
-def domain_findings(fqdn: str, session: Session = Depends(current_session)):
+def domain_findings(fqdn: str, session: Session = Depends(session_or_api_key)):
     _domain_id(session, fqdn)
     items = [_finding(f) for f in _query(session, FINDINGS_SQL, (fqdn,))]
     return {'domain': fqdn, 'items': items, 'total': len(items)}
@@ -289,7 +294,7 @@ def _score_base(row, critical_open):
 
 
 @router.get('/domains/{fqdn}/score', summary='Score más reciente con su desglose por categoría')
-def domain_score(fqdn: str, session: Session = Depends(current_session)):
+def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
     domain_id = _domain_id(session, fqdn)
     rows = _query(session, SCORES_SQL, (fqdn,))
     if not rows:
@@ -307,7 +312,7 @@ def domain_score(fqdn: str, session: Session = Depends(current_session)):
 
 
 @router.get('/domains/{fqdn}/score/history', summary='Todos los scores del dominio, del más viejo al más nuevo')
-def score_history(fqdn: str, session: Session = Depends(current_session)):
+def score_history(fqdn: str, session: Session = Depends(session_or_api_key)):
     _domain_id(session, fqdn)
     rows = _query(session, SCORES_SQL, (fqdn,))
     scan_ids = [row['scan_id'] for row in rows if row['reason'] == 'scan']
@@ -354,7 +359,7 @@ def _dominio_autorizado(session, fqdn):
                           AND current_date BETWEEN a.valid_from AND a.valid_until) AS vigente
           FROM domains d WHERE d.fqdn = %s
     ''', (fqdn,))
-    if not rows:
+    if not rows or not in_scope(session, rows[0]['id']):
         raise HTTPException(404, 'Dominio no encontrado para esta organización')
     if not rows[0]['vigente']:
         raise HTTPException(403, 'El dominio no tiene una autorización firmada vigente')
@@ -384,7 +389,7 @@ ENCABEZADOS_HALLAZGOS = (
 
 
 @router.get('/domains/{fqdn}/findings/export', summary='Descarga los hallazgos abiertos del dominio en CSV o JSON')
-def export_findings(fqdn: str, formato: str = Query(default='json'), session: Session = Depends(current_session)):
+def export_findings(fqdn: str, formato: str = Query(default='json'), session: Session = Depends(session_or_api_key)):
     formato = _formato(formato)
     _dominio_autorizado(session, fqdn)
     items = [_finding(f) for f in _query(session, FINDINGS_SQL, (fqdn,))]
@@ -404,16 +409,23 @@ SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.reason, ds.partia
   FROM domain_scores ds WHERE ds.domain_id = %s AND ds.id = ANY(%s::uuid[])
 '''
 
+# El aporte (severidad, puntos y regla) es del score del dominio y siempre sale. El título, el activo y
+# el estado se leen del hallazgo de hoy, y el upsert por huella puede haberlo movido a otro dominio de
+# la empresa: una llave de un solo dominio (%(solo)s) no los recibe de un hallazgo que ya no es suyo.
 COMPARE_CONTRIBUTIONS_SQL = '''
 SELECT x.score_id::text, f.id::text AS finding_id, x.severity, x.penalty,
-       coalesce(f.evidence->>'title', r.code) AS title, r.code AS rule_code, r.category,
-       a.value AS asset, a.asset_type, f.status
+       CASE WHEN v.visible THEN coalesce(f.evidence->>'title', r.code) ELSE r.code END AS title,
+       r.code AS rule_code, r.category,
+       CASE WHEN v.visible THEN a.value END AS asset,
+       CASE WHEN v.visible THEN a.asset_type END AS asset_type,
+       CASE WHEN v.visible THEN f.status END AS status
   FROM score_contributions x
   JOIN domain_scores ds ON ds.id = x.score_id
   JOIN findings f       ON f.id = x.finding_id  -- sin f.domain_id: el upsert por huella puede haberlo movido
   JOIN assets a         ON a.id = f.asset_id
   JOIN scoring_rules r  ON r.id = x.rule_id
- WHERE ds.domain_id = %s AND x.score_id = ANY(%s::uuid[])
+ CROSS JOIN LATERAL (SELECT %(solo)s::uuid IS NULL OR f.domain_id = %(solo)s::uuid AS visible) v
+ WHERE ds.domain_id = %(domain_id)s AND x.score_id = ANY(%(scores)s::uuid[])
 '''
 
 
@@ -431,7 +443,8 @@ def _comparacion(session, fqdn, desde, hasta):
         scores = {r['score_id']: r for r in conn.execute(COMPARE_SCORES_SQL, (domain_id, [desde, hasta])).fetchall()}
         if desde not in scores or hasta not in scores:
             raise HTTPException(404, 'Escaneo no encontrado')
-        aportes = conn.execute(COMPARE_CONTRIBUTIONS_SQL, (domain_id, [desde, hasta])).fetchall()
+        aportes = conn.execute(COMPARE_CONTRIBUTIONS_SQL, {'domain_id': domain_id, 'scores': [desde, hasta],
+                                                           'solo': session.domain_id}).fetchall()
     items, resumen = comparacion.comparar([a for a in aportes if a['score_id'] == desde],
                                           [a for a in aportes if a['score_id'] == hasta])
     return {'domain': fqdn, 'from': scores[desde], 'to': scores[hasta], 'summary': resumen,
@@ -442,13 +455,13 @@ def _comparacion(session, fqdn, desde, hasta):
             summary='Compara hallazgo por hallazgo dos scores del histórico: nuevos, que ya no están y que siguen')
 def compare_scores(fqdn: str, desde: str = Query(..., description='score_id del histórico'),
                    hasta: str = Query(..., description='score_id del histórico'),
-                   session: Session = Depends(current_session)):
+                   session: Session = Depends(session_or_api_key)):
     return _comparacion(session, fqdn, desde, hasta)
 
 
 @router.get('/domains/{fqdn}/score/compare/export', summary='Descarga la comparación de dos scores en CSV o JSON')
 def export_comparison(fqdn: str, desde: str = Query(...), hasta: str = Query(...),
-                      formato: str = Query(default='json'), session: Session = Depends(current_session)):
+                      formato: str = Query(default='json'), session: Session = Depends(session_or_api_key)):
     formato = _formato(formato)
     data = _comparacion(session, fqdn, desde, hasta)
     if formato == 'json':
@@ -513,7 +526,7 @@ def _plan_data(session, fqdn):
 
 
 @router.get('/domains/{fqdn}/action-plan', summary='Plan de acción con el impacto estimado por acción')
-def action_plan(fqdn: str, session: Session = Depends(current_session)):
+def action_plan(fqdn: str, session: Session = Depends(session_or_api_key)):
     return _plan_data(session, fqdn)
 
 
@@ -536,7 +549,7 @@ def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
 
 @router.get('/domains/{fqdn}/action-plan/export', summary='Descarga el plan de acción en CSV o JSON')
 def export_action_plan(fqdn: str, formato: str = Query(default='json'),
-                       session: Session = Depends(current_session)):
+                       session: Session = Depends(session_or_api_key)):
     if formato not in ('csv', 'json'):
         raise HTTPException(422, "El formato debe ser 'csv' o 'json'")
     data = _plan_data(session, fqdn)
@@ -556,7 +569,7 @@ def export_action_plan(fqdn: str, formato: str = Query(default='json'),
 # ---------------------------------------------------------------- explicación
 
 EXPLANATION_SQL = '''
-SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, coalesce(x.severity, f.severity) AS severity,
+SELECT f.id::text AS finding_id, f.domain_id::text AS domain_id, d.fqdn::text AS domain, f.evidence, coalesce(x.severity, f.severity) AS severity,
        r.base_severity, r.category,
        r.code AS rule_code, r.max_penalty, a.value AS asset, a.asset_type, a.first_seen_at AS asset_first_seen,
        f.detected_at, sc.queued_at AS scan_at, b.breach_date,
@@ -581,14 +594,14 @@ SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, coalesce(x.
 
 
 @router.get('/findings/{finding_id}/explanation', summary='Por qué el hallazgo tiene su severidad y cuánto suma al score')
-def finding_explanation(finding_id: str, session: Session = Depends(current_session)):
+def finding_explanation(finding_id: str, session: Session = Depends(session_or_api_key)):
     try:
         finding_id = str(uuid.UUID(finding_id))
     except ValueError:
         raise HTTPException(404, 'Hallazgo no encontrado')  # un id mal formado se responde igual que uno de otra empresa
     # Sin try: un error de la base (por ejemplo, sin la migración 003) llega al log y responde 500, no 404.
     rows = _query(session, EXPLANATION_SQL, (finding_id,))
-    if not rows:
+    if not rows or not in_scope(session, rows[0]['domain_id']):
         raise HTTPException(404, 'Hallazgo no encontrado')
     f = rows[0]
     factors = [{'label': FACTOR_ES.get(r['label'], r['label']), 'points': r['points']}
@@ -614,7 +627,7 @@ def finding_explanation(finding_id: str, session: Session = Depends(current_sess
 # ---------------------------------------------------------------- pesos, activos y escaneos
 
 @router.get('/scoring/weights', summary='Juego de reglas activo: pesos, bandas, piso, umbral y reglas')
-def scoring_weights(session: Session = Depends(current_session)):
+def scoring_weights(session: Session = Depends(session_or_api_key)):
     with transaction(session.org_id) as conn:
         rs = configuracion.juego_activo(conn, session.org_id)
         rules = conn.execute('SELECT r.code, r.category, r.base_severity, r.weight, r.max_penalty, '
@@ -690,7 +703,7 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
 
 
 @router.get('/domains/{fqdn}/assets', summary='Activos del dominio (provisional, aún no está en el contrato #21)')
-def domain_assets(fqdn: str, session: Session = Depends(current_session)):
+def domain_assets(fqdn: str, session: Session = Depends(session_or_api_key)):
     _domain_id(session, fqdn)
     rows = _query(session, '''
         SELECT a.id::text, a.asset_type AS type, a.value, p.value AS parent, a.attributes, a.first_seen_at, a.last_seen_at
@@ -701,15 +714,17 @@ def domain_assets(fqdn: str, session: Session = Depends(current_session)):
 
 
 @router.get('/scans', summary='Escaneos de la organización, del más nuevo al más viejo (provisional)')
-def scans(session: Session = Depends(current_session)):
+def scans(session: Session = Depends(session_or_api_key)):
     with transaction(session.org_id) as conn:
-        orquestador.abandonar_vencidos(conn, session.org_id)  # uno caído no se muestra en curso
+        # uno caído no se muestra en curso. Una llave de un dominio solo toca los de su dominio
+        orquestador.abandonar_vencidos(conn, session.org_id, domain_id=session.domain_id)
     rows = _query(session, '''
         SELECT s.id::text, d.fqdn::text AS domain, s.trigger_type AS trigger, s.status, s.queued_at, s.finished_at, s.stats,
                coalesce((SELECT jsonb_agg(jsonb_build_object('source', ds.code, 'status', r.status, 'attempt', r.attempt,
                                                              'error', r.error, 'finished_at', r.finished_at) ORDER BY ds.code)
                            FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id WHERE r.scan_id = s.id), '[]') AS sources
           FROM scans s JOIN domains d ON d.id = s.domain_id
+         WHERE %s::uuid IS NULL OR s.domain_id = %s::uuid
          ORDER BY s.queued_at DESC LIMIT 50
-    ''')
+    ''', (session.domain_id, session.domain_id))
     return {'items': rows, 'total': len(rows)}

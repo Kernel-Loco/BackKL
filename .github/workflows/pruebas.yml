@@ -89,7 +89,7 @@ jobs:
       - name: Pruebas de la base y la API
         run: >-
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_api.py
-          pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py
+          pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_llaves_api.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
       # porque no trae gitleaks. Aquí INTEGRACION_GITHUB=1 hace que falle si a la imagen le faltan.

@@ -22,6 +22,8 @@ def comparar(aportes_desde, aportes_hasta):
     """Une los aportes de los dos scores por finding_id.
 
     Cada aporte trae finding_id, severity, penalty, title, rule_code, category, asset, asset_type y status.
+    title, asset, asset_type y status llegan del hallazgo de hoy. Con una llave de API de un solo dominio,
+    asset, asset_type y status vienen en None si el hallazgo hoy es de otro dominio (cirdan/api/v1.py).
     Devuelve los renglones de 'items' y el resumen con los conteos por cambio.
     """
     desde = {a['finding_id']: a for a in aportes_desde}
@@ -46,7 +48,7 @@ def comparar(aportes_desde, aportes_hasta):
         })
     items.sort(key=lambda i: (CAMBIOS.index(i['change']),
                               _ORDEN_SEVERIDAD[i['severity_to'] or i['severity_from']],
-                              i['rule_code'], i['asset'], i['finding_id']))
+                              i['rule_code'], i['asset'] or '', i['finding_id']))
     resumen = {c: sum(1 for i in items if i['change'] == c) for c in CAMBIOS}
     resumen['severity_changed'] = sum(1 for i in items if i['severity_changed'])
     return items, resumen
