@@ -428,8 +428,21 @@ class ApiV1(unittest.TestCase):
         ok, _, err = psql(beta % 'suspended', user='postgres')
         self.assertTrue(ok, err)
         self.addCleanup(self.psql_o_falla, beta % 'active', 'Beta Corp se quedó suspendida')
-        self.assertEqual(self.beta.get('/api/v1/domains/beta-corp.mx/export/siem')[0], 403)
+        estado, cuerpo = self.beta.get('/api/v1/domains/beta-corp.mx/export/siem')[:2]
+        # El texto dice que la empresa está suspendida, no que el plan no incluye SIEM (Beta Corp sí lo incluye).
+        self.assertEqual((estado, cuerpo['detail']),
+                         (403, 'La empresa está suspendida o cancelada: no puede exportar a SIEM'))
         self.psql_o_falla(beta % 'active', 'Beta Corp se quedó suspendida')
+        # Una cuenta desactivada después de iniciar sesión ya no exporta: 401 y la sesión se borra (como las llaves).
+        dana = "UPDATE users SET is_active = %s WHERE email = 'dana.cruz@beta-corp.mx';"
+        vieja = sesion.login('dana.cruz@beta-corp.mx')
+        self.psql_o_falla(dana % 'false', 'no se pudo desactivar a Dana')
+        try:
+            estado, cuerpo = vieja.get('/api/v1/domains/beta-corp.mx/export/siem')[:2]
+        finally:
+            self.psql_o_falla(dana % 'true', 'Dana se quedó desactivada')
+        self.assertEqual((estado, cuerpo['detail']), (401, 'Tu sesión terminó. Vuelve a iniciar sesión.'))
+        self.assertEqual(vieja.get('/api/v1/domains/beta-corp.mx/export/siem')[0], 401)
         # Con un escaneo del dominio en curso responde 409: sus fuentes ya guardaron hallazgos y el escaneo y el score
         # serían los anteriores. El trigger de la autorización pide un TXT de menos de 1 hora y dns_txt_verifications
         # no deja borrar, así que la fila del escaneo entra sin triggers (solo en esta transacción) y se borra al final.

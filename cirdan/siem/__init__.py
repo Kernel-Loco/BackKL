@@ -1,7 +1,8 @@
 """Salida a SIEM (#98, RC-212): eventos de LowTide en el formato del HTTP Event Collector (HEC) de Splunk,
 con los nombres de campo del Common Information Model (CIM 8.5).
 
-Un evento por hallazgo abierto (sourcetype lowtide:finding, modelo Vulnerabilities, y Alerts si es crítico y nuevo),
+Un evento por hallazgo abierto (sourcetype lowtide:finding, modelo Vulnerabilities, y Alerts si es crítico
+y nuevo o si subió a crítico),
 uno del último escaneo (lowtide:scan), uno del último score (lowtide:score) y uno de la exportación (lowtide:export),
 que sale siempre, aunque el dominio no tenga hallazgos. La app de Splunk splunk/lowtide_splunk/ les pone los eventtypes
 y los tags del CIM.
@@ -84,10 +85,13 @@ def evento_hallazgo(dominio, h, ahora, export_id):
         evento['cvss'] = float(h['cvss'])
     if h['attack_technique_id']:
         evento['mitre_technique_id'] = h['attack_technique_id']
-    if h['severity'] == 'critical' and h['recurrence'] == 'new':
+    subio = h['previous_severity'] not in (None, 'critical')
+    if h['severity'] == 'critical' and (h['recurrence'] == 'new' or subio):
         # CIM Alerts: el eventtype lowtide_alert solo toma los críticos nuevos (no aportaron a los dos últimos scores
-        # de escaneo, cirdan/api/v1.py), así uno que sigue abierto no vuelve a ser alerta en cada escaneo y uno que
-        # se reabre sí. Dos exportaciones después del mismo escaneo la repiten: se deduplica por finding_id.
+        # de escaneo, cirdan/api/v1.py) y los que siguen abiertos pero no eran críticos en el más viejo de esos dos
+        # scores (los subió el ML o el motor). Así uno que sigue abierto y crítico no vuelve a ser alerta en cada
+        # escaneo, y uno que se reabre o sube sí. Dos exportaciones después del mismo escaneo la repiten: se deduplica
+        # por finding_id.
         evento['type'] = 'alert'
     return _sobre('lowtide:finding', ahora, export_id, evento)
 

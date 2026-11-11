@@ -317,8 +317,11 @@ class Orquestador(unittest.TestCase):
         recurring si el hallazgo está en los dos últimos scores de escaneo del dominio y new si no, como uno resuelto
         que se reabre (está en el último y no en el anterior). Un score de otro motivo (correction) no cuenta.
         solo_viejo es la brecha 80...0001, que también aportó al score de la semilla a0...01: con 'todos los scores' en
-        vez de 'los dos últimos' saldría recurring. Un escaneo caído entre los dos scores en el que la fuente de 'uno'
-        respondió pudo cerrarlo, y el último reabrirlo: sale new. Si esa fuente falló en el caído, sigue recurring.
+        vez de 'los dos últimos' saldría recurring. solo_nuevo también aportó a un score de escaneo más viejo que los
+        dos: con 'el último y cualquier anterior' saldría recurring. Un escaneo caído que terminó después del más viejo
+        de los dos scores, en el que la fuente de 'uno' respondió, pudo cerrarlo, y el último reabrirlo: sale new. Si
+        esa fuente falló en el caído y solo respondió otra, sigue recurring. Un score de escaneo sin ninguna fuente que
+        respondiera (sources_ok = 0) no cuenta. previous_severity es la del más viejo de los dos scores.
         Los scores y el escaneo caído llevan momentos fijos, porque en esta transacción now() es el mismo para todos."""
         abiertos = self.conn.execute(
             "SELECT f.id::text, f.rule_id, f.severity, f.domain_id, f.source_id FROM findings f "
@@ -332,38 +335,73 @@ class Orquestador(unittest.TestCase):
         escaneo = self.uno("SELECT s.id FROM scans s JOIN domains d ON d.id = s.domain_id "
                            "WHERE d.fqdn = 'acme-demo.mx' ORDER BY s.queued_at DESC LIMIT 1")['id']
 
-        def score(momento, motivo, hallazgos):
+        def score(momento, motivo, hallazgos, scan_id=escaneo, severidades=None):
             score_id = self.uno(
                 'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
                 "reason, computed_at) VALUES (%s, %s, %s, '90000000-0000-4000-8000-000000000001', 50, '{}', %s, %s) "
-                'RETURNING id', ACME, uno['domain_id'], escaneo, motivo, momento)['id']
+                'RETURNING id', ACME, uno['domain_id'], scan_id, motivo, momento)['id']
             for f in hallazgos:
                 self.conn.execute(
                     'INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, severity, '
-                    "factors) VALUES (%s, %s, %s, %s, 1, %s, '{}')", (ACME, score_id, f['id'], f['rule_id'], f['severity']))
-        score('2099-01-01T00:00:00+00:00', 'scan', [uno, solo_viejo])
+                    "factors) VALUES (%s, %s, %s, %s, 1, %s, '{}')",
+                    (ACME, score_id, f['id'], f['rule_id'], (severidades or {}).get(f['id'], f['severity'])))
+            return score_id
+        score('2098-12-30T00:00:00+00:00', 'scan', [solo_nuevo])
+        score('2099-01-01T00:00:00+00:00', 'scan', [uno, solo_viejo], severidades={uno['id']: 'low'})
         score('2099-01-02T00:00:00+00:00', 'scan', [uno, solo_nuevo])
         score('2099-01-03T00:00:00+00:00', 'correction', abiertos)
 
-        def recurrencia():
-            filas = {f['id']: f['recurrence']
-                     for f in self.conn.execute(api_v1.SIEM_FINDINGS_SQL, {'fqdn': 'acme-demo.mx'})}
+        def consulta(campo):
+            filas = {f['id']: f[campo] for f in self.conn.execute(api_v1.SIEM_FINDINGS_SQL, {'fqdn': 'acme-demo.mx'})}
             return [filas[f['id']] for f in abiertos]
+
+        def recurrencia():
+            return consulta('recurrence')
         self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
-        # Un escaneo caído (sin score) entre los dos scores de escaneo
-        caido = self.solicitar('acme-demo.mx', responde(TXT_ACME)).scan_id
-        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2099-01-01T12:00:00+00:00', "
+        # previous_severity sale del más viejo de los dos scores (el del 1 ene), no del último ni del de corrección
+        self.assertEqual(consulta('previous_severity'), [solo_viejo['severity'], 'low', None, None])
+
+        def solicitar():
+            s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+            self.assertTrue(s.aceptada, s.detalle)  # la autorización de la semilla vence el 31 dic 2026
+            return s.scan_id
+        # Un escaneo caído (sin score) pedido antes del más viejo de los dos scores y que terminó después: cuenta por
+        # finished_at. queued_at es de antes de la consulta TXT y puede quedar antes del score del escaneo anterior.
+        caido = solicitar()
+        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2098-12-31T23:00:00+00:00', "
                           "finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s", (caido,))
         corrida = ('INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status) VALUES (%s, %s, %s, %s) '
                    'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status')
         self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'failed'))
         self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Solo respondió otra fuente (la de 'ninguno'): no tocó los hallazgos de 'uno', que sigue recurring
+        self.assertNotEqual(ninguno['source_id'], uno['source_id'])
+        self.conn.execute(corrida, (ACME, caido, ninguno['source_id'], 'succeeded'))
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
         self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'succeeded'))
         self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
-        # Antes del más viejo de los dos scores ya no cuenta: ese score es posterior y tiene la foto
+        # Terminó antes del más viejo de los dos scores: ya no cuenta, ese score es posterior y tiene la foto
         self.conn.execute("UPDATE scans SET queued_at = '2098-12-31T12:00:00+00:00', "
                           "finished_at = '2098-12-31T13:00:00+00:00' WHERE id = %s", (caido,))
         self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Un escaneo posterior en el que no respondió ninguna fuente guarda score sin 'uno', pero no cuenta
+        vacio = solicitar()
+        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2099-01-04T00:00:00+00:00', "
+                          "finished_at = '2099-01-04T01:00:00+00:00', "
+                          "stats = '{\"sources_ok\": 0, \"sources_failed\": 1}' WHERE id = %s", (vacio,))
+        score('2099-01-04T01:00:00+00:00', 'scan', [], scan_id=vacio)
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Con una fuente que respondió sí cuenta, y 'uno', que no aportó a ese score, sale new
+        self.conn.execute("UPDATE scans SET stats = '{\"sources_ok\": 1, \"sources_failed\": 0}' WHERE id = %s",
+                          (vacio,))
+        self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
+        # cvss, como en el portal: de la tabla cves o, si la CVE no está ahí, de evidence.cvss si es un número de 0 a 10
+        self.conn.execute("INSERT INTO cves (cve_id, cvss_base_score) VALUES ('CVE-2099-0002', 5.0)")
+        self.conn.execute("UPDATE findings SET cve_id = 'CVE-2099-0002' WHERE id = %s", (ninguno['id'],))
+        for f, cvss in ((solo_viejo, '9.8'), (uno, '11'), (solo_nuevo, '"7.5"'), (ninguno, '9.0')):
+            self.conn.execute("UPDATE findings SET evidence = evidence || jsonb_build_object('cvss', %s::jsonb) "
+                              'WHERE id = %s', (cvss, f['id']))
+        self.assertEqual([None if x is None else float(x) for x in consulta('cvss')], [9.8, None, None, 5.0])
 
     def test_2i_no_cuentan_la_fuente_caida_sin_cobertura_ni_lo_que_decidio_el_cliente(self):
         _, f = self.escanear_ejemplo()

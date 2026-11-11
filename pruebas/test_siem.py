@@ -23,7 +23,7 @@ def hallazgo(**cambios):
         'id': '80000000-0000-4000-8000-000000000001', 'rule_title': 'Servicio de escritorio remoto expuesto',
         'rule_code': 'exposed_rdp', 'category': 'infrastructure', 'severity': 'high', 'status': 'open',
         'cve_id': None, 'cvss': None, 'asset': '192.0.2.50:3389/tcp', 'asset_type': 'service',
-        'asset_ip': '192.0.2.50', 'asset_parent': None, 'recurrence': 'new',
+        'asset_ip': '192.0.2.50', 'asset_parent': None, 'recurrence': 'new', 'previous_severity': None,
         'attack_technique_id': 'T1133', 'data_source': 'shodan',
         'detected_at': datetime(2026, 11, 1, 9, 0, tzinfo=MX), 'last_scan_id': '60000000-0000-4000-8000-000000000009',
         'scan_finished_at': ESCANEO_FIN,
@@ -83,9 +83,17 @@ class SalidaSiem(unittest.TestCase):
     def test_3_critico_nuevo_es_alerta_y_el_recurrente_no(self):
         ev = siem.evento_hallazgo('olmardo.com', hallazgo(severity='critical'), **X)['event']
         self.assertEqual((ev['type'], ev['app'], ev['recurrence']), ('alert', 'LowTide', 'new'))
-        ev = siem.evento_hallazgo('olmardo.com', hallazgo(severity='critical', recurrence='recurring'), **X)['event']
+        ev = siem.evento_hallazgo('olmardo.com', hallazgo(severity='critical', recurrence='recurring',
+                                                          previous_severity='critical'), **X)['event']
         self.assertNotIn('type', ev)
         self.assertEqual(ev['recurrence'], 'recurring')
+        # Sigue abierto, pero en el más viejo de los dos scores era high y ahora es crítico (lo subió el ML o el motor).
+        ev = siem.evento_hallazgo('olmardo.com', hallazgo(severity='critical', recurrence='recurring',
+                                                          previous_severity='high'), **X)['event']
+        self.assertEqual((ev['type'], ev['recurrence']), ('alert', 'recurring'))
+        self.assertNotIn('previous_severity', ev)
+        ev = siem.evento_hallazgo('olmardo.com', hallazgo(severity='high', previous_severity='medium'), **X)['event']
+        self.assertNotIn('type', ev)
 
     def test_4_un_correo_nunca_sale_y_dest_es_el_dominio(self):
         for asset in (CORREO, None):  # la consulta de la API ya lo deja en NULL, y aquí tampoco pasa

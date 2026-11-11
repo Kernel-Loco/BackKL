@@ -19,6 +19,8 @@ from psycopg import IsolationLevel
 from psycopg.types.json import Jsonb
 
 from cirdan import orquestador, siem
+from cirdan.api.llaves import SIN_SESION
+from cirdan.auth import sessions
 from cirdan.auth.deps import Session, current_session, in_scope, require_roles, session_or_api_key
 from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
@@ -595,15 +597,24 @@ def export_action_plan(fqdn: str, formato: str = Query(default='json'),
 # de tipo email no sale de la base.
 
 SIEM_FINDINGS_SQL = '''
-WITH ultimos AS (SELECT ds.id, ds.computed_at FROM domain_scores ds JOIN domains dd ON dd.id = ds.domain_id
-                  WHERE dd.fqdn = %(fqdn)s AND ds.reason = 'scan' ORDER BY ds.computed_at DESC, ds.id LIMIT 2),
+WITH ultimos AS (SELECT ds.id, ds.computed_at, row_number() OVER (ORDER BY ds.computed_at DESC, ds.id) AS n
+                   FROM domain_scores ds JOIN domains dd ON dd.id = ds.domain_id
+                   LEFT JOIN scans ss ON ss.id = ds.scan_id
+                  WHERE dd.fqdn = %(fqdn)s AND ds.reason = 'scan'
+                    AND ss.stats->'sources_ok' IS DISTINCT FROM '0'::jsonb
+                  ORDER BY ds.computed_at DESC, ds.id LIMIT 2),
      caidos AS (SELECT r.source_id FROM scans cs JOIN domains dd ON dd.id = cs.domain_id
                   JOIN scan_source_runs r ON r.scan_id = cs.id AND r.status = 'succeeded'
                  WHERE dd.fqdn = %(fqdn)s AND cs.finished_at IS NOT NULL
-                   AND cs.queued_at > (SELECT min(u.computed_at) FROM ultimos u)
+                   AND cs.finished_at > (SELECT min(u.computed_at) FROM ultimos u)
                    AND NOT EXISTS (SELECT 1 FROM domain_scores x WHERE x.scan_id = cs.id))
 SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
-       coalesce(sc_score.severity, f.severity) AS severity, f.status, cv.cve_id, c.cvss_base_score AS cvss,
+       coalesce(sc_score.severity, f.severity) AS severity, f.status, cv.cve_id,
+       coalesce(c.cvss_base_score, CASE WHEN jsonb_typeof(f.evidence->'cvss') = 'number' THEN
+           CASE WHEN (f.evidence->>'cvss')::numeric BETWEEN 0 AND 10 THEN (f.evidence->>'cvss')::numeric END END)
+           AS cvss,
+       (SELECT x.severity FROM score_contributions x
+         WHERE x.finding_id = f.id AND x.score_id = (SELECT u.id FROM ultimos u WHERE u.n = 2)) AS previous_severity,
        CASE WHEN a.asset_type = 'email' THEN NULL ELSE a.value END AS asset, a.asset_type,
        host(a.ip_address) AS asset_ip,
        CASE WHEN pa.asset_type IN ('domain','subdomain') THEN pa.value END AS asset_parent,
@@ -637,15 +648,23 @@ SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
 # así que un hallazgo que está en los dos últimos scores de escaneo del dominio ya venía de antes ('recurring') y
 # cualquier otro es 'new': uno que apareció o se reabrió en el último escaneo, o después de su score. No usa
 # detected_at, que no cambia al reabrir, ni last_scan_id, que no avanza si la fuente del hallazgo falla. Los scores con
-# otro motivo (correction, intel_update, rules_change) no cuentan.
+# otro motivo (correction, intel_update, rules_change) no cuentan, ni el de un escaneo en el que no respondió ninguna
+# fuente (stats.sources_ok = 0): guarda score, pero sus aportes solo repiten los del anterior.
+# Se mide contra los escaneos y no contra la exportación anterior: con dos escaneos entre dos exportaciones, un crítico
+# que abrió el primero ya sale recurring en la segunda. La alerta solo sale en la primera exportación después del
+# escaneo que la abrió, y el envío automático al cerrar cada escaneo (#98b, RC-213) es el que no pierde ninguna.
+# previous_severity es la severidad del hallazgo en el más viejo de los dos scores: un crítico que no lo era ahí (lo
+# subió el ML o el motor) también es alerta (cirdan/siem/__init__.py), aunque siga abierto.
 # Un escaneo que terminó sin score (abandonar_vencidos o marcar_fallido) no deja foto, pero sus fuentes que respondieron
 # ya guardaron: pudieron cerrar un hallazgo que el siguiente escaneo reabrió, y el reabrir no deja rastro (el upsert del
-# orquestador limpia resolved_at). Por eso, si después del más viejo de esos dos scores hubo un escaneo así en el que la
+# orquestador limpia resolved_at). Por eso, si después del más viejo de esos dos scores terminó un escaneo así (se mide
+# con finished_at: queued_at es de antes de la consulta TXT y puede quedar antes del score anterior) en el que la
 # fuente del hallazgo respondió ('caidos'), el hallazgo sale 'new': se prefiere repetir una alerta a perderla. Sale así
 # hasta el segundo escaneo con score que siga, y un crítico que abrió el escaneo caído alerta otra vez después del
 # siguiente. Una fuente que falló en el escaneo caído no tocó sus hallazgos y no cuenta.
 # Antes de RC-46 el orquestador no llenaba findings.cve_id y la CVE quedaba solo en evidence['cve']: por eso el
-# coalesce. La severidad sale del último score del dominio y no del último que contó el hallazgo: uno resuelto y
+# coalesce. El CVSS, como en el portal (FINDINGS_SQL), sale de la tabla cves o, si la CVE todavía no está ahí, de
+# evidence['cvss'] cuando es un número de 0 a 10. De la evidencia no se lee nada más. La severidad sale del último score del dominio y no del último que contó el hallazgo: uno resuelto y
 # reabierto después de ese score lleva su severidad de regla y no la de un score viejo.
 SIEM_SCAN_SQL = '''
 SELECT s.id::text, s.status, s.trigger_type AS trigger, s.queued_at, s.finished_at, s.stats,
@@ -669,8 +688,10 @@ SELECT ds.id::text, ds.scan_id::text, ds.score, ds.category_scores, ds.method, d
 '''
 # Como en el login (004_login_lookup_seguro.sql): una empresa suspendida o cancelada no exporta aunque su sesión siga viva.
 SIEM_PLAN_SQL = '''
-SELECT p.api_and_siem FROM organizations o JOIN plans p ON p.id = o.plan_id WHERE o.status IN ('trial','active')
+SELECT o.status, p.api_and_siem FROM organizations o JOIN plans p ON p.id = o.plan_id
 '''
+SIEM_SIN_PLAN = 'El plan de la empresa no incluye la salida a SIEM'
+SIEM_EMPRESA_INACTIVA = 'La empresa está suspendida o cancelada: no puede exportar a SIEM'
 
 
 @router.get('/domains/{fqdn}/export/siem',
@@ -683,9 +704,16 @@ def export_siem(fqdn: str, session: Session = Depends(current_session)):
     # en GET /scans, en su propia transacción READ COMMITTED: dentro de la foto, el UPDATE chocaría con la marca de vida
     # que el escaneo escribió después (error de serialización) en vez de esperarla.
     with transaction(session.org_id) as conn:
+        # Como al crear una llave (cirdan/api/llaves.py): la sesión dura hasta 8 h, así que una cuenta desactivada
+        # después de iniciarla ya no exporta. Responde 401 y la sesión se borra.
+        if not conn.execute('SELECT 1 FROM users WHERE id = %s AND is_active', (session.user_id,)).fetchone():
+            sessions.delete(session.token)
+            raise HTTPException(401, SIN_SESION)
         plan = conn.execute(SIEM_PLAN_SQL).fetchone()
+        if plan and plan['status'] not in ('trial', 'active'):
+            raise HTTPException(403, SIEM_EMPRESA_INACTIVA)
         if not plan or not plan['api_and_siem']:
-            raise HTTPException(403, 'El plan de la empresa no incluye la salida a SIEM')
+            raise HTTPException(403, SIEM_SIN_PLAN)
         dominio = conn.execute('SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
         if dominio:
             orquestador.abandonar_vencidos(conn, session.org_id, domain_id=dominio['id'])
