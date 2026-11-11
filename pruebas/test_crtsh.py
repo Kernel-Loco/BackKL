@@ -7,6 +7,7 @@ import io
 import json
 import functools
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -92,7 +93,8 @@ class CrtshSimulado:
 
 def recolectar(transporte, **kw):
     cliente = crtsh.ClienteCrtsh(transporte=transporte, dormir=lambda s: None)
-    return crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'], **kw)
+    kw.setdefault('propios', ['acme-demo.com.mx'])
+    return crtsh.recolectar('acme-demo.mx', cliente, AHORA, **kw)
 
 
 def consulta(url):
@@ -151,14 +153,18 @@ class DominiosParecidos(unittest.TestCase):
         self.parecidos = {h.evidencia['dominio_parecido']: h for h in self.res.hallazgos if h.codigo == 'lookalike_domain'}
 
     def test_1_encuentra_los_parecidos_recientes(self):
-        self.assertEqual(sorted(self.parecidos), ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com'])
+        self.assertEqual(sorted(self.parecidos),
+                         ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com', 'cuenta-segura.net'])
+        # R1: el dominio autorizado completo dentro de un dominio ajeno se reporta con ese dominio.
+        self.assertEqual(self.parecidos['cuenta-segura.net'].evidencia['nombres'], ['acme-demo.mx.cuenta-segura.net'])
+        self.assertEqual(self.parecidos['cuenta-segura.net'].evidencia['tipo_parecido'], 'contiene_marca')
         self.assertEqual(self.parecidos['acme-dem0.mx'].evidencia['tipo_parecido'], 'error_tipografico')
         self.assertEqual(self.parecidos['acme-demo-login.com'].evidencia['nombres'],
                          ['acme-demo-login.com', 'www.acme-demo-login.com'])
 
     def test_2_no_cuenta_propios_viejos_ni_ajenos_de_la_cdn(self):
         for fuera in ('acme-demo.com.mx', 'acme-demo-viejo.com', 'cdn-ejemplo.com', 'tienda-ajena.com', 'ajeno.org',
-                      'acme-demo.mx', 'cuenta-segura.net'):
+                      'acme-demo.mx'):
             self.assertNotIn(fuera, self.parecidos)
 
     def test_3_el_hallazgo_es_del_dominio_de_la_empresa(self):
@@ -216,10 +222,10 @@ class DominiosParecidos(unittest.TestCase):
         self.assertIn('no los excluye', ' '.join(ayuda.getvalue().split()))
 
     def test_7_sin_marca_no_se_busca_ningun_parecido(self):
-        """A1 de RC-226. registrable() solo conoce SUFIJOS_DOBLES: de acme.com.gt la etiqueta saldría 'com' y se
+        """A1 de RC-226. registrable() solo conoce SUFIJOS_DOBLES: de acme.com.kg la etiqueta saldría 'com' y se
         consultarían com.com o com.mx, que no son variantes del dominio autorizado. Con un dominio que no es su
         propio dominio registrable no se consulta nada de parecidos y lookalike_domain queda sin cobertura."""
-        for dominio in ('acme.com.gt', 'api.acme-demo.mx', 'tienda.acme.com.mx'):
+        for dominio in ('acme.com.kg', 'api.acme-demo.mx', 'tienda.acme.com.mx', 'acme-demo.github.io'):
             t = CrtshSimulado(respuestas={
                 '%.' + dominio: [cert(50, ['www.' + dominio], '2026-09-20T00:00:00', '2026-12-19T00:00:00')]})
             cliente = crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None)
@@ -232,20 +238,61 @@ class DominiosParecidos(unittest.TestCase):
             self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [], dominio)
             self.assertEqual(crtsh.candidatos_parecidos(dominio), [], dominio)
             self.assertIsNone(crtsh._marca(dominio), dominio)
-        self.assertEqual(crtsh.candidatos_parecidos('com.mx'), [])  # un sufijo solo tampoco tiene marca
+        for solo in ('com.mx', 'com.gt', 'github.io', 'mx'):  # un sufijo solo tampoco tiene marca
+            self.assertEqual((crtsh.candidatos_parecidos(solo), crtsh._marca(solo)), ([], None), solo)
         self.assertEqual((crtsh._marca('acme.com.mx'), crtsh._marca('acme-demo.mx')), ('acme', 'acme-demo'))
         self.assertEqual(crtsh.candidatos_parecidos('acme.com.mx')[:3], ['acme.com', 'acme.mx', 'acme.net'])
 
     def test_8_la_marca_tiene_que_estar_en_el_dominio_registrable(self):
-        """A2 de RC-226: acme-demo.github.io traído por %acme-demo% no es un parecido de github.io."""
+        """A2 de RC-226: acme-demo.github.io traído por %acme-demo% nunca es un parecido de github.io. R1: en un
+        hosting de HOSTINGS el parecido es el sitio del cliente, y el dominio autorizado completo dentro de un dominio
+        ajeno se reporta con ese dominio. La marca sola como subdominio de un dominio ajeno no cuenta. R2: un parecido
+        bajo un sufijo de dos niveles de la lista sale con su dominio registrable, no como el sufijo."""
         vigente = ('2026-09-10T00:00:00', '2026-12-09T00:00:00')
-        marca = [cert(60, ['acme-demo.github.io'], *vigente), cert(61, ['acme-demo.mx.cuenta-segura.net'], *vigente),
-                 cert(62, ['www.acme-demo-login.com'], *vigente), cert(63, ['miacme-demo.com.mx'], *vigente)]
+        marca = [cert(60, ['acme-demo.github.io', 'www.acme-demo.github.io'], *vigente),
+                 cert(61, ['acme-demo.mx.cuenta-segura.net'], *vigente),
+                 cert(62, ['www.acme-demo-login.com'], *vigente), cert(63, ['miacme-demo.com.mx'], *vigente),
+                 cert(64, ['acme-demo-login.netlify.app'], *vigente), cert(65, ['acme-demo.sharepoint.com'], *vigente),
+                 cert(66, ['www.acme-demo.com.gt'], *vigente), cert(67, ['acme-demo.org.ar'], *vigente),
+                 cert(68, ['acme-demo.co.za'], *vigente), cert(69, ['xacme-demo.mx.otro.org'], *vigente),
+                 cert(70, ['acme-demo.com.kg'], *vigente)]
         t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': marca})
         res = recolectar(t, parecidos=True)
         self.assertEqual(res.sin_cobertura, [])
-        self.assertEqual(sorted(h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'),
-                         ['acme-demo-login.com', 'miacme-demo.com.mx'])
+        parecidos = {h.clave: h for h in res.hallazgos if h.codigo == 'lookalike_domain'}
+        self.assertEqual(sorted(parecidos), [
+            'acme-demo-login.com', 'acme-demo-login.netlify.app', 'acme-demo.co.za', 'acme-demo.com.gt',
+            'acme-demo.github.io', 'acme-demo.org.ar', 'cuenta-segura.net', 'miacme-demo.com.mx'])
+        self.assertEqual(parecidos['cuenta-segura.net'].evidencia['nombres'], ['acme-demo.mx.cuenta-segura.net'])
+        self.assertEqual(parecidos['acme-demo.github.io'].evidencia['nombres'],
+                         ['acme-demo.github.io', 'www.acme-demo.github.io'])
+        for fuera in ('github.io', 'netlify.app', 'sharepoint.com', 'otro.org', 'com.gt', 'org.ar', 'co.za', 'com.kg'):
+            self.assertNotIn(fuera, parecidos)  # com.kg no está en SUFIJOS_DOBLES: acme-demo.com.kg se descarta
+        # Un sitio del hosting dado de alta como propio no sale, y no esconde el de otro cliente del mismo hosting.
+        t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': marca})
+        res = recolectar(t, parecidos=True, propios=['acme-demo.github.io'])
+        claves = {h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'}
+        self.assertEqual((('acme-demo.github.io' in claves), ('acme-demo-login.netlify.app' in claves)), (False, True))
+
+    def test_8c_sufijos_y_hostings(self):
+        """R1 y R2 de RC-226: registrable() con los sufijos de dos niveles y con los hostings, y la marca."""
+        for nombre, esperado in (('www.acme.com.gt', 'acme.com.gt'), ('a.b.acme.org.ar', 'acme.org.ar'),
+                                 ('acme.co.za', 'acme.co.za'), ('www.acme.github.io', 'acme.github.io'),
+                                 ('acme.github.io', 'acme.github.io'), ('github.io', 'github.io'),
+                                 ('x.acme.com.kg', 'com.kg'), ('www.acme.mx', 'acme.mx')):
+            self.assertEqual(crtsh.registrable(nombre), esperado, nombre)
+        self.assertEqual(crtsh.SUFIJOS_DOBLES & crtsh.HOSTINGS, set())
+        self.assertTrue(all(s.count('.') == 1 for s in crtsh.SUFIJOS_DOBLES | crtsh.HOSTINGS))
+        self.assertEqual((crtsh._marca('acme.com.gt'), crtsh._marca('acme.co.nz')), ('acme', 'acme'))
+        self.assertEqual(crtsh.candidatos_parecidos('acme-demo.com.gt'), [
+            'acme-demo.com', 'acme-demo.mx', 'acme-demo.com.mx', 'acme-demo.net', 'acmedemo.com.gt',
+            'acme-dem0.com.gt', 'acrne-demo.com.gt', 'acm3-demo.com.gt', '4cme-demo.com.gt', 'acme-demo.org'])
+        # El dominio autorizado no cuenta como dirección dentro de un dominio ajeno, ni un nombre que solo termina igual.
+        for nombre, cuenta in (('acme-demo.mx.cuenta-segura.net', True), ('login.acme-demo.mx.otro.org', True),
+                               ('acme-demo.mx', True), ('acme-demo.sharepoint.com', False),
+                               ('xacme-demo.mx.otro.org', False), ('acme-demo.mxx.otro.org', False),
+                               ('acme-demo-pagos.com', True), ('tienda.github.io', False)):
+            self.assertEqual(crtsh._lleva_marca(nombre, 'acme-demo', 'acme-demo.mx'), cuenta, nombre)
 
     def test_9_nunca_mas_de_diez_variantes(self):
         """A3 de RC-226: el tope de 10 es fijo, aunque quien llame pida más. Es lo que cuenta MAX_CONSULTAS."""
@@ -257,6 +304,26 @@ class DominiosParecidos(unittest.TestCase):
         res = recolectar(t, parecidos=True, max_candidatos=50)
         self.assertEqual([consulta(u) for u in t.urls][2:], [v for v in diez if v != 'acme-demo.com.mx'])
         self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
+
+
+class SemillaDelCupo(unittest.TestCase):
+    """Lectura estática de db/semillas/014_cupo_ct_logs.sql, sin base (RC-226)."""
+
+    def test_1_la_014_sube_el_limite_a_11_corridas_sin_pisar_uno_puesto_a_mano(self):
+        semilla = Path(__file__).resolve().parents[1] / 'db' / 'semillas' / '014_cupo_ct_logs.sql'
+        texto = semilla.read_text(encoding='utf-8')
+        sin_comentarios = '\n'.join(linea.split('--')[0] for linea in texto.splitlines())
+        [(limite, anterior)] = re.findall(
+            r"UPDATE\s+data_sources\s+SET\s+daily_limit\s*=\s*(\d+)\s+WHERE\s+code\s*=\s*'ct_logs'"
+            r"\s+AND\s+daily_limit\s*=\s*(\d+);", sin_comentarios)
+        limite, normal = int(limite), 14  # un escaneo normal: la del dominio, 2 de Cert Spotter y 11 de parecidos
+        self.assertEqual((limite, int(anterior)), (400, 200))  # solo cambia el 200 de la semilla 005
+        self.assertEqual(limite // crtsh.MAX_CONSULTAS, 11)  # corridas de peor caso, como antes con 18 y 200
+        self.assertEqual(1 + (limite - crtsh.MAX_CONSULTAS) // normal, 27)  # escaneos en vivo por día
+        self.assertLess(sin_comentarios.index("SET client_encoding = 'UTF8';"), sin_comentarios.index('BEGIN;'))
+        self.assertRegex(sin_comentarios, r"code\s*=\s*'ct_logs'\s+AND\s+daily_limit\s*<\s*%d\)" % crtsh.MAX_CONSULTAS)
+        self.assertIn("RAISE WARNING 'ct_logs tiene un límite diario menor que %d" % crtsh.MAX_CONSULTAS, sin_comentarios)
+        self.assertEqual([p.name for p in semilla.parent.glob('014_*.sql')], ['014_cupo_ct_logs.sql'])
 
 
 class FallasYGrabacion(unittest.TestCase):
@@ -322,7 +389,7 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(sorted(res.omitidos),
                          sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in variantes))
         self.assertEqual(sorted(h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'),
-                         ['acme-demo-login.com', 'acme-demo-pagos.com'])  # lo de %marca% sí se reporta
+                         ['acme-demo-login.com', 'acme-demo-pagos.com', 'cuenta-segura.net'])  # lo de %marca% sí
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_4b_grabar_y_reproducir_sin_red(self):
@@ -389,7 +456,7 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual([a for a in res.avisos if a.startswith(crtsh.SIN_GRABACION)], res.avisos)
         self.assertEqual(len(res.avisos), 1)
         self.assertEqual(sorted(h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'),
-                         ['acme-demo-login.com', 'acme-demo-pagos.com'])
+                         ['acme-demo-login.com', 'acme-demo-pagos.com', 'cuenta-segura.net'])
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_9_completar_vuelve_a_consultar_lo_de_grabaciones_anteriores(self):

@@ -815,13 +815,13 @@ class Orquestador(unittest.TestCase):
         self.assertEqual([n for n in t.dns if not n.endswith('acme-demo.mx')], [])  # ni su DNS
         self.assertNotIn('rules_without_coverage', resumen['stats'])
         self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 6)  # el vencido, el que vence pronto y 4 parecidos
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 7)  # el vencido, el que vence pronto y 5 parecidos
         parecidos = self.conn.execute(
             "SELECT f.evidence->>'dominio_parecido' AS d, a.value AS activo FROM findings f "
             "JOIN scoring_rules r ON r.id = f.rule_id JOIN assets a ON a.id = f.asset_id "
             "WHERE f.last_scan_id = %s AND r.code = 'lookalike_domain' AND f.status = 'open' ORDER BY 1",
             (s.scan_id,)).fetchall()
-        esperados = ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com', 'acme-demo.com.mx']
+        esperados = ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com', 'acme-demo.com.mx', 'cuenta-segura.net']
         self.assertEqual(sorted((p['d'], p['activo']) for p in parecidos), [(p, 'acme-demo.mx') for p in esperados])
         # el dominio parecido solo va en la evidencia: nunca entra a assets
         self.assertIsNone(self.uno('SELECT 1 FROM assets WHERE value = ANY(%s)', esperados))
@@ -849,12 +849,12 @@ class Orquestador(unittest.TestCase):
         self.exige_cupo('ct_logs', 2 * crtsh.MAX_CONSULTAS)  # dos escaneos en vivo, cada uno reserva su máximo
         antes = abiertos()
         escanear(CrtshSimulado())
-        self.assertEqual(abiertos(), antes + 4)
+        self.assertEqual(abiertos(), antes + 5)
         resumen = escanear(SinParecidos())
         self.assertEqual(resumen['status'], 'partial')
         self.assertEqual(resumen['stats']['rules_without_coverage'], ['lookalike_domain'])
         self.assertEqual(resumen['sources'][0]['hallazgos'], 2)
-        self.assertEqual(abiertos(), antes + 4)  # nunca '0 parecidos': siguen abiertos
+        self.assertEqual(abiertos(), antes + 5)  # nunca '0 parecidos': siguen abiertos
 
     def escanear_ct(self, t):
         """Un escaneo en vivo de acme-demo.mx solo con ct_logs y un crt.sh simulado: nada sale a la red."""
@@ -887,7 +887,7 @@ class Orquestador(unittest.TestCase):
         _, resumen = self.escanear_ct(SinLaVariante())
         self.assertNotIn('rules_without_coverage', resumen['stats'])
         self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 5)  # los 6 de siempre menos el de la variante
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 6)  # los 7 de siempre menos el de la variante
         self.assertEqual(estado(), ['open'])  # no saber si sigue ahí no es que ya no esté
         sin_certificado = CrtshSimulado()
         del sin_certificado.respuestas['acme-dem0.mx']
@@ -920,7 +920,8 @@ class Orquestador(unittest.TestCase):
             "SELECT f.evidence->>'dominio_parecido' AS d FROM findings f JOIN scoring_rules r ON r.id = f.rule_id "
             "WHERE f.last_scan_id = %s AND r.code = 'lookalike_domain' AND f.status = 'open' ORDER BY 1",
             (s.scan_id,)).fetchall()]
-        self.assertEqual(sorted(parecidos), ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo.com.mx'])
+        self.assertEqual(sorted(parecidos),
+                         ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo.com.mx', 'cuenta-segura.net'])
 
     def test_3d_en_vivo_la_fuente_que_falla_se_reintenta_en_el_mismo_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))

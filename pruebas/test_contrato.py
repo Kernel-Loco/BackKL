@@ -531,7 +531,8 @@ class Ejecutar(unittest.TestCase):
             self.assertTrue(t.dns, modo)
             self.assertEqual([n for n in t.dns if not contrato.en_alcance_nombre(n, 'acme-demo.mx')], [], modo)
             self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', []), modo)
-            self.assertEqual(self.parecidos(res), ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com'], modo)
+            self.assertEqual(self.parecidos(res), ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com',
+                                                   'cuenta-segura.net'], modo)
             self.assertEqual({a.valor for a in res.activos if not contrato.en_alcance_nombre(a.valor, 'acme-demo.mx')},
                              set(), modo)  # el parecido solo va en la evidencia, nunca como activo
 
@@ -600,7 +601,7 @@ class Ejecutar(unittest.TestCase):
 
         res = self.escanear(Sin({'acme-dem0.mx', 'acme-demo.net'}))
         self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', []))
-        self.assertEqual(self.parecidos(res), ['acme-demo-login.com', 'acme-demo-pagos.com'])
+        self.assertEqual(self.parecidos(res), ['acme-demo-login.com', 'acme-demo-pagos.com', 'cuenta-segura.net'])
         self.assertEqual(len(res.omitidos), 2)
         self.assertIn(del_0, res.omitidos)
         self.assertEqual(sum('no respondió a acme-' in a for a in res.avisos), 2)
@@ -653,10 +654,10 @@ class Ejecutar(unittest.TestCase):
             self.assertIn('EN_ESCANEO', res.error)
 
     def test_16f_un_escaneo_de_un_dominio_sin_marca_no_consulta_parecidos(self):
-        """A1 de RC-226 por ejecutar(), el camino del orquestador: con acme.com.gt, cuyo sufijo no está en
+        """A1 de RC-226 por ejecutar(), el camino del orquestador: con acme.com.kg, cuyo sufijo no está en
         SUFIJOS_DOBLES, no sale ninguna consulta de parecidos (nunca com.com ni com.mx) y el código queda sin
         cobertura. Las opciones de EN_ESCANEO no pueden subir el tope de 10 variantes (A3)."""
-        for dominio in ('acme.com.gt', 'portal.acme-demo.mx'):
+        for dominio in ('acme.com.kg', 'portal.acme-demo.mx'):
             t = CrtshSimulado(respuestas={
                 '%.' + dominio: [cert(70, ['www.' + dominio], '2026-09-20T00:00:00', '2026-12-19T00:00:00')]})
             with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \

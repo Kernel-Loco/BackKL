@@ -114,9 +114,22 @@ MAX_CONSULTAS = max(2 * INTENTOS + certspotter.MAX_PAGINAS * INTENTOS,
                     2 * INTENTOS + certspotter.MAX_PAGINAS * certspotter.COMPLEMENTO['intentos']
                     + (1 + MAX_CANDIDATOS) * INTENTOS_PARECIDOS)
 
-# Sufijos de dos niveles más comunes para sacar el dominio registrable sin descargar la lista pública de sufijos.
-SUFIJOS_DOBLES = {'com.mx', 'org.mx', 'net.mx', 'edu.mx', 'gob.mx', 'com.br', 'com.ar', 'com.co', 'com.pe', 'com.es',
-                  'co.uk', 'org.uk', 'com.au', 'co.jp'}
+# Sufijos de dos niveles más comunes para sacar el dominio registrable sin descargar la lista pública de sufijos:
+# México, el resto de Latinoamérica y los más usados de otros países. Con uno que no está aquí (acme.com.kg) el dominio
+# autorizado queda sin marca (_marca) y un parecido bajo ese sufijo no se reporta.
+SUFIJOS_DOBLES = {
+    'com.mx', 'org.mx', 'net.mx', 'edu.mx', 'gob.mx',
+    'com.gt', 'com.sv', 'com.hn', 'com.ni', 'co.cr', 'com.pa', 'com.do', 'com.cu', 'com.pr',
+    'com.co', 'net.co', 'org.co', 'com.ve', 'co.ve', 'com.ec', 'com.pe', 'org.pe', 'com.bo', 'com.py', 'com.uy',
+    'com.ar', 'net.ar', 'org.ar', 'com.br', 'net.br', 'org.br',
+    'com.es', 'org.es', 'co.uk', 'org.uk', 'com.pt', 'com.pl', 'com.tr', 'com.ua', 'co.il', 'co.za', 'com.ng',
+    'com.au', 'net.au', 'org.au', 'co.nz', 'co.jp', 'co.kr', 'co.in', 'com.cn', 'com.hk', 'com.tw', 'com.sg',
+    'com.my', 'co.id', 'com.ph', 'com.vn', 'co.th'}
+# Hostings donde cada cliente recibe su propio subdominio: ahí el dominio registrable es el nombre completo del
+# cliente (acme-demo.github.io), nunca el del hosting. Es una lista corta, no la lista pública de sufijos.
+HOSTINGS = {'github.io', 'gitlab.io', 'netlify.app', 'vercel.app', 'pages.dev', 'workers.dev', 'web.app',
+            'firebaseapp.com', 'herokuapp.com', 'azurewebsites.net', 'onrender.com', 'blogspot.com', 'wixsite.com',
+            'weebly.com', 'wordpress.com', 'myshopify.com'}
 TLD_PRINCIPALES = ('com', 'mx', 'com.mx', 'net')
 TLD_SECUNDARIOS = ('org', 'co', 'io', 'info', 'online', 'site')
 HOMOGLIFOS = {'o': '0', 'l': '1', 'i': 'l', 'm': 'rn', 'w': 'vv', 'e': '3', 'a': '4', 's': '5'}
@@ -345,21 +358,36 @@ def _fecha(texto):
 
 
 def registrable(nombre):
-    """Dominio registrable aproximado: acme.com.mx para www.acme.com.mx, acme.mx para api.acme.mx."""
+    """Dominio registrable aproximado: acme.com.mx para www.acme.com.mx, acme.mx para api.acme.mx y, en un hosting
+    de HOSTINGS, el nombre del cliente: acme.github.io para www.acme.github.io."""
     partes = nombre.split('.')
-    if len(partes) >= 3 and '.'.join(partes[-2:]) in SUFIJOS_DOBLES:
+    sufijo = '.'.join(partes[-2:])
+    if len(partes) >= 3 and (sufijo in SUFIJOS_DOBLES or sufijo in HOSTINGS):
         return '.'.join(partes[-3:])
     return '.'.join(partes[-2:])
 
 
 def _marca(dominio):
     """La etiqueta que se busca como marca, o None si no se puede saber cuál es. registrable() solo conoce
-    SUFIJOS_DOBLES: de acme.com.gt saca com.gt, con la etiqueta 'com', y sus variantes (com.com, com.mx) no se parecen
+    SUFIJOS_DOBLES: de acme.com.kg saca com.kg, con la etiqueta 'com', y sus variantes (com.com, com.mx) no se parecen
     al dominio autorizado. Por eso solo hay marca cuando el dominio autorizado es su propio dominio registrable.
-    Tampoco la hay en un subdominio (api.acme.mx) ni en un sufijo solo (com.mx)."""
-    if dominio in SUFIJOS_DOBLES or '.' not in dominio or registrable(dominio) != dominio:
+    Tampoco la hay en un subdominio (api.acme.mx), en un sufijo solo (com.mx, github.io) ni en un nombre de un
+    hosting de HOSTINGS (acme.github.io): sus variantes serían sitios de otros clientes del hosting."""
+    if '.' not in dominio or registrable(dominio) != dominio:
         return None
-    return dominio.split('.', 1)[0]
+    etiqueta, sufijo = dominio.split('.', 1)
+    if dominio in SUFIJOS_DOBLES or dominio in HOSTINGS or sufijo in HOSTINGS:
+        return None
+    return etiqueta
+
+
+def _lleva_marca(nombre, etiqueta, dominio):
+    """Si un nombre que trajo %marca% cuenta como parecido. Cuenta con la marca en la primera etiqueta de su dominio
+    registrable (acme-demo-login.com, y acme-demo.github.io como el sitio acme-demo.github.io, nunca como github.io),
+    o con el dominio autorizado completo metido como subdominio de un dominio ajeno (acme-demo.mx.cuenta-segura.net,
+    que se reporta como cuenta-segura.net). La marca sola como subdominio de otro dominio (acme-demo.sharepoint.com)
+    no cuenta: culparía a un dominio ajeno por un nombre que cualquiera puede elegir."""
+    return etiqueta in registrable(nombre).split('.', 1)[0] or '.%s.' % dominio in '.' + nombre
 
 
 def _nombres(cert):
@@ -441,7 +469,7 @@ def candidatos_parecidos(dominio, maximo=MAX_CANDIDATOS):
     """Variantes de un dominio, en orden de probabilidad: TLD más comunes, sin guion, homoglifos, otros TLD,
     letras omitidas, letras cambiadas de lugar y letras repetidas. Nunca incluye el dominio original ni da más de
     MAX_CANDIDATOS, aunque `maximo` pida más: es el tope de la política de uso ético y el que cuenta MAX_CONSULTAS.
-    Sin marca (_marca) no hay variantes: de acme.com.gt saldrían com.com o com.mx, que no se le parecen."""
+    Sin marca (_marca) no hay variantes: de acme.com.kg saldrían com.com o com.mx, que no se le parecen."""
     etiqueta = _marca(dominio)
     if etiqueta is None:
         return []
@@ -596,8 +624,9 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
     solo ahí: nunca resuelve su DNS ni les hace peticiones. Aquí va apagado por defecto. Lo prenden los escaneos
     (EN_ESCANEO) y la terminal. Sin esa búsqueda, o si ninguna responde, lookalike_domain queda en sin_cobertura.
     Tampoco se busca nada, y queda igual con un aviso, si el dominio no es su propio dominio registrable (un
-    subdominio, o un sufijo de dos niveles que no está en SUFIJOS_DOBLES, como acme.com.gt): sus variantes serían de
-    otra marca (_marca). De lo que trae %marca% solo cuenta el nombre con la marca en su dominio registrable.
+    subdominio, o un sufijo de dos niveles que no está en SUFIJOS_DOBLES, como acme.com.kg): sus variantes serían de
+    otra marca (_marca). De lo que trae %marca% solo cuenta el nombre con la marca en su dominio registrable o con el
+    dominio autorizado completo dentro de un dominio ajeno (_lleva_marca).
     `propios` son los otros dominios de la misma empresa, que nunca cuentan como parecidos.
     """
     dominio = dominio.strip().lower().rstrip('.')
@@ -702,12 +731,12 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
         propios_set = {registrable(dominio)} | {registrable(p.lower()) for p in propios} | {p.lower() for p in propios}
         por_tipo, sin_respuesta = [], []
         if len(etiqueta) >= 5:  # con etiquetas cortas la búsqueda por contenido trae demasiado ruido
-            # Solo cuenta el nombre con la marca en su dominio registrable: olmardo.github.io no es un parecido de
-            # github.io. Tampoco cuenta la marca puesta como subdominio de otro dominio (acme.mx.otro.net).
+            # Solo cuenta lo que deja _lleva_marca: olmardo.github.io es el sitio olmardo.github.io, no un parecido
+            # de github.io, y olmardo.com.otro.net sí es una dirección dentro de un dominio ajeno.
             try:
                 por_tipo.append(('contiene_marca',
                                  _con_fechas(cliente.consultar('%' + etiqueta + '%', intentos=INTENTOS_PARECIDOS)),
-                                 lambda n, e=etiqueta: e in registrable(n)))
+                                 lambda n, e=etiqueta: _lleva_marca(n, e, dominio)))
                 respondidas += 1
             except CrtshNoResponde as e:
                 res.avisos.append(str(e))
