@@ -625,6 +625,8 @@ def _parecidos(dominio, certs_por_tipo, propios, ahora, vistos=None):
                 if reg in propios or nombre in propios or not filtro(nombre):
                     continue
                 g = grupos.setdefault(reg, {'tipo': tipo, 'nombres': set(), 'certs': {}})
+                if g['tipo'] == 'contiene_marca':  # la variante dice más que %marca%, que se consulta primero
+                    g['tipo'] = tipo
                 g['nombres'].add(nombre)
                 g['certs'][c.get('id')] = c
 
