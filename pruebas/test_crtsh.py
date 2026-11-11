@@ -388,6 +388,38 @@ class DominiosParecidos(unittest.TestCase):
                                parecidos=True)
         self.assertEqual(([h.clave for h in res.hallazgos], res.sin_cobertura), ([], []))
 
+    def test_8g_la_variante_le_gana_a_contiene_marca(self):
+        """Pendiente de la ronda 4 de RC-226: acme-demo.com llega por %acme-demo% y por su variante. El tipo es el de
+        la variante (otro_tld), sin importar el orden de las búsquedas, y la huella y la clave no cambian."""
+        vigente = ('2026-09-10T00:00:00', '2026-12-09T00:00:00')
+        por_marca = [cert(90, ['acme-demo.com'], *vigente), cert(92, ['acme-demo-pagos.com'], *vigente)]
+        por_variante = [cert(90, ['acme-demo.com'], *vigente), cert(91, ['www.acme-demo.com'], *vigente)]
+
+        def correr(variante):
+            t = CrtshSimulado(respuestas={'%.acme-demo.mx': [], '%acme-demo%': por_marca, 'acme-demo.com': variante})
+            res = crtsh.recolectar('acme-demo.mx', crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None), AHORA,
+                                   parecidos=True)
+            self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+            return {h.clave: h for h in res.hallazgos if h.codigo == 'lookalike_domain'}
+        con, sin = correr(por_variante), correr([])
+        self.assertEqual({k: h.evidencia['tipo_parecido'] for k, h in con.items()},
+                         {'acme-demo.com': 'otro_tld', 'acme-demo-pagos.com': 'contiene_marca'})
+        self.assertEqual((con['acme-demo.com'].evidencia['certificados'], con['acme-demo.com'].evidencia['nombres']),
+                         (2, ['acme-demo.com', 'www.acme-demo.com']))
+        # si la variante responde vacía, lo que trajo %marca% sigue como contiene_marca, con la misma huella
+        self.assertEqual(sin['acme-demo.com'].evidencia['tipo_parecido'], 'contiene_marca')
+        self.assertEqual(con['acme-demo.com'].huella, sin['acme-demo.com'].huella)
+        self.assertEqual(con['acme-demo.com'].huella,
+                         crtsh._huella('lookalike_domain', 'acme-demo.mx', 'acme-demo.com'))
+        marca = ('contiene_marca', crtsh._con_fechas(por_marca),
+                 lambda n: crtsh._lleva_marca(n, 'acme-demo', 'acme-demo.mx'))
+        for tipo in ('otro_tld', 'error_tipografico'):
+            variante = (tipo, crtsh._con_fechas(por_variante), lambda n: crtsh.registrable(n) == 'acme-demo.com')
+            for orden in ([marca, variante], [variante, marca]):
+                hallados = crtsh._parecidos('acme-demo.mx', orden, set(), AHORA)
+                tipos = {h.clave: h.evidencia['tipo_parecido'] for h in hallados}
+                self.assertEqual(tipos, {'acme-demo.com': tipo, 'acme-demo-pagos.com': 'contiene_marca'})
+
     def test_9_nunca_mas_de_diez_variantes(self):
         """A3 de RC-226: el tope de 10 es fijo, aunque quien llame pida más. Es lo que cuenta MAX_CONSULTAS."""
         diez = crtsh.candidatos_parecidos('acme-demo.mx')
