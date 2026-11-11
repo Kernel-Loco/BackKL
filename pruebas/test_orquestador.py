@@ -28,6 +28,7 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 
 from cirdan import orquestador
+from cirdan.api import v1 as api_v1
 from cirdan.config import config
 from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
@@ -310,6 +311,34 @@ class Orquestador(unittest.TestCase):
         s, _ = self.reescanear(self.con_spf(f['id']))
         self.assertEqual(self.conteos(s.scan_id), (1, 0))  # estaba resuelto y se reabre
         self.assertEqual(self.estado(f['id'])['status'], 'open')
+
+    def test_2h2_la_salida_a_siem_da_por_recurrente_solo_lo_que_aporto_a_los_dos_ultimos_scores(self):
+        """recurrence de la salida a SIEM (#98, RC-212). Cada score de escaneo guarda un aporte por hallazgo vigente:
+        recurring si el hallazgo está en los dos últimos scores de escaneo del dominio y new si no, como uno resuelto
+        que se reabre o uno cuya fuente falló después de abrirlo. Un score de otro motivo (correction) no cuenta.
+        Los scores llevan computed_at fijo, porque en esta transacción now() es el mismo para todos."""
+        abiertos = self.conn.execute(
+            "SELECT f.id::text, f.rule_id, f.severity, f.domain_id FROM findings f JOIN domains d ON d.id = f.domain_id "
+            "WHERE d.fqdn = 'acme-demo.mx' AND f.status = 'open' ORDER BY f.id LIMIT 4").fetchall()
+        self.assertEqual(len(abiertos), 4)
+        uno, solo_nuevo, solo_viejo, ninguno = abiertos
+        escaneo = self.uno("SELECT s.id FROM scans s JOIN domains d ON d.id = s.domain_id "
+                           "WHERE d.fqdn = 'acme-demo.mx' ORDER BY s.queued_at DESC LIMIT 1")['id']
+
+        def score(momento, motivo, hallazgos):
+            score_id = self.uno(
+                'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
+                "reason, computed_at) VALUES (%s, %s, %s, '90000000-0000-4000-8000-000000000001', 50, '{}', %s, %s) "
+                'RETURNING id', ACME, uno['domain_id'], escaneo, motivo, momento)['id']
+            for f in hallazgos:
+                self.conn.execute(
+                    'INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, severity, '
+                    "factors) VALUES (%s, %s, %s, %s, 1, %s, '{}')", (ACME, score_id, f['id'], f['rule_id'], f['severity']))
+        score('2099-01-01T00:00:00+00:00', 'scan', [uno, solo_viejo])
+        score('2099-01-02T00:00:00+00:00', 'scan', [uno, solo_nuevo])
+        score('2099-01-03T00:00:00+00:00', 'correction', abiertos)
+        filas = {f['id']: f['recurrence'] for f in self.conn.execute(api_v1.SIEM_FINDINGS_SQL, {'fqdn': 'acme-demo.mx'})}
+        self.assertEqual([filas[f['id']] for f in abiertos], ['recurring', 'new', 'new', 'new'])
 
     def test_2i_no_cuentan_la_fuente_caida_sin_cobertura_ni_lo_que_decidio_el_cliente(self):
         _, f = self.escanear_ejemplo()

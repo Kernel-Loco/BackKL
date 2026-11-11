@@ -3,10 +3,10 @@
 Todo con sesión: la empresa sale de la cookie y RLS filtra en la base. Las bandas, el ponderado y
 el piso salen del criterio de criticidad (cirdan/score/criterio.py, #29).
 
-Los GET de datos también aceptan una llave de API (#87, RC-129) con session_or_api_key. La empresa
-sale de la llave y RLS filtra igual. Una llave de un solo dominio además pasa por in_scope(): toda
-ruta nueva que acepte llave y lea datos de un dominio tiene que revisarlo, porque RLS aísla por
-empresa, no por dominio.
+Los GET de datos también aceptan una llave de API (#87, RC-129) con session_or_api_key, salvo la salida
+a SIEM (export/siem), que por ahora pide la sesión. La empresa sale de la llave y RLS filtra igual.
+Una llave de un solo dominio además pasa por in_scope(): toda ruta nueva que acepte llave y lea datos
+de un dominio tiene que revisarlo, porque RLS aísla por empresa, no por dominio.
 """
 import json
 import uuid
@@ -595,6 +595,8 @@ def export_action_plan(fqdn: str, formato: str = Query(default='json'),
 # de tipo email no sale de la base.
 
 SIEM_FINDINGS_SQL = '''
+WITH ultimos AS (SELECT ds.id FROM domain_scores ds JOIN domains dd ON dd.id = ds.domain_id
+                  WHERE dd.fqdn = %(fqdn)s AND ds.reason = 'scan' ORDER BY ds.computed_at DESC, ds.id LIMIT 2)
 SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
        coalesce(sc_score.severity, f.severity) AS severity, f.status, cv.cve_id, c.cvss_base_score AS cvss,
        CASE WHEN a.asset_type = 'email' THEN NULL ELSE a.value END AS asset, a.asset_type,
@@ -602,7 +604,9 @@ SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
        CASE WHEN pa.asset_type IN ('domain','subdomain') THEN pa.value END AS asset_parent,
        fm.attack_technique_id, s.code AS data_source, f.detected_at, f.last_scan_id::text,
        sc.finished_at AS scan_finished_at,
-       CASE WHEN sc.id IS NULL OR f.detected_at >= sc.queued_at THEN 'new' ELSE 'recurring' END AS recurrence
+       CASE WHEN (SELECT count(*) FROM score_contributions x
+                   WHERE x.finding_id = f.id AND x.score_id IN (SELECT u.id FROM ultimos u)) = 2
+            THEN 'recurring' ELSE 'new' END AS recurrence
   FROM findings f
   JOIN domains d       ON d.id = f.domain_id
   JOIN assets a        ON a.id = f.asset_id
@@ -619,10 +623,15 @@ SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
                       WHERE x.finding_id = f.id
                         AND x.score_id = (SELECT ds.id FROM domain_scores ds WHERE ds.domain_id = f.domain_id
                                            ORDER BY ds.computed_at DESC LIMIT 1)) sc_score ON true
- WHERE d.fqdn = %s AND f.status = 'open'
+ WHERE d.fqdn = %(fqdn)s AND f.status = 'open'
  ORDER BY array_position(ARRAY['critical','high','medium','low'], coalesce(sc_score.severity, f.severity)),
           f.detected_at DESC, f.id
 '''
+# recurrence: cada score de escaneo guarda en score_contributions un aporte por hallazgo vigente (open o accepted_risk),
+# así que un hallazgo que está en los dos últimos scores de escaneo del dominio ya venía de antes ('recurring') y
+# cualquier otro es 'new': uno que apareció o se reabrió en el último escaneo, o después de su score (un escaneo que
+# dieron por caído no guarda score). No usa detected_at, que no cambia al reabrir, ni last_scan_id, que no avanza si
+# la fuente del hallazgo falla. Los scores con otro motivo (correction, intel_update, rules_change) no cuentan.
 # Antes de RC-46 el orquestador no llenaba findings.cve_id y la CVE quedaba solo en evidence['cve']: por eso el
 # coalesce. La severidad sale del último score del dominio y no del último que contó el hallazgo: uno resuelto y
 # reabierto después de ese score lleva su severidad de regla y no la de un score viejo.
@@ -633,6 +642,9 @@ SELECT s.id::text, s.status, s.trigger_type AS trigger, s.queued_at, s.finished_
   FROM scans s JOIN domains d ON d.id = s.domain_id
  WHERE d.fqdn = %s AND s.finished_at IS NOT NULL
  ORDER BY s.finished_at DESC LIMIT 1
+'''
+SIEM_EN_CURSO_SQL = '''
+SELECT 1 FROM scans s JOIN domains d ON d.id = s.domain_id WHERE d.fqdn = %s AND s.status IN ('queued','running') LIMIT 1
 '''
 SIEM_SCORE_SQL = '''
 SELECT ds.id::text, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.model_version, ds.reason,
@@ -653,6 +665,9 @@ SELECT p.api_and_siem FROM organizations o JOIN plans p ON p.id = o.plan_id WHER
             summary='Descarga en NDJSON para el HEC de Splunk los hallazgos abiertos, el último escaneo y el último score')
 def export_siem(fqdn: str, session: Session = Depends(current_session)):
     # REPEATABLE READ: las consultas ven una sola foto, así un escaneo que cierra a la mitad no mezcla dos escaneos.
+    # Con uno activo esa foto ya traería lo que guardaron sus fuentes (cada una confirma sola, en el orquestador) junto
+    # al escaneo y al score anteriores: no se exporta hasta que cierre o lo den por caído (abandonar_vencidos), con los
+    # mismos estados que el índice único de scans.
     with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
         plan = conn.execute(SIEM_PLAN_SQL).fetchone()
         if not plan or not plan['api_and_siem']:
@@ -660,7 +675,9 @@ def export_siem(fqdn: str, session: Session = Depends(current_session)):
         dominio = conn.execute('SELECT fqdn::text, now() AS ahora FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
         if not dominio:
             raise HTTPException(404, 'Dominio no encontrado para esta organización')
-        hallazgos = conn.execute(SIEM_FINDINGS_SQL, (fqdn,)).fetchall()
+        if conn.execute(SIEM_EN_CURSO_SQL, (fqdn,)).fetchone():
+            raise HTTPException(409, 'Hay un escaneo en curso del dominio: exporta cuando termine')
+        hallazgos = conn.execute(SIEM_FINDINGS_SQL, {'fqdn': fqdn}).fetchall()
         escaneo = conn.execute(SIEM_SCAN_SQL, (fqdn,)).fetchone()
         score = conn.execute(SIEM_SCORE_SQL, (fqdn,)).fetchone()
     fqdn = dominio['fqdn']

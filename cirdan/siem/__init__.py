@@ -85,9 +85,9 @@ def evento_hallazgo(dominio, h, ahora, export_id):
     if h['attack_technique_id']:
         evento['mitre_technique_id'] = h['attack_technique_id']
     if h['severity'] == 'critical' and h['recurrence'] == 'new':
-        # CIM Alerts: el eventtype lowtide_alert solo toma los críticos que aparecieron en su último escaneo, así uno
-        # que sigue abierto no vuelve a ser alerta en cada escaneo. Dos exportaciones del mismo escaneo sí la repiten:
-        # se deduplica por finding_id.
+        # CIM Alerts: el eventtype lowtide_alert solo toma los críticos nuevos (no aportaron a los dos últimos scores
+        # de escaneo, cirdan/api/v1.py), así uno que sigue abierto no vuelve a ser alerta en cada escaneo y uno que
+        # se reabre sí. Dos exportaciones después del mismo escaneo la repiten: se deduplica por finding_id.
         evento['type'] = 'alert'
     return _sobre('lowtide:finding', ahora, export_id, evento)
 

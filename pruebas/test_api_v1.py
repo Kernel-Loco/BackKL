@@ -42,6 +42,12 @@ class ApiV1(unittest.TestCase):
         cls.beta = sesion.login('dana.cruz@beta-corp.mx')
         cls.olmardo = sesion.login('admin@olmardo.com')
 
+    def psql_o_falla(self, sql, motivo):
+        """psql como postgres que falla con su motivo: una limpieza que no regresa la base no pasa en silencio."""
+        ok, _, err = psql(sql, user='postgres')
+        if not ok:
+            raise AssertionError('%s: %s' % (motivo, err))
+
     def get(self, client, url):
         code, body = client.get(url)
         self.assertEqual(code, 200, (url, body))
@@ -421,10 +427,28 @@ class ApiV1(unittest.TestCase):
         beta = "UPDATE organizations SET status = '%s' WHERE id = '20000000-0000-4000-8000-000000000002';"
         ok, _, err = psql(beta % 'suspended', user='postgres')
         self.assertTrue(ok, err)
-        self.addCleanup(psql, beta % 'active', user='postgres')
+        self.addCleanup(self.psql_o_falla, beta % 'active', 'Beta Corp se quedó suspendida')
         self.assertEqual(self.beta.get('/api/v1/domains/beta-corp.mx/export/siem')[0], 403)
-        ok, _, err = psql(beta % 'active', user='postgres')
+        self.psql_o_falla(beta % 'active', 'Beta Corp se quedó suspendida')
+        # Con un escaneo del dominio en curso responde 409: sus fuentes ya guardaron hallazgos y el escaneo y el score
+        # serían los anteriores. El trigger de la autorización pide un TXT de menos de 1 hora y dns_txt_verifications
+        # no deja borrar, así que la fila del escaneo entra sin triggers (solo en esta transacción) y se borra al final.
+        escaneo = "'60000000-0000-4000-8000-0000000000f1'"
+        ok, _, err = psql(
+            "BEGIN; SET LOCAL session_replication_role = replica; "
+            "INSERT INTO scans (id, organization_id, domain_id, authorization_id, txt_verification_id, trigger_type, "
+            "status) SELECT %s, organization_id, domain_id, id, '42000000-0000-4000-8000-000000000006', 'on_demand', "
+            "'running' "
+            "FROM domain_authorizations WHERE id = '41000000-0000-4000-8000-000000000006'; COMMIT;" % escaneo,
+            user='postgres')
         self.assertTrue(ok, err)
+        borrar = 'DELETE FROM scans WHERE id = %s;' % escaneo
+        self.addCleanup(self.psql_o_falla, borrar, 'quedó un escaneo en curso de beta-corp.mx')
+        estado, cuerpo = self.beta.get('/api/v1/domains/beta-corp.mx/export/siem')[:2]
+        self.assertEqual(estado, 409, cuerpo)
+        self.psql_o_falla(borrar, 'quedó un escaneo en curso de beta-corp.mx')
+        with self.beta.opener.open(url, timeout=10) as r:
+            self.assertEqual(r.status, 200)
         # Acme tiene el plan starter, sin API ni SIEM. Un dominio de otra empresa responde 404 y sin sesión, 401.
         self.assertEqual(self.acme.get('/api/v1/domains/acme-demo.mx/export/siem')[0], 403)
         for fqdn in ('acme-demo.mx', 'olmardo.com'):
