@@ -522,49 +522,59 @@ class FallasYGrabacion(unittest.TestCase):
         return res, pedidas, reloj[0]
 
     def test_4d_una_variante_de_35_segundos_responde(self):
-        """El 11 nov olmardo.com.mx tardó unos 35 s y con 20 s de timeout dejaba el escaneo parcial. Cada petición
-        de una variante lleva TIMEOUT_VARIANTE y la lenta responde al primer intento."""
+        """El 11 nov olmardo.com.mx tardó unos 35 s y con 2 intentos de 20 s dejaba el escaneo parcial. El segundo
+        intento de una variante espera hasta 45 s (TIMEOUTS_VARIANTE) y la lenta responde ahí."""
         variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
         lenta = variantes[1]
         res, pedidas, duro = self._con_cronometro(lambda v, n: 35 if v == lenta else 1)
-        self.assertEqual(crtsh.TIMEOUT_VARIANTE, 45)
-        self.assertEqual(pedidas, [(v, crtsh.TIMEOUT_VARIANTE) for v in variantes])  # una petición por variante
+        self.assertEqual(crtsh.TIMEOUTS_VARIANTE, (20, 45))
+        self.assertEqual(pedidas, [(v, t) for v in variantes for t in ((20, 45) if v == lenta else (20,))])
         self.assertEqual((res.estado, res.sin_cobertura, res.omitidos), ('succeeded', [], []))
         self.assertFalse([a for a in res.avisos if 'no respondió' in a or 'tiempo de las variantes' in a])
         self.assertIsNone(res.revisados)  # corrida completa: el escaneo no termina 'partial' por la variante lenta
-        self.assertEqual(duro, len(variantes) * crtsh.PAUSA_PARECIDOS + 35 + len(variantes) - 1)
+        self.assertEqual(duro, (len(variantes) - 1) * (crtsh.PAUSA_PARECIDOS + 1)
+                         + crtsh.PAUSA_PARECIDOS + 20 + crtsh.ESPERAS[0] + 35)
+        # Todas se cuelgan al primer intento y responden en 1 s al segundo: cuesta lo mismo que antes y caben todas
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if n == 1 else 1)
+        self.assertEqual((res.omitidos, res.revisados), ([], None))
+        self.assertEqual(duro, len(variantes) * (crtsh.PAUSA_PARECIDOS + 20 + crtsh.ESPERAS[0] + 1))
 
     def test_4e_las_variantes_no_pasan_de_su_presupuesto(self):
         """Con crt.sh lento en todas las variantes (un timeout y luego 40 s), las variantes juntas no pasan de
         PRESUPUESTO_VARIANTES: las que no caben quedan sin consultar, con su aviso y su huella en omitidos, ninguna
-        petición recibe menos de MINIMO_VARIANTE ni más de TIMEOUT_VARIANTE y nunca hay más de 2 por variante."""
+        petición recibe menos de MINIMO_VARIANTE ni más de 45 s y nunca hay más de 2 por variante."""
         variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
         res, pedidas, duro = self._con_cronometro(lambda v, n: 100 if n == 1 else 40)
         self.assertLessEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
-        self.assertTrue(all(crtsh.MINIMO_VARIANTE <= t <= crtsh.TIMEOUT_VARIANTE for _, t in pedidas), pedidas)
+        self.assertTrue(all(crtsh.MINIMO_VARIANTE <= t <= crtsh.TIMEOUTS_VARIANTE[1] for _, t in pedidas), pedidas)
         consultadas = list(dict.fromkeys(v for v, _ in pedidas))
-        self.assertEqual(consultadas, variantes[:5])  # 5 x (2 + 45 + 5 + 40) = 460 s, y en 10 s no cabe otra
+        self.assertEqual(consultadas, variantes[:7])  # 7 x (2 + 20 + 5 + 40) = 469 s, y en 1 s no cabe otra
         self.assertTrue(all([v for v, _ in pedidas].count(v) == crtsh.INTENTOS_PARECIDOS for v in consultadas))
-        faltan = variantes[5:]
+        faltan = variantes[7:]
         self.assertEqual(res.avisos[-1], crtsh.SIN_TIEMPO % (
             crtsh.PRESUPUESTO_VARIANTES, '%d variantes' % len(faltan), ', '.join(faltan)))
+        self.assertFalse([a for a in res.avisos if 'no respondió' in a])  # a las que faltan no se les preguntó
         self.assertEqual(sorted(res.omitidos),
                          sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in faltan))
         self.assertIsNotNone(res.revisados)  # faltaron variantes: el escaneo termina 'partial'
+        self.assertEqual(res.consultas, 3 + len(pedidas))  # la del dominio, Cert Spotter, %marca% y lo que sí se pidió
         # crt.sh colgado en todas: corta a las FALLAS_SEGUIDAS variantes, también dentro del presupuesto
         res, pedidas, duro = self._con_cronometro(lambda v, n: 1000)
         self.assertEqual(len(pedidas), crtsh.FALLAS_SEGUIDAS * crtsh.INTENTOS_PARECIDOS)
         self.assertLessEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
         self.assertIn('crt.sh saturado', res.avisos[-1])
-        # la última petición se recorta a lo que queda y no se duerme una espera que ya no cabe
+        # el último intento se recorta a lo que queda (35 s) y el presupuesto se gasta exacto
         ultima = variantes[-1]
-        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v == ultima or n == 1 else 1)
-        cada_una = crtsh.PAUSA_PARECIDOS + crtsh.TIMEOUT_VARIANTE + crtsh.ESPERAS[0] + 1  # un timeout y responde en 1 s
-        resto = crtsh.PRESUPUESTO_VARIANTES - (len(variantes) - 1) * cada_una - crtsh.PAUSA_PARECIDOS
-        self.assertTrue(crtsh.MINIMO_VARIANTE <= resto < crtsh.TIMEOUT_VARIANTE, resto)
-        self.assertEqual(pedidas[-1], (ultima, resto))
-        self.assertEqual([v for v, _ in pedidas].count(ultima), 1)
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v == ultima or n == 1 else 24)
+        cada_una = crtsh.PAUSA_PARECIDOS + 20 + crtsh.ESPERAS[0]  # pausa, timeout del primer intento y espera
+        resto = crtsh.PRESUPUESTO_VARIANTES - (len(variantes) - 1) * (cada_una + 24) - cada_una
+        self.assertTrue(crtsh.MINIMO_VARIANTE <= resto < crtsh.TIMEOUTS_VARIANTE[1], resto)
+        self.assertEqual(pedidas[-2:], [(ultima, 20), (ultima, resto)])
         self.assertEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
+        # si después del primer intento ya no caben la espera y MINIMO_VARIANTE, no hay segundo intento ni espera
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v == ultima or n == 1 else 26)
+        self.assertEqual([t for v, t in pedidas if v == ultima], [20])
+        self.assertEqual(duro, (len(variantes) - 1) * (cada_una + 26) + crtsh.PAUSA_PARECIDOS + 20)
 
     def test_4f_el_peor_caso_de_tiempo_documentado(self):
         """El peor caso de una corrida, que citan el orquestador y docs/contrato_plugin.md, sale de las constantes:
@@ -584,7 +594,8 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertIn('%d s en el peor' % peor, orquestador)
         self.assertIn('Quedan %d s antes de TOPE_CORRIDA' % (tope - peor), orquestador)
         doc = (raiz / 'docs' / 'contrato_plugin.md').read_text(encoding='utf-8')
-        self.assertIn('hasta %d segundos (`TIMEOUT_VARIANTE`)' % crtsh.TIMEOUT_VARIANTE, doc)
+        self.assertIn('espera %d segundos y el segundo hasta %d segundos (`TIMEOUTS_VARIANTE`)' % crtsh.TIMEOUTS_VARIANTE, doc)
+        self.assertIn('con %d s en el primer intento y hasta %d s en el segundo' % crtsh.TIMEOUTS_VARIANTE, orquestador)
         self.assertIn('tienen %d segundos (`PRESUPUESTO_VARIANTES`)' % crtsh.PRESUPUESTO_VARIANTES, doc)
         self.assertIn('sigue en %d segundos' % peor, doc)
 

@@ -100,11 +100,13 @@ INTENTOS = 3                 # intentos HTTP por consulta dentro de una corrida 
 ESPERAS = (5, 15)            # segundos entre intentos; crt.sh suele recuperarse en segundos
 PAUSA_PARECIDOS = 2          # segundos entre consultas de variantes, para no saturar crt.sh
 # Tiempo de las variantes. crt.sh tarda con algunas: el 11 nov olmardo.com.mx dio timeout 2 veces con 20 s y respondió
-# en unos 35 s. Cada petición espera hasta TIMEOUT_VARIANTE, y todas las variantes juntas (pausas, peticiones y esperas
-# entre intentos) caben en PRESUPUESTO_VARIANTES, los mismos 470 s de antes (10 variantes x (2 de pausa + 2 intentos de
-# 20 + 5 de espera)): el peor caso de la corrida sigue en 1055 s, debajo de TOPE_CORRIDA del orquestador. Con menos de
-# MINIMO_VARIANTE por delante no se hace otra petición y las variantes que faltan quedan sin respuesta.
-TIMEOUT_VARIANTE = 45        # segundos de cada petición de una variante, como las demás consultas a crt.sh
+# en unos 35 s. El primer intento espera 20 s, como antes, y el segundo hasta 45 (TIMEOUTS_VARIANTE): una variante que
+# se cuelga y responde al reintento cuesta lo mismo que antes, y una lenta responde en el segundo. Todas las variantes
+# juntas (pausas, peticiones y esperas entre intentos) caben en PRESUPUESTO_VARIANTES, los mismos 470 s de antes (10
+# variantes x (2 de pausa + 2 intentos de 20 + 5 de espera)): el peor caso de la corrida sigue en 1055 s, debajo de
+# TOPE_CORRIDA del orquestador. Con menos de MINIMO_VARIANTE por delante no se hace otra petición, y las variantes que
+# ya no caben quedan sin consultar (SIN_TIEMPO), salvo las que salen del disco.
+TIMEOUTS_VARIANTE = (20, 45)  # segundos del primer y del segundo intento de cada variante
 PRESUPUESTO_VARIANTES = 470  # segundos para todas las variantes de una corrida
 MINIMO_VARIANTE = 20         # segundos que debe tener por delante una petición de variante (el plazo de antes)
 FALLA = 'falla:'             # consulta que graba que crt.sh no respondió y se usó Cert Spotter
@@ -157,6 +159,11 @@ MESES = ('ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', '
 
 
 CrtshNoResponde = FuenteNoResponde  # el contrato (#13) define las excepciones de todas las fuentes
+
+
+class SinTiempo(FuenteNoResponde):
+    """El presupuesto de tiempo no alcanzó para hacer la consulta: no se le preguntó a la fuente."""
+
 
 # Avisos de una grabación con archivos dañados (RC-46). DANADA va primero, para que no lo corte el tope de avisos.
 DANADA = ('La grabación tiene %s (%s). Se muestra lo que sí se pudo leer, pueden faltar subdominios y certificados, y '
@@ -274,7 +281,8 @@ class ClienteCrtsh:
 
     def consultar(self, consulta, intentos=INTENTOS, timeout=None, pausa=0, plazo=None, **extra):
         """Una consulta a crt.sh. `pausa`: segundos de espera antes de consultar, no aplica si la respuesta sale del disco.
-        `plazo`: valor de `cronometro()` que la consulta no debe pasar (ver pedir).
+        `timeout`: segundos de cada petición, o una tupla con los de cada intento. `plazo`: valor de `cronometro()`
+        que la consulta no debe pasar (ver pedir).
 
         Al reproducir, si la grabación dice que crt.sh no respondió a esta consulta, lanza CrtshNoResponde con el mismo
         error, así el respaldo de Cert Spotter se repite igual que en vivo. Si el archivo de la respuesta o el de su
@@ -306,22 +314,21 @@ class ClienteCrtsh:
         intentos, por ejemplo el 429 de Cert Spotter. `texto` se muestra en el error en lugar de `consulta`. Una
         respuesta con la que `valida(datos)` da False cuenta como una que no llegó, no se graba y no se reintenta.
         Un archivo de la grabación vacío, cortado o ilegible lanza GrabacionDanada (_de_disco).
-        Con `plazo` (un valor de `cronometro()`), cada petición espera a lo más lo que falta para el plazo, y no se
-        hace si faltan menos de MINIMO_VARIANTE segundos: así pausa, peticiones y esperas no pasan del plazo."""
+        Con `plazo` (un valor de `cronometro()`), cada petición espera a lo más lo que falta para el plazo y no se
+        hace si le quedan menos de MINIMO_VARIANTE segundos: así pausa, peticiones y esperas no pasan del plazo. Si
+        ni la primera cabe, lanza SinTiempo sin consultar. Lo que sale del disco no gasta tiempo y siempre se lee."""
         del_disco, datos = self._de_disco(consulta)
         if del_disco:
             return datos
+        if plazo is not None and plazo - self.cronometro() < pausa + MINIMO_VARIANTE:
+            raise SinTiempo('no quedó tiempo para consultar %s' % (texto or consulta))
         if pausa:
             self.dormir(pausa)
         ultimo, hechos = '', 0
         for n in range(intentos):
-            espera = timeout or self.timeout
+            espera = timeout[min(n, len(timeout) - 1)] if isinstance(timeout, tuple) else timeout or self.timeout
             if plazo is not None:
-                queda = plazo - self.cronometro()
-                if queda < MINIMO_VARIANTE:
-                    ultimo = ultimo or 'se acabó el tiempo de la consulta'
-                    break
-                espera = min(espera, queda)
+                espera = min(espera, plazo - self.cronometro())
             self.consultas += 1
             hechos += 1
             try:
@@ -819,7 +826,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             # variantes gastaría hasta 20 consultas del cupo, sobre nombres de terceros, para tirar sus respuestas.
             res.avisos.append(SIN_VARIANTES % (etiqueta, _cuantos(len(candidatos), 'variante', 'variantes'), dominio))
             candidatos = []
-        seguidas, respondieron = 0, []
+        seguidas, respondieron, sin_tiempo = 0, [], []
         plazo = cliente.cronometro() + PRESUPUESTO_VARIANTES
         for i, candidato in enumerate(candidatos):
             if seguidas >= FALLAS_SEGUIDAS:
@@ -827,19 +834,18 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                     len(candidatos) - i, ', '.join(candidatos[i:])))
                 sin_respuesta += candidatos[i:]
                 break
-            if plazo - cliente.cronometro() < PAUSA_PARECIDOS + MINIMO_VARIANTE:
-                res.avisos.append(SIN_TIEMPO % (PRESUPUESTO_VARIANTES, _cuantos(len(candidatos) - i, 'variante',
-                                                                              'variantes'), ', '.join(candidatos[i:])))
-                sin_respuesta += candidatos[i:]
-                break
             try:
-                encontrados = cliente.consultar(candidato, intentos=INTENTOS_PARECIDOS, timeout=TIMEOUT_VARIANTE,
+                encontrados = cliente.consultar(candidato, intentos=INTENTOS_PARECIDOS, timeout=TIMEOUTS_VARIANTE,
                                                 pausa=PAUSA_PARECIDOS, plazo=plazo)
                 seguidas = 0
                 respondidas += 1
                 respondieron.append(candidato)
             except SinGrabacion as e:  # falta en la grabación: no cuenta como saturación de crt.sh
                 res.avisos.append(str(e))
+                sin_respuesta.append(candidato)
+                continue
+            except SinTiempo:  # no se le preguntó a crt.sh: no cuenta como saturación, y las que siguen se leen
+                sin_tiempo.append(candidato)  # igual si están en el disco (--grabar --completar)
                 sin_respuesta.append(candidato)
                 continue
             except CrtshNoResponde as e:
@@ -849,6 +855,9 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                 continue
             tipo = 'otro_tld' if candidato.split('.', 1)[0] == etiqueta else 'error_tipografico'
             por_tipo.append((tipo, _con_fechas(encontrados), lambda n, k=candidato: registrable(n) == k))
+        if sin_tiempo:
+            res.avisos.append(SIN_TIEMPO % (PRESUPUESTO_VARIANTES, _cuantos(len(sin_tiempo), 'variante', 'variantes'),
+                                            ', '.join(sin_tiempo)))
         if respondidas and not sin_marca:
             vistos = set()
             # Sin tope de parecidos: todo el que pasa el filtro se reporta. Un tope en el recolector dejaba fuera
