@@ -171,6 +171,16 @@ class DominiosParecidos(unittest.TestCase):
         self.assertEqual(v[:4], ['acme-demo.com', 'acme-demo.com.mx', 'acme-demo.net', 'acmedemo.mx'])
         self.assertIn('acme-dem0.mx', v)
 
+    def test_4c_la_lista_aprobada_de_olmardo_com(self):
+        """Las 10 variantes de docs/contrato_plugin.md, que ErnestoDL aprobó el 10 nov 2026 (#109, RC-226). Si
+        candidatos_parecidos() cambia, cambia lo que se consulta de terceros: se aprueba otra vez y se corrige el doc."""
+        self.assertEqual(crtsh.candidatos_parecidos('olmardo.com'),
+                         ['olmardo.mx', 'olmardo.com.mx', 'olmardo.net', '0lmardo.com', 'o1mardo.com', 'olrnardo.com',
+                          'olm4rdo.com', 'olmardo.org', 'olmardo.co', 'olmardo.io'])
+        doc = (Path(__file__).resolve().parents[1] / 'docs' / 'contrato_plugin.md').read_text(encoding='utf-8')
+        for variante in ['%olmardo%'] + crtsh.candidatos_parecidos('olmardo.com'):
+            self.assertIn('`%s`' % variante, doc)
+
     def test_5_por_defecto_no_se_buscan_y_quedan_sin_cobertura(self):
         t = CrtshSimulado()
         res = recolectar(t)
@@ -181,7 +191,7 @@ class DominiosParecidos(unittest.TestCase):
         self.assertEqual(crtsh.resumen(res)[-1],
                          'Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).')
 
-    def test_6_la_linea_de_comandos_solo_los_busca_con_con_parecidos(self):
+    def test_6_la_linea_de_comandos_los_busca_salvo_con_sin_parecidos(self):
         def correr(*argv):
             t, salida = CrtshSimulado(), io.StringIO()
             with mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
@@ -189,14 +199,13 @@ class DominiosParecidos(unittest.TestCase):
                 codigo = crtsh._main(['acme-demo.mx', '--json'] + list(argv))
             return codigo, json.loads(salida.getvalue()), [consulta(u) for u in t.urls]
 
-        for argv in ((), ('--sin-parecidos',)):
+        codigo, res, consultas = correr('--sin-parecidos')
+        self.assertEqual((codigo, res['sin_cobertura'], consultas), (0, ['lookalike_domain'], ['%.acme-demo.mx']))
+        for argv in ((), ('--con-parecidos',)):  # desde #109 (RC-226) es lo predeterminado
             codigo, res, consultas = correr(*argv)
-            self.assertEqual((codigo, res['sin_cobertura'], consultas), (0, ['lookalike_domain'], ['%.acme-demo.mx']),
+            self.assertEqual(res['sin_cobertura'], [], argv)
+            self.assertEqual(consultas, ['%.acme-demo.mx', '%acme-demo%'] + crtsh.candidatos_parecidos('acme-demo.mx'),
                              argv)
-        codigo, res, consultas = correr('--con-parecidos')
-        self.assertEqual(res['sin_cobertura'], [])
-        self.assertEqual(consultas[:2], ['%.acme-demo.mx', '%acme-demo%'])
-        self.assertIn('acme-dem0.mx', consultas)
         with self.assertRaises(SystemExit) as salida, contextlib.redirect_stderr(io.StringIO()):
             crtsh._main(['acme-demo.mx', '--con-parecidos', '--sin-parecidos'])
         self.assertEqual(salida.exception.code, 2)

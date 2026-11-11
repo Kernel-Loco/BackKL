@@ -598,8 +598,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
     se muestran como 0 hallazgos, o si revisó solo una parte de lo suyo (revisados, en stats.sources_partial).
-    crt.sh nunca busca dominios parecidos desde aquí, porque consulta
-    variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
+    crt.sh busca dominios parecidos en cada escaneo, solo en los registros de certificados (#109, RC-226): si
+    ninguna de esas búsquedas responde, lookalike_domain queda en sin_cobertura, nunca en 0. Devuelve un resumen.
     En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
     ct_logs y subfinder cuenta una vez. En assets van una sola vez, con sus atributos unidos.
     new_findings cuenta los hallazgos que el escaneo dejó abiertos y antes no lo estaban: los que insertó y los que

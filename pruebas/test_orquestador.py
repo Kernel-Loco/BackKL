@@ -796,24 +796,64 @@ class Orquestador(unittest.TestCase):
         score = self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s', s.scan_id)
         self.assertTrue(score['partial_coverage'])
 
-    def test_3c_un_escaneo_en_vivo_nunca_busca_dominios_parecidos(self):
-        """Lo que corre POST /api/v1/domains/{fqdn}/scans: crt.sh solo consulta el dominio autorizado. El crt.sh es
-        simulado, así que nada sale a la red aunque se deje pasar acme-demo.mx como dominio en vivo."""
+    def test_3c_un_escaneo_en_vivo_busca_dominios_parecidos_solo_en_crtsh(self):
+        """Lo que corre POST /api/v1/domains/{fqdn}/scans (#109, RC-226): crt.sh consulta el dominio autorizado, %marca%
+        y las variantes aprobadas, y lookalike_domain ya tiene cobertura. El crt.sh es simulado, así que nada sale a
+        la red aunque se deje pasar acme-demo.mx como dominio en vivo."""
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         self.exige_cupo('ct_logs', crtsh.MAX_CONSULTAS)  # en vivo, ct_logs reserva su máximo antes de correr
         t = CrtshSimulado()
         with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
-                mock.patch.object(crtsh, '_descargar', t), \
+                mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
                 mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
             resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
                                          conn=self.conn)
         consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
-        self.assertEqual(consultas, ['%.acme-demo.mx'])  # ni %acme-demo% ni variantes como acme-dem0.mx
+        self.assertEqual(consultas, ['%.acme-demo.mx', '%acme-demo%'] + crtsh.candidatos_parecidos('acme-demo.mx'))
         dominios = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['domain'] for u in t.cert_spotter]
         self.assertEqual(dominios, [['acme-demo.mx']])  # Cert Spotter tampoco sale del dominio autorizado
+        self.assertEqual([n for n in t.dns if not n.endswith('acme-demo.mx')], [])  # ni su DNS
+        self.assertNotIn('rules_without_coverage', resumen['stats'])
+        self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 6)  # el vencido, el que vence pronto y 4 parecidos
+        parecidos = self.conn.execute(
+            "SELECT f.evidence->>'dominio_parecido' AS d, a.value AS activo FROM findings f "
+            "JOIN scoring_rules r ON r.id = f.rule_id JOIN assets a ON a.id = f.asset_id "
+            "WHERE f.last_scan_id = %s AND r.code = 'lookalike_domain' AND f.status = 'open' ORDER BY 1",
+            (s.scan_id,)).fetchall()
+        esperados = ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com', 'cuenta-segura.net']
+        self.assertEqual([(p['d'], p['activo']) for p in parecidos], [(p, 'acme-demo.mx') for p in esperados])
+        # el dominio parecido solo va en la evidencia: nunca entra a assets
+        self.assertIsNone(self.uno('SELECT 1 FROM assets WHERE value = ANY(%s)', esperados))
+
+    def test_3c2_si_crtsh_no_responde_a_los_parecidos_el_escaneo_queda_parcial(self):
+        """Hecho cuando 3 de RC-226: sin respuesta de crt.sh a %marca% ni a las variantes, lookalike_domain va en
+        rules_without_coverage y un parecido abierto de antes no se da por resuelto."""
+        class SinParecidos(CrtshSimulado):
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
+                if q and q[0] != '%.acme-demo.mx':
+                    raise crtsh.urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+
+        def escanear(t):
+            s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+            with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                    mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                    mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+                return orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA, conn=self.conn)
+
+        def abiertos():
+            return self.uno("SELECT count(*) AS n FROM findings f JOIN scoring_rules r ON r.id = f.rule_id "
+                            "WHERE r.code = 'lookalike_domain' AND f.status = 'open' AND f.evidence->>'origen' = 'crtsh'")['n']
+        antes = abiertos()
+        escanear(CrtshSimulado())
+        self.assertEqual(abiertos(), antes + 4)
+        resumen = escanear(SinParecidos())
         self.assertEqual(resumen['status'], 'partial')
         self.assertEqual(resumen['stats']['rules_without_coverage'], ['lookalike_domain'])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 2)  # el vencido y el que vence pronto, ningún parecido
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 2)
+        self.assertEqual(abiertos(), antes + 4)  # nunca '0 parecidos': siguen abiertos
 
     def test_3d_en_vivo_la_fuente_que_falla_se_reintenta_en_el_mismo_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))

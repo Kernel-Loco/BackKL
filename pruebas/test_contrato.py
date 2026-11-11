@@ -16,7 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_contrato.py
 from pruebas.test_certspotter import RespaldoSimulado, emision  # noqa: E402
-from pruebas.test_crtsh import AHORA, CrtshSimulado  # noqa: E402
+from pruebas.test_crtsh import AHORA, SUBDOMINIOS, CrtshSimulado, cert  # noqa: E402
 from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
 from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa: E402
 from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a  # noqa: E402
@@ -453,10 +453,11 @@ class Ejecutar(unittest.TestCase):
             self.assertGreaterEqual(maximo, 0, fuente)
         self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, shodan.MAX_CONSULTAS,
                           rdap.MAX_CONSULTAS, visita.MAX_CONSULTAS, api_docs.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS),
-                         (18, len(subfinder.FUENTES_SUBFINDER), 16, 184, 10, 184, 264, 0))
+                         (36, len(subfinder.FUENTES_SUBFINDER), 16, 184, 10, 184, 264, 0))
 
-    def test_15c_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
-        """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento."""
+    def test_15c_el_respaldo_de_ct_logs_no_pasa_de_su_maximo(self):
+        """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento: 18
+        consultas, sin parecidos. Ya no es el peor caso (test_15d)."""
         paginas = [[emision(str(9100 + i), ['p%d.acme-demo.mx' % i], '2026-09-20T00:00:00Z', '2026-12-19T00:00:00Z')]
                    for i in range(certspotter.MAX_PAGINAS + 1)]
         respaldo, intentos = RespaldoSimulado(paginas=paginas), {}
@@ -473,22 +474,182 @@ class Ejecutar(unittest.TestCase):
             res = contrato.ejecutar(cargar('ct_logs'), 'acme-demo.mx', modo='vivo', ahora=AHORA)
         self.assertEqual(res.estado, 'succeeded', res.error)
         self.assertIn(certspotter.INCOMPLETO, res.avisos)  # se cortó en MAX_PAGINAS
-        self.assertEqual(res.consultas, crtsh.MAX_CONSULTAS)
+        self.assertEqual(res.consultas, 2 * crtsh.INTENTOS + certspotter.MAX_PAGINAS * crtsh.INTENTOS)
+        self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
+        self.assertEqual(res.sin_cobertura, ['cert_expired', 'lookalike_domain'])  # con crt.sh caído no se buscan
 
-    def test_16_un_escaneo_nunca_busca_dominios_parecidos(self):
-        """ejecutar() es el camino del portal y del orquestador: crt.sh solo consulta el dominio autorizado."""
+    def test_15d_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
+        """Con crt.sh arriba y los parecidos (#109, RC-226): el comodín falla sus 3 intentos, la búsqueda por nombre
+        responde al tercero, y cada página de Cert Spotter, %marca% y cada variante responden al último intento."""
+        paginas = [[emision(str(9100 + i), ['p%d.acme-demo.mx' % i], '2026-09-20T00:00:00Z', '2026-12-19T00:00:00Z')]
+                   for i in range(certspotter.MAX_PAGINAS + 1)]
+        respaldo, intentos = RespaldoSimulado(paginas=paginas, crtsh={}), {}
+
+        def transporte(url, timeout):
+            partes = crtsh.urllib.parse.urlparse(url)
+            intentos[url] = intentos.get(url, 0) + 1
+            if partes.netloc == 'api.certspotter.com':
+                ultimo = certspotter.COMPLEMENTO['intentos']
+            else:
+                q = crtsh.urllib.parse.parse_qs(partes.query)['q'][0]
+                ultimo = 99 if q == '%.acme-demo.mx' else crtsh.INTENTOS if q == 'acme-demo.mx' else crtsh.INTENTOS_PARECIDOS
+            if intentos[url] < ultimo:
+                raise urllib.error.HTTPError(url, 503, 'Service Unavailable', None, None)
+            return respaldo(url, timeout)
+        transporte.resolver = respaldo.resolver
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                mock.patch.object(crtsh, '_descargar', transporte), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
+            res = contrato.ejecutar(cargar('ct_logs'), 'acme-demo.mx', modo='vivo', ahora=AHORA)
+        self.assertEqual(res.estado, 'succeeded', res.error)
+        self.assertEqual(res.sin_cobertura, [])
+        self.assertEqual((res.consultas, crtsh.MAX_CONSULTAS), (36, 36))
+
+    def escanear(self, t, modo='vivo'):
+        """ct_logs por ejecutar(), el camino del portal y del orquestador, con un crt.sh simulado."""
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
+            return contrato.ejecutar(cargar('ct_logs'), 'acme-demo.mx', modo=modo, ahora=AHORA,
+                                     propios=['acme-demo.com.mx'], codigos=set(crtsh.CODIGOS))
+
+    @staticmethod
+    def parecidos(res):
+        return sorted(h.evidencia['dominio_parecido'] for h in res.hallazgos if h.codigo == 'lookalike_domain')
+
+    def test_16_un_escaneo_busca_dominios_parecidos_solo_en_los_certificados(self):
+        """#109 (RC-226): cada escaneo consulta en crt.sh %marca% y las variantes aprobadas, y nada más. Ninguna
+        petición ni consulta de DNS va a un dominio parecido, y Cert Spotter no sale del dominio autorizado."""
         for modo in ('vivo', 'grabar'):
             t = CrtshSimulado()
-            with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
-                    mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None):
-                res = contrato.ejecutar(cargar('ct_logs'), 'acme-demo.mx', modo=modo, ahora=AHORA,
-                                        propios=['acme-demo.com.mx'], codigos=set(crtsh.CODIGOS))
+            res = self.escanear(t, modo)
             consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
-            self.assertEqual(consultas, ['%.acme-demo.mx'], modo)  # ni %acme-demo% ni variantes como acme-dem0.mx
+            variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+            self.assertEqual(consultas, ['%.acme-demo.mx', '%acme-demo%'] + variantes, modo)  # sin el otro dominio propio
+            self.assertEqual(len(variantes), crtsh.MAX_CANDIDATOS - 1, modo)
+            self.assertEqual({crtsh.urllib.parse.urlparse(u).netloc for u in t.urls}, {'crt.sh'}, modo)
             dominios = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['domain'] for u in t.cert_spotter]
             self.assertEqual(dominios, [['acme-demo.mx']], modo)  # Cert Spotter tampoco sale del dominio autorizado
-            self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']), modo)
-            self.assertEqual({h.codigo for h in res.hallazgos}, {'cert_expired', 'cert_expiring_soon'}, modo)
+            self.assertTrue(t.dns, modo)
+            self.assertEqual([n for n in t.dns if not contrato.en_alcance_nombre(n, 'acme-demo.mx')], [], modo)
+            self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', []), modo)
+            self.assertEqual(self.parecidos(res), ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com',
+                                                   'cuenta-segura.net'], modo)
+            self.assertEqual({a.valor for a in res.activos if not contrato.en_alcance_nombre(a.valor, 'acme-demo.mx')},
+                             set(), modo)  # el parecido solo va en la evidencia, nunca como activo
+
+    def test_16b_un_parecido_reciente_uno_viejo_y_ninguno(self):
+        """El Hecho cuando 5 de RC-226. Cuenta el parecido con un certificado vigente o vencido hace menos de 90 días.
+        Uno cuyo último certificado venció antes no es hallazgo. Sin ninguno hay cobertura y 0 parecidos."""
+        reciente = cert(40, ['acme-demo.net'], '2026-06-01T00:00:00', '2026-08-30T00:00:00')     # venció hace 46 días
+        en_el_limite = cert(41, ['acme-demo.org'], '2026-04-19T00:00:00', '2026-07-18T00:00:00')  # hace 89 días
+        viejo = cert(42, ['acme-demo.co'], '2026-04-16T00:00:00', '2026-07-15T00:00:00')          # hace 92 días
+        res = self.escanear(CrtshSimulado(respuestas={
+            '%.acme-demo.mx': SUBDOMINIOS, 'acme-demo.net': [reciente], 'acme-demo.org': [en_el_limite],
+            'acme-demo.co': [viejo]}))
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', []))
+        self.assertEqual(self.parecidos(res), ['acme-demo.net', 'acme-demo.org'])
+        h = next(h for h in res.hallazgos if h.clave == 'acme-demo.net')
+        self.assertEqual((h.activo, h.severidad, h.partes, h.evidencia['tipo_parecido'], h.evidencia['vence']),
+                         ('acme-demo.mx', 'medium', ['acme-demo.net'], 'otro_tld', '2026-08-30T00:00:00+00:00'))
+
+        solo_viejo = self.escanear(CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, 'acme-demo.co': [viejo]}))
+        self.assertEqual((solo_viejo.sin_cobertura, self.parecidos(solo_viejo)), ([], []))
+
+        ninguno = self.escanear(CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS}))
+        self.assertEqual((ninguno.estado, ninguno.sin_cobertura, ninguno.avisos), ('succeeded', [], []))
+        self.assertEqual(self.parecidos(ninguno), [])  # se buscó y no hay: 0 parecidos con cobertura
+        self.assertEqual({h.codigo for h in ninguno.hallazgos}, {'cert_expired', 'cert_expiring_soon'})
+
+    def test_16c_si_crtsh_no_responde_a_los_parecidos_quedan_sin_cobertura(self):
+        """El Hecho cuando 3 de RC-226: nunca '0 parecidos'. crt.sh da los subdominios y luego deja de responder."""
+        class SinParecidos(CrtshSimulado):
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')  # Cert Spotter no lleva q
+                if q and q[0] != '%.acme-demo.mx':
+                    self.urls.append(url)
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        t = SinParecidos()
+        res = self.escanear(t)
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']))
+        self.assertEqual(self.parecidos(res), [])
+        self.assertEqual({h.codigo for h in res.hallazgos}, {'cert_expired', 'cert_expiring_soon'})  # lo demás sigue
+        self.assertIn('crt.sh saturado', res.avisos[-1])  # tras 3 variantes seguidas sin respuesta deja las demás
+        self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
+        self.assertIn('Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).', crtsh.resumen(res))
+
+        caido = self.escanear(RespaldoSimulado())  # crt.sh caído del todo: respaldo de Cert Spotter, sin parecidos
+        self.assertEqual((caido.estado, caido.sin_cobertura), ('succeeded', ['cert_expired', 'lookalike_domain']))
+        self.assertEqual(self.parecidos(caido), [])
+
+    def test_16c2_una_variante_sin_respuesta_no_cierra_su_parecido_y_sin_marca_no_hay_cobertura(self):
+        """Si crt.sh responde a %marca% pero no a una variante, hay cobertura y la huella de esa variante va en omitidos:
+        el orquestador no cierra su parecido de un escaneo anterior ni guarda uno nuevo. Si no responde a %marca%, no
+        se sabe qué parecidos por contenido hay: sin cobertura y sin hallazgos de parecidos, aunque una variante responda."""
+        class Sin(CrtshSimulado):
+            def __init__(self, caidas):
+                super().__init__()
+                self.caidas = caidas
+
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
+                if q and q[0] in self.caidas:
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        completo = self.escanear(CrtshSimulado())
+        del_0 = next(h.huella for h in completo.hallazgos if h.clave == 'acme-dem0.mx')
+        self.assertEqual(completo.omitidos, [])
+
+        res = self.escanear(Sin({'acme-dem0.mx', 'acme-demo.net'}))
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', []))
+        self.assertEqual(self.parecidos(res), ['acme-demo-login.com', 'acme-demo-pagos.com', 'cuenta-segura.net'])
+        self.assertEqual(len(res.omitidos), 2)
+        self.assertIn(del_0, res.omitidos)
+        self.assertEqual(sum('no respondió a acme-' in a for a in res.avisos), 2)
+
+        sin_marca = self.escanear(Sin({'%acme-demo%'}))
+        self.assertEqual((sin_marca.estado, sin_marca.sin_cobertura, sin_marca.omitidos),
+                         ('succeeded', ['lookalike_domain'], []))
+        self.assertEqual(self.parecidos(sin_marca), [])  # acme-dem0.mx sí respondió, pero el código no tiene cobertura
+
+    def test_16d_al_reproducir_una_grabacion_sin_parecidos_quedan_sin_cobertura(self):
+        """Una grabación de antes de #109 no trae %marca% ni las variantes: al reproducir es cobertura parcial con el
+        aviso de lo que falta, no 0 parecidos, y nada sale a la red."""
+        def sin_red(url, timeout):
+            raise AssertionError('no debe usar la red')
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)):
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=crtsh.carpeta_de('acme-demo.mx'), transporte=CrtshSimulado(),
+                                      dormir=lambda s: None, nueva=True)
+            crtsh.recolectar('acme-demo.mx', grab, AHORA)  # como grababa --grabar antes: sin parecidos
+            with mock.patch.object(crtsh, '_descargar', sin_red):
+                res = contrato.ejecutar(cargar('ct_logs'), 'acme-demo.mx', modo='reproducir', ahora=AHORA,
+                                        codigos=set(crtsh.CODIGOS))
+        self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', ['lookalike_domain'], 0))
+        self.assertEqual(sum(a.startswith(contrato.SIN_GRABACION) for a in res.avisos), 1 + crtsh.MAX_CANDIDATOS)
+
+    def test_16e_las_opciones_del_escaneo_las_declara_el_recolector(self):
+        """ejecutar() pasa EN_ESCANEO a recolectar(). Sin EN_ESCANEO no pasa nada más, y uno mal formado o que pisa
+        dominio, cliente, ahora o propios deja la fuente en failed sin llamar al recolector."""
+        self.assertEqual(crtsh.EN_ESCANEO, {'parecidos': True})
+        for fuente in REGISTRO:
+            if fuente != 'ct_logs':
+                self.assertFalse(getattr(cargar(fuente), 'EN_ESCANEO', None), fuente)
+        vistos = []
+
+        def recolectar(dominio, cliente=None, ahora=None, propios=(), **opciones):
+            vistos.append(opciones)
+            return Resultado(dominio, 'prueba')
+        for declarado, esperado in ((None, {}), ({}, {}), ({'extra': 1}, {'extra': 1})):
+            modulo = SimpleNamespace(FUENTE='prueba', crear_cliente=lambda modo, dominio: None, recolectar=recolectar)
+            if declarado is not None:
+                modulo.EN_ESCANEO = declarado
+            self.assertEqual(contrato.ejecutar(modulo, 'acme-demo.mx').estado, 'succeeded')
+            self.assertEqual(vistos.pop(), esperado)
+        for malo in (['parecidos'], 'parecidos', {'propios': ['otro.mx']}, {'dominio': 'otro.mx'}):
+            modulo = SimpleNamespace(FUENTE='prueba', crear_cliente=lambda modo, dominio: None, recolectar=recolectar,
+                                     EN_ESCANEO=malo)
+            res = contrato.ejecutar(modulo, 'acme-demo.mx')
+            self.assertEqual((res.estado, vistos), ('failed', []), malo)
+            self.assertIn('EN_ESCANEO', res.error)
 
 
 class Reintentos(unittest.TestCase):
