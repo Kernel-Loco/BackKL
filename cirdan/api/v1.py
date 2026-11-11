@@ -15,6 +15,7 @@ from datetime import date, datetime
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
+from psycopg import IsolationLevel
 from psycopg.types.json import Jsonb
 
 from cirdan import orquestador, siem
@@ -590,30 +591,41 @@ def export_action_plan(fqdn: str, formato: str = Query(default='json'),
 
 
 # ---------------------------------------------------------------- salida a SIEM (#98, RC-212)
-# Consultas propias y no las del portal: no leen la evidencia, y el valor de un activo de tipo email no sale de la base.
+# Consultas propias y no las del portal: no leen la evidencia (solo su llave 'cve', validada), y el valor de un activo
+# de tipo email no sale de la base.
 
 SIEM_FINDINGS_SQL = '''
 SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
-       coalesce(sc_score.severity, f.severity) AS severity, f.status, f.cve_id, c.cvss_base_score AS cvss,
+       coalesce(sc_score.severity, f.severity) AS severity, f.status, cv.cve_id, c.cvss_base_score AS cvss,
        CASE WHEN a.asset_type = 'email' THEN NULL ELSE a.value END AS asset, a.asset_type,
+       host(a.ip_address) AS asset_ip,
+       CASE WHEN pa.asset_type IN ('domain','subdomain') THEN pa.value END AS asset_parent,
        fm.attack_technique_id, s.code AS data_source, f.detected_at, f.last_scan_id::text,
-       sc.finished_at AS scan_finished_at
+       sc.finished_at AS scan_finished_at,
+       CASE WHEN sc.id IS NULL OR f.detected_at >= sc.queued_at THEN 'new' ELSE 'recurring' END AS recurrence
   FROM findings f
   JOIN domains d       ON d.id = f.domain_id
   JOIN assets a        ON a.id = f.asset_id
+  LEFT JOIN assets pa  ON pa.id = a.parent_asset_id
   JOIN scoring_rules r ON r.id = f.rule_id
   JOIN scoring_rule_texts t ON t.code = r.code
   JOIN data_sources s  ON s.id = f.source_id
   LEFT JOIN scoring_rule_framework_mappings fm ON fm.rule_code = r.code
   LEFT JOIN scans sc   ON sc.id = f.last_scan_id
-  LEFT JOIN cves c     ON c.cve_id = f.cve_id
-  LEFT JOIN LATERAL (SELECT x.severity FROM domain_scores ds
-                       JOIN score_contributions x ON x.score_id = ds.id AND x.finding_id = f.id
-                      WHERE ds.domain_id = f.domain_id ORDER BY ds.computed_at DESC LIMIT 1) sc_score ON true
+  CROSS JOIN LATERAL (SELECT coalesce(f.cve_id, CASE WHEN f.evidence->>'cve' ~ '^CVE-[0-9]{4}-[0-9]{4,}$'
+                                                     THEN f.evidence->>'cve' END) AS cve_id) cv
+  LEFT JOIN cves c     ON c.cve_id = cv.cve_id
+  LEFT JOIN LATERAL (SELECT x.severity FROM score_contributions x
+                      WHERE x.finding_id = f.id
+                        AND x.score_id = (SELECT ds.id FROM domain_scores ds WHERE ds.domain_id = f.domain_id
+                                           ORDER BY ds.computed_at DESC LIMIT 1)) sc_score ON true
  WHERE d.fqdn = %s AND f.status = 'open'
  ORDER BY array_position(ARRAY['critical','high','medium','low'], coalesce(sc_score.severity, f.severity)),
           f.detected_at DESC, f.id
 '''
+# Antes de RC-46 el orquestador no llenaba findings.cve_id y la CVE quedaba solo en evidence['cve']: por eso el
+# coalesce. La severidad sale del último score del dominio y no del último que contó el hallazgo: uno resuelto y
+# reabierto después de ese score lleva su severidad de regla y no la de un score viejo.
 SIEM_SCAN_SQL = '''
 SELECT s.id::text, s.status, s.trigger_type AS trigger, s.queued_at, s.finished_at, s.stats,
        coalesce((SELECT jsonb_agg(jsonb_build_object('data_source', ds.code, 'status', r.status) ORDER BY ds.code)
@@ -631,16 +643,21 @@ SELECT ds.id::text, ds.scan_id::text, ds.score, ds.category_scores, ds.method, d
  WHERE d.fqdn = %s
  ORDER BY ds.computed_at DESC LIMIT 1
 '''
+# Como en el login (004_login_lookup_seguro.sql): una empresa suspendida o cancelada no exporta aunque su sesión siga viva.
+SIEM_PLAN_SQL = '''
+SELECT p.api_and_siem FROM organizations o JOIN plans p ON p.id = o.plan_id WHERE o.status IN ('trial','active')
+'''
 
 
 @router.get('/domains/{fqdn}/export/siem',
             summary='Descarga en NDJSON para el HEC de Splunk los hallazgos abiertos, el último escaneo y el último score')
 def export_siem(fqdn: str, session: Session = Depends(current_session)):
-    with transaction(session.org_id) as conn:
-        plan = conn.execute('SELECT p.api_and_siem FROM organizations o JOIN plans p ON p.id = o.plan_id').fetchone()
+    # REPEATABLE READ: las consultas ven una sola foto, así un escaneo que cierra a la mitad no mezcla dos escaneos.
+    with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
+        plan = conn.execute(SIEM_PLAN_SQL).fetchone()
         if not plan or not plan['api_and_siem']:
             raise HTTPException(403, 'El plan de la empresa no incluye la salida a SIEM')
-        dominio = conn.execute('SELECT fqdn::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
+        dominio = conn.execute('SELECT fqdn::text, now() AS ahora FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
         if not dominio:
             raise HTTPException(404, 'Dominio no encontrado para esta organización')
         hallazgos = conn.execute(SIEM_FINDINGS_SQL, (fqdn,)).fetchall()
@@ -648,9 +665,9 @@ def export_siem(fqdn: str, session: Session = Depends(current_session)):
         score = conn.execute(SIEM_SCORE_SQL, (fqdn,)).fetchone()
     fqdn = dominio['fqdn']
     return Response(
-        content=siem.ndjson(fqdn, hallazgos, escaneo, score),
+        content=siem.ndjson(fqdn, hallazgos, escaneo, score, ahora=dominio['ahora'], export_id=str(uuid.uuid4())),
         media_type='application/x-ndjson; charset=utf-8',
-        headers={'Content-Disposition': 'attachment; filename="%s-siem.ndjson"' % fqdn},
+        headers={'Content-Disposition': 'attachment; filename="%s-siem.ndjson"' % fqdn, 'Cache-Control': 'no-store'},
     )
 
 

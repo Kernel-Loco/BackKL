@@ -1,4 +1,4 @@
-# Los eventtypes, tags y props se exportan a todo Splunk para que los modelos del CIM (otra app) los vean.
+# Los eventtypes, tags, props y macros se exportan a todo Splunk para que los modelos del CIM (otra app) los vean.
 []
 access = read : [ * ], write : [ admin ]
 export = system

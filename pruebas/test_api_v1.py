@@ -10,6 +10,7 @@ import csv
 import io
 import json
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from cirdan.score import criterio, subcategorias
@@ -397,23 +398,38 @@ class ApiV1(unittest.TestCase):
             self.assertEqual(r.status, 200)
             self.assertTrue(r.headers['Content-Type'].startswith('application/x-ndjson'))
             self.assertIn('beta-corp.mx-siem.ndjson', r.headers['Content-Disposition'])
+            self.assertEqual(r.headers['Cache-Control'], 'no-store')
             texto = r.read().decode('utf-8')
         eventos = [json.loads(x) for x in texto.splitlines()]
-        # beta-corp.mx tiene un hallazgo abierto y ningún escaneo ni score en la semilla 001.
-        self.assertEqual([e['sourcetype'] for e in eventos], ['lowtide:finding'])
+        # beta-corp.mx tiene un hallazgo abierto y ningún escaneo ni score en la semilla 001. La exportación siempre
+        # cierra con su evento lowtide:export.
+        self.assertEqual([e['sourcetype'] for e in eventos], ['lowtide:finding', 'lowtide:export'])
         ev = eventos[0]['event']
-        self.assertEqual((ev['finding_id'], ev['signature_id'], ev['dest'], ev['domain'], ev['vendor_product']),
-                         ('80000000-0000-4000-8000-000000000011', 'exposed_rdp', '192.0.2.50:3389/tcp',
+        self.assertEqual((ev['finding_id'], ev['signature_id'], ev['dest'], ev['dest_port'], ev['domain'],
+                          ev['vendor_product']),
+                         ('80000000-0000-4000-8000-000000000011', 'exposed_rdp', '192.0.2.50', 3389,
                           'beta-corp.mx', 'LowTide'))
-        self.assertTrue(ev['signature'])
+        # signature es el título de la regla (003_textos_reglas.sql), no el de la evidencia (semilla 003_titulos_espanol).
+        self.assertEqual(ev['signature'], 'Puerto del escritorio remoto de Windows abierto a internet')
         self.assertNotIn('evidence', texto)
-        self.assertNotIn('Remote Desktop (RDP) exposed', texto)  # el título de la evidencia tampoco sale
+        self.assertNotIn('Escritorio remoto (RDP) expuesto', texto)
+        # El hallazgo es del 28 sep, pero el time de HEC es el de la exportación, igual en todos los eventos.
+        self.assertEqual(len({(e['time'], e['event']['export_id']) for e in eventos}), 1)
+        self.assertGreater(eventos[0]['time'], datetime.fromisoformat(ev['detected_at']).timestamp() + 86400)
+        self.assertEqual(eventos[1]['event']['findings'], 1)
+        # Con la empresa suspendida, la sesión que ya tenía abierta no exporta (como el login, solo trial o active).
+        beta = "UPDATE organizations SET status = '%s' WHERE id = '20000000-0000-4000-8000-000000000002';"
+        ok, _, err = psql(beta % 'suspended', user='postgres')
+        self.assertTrue(ok, err)
+        self.addCleanup(psql, beta % 'active', user='postgres')
+        self.assertEqual(self.beta.get('/api/v1/domains/beta-corp.mx/export/siem')[0], 403)
+        ok, _, err = psql(beta % 'active', user='postgres')
+        self.assertTrue(ok, err)
         # Acme tiene el plan starter, sin API ni SIEM. Un dominio de otra empresa responde 404 y sin sesión, 401.
         self.assertEqual(self.acme.get('/api/v1/domains/acme-demo.mx/export/siem')[0], 403)
         for fqdn in ('acme-demo.mx', 'olmardo.com'):
             self.assertEqual(self.beta.get('/api/v1/domains/%s/export/siem' % fqdn)[0], 404, fqdn)
         self.assertEqual(sesion.Client().get('/api/v1/domains/beta-corp.mx/export/siem')[0], 401)
-
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
