@@ -593,8 +593,8 @@ def export_action_plan(fqdn: str, formato: str = Query(default='json'),
 
 
 # ---------------------------------------------------------------- salida a SIEM (#98, RC-212)
-# Consultas propias y no las del portal: no leen la evidencia (solo su llave 'cve', validada), y el valor de un activo
-# de tipo email no sale de la base.
+# Consultas propias y no las del portal: de la evidencia solo leen sus llaves 'cve' y 'cvss', validadas, y el valor de
+# un activo de tipo email no sale de la base.
 
 SIEM_FINDINGS_SQL = '''
 WITH ultimos AS (SELECT ds.id, ds.computed_at, row_number() OVER (ORDER BY ds.computed_at DESC, ds.id) AS n
@@ -649,12 +649,16 @@ SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
 # cualquier otro es 'new': uno que apareció o se reabrió en el último escaneo, o después de su score. No usa
 # detected_at, que no cambia al reabrir, ni last_scan_id, que no avanza si la fuente del hallazgo falla. Los scores con
 # otro motivo (correction, intel_update, rules_change) no cuentan, ni el de un escaneo en el que no respondió ninguna
-# fuente (stats.sources_ok = 0): guarda score, pero sus aportes solo repiten los del anterior.
+# fuente (stats.sources_ok = 0): guarda score, pero ninguna fuente confirmó sus hallazgos.
 # Se mide contra los escaneos y no contra la exportación anterior: con dos escaneos entre dos exportaciones, un crítico
-# que abrió el primero ya sale recurring en la segunda. La alerta solo sale en la primera exportación después del
-# escaneo que la abrió, y el envío automático al cerrar cada escaneo (#98b, RC-213) es el que no pierde ninguna.
+# que abrió el primero ya sale recurring en la segunda. La alerta solo sale en las exportaciones hechas antes del
+# siguiente escaneo con score, y el envío automático al cerrar cada escaneo (#98b, RC-213) es el que no pierde ninguna.
 # previous_severity es la severidad del hallazgo en el más viejo de los dos scores: un crítico que no lo era ahí (lo
-# subió el ML o el motor) también es alerta (cirdan/siem/__init__.py), aunque siga abierto.
+# subió el ML o el motor) también es alerta (cirdan/siem/__init__.py), aunque siga abierto. La severidad que se compara
+# sale del último score de cualquier motivo, así que también alerta un crítico que subió sin un escaneo con fuentes (un
+# score rules_change, uno de un escaneo con sources_ok = 0 o el ML que cae a reglas con severidad base critical). Esas
+# alertas se repiten: la de un score sin escaneo con fuentes otra vez tras el siguiente escaneo con score, y la del ML
+# cada vez que vuelve a caer a reglas. Se prefiere repetir una alerta a perderla.
 # Un escaneo que terminó sin score (abandonar_vencidos o marcar_fallido) no deja foto, pero sus fuentes que respondieron
 # ya guardaron: pudieron cerrar un hallazgo que el siguiente escaneo reabrió, y el reabrir no deja rastro (el upsert del
 # orquestador limpia resolved_at). Por eso, si después del más viejo de esos dos scores terminó un escaneo así (se mide
@@ -663,9 +667,11 @@ SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
 # hasta el segundo escaneo con score que siga, y un crítico que abrió el escaneo caído alerta otra vez después del
 # siguiente. Una fuente que falló en el escaneo caído no tocó sus hallazgos y no cuenta.
 # Antes de RC-46 el orquestador no llenaba findings.cve_id y la CVE quedaba solo en evidence['cve']: por eso el
-# coalesce. El CVSS, como en el portal (FINDINGS_SQL), sale de la tabla cves o, si la CVE todavía no está ahí, de
-# evidence['cvss'] cuando es un número de 0 a 10. De la evidencia no se lee nada más. La severidad sale del último score del dominio y no del último que contó el hallazgo: uno resuelto y
-# reabierto después de ese score lleva su severidad de regla y no la de un score viejo.
+# coalesce. El CVSS sale de la tabla cves o, si la CVE todavía no está ahí, de evidence['cvss'] cuando es un número de
+# 0 a 10, con la misma expresión que el portal (FINDINGS_SQL). La diferencia es la CVE que se busca en cves: aquí la
+# combinada (cve_id o evidence['cve']) y en el portal solo f.cve_id. De la evidencia no se lee nada más.
+# La severidad sale del último score del dominio y no del último que contó el hallazgo: uno resuelto y reabierto
+# después de ese score lleva su severidad de regla y no la de un score viejo.
 SIEM_SCAN_SQL = '''
 SELECT s.id::text, s.status, s.trigger_type AS trigger, s.queued_at, s.finished_at, s.stats,
        coalesce((SELECT jsonb_agg(jsonb_build_object('data_source', ds.code, 'status', r.status) ORDER BY ds.code)

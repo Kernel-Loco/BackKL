@@ -361,9 +361,18 @@ class Orquestador(unittest.TestCase):
         # previous_severity sale del más viejo de los dos scores (el del 1 ene), no del último ni del de corrección
         self.assertEqual(consulta('previous_severity'), [solo_viejo['severity'], 'low', None, None])
 
+        # La autorización de la semilla vence el 31 dic 2026: una renovación vigente hoy, que se va con el rollback de
+        # la prueba (la tabla es inmutable, renovar crea otra fila), así la prueba no depende de la fecha en que corre.
+        self.conn.execute(
+            'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
+            'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+            'SELECT organization_id, domain_id, signer_name, signer_title, signer_email, '
+            "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
+            "accepted_by FROM domain_authorizations WHERE id = '41000000-0000-4000-8000-000000000001'")
+
         def solicitar():
             s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
-            self.assertTrue(s.aceptada, s.detalle)  # la autorización de la semilla vence el 31 dic 2026
+            self.assertTrue(s.aceptada, s.detalle)
             return s.scan_id
         # Un escaneo caído (sin score) pedido antes del más viejo de los dos scores y que terminó después: cuenta por
         # finished_at. queued_at es de antes de la consulta TXT y puede quedar antes del score del escaneo anterior.
