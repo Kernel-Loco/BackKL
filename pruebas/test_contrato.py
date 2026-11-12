@@ -19,9 +19,8 @@ from pruebas.test_certspotter import RespaldoSimulado, emision  # noqa: E402
 from pruebas.test_crtsh import AHORA, SUBDOMINIOS, CrtshSimulado, cert  # noqa: E402
 from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
 from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa: E402
-from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a  # noqa: E402
+from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a, bases_por_defecto  # noqa: E402
 from pruebas.test_subfinder import SubfinderSimulado  # noqa: E402
-from pruebas.test_geoip import bases as bases_geo  # noqa: E402
 from pruebas.test_rdap import HttpSimulado as RdapSimulado, respuesta as respuesta_rdap  # noqa: E402
 from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, rdap,  # noqa: E402
                                  registros_dns, shodan, subfinder, visita)
@@ -405,7 +404,8 @@ class Ejecutar(unittest.TestCase):
         dns y shodan ubican sus IP con unas Bases falsas (geo-G6): la prueba no lee datos/geo ni abre maxminddb, así que
         da lo mismo en una PC con las bases que sin ellas, y _POR_OMISION queda como estaba."""
         sin_abrir = []
-        for parche in (mock.patch.object(geoip, 'bases_por_omision', return_value=bases_geo()),
+        # Con un ASN que no es de CDN para toda IP: sin ASN conocido shodan no consulta ni graba (RC-49, H11)
+        for parche in (mock.patch.object(geoip, 'bases_por_omision', return_value=bases_por_defecto()),
                        mock.patch.object(geoip, '_POR_OMISION', sin_abrir)):
             parche.start()
             self.addCleanup(parche.stop)

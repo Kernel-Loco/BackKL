@@ -19,8 +19,10 @@ sin consultas extra (_cadena_cname). Tampoco las de un ASN que es solo de un CDN
 CNAME a la vista (geoip.cdn_por_asn con la base local de DB-IP Lite, #15b, RC-166). Un ASN mixto de nube y CDN
 (Amazon, Microsoft, Google) no cuenta, porque una IP suya puede ser un servidor de la empresa: ahí el CDN sale solo por
 el CNAME. Quedan como activo ip con su marca y sin consulta. Si aun así InternetDB trae el tag 'cdn', sus datos se
-descartan con un aviso. Sin la base de ASN de DB-IP ese filtro no corre: las IP de un CDN sin CNAME conocido se
-consultan igual y el aviso de base faltante lo dice (SIN_CDN_POR_ASN).
+descartan con un aviso. Una IP sin ASN conocido, porque falta la base de ASN de DB-IP o porque la base no la trae, no
+se consulta (RC-49, H11 de la auditoría del 12 nov): sin el ASN no se puede descartar que sea de un CDN. Queda como
+activo ip con internetdb 'sin_asn' y la cobertura parcial, así no se cierran sus hallazgos de antes. El aviso de base
+faltante lo dice (SIN_CDN_POR_ASN) y, con la base abierta, SIN_ASN cuenta cuántas fueron.
 
 Devuelve:
 - un activo ip por IP, con 'hosts' (los nombres que resuelven a ella) e 'internetdb' con puertos, tags, CPE, cuántos
@@ -206,14 +208,17 @@ CAMPOS = ('ports', 'tags', 'cpes', 'vulns', 'hostnames')   # los de una respuest
 SIN_GRABACION_DOMINIO = 'shodan: no hay grabación de Shodan de este dominio, no se revisó InternetDB'
 LIMITES = ('shodan: solo IPv4 y sin la llave de Shodan (#8): exposed_iot_device, exposed_ot_device y outdated_software '
            'quedan sin cobertura, y no se detecta un CDN que no llegue por un CNAME conocido y cuyo ASN no esté en '
-           'geoip.CDN_POR_ASN (las nubes mixtas como Amazon, Microsoft o Google, y otros fuera de la lista), ni ninguno '
-           'sin la base de DB-IP')
+           'geoip.CDN_POR_ASN (las nubes mixtas como Amazon, Microsoft o Google, y otros fuera de la lista)')
 # Lo que shodan agrega al aviso de geoip.aviso_sin_base cuando falta la base de ASN: el filtro de CDN por ASN no corrió.
-SIN_CDN_POR_ASN = 'las IP de un CDN sin un CNAME conocido no se pudieron descartar por ASN y se consultaron igual en InternetDB'
+SIN_CDN_POR_ASN = ('las IP fuera de Cloudflare y sin un CNAME de CDN no se consultaron en InternetDB, porque sin el ASN no '
+                   'se puede descartar que sean de un CDN')
+# Las IP que la base de ASN abierta no trae, por la misma razón.
+SIN_ASN = 'shodan: %s sin ASN en la base de DB-IP no se consultaron en InternetDB, porque no se puede descartar un CDN: %s'
 SIN_IP = 'shodan: ninguna IP pública del dominio fuera de un CDN, no hubo nada que consultar en InternetDB'
 PARCIAL = 'shodan: cobertura parcial'
 PARTE_CVE = '/cve'   # las CVE de una IP son otra parte que sus puertos: 'vulns' roto no frena el cierre de sus puertos
-NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiempo o una respuesta que no se puede leer), '
+NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiempo, una respuesta que no se puede leer o IP '
+               'sin ASN), '
                'no se grabó y se conserva la grabación anterior')
 NOTA_SIN_FECHA = ('InternetDB no dice cuándo vio este dato: puede ser viejo o de quien tuvo la IP antes que el dominio')
 
@@ -891,24 +896,33 @@ def _revisar(res, cliente, dominio, ahora):
 
     # 3. Qué IP se consultan: públicas (consultable), fuera de un CDN en toda su cadena CNAME y fuera de un ASN de CDN.
     # La ubicación sale de la base local, sin red: las bases se piden una vez por corrida y solo si alguna IP es
-    # ubicable (con solo IP privadas no se busca nada y el aviso de base faltante no diría nada cierto). Sin la base de
-    # ASN el filtro de CDN por ASN queda apagado y esas IP se consultan igual: el mismo aviso lo dice (SIN_CDN_POR_ASN).
+    # ubicable (con solo IP privadas no se busca nada y el aviso de base faltante no diría nada cierto). Una IP sin ASN
+    # conocido no se consulta: sin la base de ASN lo dice el aviso de base faltante (SIN_CDN_POR_ASN) y, con la base
+    # abierta, SIN_ASN.
     ips = sorted(por_ip, key=ipaddress.ip_address)
     bases = geoip.bases_por_omision() if any(geoip.ubicable(ip) for ip in ips) else None
     ubicadas = {ip: geoip.ubicar(ip, bases) for ip in ips}
     aviso_geo = None if bases is None else geoip.aviso_sin_base(FUENTE, bases, sin_asn=SIN_CDN_POR_ASN)
     if aviso_geo:
         res.avisos.append(aviso_geo)
-    marcas, consultar = {}, []
+    marcas, consultar, sin_asn = {}, [], []
     for ip in ips:
         if not consultable(ip):
             marcas[ip] = {'no_publica': True}
             continue
-        cdn = cdn_de(ip, cnames.get(ip, ())) or geoip.cdn_por_asn(ubicadas[ip]['asn'])
+        asn = ubicadas[ip]['asn']
+        cdn = cdn_de(ip, cnames.get(ip, ())) or geoip.cdn_por_asn(asn)
         if cdn:
             marcas[ip] = {'cdn': cdn}
+        elif isinstance(asn, bool) or not isinstance(asn, int):   # 'No disponible': no se sabe si es de un CDN
+            marcas[ip] = {'internetdb': 'sin_asn'}
+            sin_asn.append(ip)
         else:
             consultar.append(ip)
+    if sin_asn:
+        parcial.append('asn')
+        if not (aviso_geo and bases.asn is None):   # sin la base, el aviso de base faltante ya lo dijo
+            res.avisos.append(SIN_ASN % (_cuantos(len(sin_asn), 'IP', 'IP'), _lista(sin_asn)))
     # Las IP de la raíz van primero: con MAX_NOMBRES nombres las de los subdominios no la dejan fuera de MAX_IPS (RC-55)
     consultar.sort(key=lambda ip: (dominio not in por_ip[ip], ipaddress.ip_address(ip)))
     if len(consultar) > MAX_IPS:
