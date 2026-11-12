@@ -659,11 +659,14 @@ SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
 # sale del último score de cualquier motivo, así que también alerta un crítico que subió en el score de un escaneo
 # con sources_ok = 0, que ultimos no cuenta, o porque el ML cayó a reglas con severidad base critical. Un score
 # rules_change no sube nada por sí solo: recalcular_scores (cirdan/score/configuracion.py) copia la severidad ML
-# congelada del score anterior o f.severity, así que solo arrastra la subida de un score anterior. Esas alertas se
+# congelada del score anterior o f.severity, así que solo arrastra la subida de un score anterior o el f.severity
+# que dejó un escaneo caído (el upsert del orquestador la reescribe aunque el escaneo no deje score). Esas alertas se
 # repiten: la del escaneo con sources_ok = 0 otra vez tras el siguiente escaneo con score que cuente, y la del ML cada
-# vez que vuelve a caer a reglas. Al revés, un score que baja la severidad sin un escaneo que cuente (el de un escaneo
-# con sources_ok = 0, con el ML disponible) cierra antes la ventana de un crítico nuevo: si nadie exportó entre los
-# dos, esa alerta se pierde.
+# vez que vuelve a caer a reglas. En uno que sigue abierto, todas dependen de que no fuera critical en el más viejo de
+# los dos scores de ultimos (previous_severity): si ya lo era (critical ahí, high en el siguiente y otra vez critical
+# en uno con sources_ok = 0), la subida ni alerta ni se repite. Al revés, un score que baja la severidad sin un
+# escaneo que cuente (el de un escaneo con sources_ok = 0) cierra antes la ventana de un crítico nuevo: si nadie
+# exportó entre los dos, esa alerta se pierde.
 # Un escaneo que terminó sin score (abandonar_vencidos o marcar_fallido) no deja foto, pero sus fuentes que respondieron
 # ya guardaron: pudieron cerrar un hallazgo que el siguiente escaneo reabrió, y el reabrir no deja rastro (el upsert del
 # orquestador limpia resolved_at). Por eso, si después del más viejo de esos dos scores terminó un escaneo así (se mide
@@ -672,8 +675,9 @@ SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
 # hasta el segundo escaneo con score que siga, y un crítico que abrió el escaneo caído alerta otra vez después del
 # siguiente. Una fuente que falló en el escaneo caído no tocó sus hallazgos y no cuenta.
 # Antes de RC-46 el orquestador no llenaba findings.cve_id y la CVE quedaba solo en evidence['cve']: por eso el
-# coalesce. El CVSS sale de la tabla cves o, si esa tabla no tiene su CVSS (las de Shodan quedan ahí sin CVSS hasta el
-# cargador diario, #69), de evidence['cvss'] cuando es un número de 0 a 10, con la misma expresión que el portal
+# coalesce. El CVSS sale de la tabla cves o, si esa tabla no tiene su CVSS (una CVE que trae Shodan entra sin CVSS
+# hasta el cargador diario, #69, salvo que ya estuviera completa: el orquestador inserta con ON CONFLICT DO NOTHING),
+# de evidence['cvss'] cuando es un número de 0 a 10, con la misma expresión que el portal
 # (FINDINGS_SQL). La diferencia es la CVE que se busca en cves: aquí la combinada (cve_id o evidence['cve']) y en el
 # portal solo f.cve_id. De la evidencia no se lee nada más.
 # La severidad sale del último score del dominio y no del último que contó el hallazgo: uno resuelto y reabierto

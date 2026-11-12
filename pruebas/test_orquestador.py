@@ -377,7 +377,8 @@ class Orquestador(unittest.TestCase):
         # previous_severity sale del más viejo de los dos scores (el del 1 ene), no del último ni del de corrección
         self.assertEqual(consulta('previous_severity'), [solo_viejo['severity'], 'low', None, None])
 
-        # solicitar() usa la carta que renovó setUp (renovar_carta), así la prueba no depende de la fecha en que corre
+        # solicitar() siempre tiene una carta vigente gracias a setUp (renovar_carta), así la prueba no depende de la
+        # fecha en que corre
         def solicitar():
             s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
             self.assertTrue(s.aceptada, s.detalle)
@@ -1387,8 +1388,8 @@ class Orquestador(unittest.TestCase):
         consulta = ConsultaTxt((TXT_ACME,))
 
         def revoca_y_responde(fqdn):
-            # Las dos vigentes (la de la semilla y la que renovó setUp): así se revoca la que eligió solicitar(),
-            # aunque las dos venzan el mismo día
+            # Todas las no revocadas (la de la semilla y la que renovó setUp, vigentes o no): así se revoca la que
+            # eligió solicitar(), sea cual sea
             self.conn.execute("UPDATE domain_authorizations a SET revoked_at = now() FROM domains d "
                               "WHERE d.id = a.domain_id AND d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL")
             return consulta
