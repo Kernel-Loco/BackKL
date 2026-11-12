@@ -1,6 +1,10 @@
-"""Llaves de API para integradores (#87, RC-129): crear, listar y revocar.
+"""Llaves de API para los sistemas de la propia empresa (#87, RC-129): crear, listar y revocar.
 
 Solo el Administrador, y siempre con la sesión del portal: una llave no crea ni revoca llaves.
+Una llave no se da a un integrador ni a otra empresa: la carta todavía no tiene dónde nombrarlo
+(politica_uso_etico.md, sección 6, punto 1, y H1 de la auditoría del 12 nov). Por eso crear pide
+own_use: true, la declaración del Administrador de que la llave es para un sistema de su empresa,
+y la bitácora la guarda en api_key.created.
 La llave completa sale una sola vez, en la respuesta de POST. Después solo se ve su prefijo.
 Crear pide un plan con API (plans.api_and_siem). Listar y revocar no, para que una empresa que
 bajó de plan todavía pueda revocar las que tenía.
@@ -9,7 +13,7 @@ import uuid
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from cirdan.auth import api_keys, sessions
 from cirdan.auth.deps import Session, client_ip, require_roles
@@ -23,12 +27,17 @@ LLAVES_VIGENTES = 20  # por empresa, sin contar las revocadas ni las vencidas
 SIN_PLAN = 'Tu plan no incluye la API. Está disponible en los planes Business y Enterprise.'
 SIN_SESION = 'Tu sesión terminó. Vuelve a iniciar sesión.'
 NO_ENCONTRADA = 'Llave no encontrada'
+USO_PROPIO = ('Una llave de API es solo para los sistemas de tu propia empresa. Confírmalo con own_use: true. '
+              'No se da a un integrador ni a otra empresa mientras la carta no tenga dónde nombrarlo.')
 
 
 class LlaveIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     domain: str | None = Field(default=None, min_length=1, max_length=253)
     expires_in_days: int = Field(default=DIAS_MAXIMO, ge=1, le=DIAS_MAXIMO)
+    # Sin valor por omisión que valga: falta, null o false responden 422 con USO_PROPIO. Estricto, para que
+    # 1 o 'true' no cuenten como la declaración.
+    own_use: StrictBool | None = None
 
 
 LISTA_SQL = '''
@@ -51,6 +60,8 @@ def _texto(valor, campo):
 
 @router.post('', status_code=201, summary='Crea una llave de API. La llave completa solo se muestra aquí (solo Admin)')
 def create_api_key(body: LlaveIn, request: Request, response: Response, session: Session = Depends(admin)):
+    if body.own_use is not True:
+        raise HTTPException(422, USO_PROPIO)
     nombre = _texto(body.name, 'name')
     fqdn = _texto(body.domain, 'domain') if body.domain is not None else None
     with transaction(session.org_id) as conn:
@@ -94,7 +105,7 @@ def create_api_key(body: LlaveIn, request: Request, response: Response, session:
             raise HTTPException(503, 'No se pudo generar la llave. Inténtalo de nuevo.')
         audit(conn, session.org_id, 'api_key.created', session.user_id, client_ip(request), 'api_key', fila['id'],
               {'name': nombre, 'key_prefix': prefijo, 'domain': fqdn, 'scopes': [api_keys.LECTURA],
-               'expires_at': fila['expires_at'].isoformat()})
+               'expires_at': fila['expires_at'].isoformat(), 'own_use': True})
     response.headers['Cache-Control'] = 'no-store'
     return {'id': fila['id'], 'name': nombre, 'key_prefix': prefijo, 'domain': fqdn, 'scopes': [api_keys.LECTURA],
             'created_by': session.email, 'created_at': fila['created_at'], 'expires_at': fila['expires_at'],

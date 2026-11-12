@@ -7,6 +7,10 @@ máxima de 90 días, se muestra una sola vez y solo se guardan su prefijo y su h
 y se ve su último uso, y la API la acepta con el mismo aislamiento por empresa. Una llave revocada
 o vencida responde 401 y la de otra empresa no ve nada.
 
+H1 de la auditoría del 12 nov (opción A): la llave es solo para los sistemas de la propia empresa,
+porque la carta todavía no tiene dónde nombrar a un integrador. Crear pide own_use: true y la
+bitácora lo guarda (test_14).
+
 Las llaves las genera la API en cada corrida y ninguna queda escrita aquí. Las que estas pruebas
 crean llevan un nombre que empieza con CIRDAN_FAKE_ y se borran al terminar cada prueba. Acme es
 Starter en la semilla: las pruebas que necesitan que tenga API le ponen Business y lo regresan.
@@ -34,6 +38,8 @@ LLAVE_FALSA = 'lt_00000000_CIRDAN_FAKE_' + 'x' * 31
 LLAVE_INVALIDA = 'La llave de API no es válida, venció o fue revocada.'
 SIN_SESION = 'Tu sesión terminó. Vuelve a iniciar sesión.'
 SIN_PLAN = 'Tu plan no incluye la API. Está disponible en los planes Business y Enterprise.'
+USO_PROPIO = ('Una llave de API es solo para los sistemas de tu propia empresa. Confírmalo con own_use: true. '
+              'No se da a un integrador ni a otra empresa mientras la carta no tenga dónde nombrarlo.')
 HALLAZGO_ACME_DEMO = '80000000-0000-4000-8000-000000000001'
 ESCANEO_ACME_DEMO = '60000000-0000-4000-8000-000000000001'
 ESCANEO_ACME_TIENDA = '60000000-0000-4000-8000-000000000002'
@@ -92,7 +98,7 @@ class LlavesApi(unittest.TestCase):
         borrar_llaves()
 
     def crear(self, cliente, nombre='llave', **campos):
-        code, body = cliente.post(LLAVES, {'name': 'CIRDAN_FAKE_' + nombre, **campos})
+        code, body = cliente.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_' + nombre, **campos})
         self.assertEqual(code, 201, body)
         return body
 
@@ -131,7 +137,7 @@ class LlavesApi(unittest.TestCase):
 
     def test_2_vigencia_maxima_de_90_dias(self):
         for dias in (0, 91, 365, -1):
-            code, _ = self.dana.post(LLAVES, {'name': 'CIRDAN_FAKE_vigencia', 'expires_in_days': dias})
+            code, _ = self.dana.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_vigencia', 'expires_in_days': dias})
             self.assertEqual(code, 422, dias)
         self.assertEqual(scalar("SELECT count(*) FROM api_keys;", user='postgres'), '0')
         por_omision = self.crear(self.dana, 'omision')
@@ -182,7 +188,7 @@ class LlavesApi(unittest.TestCase):
         self.assertNotIn('domain_id', str(body))
         # Una llave no se crea para el dominio de otra empresa ni para uno que no existe.
         for dominio in ('beta-corp.mx', 'no-existe.example'):
-            code, _ = self.alex.post(LLAVES, {'name': 'CIRDAN_FAKE_ajeno', 'domain': dominio})
+            code, _ = self.alex.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_ajeno', 'domain': dominio})
             self.assertEqual(code, 404, dominio)
 
     def test_3b_la_comparacion_no_muestra_lo_que_hoy_es_de_otro_dominio(self):
@@ -356,7 +362,7 @@ class LlavesApi(unittest.TestCase):
             ('GET', '/api/v1/auth/me', None),
             ('POST', '/api/v1/auth/password', {'current_password': 'x', 'new_password': 'CIRDAN_FAKE_no-se-usa-1'}),
             ('GET', LLAVES, None),
-            ('POST', LLAVES, {'name': 'CIRDAN_FAKE_con-llave'}),
+            ('POST', LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_con-llave'}),
             ('DELETE', LLAVES + '/' + llave_id, None),
             ('GET', '/api/v1/domains/txt', None),
             ('PUT', '/api/v1/scoring/weights', {'category_weights': {}}),
@@ -388,16 +394,16 @@ class LlavesApi(unittest.TestCase):
         llave_id = self.crear(self.dana)['id']
         poner_plan(ACME, 'business')
         for cliente in (self.jordan, self.maya):
-            self.assertEqual(cliente.post(LLAVES, {'name': 'CIRDAN_FAKE_sin-rol'})[0], 403)
+            self.assertEqual(cliente.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_sin-rol'})[0], 403)
             self.assertEqual(cliente.get(LLAVES)[0], 403)
             self.assertEqual(cliente.request('DELETE', LLAVES + '/' + llave_id)[0], 403)
         sin_sesion = Client()
-        self.assertEqual(sin_sesion.post(LLAVES, {'name': 'CIRDAN_FAKE_sin-sesion'})[0], 401)
+        self.assertEqual(sin_sesion.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_sin-sesion'})[0], 401)
         self.assertEqual(sin_sesion.get(LLAVES)[0], 401)
         self.assertEqual(sin_sesion.request('DELETE', LLAVES + '/' + llave_id)[0], 401)
         self.assertEqual(scalar("SELECT count(*) FROM api_keys;", user='postgres'), '1')
         for nombre in ('', '   ', 'x' * 81, 'CIRDAN_FAKE_\u0007'):
-            self.assertEqual(self.dana.post(LLAVES, {'name': nombre})[0], 422, repr(nombre))
+            self.assertEqual(self.dana.post(LLAVES, {'own_use': True, 'name': nombre})[0], 422, repr(nombre))
 
     def test_10b_una_sesion_vieja_de_admin_no_crea_llaves(self):
         # La sesión guarda el rol del día en que se inició. Si después le quitan el rol o desactivan la cuenta,
@@ -408,7 +414,7 @@ class LlavesApi(unittest.TestCase):
             self.assertEqual(vieja.get(LLAVES)[0], 200)
             postgres("UPDATE users SET %s WHERE %s;" % (cambio, dana))
             try:
-                code, error = vieja.post(LLAVES, {'name': 'CIRDAN_FAKE_sesion-vieja'})
+                code, error = vieja.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_sesion-vieja'})
             finally:
                 postgres("UPDATE users SET role = 'admin', is_active = true WHERE %s;" % dana)
             self.assertEqual((code, error['detail']), (401, SIN_SESION), cambio)
@@ -421,7 +427,7 @@ class LlavesApi(unittest.TestCase):
 
     def test_11_solo_con_un_plan_que_incluye_la_api(self):
         # Acme es Starter: no crea.
-        code, error = self.alex.post(LLAVES, {'name': 'CIRDAN_FAKE_starter'})
+        code, error = self.alex.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_starter'})
         self.assertEqual((code, error['detail']), (403, SIN_PLAN))
         self.assertEqual(scalar("SELECT count(*) FROM api_keys;", user='postgres'), '0')
         # Con Business crea y la llave entra. Al bajar a Starter deja de entrar, sin borrarla.
@@ -446,7 +452,7 @@ class LlavesApi(unittest.TestCase):
         cookie = {'Cookie': 'lt_session=' + self.dana.cookie().value}
 
         def crear(i):
-            return Client().post(LLAVES, {'name': 'CIRDAN_FAKE_tope_%02d' % i}, headers=cookie)[0]
+            return Client().post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_tope_%02d' % i}, headers=cookie)[0]
 
         with ThreadPoolExecutor(max_workers=12) as pool:
             codigos = sorted(pool.map(crear, range(26)))
@@ -457,14 +463,38 @@ class LlavesApi(unittest.TestCase):
         llave_id = self.dana.get(LLAVES)[1]['items'][0]['id']
         self.assertEqual(self.dana.request('DELETE', LLAVES + '/' + llave_id)[0], 204)
         self.crear(self.dana, 'despues-de-revocar')
-        self.assertEqual(self.dana.post(LLAVES, {'name': 'CIRDAN_FAKE_de-mas'})[0], 409)
+        self.assertEqual(self.dana.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_de-mas'})[0], 409)
         vigente = next(i['id'] for i in self.dana.get(LLAVES)[1]['items'] if i['status'] == 'active')
         postgres("UPDATE api_keys SET created_at = now() - interval '91 days', expires_at = now() - interval '1 day' "
                  "WHERE id = '%s';" % vigente)
         self.crear(self.dana, 'despues-de-vencer')
-        self.assertEqual(self.dana.post(LLAVES, {'name': 'CIRDAN_FAKE_de-mas'})[0], 409)
+        self.assertEqual(self.dana.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_de-mas'})[0], 409)
         self.assertEqual(scalar("SELECT count(*) FILTER (WHERE revoked_at IS NULL AND expires_at > now()) || ',' || count(*) "
                                 "FROM api_keys;", user='postgres'), '20,22')
+
+    # ------------------------------------------------------------ solo para la propia empresa (H1, opción A)
+
+    def test_14_crear_pide_own_use_true_y_la_bitacora_lo_guarda(self):
+        # Sin la declaración, con false, null o un valor que no es el booleano true: 422 y no se crea nada.
+        for cuerpo in ({}, {'own_use': False}, {'own_use': None}):
+            code, error = self.dana.post(LLAVES, {'name': 'CIRDAN_FAKE_sin-uso-propio', **cuerpo})
+            self.assertEqual((code, error['detail']), (422, USO_PROPIO), cuerpo)
+        for valor in (1, 'true', 'yes'):
+            code, _ = self.dana.post(LLAVES, {'name': 'CIRDAN_FAKE_sin-uso-propio', 'own_use': valor})
+            self.assertEqual(code, 422, repr(valor))
+        self.assertEqual(scalar("SELECT count(*) FROM api_keys;", user='postgres'), '0')
+        self.assertEqual(scalar("SELECT count(*) FROM audit_log WHERE action = 'api_key.created' "
+                                "AND details->>'name' = 'CIRDAN_FAKE_sin-uso-propio';", user='postgres'), '0')
+        # Quien no es Admin, o no tiene sesión, sigue recibiendo 403 o 401 antes que el 422.
+        poner_plan(ACME, 'business')
+        self.assertEqual(self.jordan.post(LLAVES, {'name': 'CIRDAN_FAKE_sin-rol'})[0], 403)
+        self.assertEqual(Client().post(LLAVES, {'name': 'CIRDAN_FAKE_sin-sesion'})[0], 401)
+        # Con own_use: true se crea, y la bitácora guarda la declaración de quien la creó.
+        body = self.crear(self.dana, 'uso-propio')
+        self.assertNotIn('own_use', body)
+        bitacora = scalar("SELECT (details->>'own_use') || ',' || actor_type FROM audit_log "
+                          "WHERE action = 'api_key.created' AND entity_id = '%s';" % body['id'], user='postgres')
+        self.assertEqual(bitacora, 'true,user')
 
     # ------------------------------------------------------------ la base
 

@@ -33,7 +33,7 @@ def current_session(request: Request) -> Session:
 
 
 def session_or_api_key(request: Request) -> Session:
-    """Para las lecturas que un integrador puede hacer con su llave (#87, RC-129).
+    """Para las lecturas que un sistema de la empresa puede hacer con su llave (#87, RC-129).
 
     Con `Authorization: Bearer` manda la llave y la cookie no cuenta: una llave que no sirve
     responde 401 aunque el navegador traiga una sesión. Sin ese encabezado, la sesión de siempre.

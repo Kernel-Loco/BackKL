@@ -1,4 +1,4 @@
-"""Llaves de API para integradores (#87, RC-129).
+"""Llaves de API para los sistemas de la propia empresa (#87, RC-129).
 
 La llave es `lt_<8 hex>_<43 caracteres>`: 256 bits al azar después del prefijo visible. Se entrega
 una sola vez, al crearla. En la base solo quedan el prefijo (`lt_<8 hex>`) y el SHA-256 de la
