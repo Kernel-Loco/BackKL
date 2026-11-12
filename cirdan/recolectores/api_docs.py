@@ -38,6 +38,8 @@ una ruta no se distinguen de una palabra y sí quedan.
 
 Uso, desde la raíz del repo:
   python -m cirdan.recolectores.api_docs olmardo.com --reproducir
+En vivo y con --grabar la línea de comandos pide además que la fuente esté encendida en data_sources, como el
+orquestador (_fuente_cerrada). La semilla 013 la deja apagada hasta que se dé el aviso de la actividad 9.
 """
 import argparse
 import hashlib
@@ -872,6 +874,25 @@ def codigo_salida(res):
     return 2 if res.sin_cobertura or res.revisados is not None else 0
 
 
+def _fuente_cerrada():
+    """None solo si la fila de la fuente en data_sources tiene enabled, la misma columna que lee el orquestador
+    (fuentes_activas). Si no, el motivo: la fuente apagada, sin su fila o una base que no se pudo leer (sin
+    CIRDAN_APP_PASSWORD, sin conexión o sin permiso). Con un motivo la línea de comandos no consulta."""
+    try:
+        from cirdan.db import transaction   # aquí y no arriba: --reproducir no pide la base ni su contraseña
+        with transaction() as c:
+            fila = c.execute('SELECT enabled FROM data_sources WHERE code = %s AND kind = %s',
+                             (FUENTE, 'osint')).fetchone()
+    except Exception as e:   # cualquier falla cierra el paso, nunca lo abre
+        return 'no se pudo leer data_sources en la base (%s): no se sabe si %s está encendida' % (
+            type(e).__name__, FUENTE)
+    if fila is None:
+        return 'data_sources no tiene la fila de %s (falta la semilla 013)' % FUENTE
+    if fila['enabled'] is not True:
+        return 'la fuente %s está apagada en data_sources (falta el aviso de la actividad 9)' % FUENTE
+    return None
+
+
 def _main(argv=None, hoy=None):
     p = argparse.ArgumentParser(description='Documentación de APIs a la vista, actividad 9 (sin --reproducir consulta '
                                             'en vivo)')
@@ -879,7 +900,8 @@ def _main(argv=None, hoy=None):
     modo = p.add_mutually_exclusive_group()
     modo.add_argument('--grabar', action='store_true', help='consulta en vivo y graba las respuestas')
     p.epilog = ('En vivo y con --grabar las consultas no pasan por el límite diario de la fuente (eso lo hace el '
-                'orquestador) y solo se permiten desde el %s.' % VIGENTE_DESDE.isoformat())
+                'orquestador), solo se permiten desde el %s y solo con la fuente encendida en data_sources, que '
+                'se lee en la base.' % VIGENTE_DESDE.isoformat())
     modo.add_argument('--reproducir', action='store_true', help='usa solo lo grabado, sin red')
     args = p.parse_args(argv)
     dominio = args.dominio.strip().lower().rstrip('.')
@@ -890,6 +912,10 @@ def _main(argv=None, hoy=None):
     if elegido != 'reproducir' and (hoy or datetime.now(HORA_MEXICO).date()) < VIGENTE_DESDE:
         print('la actividad 9 del Anexo A rige desde el %s: antes solo se puede --reproducir'
               % VIGENTE_DESDE.isoformat(), file=sys.stderr)
+        return 1
+    motivo = _fuente_cerrada() if elegido != 'reproducir' else None
+    if motivo:
+        print(motivo + ': solo se puede --reproducir', file=sys.stderr)
         return 1
     res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
     print(resumen(res))

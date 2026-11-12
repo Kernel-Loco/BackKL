@@ -7,6 +7,8 @@ la red. Cada clase lleva el punto del Hecho cuando de RC-118 que cubre.
 Uso, desde la raíz del repo:
   python -m unittest pruebas/test_api_docs.py
 """
+import contextlib
+import io
 import itertools
 import json
 import re
@@ -15,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 import urllib.error
 from datetime import datetime, timezone
@@ -735,13 +738,60 @@ class Revision(unittest.TestCase):
         vispera = api_docs.VIGENTE_DESDE.replace(day=api_docs.VIGENTE_DESDE.day - 1)
         corrio = mock.Mock(return_value=contrato.Resultado(DOMINIO, api_docs.FUENTE))
         with mock.patch.dict('os.environ', {'DOMINIOS_EN_VIVO': DOMINIO}), mock.patch('sys.stderr'), \
-                mock.patch('sys.stdout'), mock.patch.object(api_docs.contrato, 'ejecutar', corrio):
+                mock.patch('sys.stdout'), mock.patch.object(api_docs.contrato, 'ejecutar', corrio), \
+                mock.patch.object(api_docs, '_fuente_cerrada', return_value=None):
             self.assertEqual(api_docs._main([DOMINIO], hoy=vispera), 1)
             self.assertEqual(api_docs._main([DOMINIO, '--grabar'], hoy=vispera), 1)
             corrio.assert_not_called()
             api_docs._main([DOMINIO, '--reproducir'], hoy=vispera)
             api_docs._main([DOMINIO], hoy=api_docs.VIGENTE_DESDE)
         self.assertEqual([c.args[2] for c in corrio.call_args_list], ['reproducir', 'vivo'])
+
+    def test_12_la_linea_de_comandos_no_consulta_en_vivo_con_la_fuente_apagada_o_sin_leer_la_base(self):
+        consultas = []
+
+        def base(fila=None, falla=None):
+            """Un cirdan.db falso: transaction() da la fila de data_sources, o falla como sin contraseña o sin red."""
+            @contextlib.contextmanager
+            def transaction(*_, **__):
+                if falla:
+                    raise falla
+                conn = mock.Mock()
+                conn.execute.side_effect = lambda sql, params: consultas.append((sql, params)) or mock.Mock(
+                    fetchone=mock.Mock(return_value=fila))
+                yield conn
+            return types.SimpleNamespace(transaction=transaction)
+
+        class Rige(datetime):
+            """El reloj del día en que rige la actividad: _main sin hoy, como en la línea de comandos real."""
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(*api_docs.VIGENTE_DESDE.timetuple()[:3], 9, tzinfo=tz)
+
+        corrio = mock.Mock(return_value=contrato.Resultado(DOMINIO, api_docs.FUENTE))
+        casos = ((base({'enabled': False}), 'está apagada'), (base({'enabled': None}), 'está apagada'),
+                 (base(None), 'falta la semilla 013'),
+                 (base(falla=RuntimeError('Falta CIRDAN_APP_PASSWORD')), 'no se pudo leer data_sources'),
+                 (base(falla=OSError('sin red')), 'no se pudo leer data_sources'))
+        with mock.patch.dict('os.environ', {'DOMINIOS_EN_VIVO': DOMINIO}), mock.patch('sys.stdout'), \
+                mock.patch.object(api_docs.contrato, 'ejecutar', corrio), mock.patch.object(api_docs, 'datetime', Rige):
+            for falsa, motivo in casos:
+                with mock.patch.dict(sys.modules, {'cirdan.db': falsa}):
+                    for argv in ([DOMINIO], [DOMINIO, '--grabar']):
+                        with mock.patch('sys.stderr', new_callable=io.StringIO) as err:
+                            self.assertEqual(api_docs._main(argv), 1)
+                        self.assertIn(motivo, err.getvalue())
+            corrio.assert_not_called()
+            # La misma consulta que fuentes_activas() del orquestador, solo con la fila de esta fuente
+            self.assertEqual(set(consultas), {('SELECT enabled FROM data_sources WHERE code = %s AND kind = %s',
+                                               (api_docs.FUENTE, 'osint'))})
+            with mock.patch('sys.stderr'):
+                # --reproducir no pide la base: con una que falla corre igual
+                with mock.patch.dict(sys.modules, {'cirdan.db': base(falla=AssertionError('no debe leer la base'))}):
+                    api_docs._main([DOMINIO, '--reproducir'])
+                with mock.patch.dict(sys.modules, {'cirdan.db': base({'enabled': True})}):
+                    api_docs._main([DOMINIO, '--grabar'])
+        self.assertEqual([c.args[2] for c in corrio.call_args_list], ['reproducir', 'grabar'])
 
     def test_11_la_migracion_no_espera_sin_limite_y_deja_al_dia_el_comentario_de_la_tabla(self):
         texto = MIGRACION.read_text(encoding='utf-8')
