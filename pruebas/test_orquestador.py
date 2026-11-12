@@ -28,6 +28,7 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 
 from cirdan import orquestador
+from cirdan.api import v1 as api_v1
 from cirdan.config import config
 from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
@@ -112,6 +113,21 @@ def resultado_shodan(*puertos, revisados=None, sin_revisar=None, cves=(), omitid
 HOY_UTC = "(now() AT TIME ZONE 'UTC')::date"
 
 
+# La carta de acme-demo.mx de la semilla 001 (41...01) vence el 31 dic 2026. renovar_carta() inserta en la transacción
+# de la prueba una renovación vigente hoy, que se va con el rollback (la tabla es inmutable: renovar crea otra
+# fila), así las pruebas no dependen de la fecha en que corren. La semilla no se toca.
+CARTA_ACME_DEMO = '41000000-0000-4000-8000-000000000001'
+
+
+def renovar_carta(conn):
+    conn.execute(
+        'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
+        'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+        'SELECT organization_id, domain_id, signer_name, signer_title, signer_email, '
+        "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
+        'accepted_by FROM domain_authorizations WHERE id = %s', (CARTA_ACME_DEMO,))
+
+
 def conexion_postgres():
     """Conexión como postgres, solo para preparar lo que cirdan_app no puede escribir. Sin la clave, la prueba se salta."""
     clave = config('POSTGRES_PASSWORD')
@@ -129,6 +145,7 @@ class Orquestador(unittest.TestCase):
         self.tx = self.conn.transaction(force_rollback=True)
         self.tx.__enter__()
         self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+        renovar_carta(self.conn)
 
     def tearDown(self):
         self.tx.__exit__(None, None, None)
@@ -310,6 +327,100 @@ class Orquestador(unittest.TestCase):
         s, _ = self.reescanear(self.con_spf(f['id']))
         self.assertEqual(self.conteos(s.scan_id), (1, 0))  # estaba resuelto y se reabre
         self.assertEqual(self.estado(f['id'])['status'], 'open')
+
+    def test_2h2_la_salida_a_siem_da_por_recurrente_solo_lo_que_aporto_a_los_dos_ultimos_scores(self):
+        """recurrence de la salida a SIEM (#98, RC-212). Cada score de escaneo guarda un aporte por hallazgo vigente:
+        recurring si el hallazgo está en los dos últimos scores de escaneo del dominio y new si no, como uno resuelto
+        que se reabre (está en el último y no en el anterior). Un score de otro motivo (correction) no cuenta.
+        solo_viejo es la brecha 80...0001, que también aportó al score de la semilla a0...01: con 'todos los scores' en
+        vez de 'los dos últimos' saldría recurring. solo_nuevo también aportó a un score de escaneo más viejo que los
+        dos: con 'el último y cualquier anterior' saldría recurring. Un escaneo caído que terminó después del más viejo
+        de los dos scores, en el que la fuente de 'uno' respondió, pudo cerrarlo, y el último reabrirlo: sale new. Si
+        esa fuente falló en el caído y solo respondió otra, sigue recurring. Un score de escaneo sin ninguna fuente que
+        respondiera (sources_ok = 0) no cuenta. previous_severity es la del más viejo de los dos scores.
+        Los scores y el escaneo caído llevan momentos fijos, porque en esta transacción now() es el mismo para todos."""
+        abiertos = self.conn.execute(
+            "SELECT f.id::text, f.rule_id, f.severity, f.domain_id, f.source_id FROM findings f "
+            "JOIN domains d ON d.id = f.domain_id "
+            "WHERE d.fqdn = 'acme-demo.mx' AND f.status = 'open' ORDER BY f.id LIMIT 4").fetchall()
+        self.assertEqual(len(abiertos), 4)
+        solo_viejo, uno, solo_nuevo, ninguno = abiertos
+        self.assertEqual(solo_viejo['id'], '80000000-0000-4000-8000-000000000001')
+        self.assertIsNotNone(self.uno("SELECT 1 FROM score_contributions WHERE finding_id = %s "
+                                      "AND score_id = 'a0000000-0000-4000-8000-000000000001'", solo_viejo['id']))
+        escaneo = self.uno("SELECT s.id FROM scans s JOIN domains d ON d.id = s.domain_id "
+                           "WHERE d.fqdn = 'acme-demo.mx' ORDER BY s.queued_at DESC LIMIT 1")['id']
+
+        def score(momento, motivo, hallazgos, scan_id=escaneo, severidades=None):
+            score_id = self.uno(
+                'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
+                "reason, computed_at) VALUES (%s, %s, %s, '90000000-0000-4000-8000-000000000001', 50, '{}', %s, %s) "
+                'RETURNING id', ACME, uno['domain_id'], scan_id, motivo, momento)['id']
+            for f in hallazgos:
+                self.conn.execute(
+                    'INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, severity, '
+                    "factors) VALUES (%s, %s, %s, %s, 1, %s, '{}')",
+                    (ACME, score_id, f['id'], f['rule_id'], (severidades or {}).get(f['id'], f['severity'])))
+            return score_id
+        score('2098-12-30T00:00:00+00:00', 'scan', [solo_nuevo])
+        score('2099-01-01T00:00:00+00:00', 'scan', [uno, solo_viejo], severidades={uno['id']: 'low'})
+        score('2099-01-02T00:00:00+00:00', 'scan', [uno, solo_nuevo])
+        score('2099-01-03T00:00:00+00:00', 'correction', abiertos)
+
+        def consulta(campo):
+            filas = {f['id']: f[campo] for f in self.conn.execute(api_v1.SIEM_FINDINGS_SQL, {'fqdn': 'acme-demo.mx'})}
+            return [filas[f['id']] for f in abiertos]
+
+        def recurrencia():
+            return consulta('recurrence')
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # previous_severity sale del más viejo de los dos scores (el del 1 ene), no del último ni del de corrección
+        self.assertEqual(consulta('previous_severity'), [solo_viejo['severity'], 'low', None, None])
+
+        # solicitar() siempre tiene una carta vigente gracias a setUp (renovar_carta), así la prueba no depende de la
+        # fecha en que corre
+        def solicitar():
+            s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+            self.assertTrue(s.aceptada, s.detalle)
+            return s.scan_id
+        # Un escaneo caído (sin score) pedido antes del más viejo de los dos scores y que terminó después: cuenta por
+        # finished_at. queued_at es de antes de la consulta TXT y puede quedar antes del score del escaneo anterior.
+        caido = solicitar()
+        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2098-12-31T23:00:00+00:00', "
+                          "finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s", (caido,))
+        corrida = ('INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status) VALUES (%s, %s, %s, %s) '
+                   'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status')
+        self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'failed'))
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Solo respondió otra fuente (la de 'ninguno'): no tocó los hallazgos de 'uno', que sigue recurring
+        self.assertNotEqual(ninguno['source_id'], uno['source_id'])
+        self.conn.execute(corrida, (ACME, caido, ninguno['source_id'], 'succeeded'))
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'succeeded'))
+        self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
+        # Terminó antes del más viejo de los dos scores: ya no cuenta, ese score es posterior y tiene la foto
+        self.conn.execute("UPDATE scans SET queued_at = '2098-12-31T12:00:00+00:00', "
+                          "finished_at = '2098-12-31T13:00:00+00:00' WHERE id = %s", (caido,))
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Un escaneo posterior en el que no respondió ninguna fuente guarda score sin 'uno', pero no cuenta
+        vacio = solicitar()
+        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2099-01-04T00:00:00+00:00', "
+                          "finished_at = '2099-01-04T01:00:00+00:00', "
+                          "stats = '{\"sources_ok\": 0, \"sources_failed\": 1}' WHERE id = %s", (vacio,))
+        score('2099-01-04T01:00:00+00:00', 'scan', [], scan_id=vacio)
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Con una fuente que respondió sí cuenta, y 'uno', que no aportó a ese score, sale new
+        self.conn.execute("UPDATE scans SET stats = '{\"sources_ok\": 1, \"sources_failed\": 0}' WHERE id = %s",
+                          (vacio,))
+        self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
+        # cvss, con la expresión del portal sobre la CVE combinada: de la tabla cves o, si cves no tiene su CVSS, de
+        # evidence.cvss si es un número de 0 a 10
+        self.conn.execute("INSERT INTO cves (cve_id, cvss_base_score) VALUES ('CVE-2099-0002', 5.0)")
+        self.conn.execute("UPDATE findings SET cve_id = 'CVE-2099-0002' WHERE id = %s", (ninguno['id'],))
+        for f, cvss in ((solo_viejo, '9.8'), (uno, '11'), (solo_nuevo, '"7.5"'), (ninguno, '9.0')):
+            self.conn.execute("UPDATE findings SET evidence = evidence || jsonb_build_object('cvss', %s::jsonb) "
+                              'WHERE id = %s', (cvss, f['id']))
+        self.assertEqual([None if x is None else float(x) for x in consulta('cvss')], [9.8, None, None, 5.0])
 
     def test_2i_no_cuentan_la_fuente_caida_sin_cobertura_ni_lo_que_decidio_el_cliente(self):
         _, f = self.escanear_ejemplo()
@@ -1209,6 +1320,7 @@ class Orquestador(unittest.TestCase):
                        "WHERE code = 'ct_logs'", (ayer,))
             pg.execute('SET LOCAL ROLE cirdan_app')  # desde aquí, con los permisos de la API
             pg.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+            renovar_carta(pg)  # la de setUp está en otra transacción que esta conexión no ve
             s = self.solicitar('acme-demo.mx', responde(TXT_ACME), conn=pg)
             resumen = self.en_vivo(s, [BIEN], lambda segundos: None, fuentes=('ct_logs',), conn=pg)
             self.assertEqual(resumen['sources'][0]['status'], 'succeeded')  # lo de ayer no cuenta hoy
@@ -1273,13 +1385,13 @@ class Orquestador(unittest.TestCase):
 
     def test_5b_si_el_trigger_rechaza_el_motivo_sale_de_la_base_y_no_del_texto_del_error(self):
         """Segundo candado: la carta se revoca entre la revisión y la fila de scans, y el trigger la rechaza."""
-        carta = self.uno("SELECT a.id::text FROM domain_authorizations a JOIN domains d ON d.id = a.domain_id "
-                         "WHERE d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL "
-                         "AND current_date BETWEEN a.valid_from AND a.valid_until ORDER BY a.valid_until DESC LIMIT 1")['id']
         consulta = ConsultaTxt((TXT_ACME,))
 
         def revoca_y_responde(fqdn):
-            self.conn.execute('UPDATE domain_authorizations SET revoked_at = now() WHERE id = %s', (carta,))
+            # Todas las no revocadas (la de la semilla y la que renovó setUp, vigentes o no): así se revoca la que
+            # eligió solicitar(), sea cual sea
+            self.conn.execute("UPDATE domain_authorizations a SET revoked_at = now() FROM domains d "
+                              "WHERE d.id = a.domain_id AND d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL")
             return consulta
         s = self.solicitar('acme-demo.mx', revoca_y_responde)
         self.assertEqual((s.aceptada, s.motivos), (False, ['authorization_revoked']))  # antes salía authorization_expired

@@ -1,0 +1,221 @@
+<dashboard version="2" theme="light">
+  <label>LowTide · Resumen</label>
+  <description>Score, hallazgos abiertos y cobertura de los dominios que exporta LowTide (#98, RC-212). No depende del CIM.</description>
+  <definition><![CDATA[
+{
+  "title": "LowTide · Resumen",
+  "description": "Cada exportación manda otra vez los hallazgos abiertos con el momento de la exportación, por eso las búsquedas de hallazgos se quedan con la última exportación de cada dominio: lo que ya no viene en ella está resuelto. El índice sale de la macro lowtide_index.",
+  "inputs": {
+    "input_periodo": {
+      "type": "input.timerange",
+      "title": "Periodo",
+      "options": {
+        "token": "periodo",
+        "defaultValue": "-30d@d,now"
+      }
+    }
+  },
+  "defaults": {
+    "dataSources": {
+      "ds.search": {
+        "options": {
+          "queryParameters": {
+            "earliest": "$periodo.earliest$",
+            "latest": "$periodo.latest$"
+          }
+        }
+      }
+    }
+  },
+  "dataSources": {
+    "ds_score_actual": {
+      "type": "ds.search",
+      "options": {
+        "query": "`lowtide_index` sourcetype=lowtide:score | dedup domain | table domain score band partial_coverage computed_at | rename domain AS Dominio score AS Score band AS Banda partial_coverage AS \"Cobertura parcial\" computed_at AS Calculado"
+      }
+    },
+    "ds_score_tiempo": {
+      "type": "ds.search",
+      "options": {
+        "query": "`lowtide_index` sourcetype=lowtide:score | dedup score_id | eval _time=coalesce(strptime(computed_at, \"%Y-%m-%dT%H:%M:%S.%6N%:z\"), strptime(computed_at, \"%Y-%m-%dT%H:%M:%S%:z\")) | timechart latest(score) AS score by domain"
+      }
+    },
+    "ds_severidad": {
+      "type": "ds.search",
+      "options": {
+        "query": "`lowtide_index` (sourcetype=lowtide:finding OR sourcetype=lowtide:export) | `lowtide_ultima_exportacion` | search sourcetype=lowtide:finding | stats count AS Hallazgos by severity | eval orden=case(severity==\"critical\",1,severity==\"high\",2,severity==\"medium\",3,true(),4) | sort orden | fields - orden | rename severity AS Severidad"
+      }
+    },
+    "ds_categoria": {
+      "type": "ds.search",
+      "options": {
+        "query": "`lowtide_index` (sourcetype=lowtide:finding OR sourcetype=lowtide:export) | `lowtide_ultima_exportacion` | search sourcetype=lowtide:finding | stats count AS Hallazgos by category | sort - Hallazgos | rename category AS Categoría"
+      }
+    },
+    "ds_attack": {
+      "type": "ds.search",
+      "options": {
+        "query": "`lowtide_index` (sourcetype=lowtide:finding OR sourcetype=lowtide:export) | `lowtide_ultima_exportacion` | search sourcetype=lowtide:finding | where isnotnull(mitre_technique_id) | stats count AS Hallazgos dc(domain) AS Dominios by mitre_technique_id signature | sort - Hallazgos | rename mitre_technique_id AS \"Técnica ATT&CK\" signature AS Regla"
+      }
+    },
+    "ds_cobertura": {
+      "type": "ds.search",
+      "options": {
+        "query": "`lowtide_index` sourcetype=lowtide:scan | dedup domain | rename \"rules_without_coverage{}\" AS sin_cobertura \"sources_partial{}\" AS parciales | eval sin_cobertura=mvjoin(sin_cobertura, \", \"), parciales=mvjoin(parciales, \", \") | table domain status partial_coverage sin_cobertura parciales finished_at | rename domain AS Dominio status AS Estado partial_coverage AS \"Cobertura parcial\" sin_cobertura AS \"Reglas sin cobertura\" parciales AS \"Fuentes parciales\" finished_at AS Terminado"
+      }
+    },
+    "ds_detalle": {
+      "type": "ds.search",
+      "options": {
+        "query": "`lowtide_index` (sourcetype=lowtide:finding OR sourcetype=lowtide:export) | `lowtide_ultima_exportacion` | search sourcetype=lowtide:finding | eval orden=case(severity==\"critical\",1,severity==\"high\",2,severity==\"medium\",3,true(),4) | sort orden - detected_at | table severity signature dest dest_port category cve cvss mitre_technique_id domain detected_at | rename severity AS Severidad signature AS Regla dest AS Activo dest_port AS Puerto category AS Categoría cve AS CVE cvss AS CVSS mitre_technique_id AS \"ATT&CK\" domain AS Dominio detected_at AS Detectado"
+      }
+    }
+  },
+  "visualizations": {
+    "viz_score_actual": {
+      "type": "splunk.table",
+      "title": "Score actual por dominio (0 a 100, más alto es más riesgo)",
+      "dataSources": {
+        "primary": "ds_score_actual"
+      }
+    },
+    "viz_score_tiempo": {
+      "type": "splunk.line",
+      "title": "Score en el tiempo",
+      "dataSources": {
+        "primary": "ds_score_tiempo"
+      }
+    },
+    "viz_severidad": {
+      "type": "splunk.column",
+      "title": "Hallazgos abiertos por severidad",
+      "dataSources": {
+        "primary": "ds_severidad"
+      }
+    },
+    "viz_categoria": {
+      "type": "splunk.bar",
+      "title": "Hallazgos abiertos por categoría",
+      "dataSources": {
+        "primary": "ds_categoria"
+      }
+    },
+    "viz_attack": {
+      "type": "splunk.table",
+      "title": "Técnicas de MITRE ATT&CK",
+      "dataSources": {
+        "primary": "ds_attack"
+      }
+    },
+    "viz_cobertura": {
+      "type": "splunk.table",
+      "title": "Último escaneo y cobertura parcial",
+      "dataSources": {
+        "primary": "ds_cobertura"
+      }
+    },
+    "viz_detalle": {
+      "type": "splunk.table",
+      "title": "Detalle de hallazgos abiertos",
+      "dataSources": {
+        "primary": "ds_detalle"
+      }
+    }
+  },
+  "layout": {
+    "globalInputs": [
+      "input_periodo"
+    ],
+    "tabs": {
+      "items": [
+        {
+          "label": "Resumen",
+          "layoutId": "layout_resumen"
+        }
+      ]
+    },
+    "layoutDefinitions": {
+      "layout_resumen": {
+        "type": "absolute",
+        "options": {
+          "width": 1440,
+          "height": 1500
+        },
+        "structure": [
+          {
+            "item": "viz_score_actual",
+            "type": "block",
+            "position": {
+              "x": 0,
+              "y": 0,
+              "w": 700,
+              "h": 260
+            }
+          },
+          {
+            "item": "viz_score_tiempo",
+            "type": "block",
+            "position": {
+              "x": 720,
+              "y": 0,
+              "w": 720,
+              "h": 260
+            }
+          },
+          {
+            "item": "viz_severidad",
+            "type": "block",
+            "position": {
+              "x": 0,
+              "y": 280,
+              "w": 700,
+              "h": 300
+            }
+          },
+          {
+            "item": "viz_categoria",
+            "type": "block",
+            "position": {
+              "x": 720,
+              "y": 280,
+              "w": 720,
+              "h": 300
+            }
+          },
+          {
+            "item": "viz_attack",
+            "type": "block",
+            "position": {
+              "x": 0,
+              "y": 600,
+              "w": 700,
+              "h": 300
+            }
+          },
+          {
+            "item": "viz_cobertura",
+            "type": "block",
+            "position": {
+              "x": 720,
+              "y": 600,
+              "w": 720,
+              "h": 300
+            }
+          },
+          {
+            "item": "viz_detalle",
+            "type": "block",
+            "position": {
+              "x": 0,
+              "y": 920,
+              "w": 1440,
+              "h": 560
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+]]></definition>
+</dashboard>

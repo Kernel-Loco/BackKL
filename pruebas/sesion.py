@@ -53,10 +53,15 @@ def next_code(email):
     return totp(SECRETS[email], step)
 
 
+def psql(sql):
+    """Corre una sentencia en la base como postgres, fuera de la API."""
+    subprocess.run(['docker', 'exec', 'cirdan-pg16', 'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c', sql],
+                   check=True, capture_output=True)
+
+
 def reset():
     """Deja las cuentas listas para la prueba: sin último código usado ni intentos fallidos."""
-    subprocess.run(['docker', 'exec', 'cirdan-pg16', 'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c',
-                    'UPDATE users SET last_totp_step = NULL'], check=True, capture_output=True)
+    psql('UPDATE users SET last_totp_step = NULL')
     subprocess.run(['docker', 'exec', 'cirdan-valkey', 'sh', '-c',
                     'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "login:fail:*" '
                     '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del'], check=True, capture_output=True)

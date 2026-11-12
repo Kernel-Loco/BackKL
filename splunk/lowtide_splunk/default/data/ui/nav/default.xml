@@ -1,0 +1,4 @@
+<nav search_view="search">
+  <view name="lowtide_resumen" default="true" />
+  <view name="search" />
+</nav>

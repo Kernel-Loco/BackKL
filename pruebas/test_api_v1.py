@@ -10,6 +10,7 @@ import csv
 import io
 import json
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from cirdan.score import criterio, subcategorias
@@ -40,6 +41,12 @@ class ApiV1(unittest.TestCase):
         cls.acme = sesion.login('alex.morgan@acme-demo.mx')
         cls.beta = sesion.login('dana.cruz@beta-corp.mx')
         cls.olmardo = sesion.login('admin@olmardo.com')
+
+    def psql_o_falla(self, sql, motivo):
+        """psql como postgres que falla con su motivo: una limpieza que no regresa la base no pasa en silencio."""
+        ok, _, err = psql(sql, user='postgres')
+        if not ok:
+            raise AssertionError('%s: %s' % (motivo, err))
 
     def get(self, client, url):
         code, body = client.get(url)
@@ -391,6 +398,84 @@ class ApiV1(unittest.TestCase):
         self.assertEqual(self.get(self.beta, '/api/v1/domains/beta-corp.mx/findings/export')['domain'], 'beta-corp.mx')
         self.assertEqual(sesion.Client().get('/api/v1/domains/acme-demo.mx/findings/export')[0], 401)
 
+    def test_10_salida_siem_con_plan_y_sin_evidencia(self):
+        url = '%s/api/v1/domains/beta-corp.mx/export/siem' % sesion.BASE
+        with self.beta.opener.open(url, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+            self.assertTrue(r.headers['Content-Type'].startswith('application/x-ndjson'))
+            self.assertIn('beta-corp.mx-siem.ndjson', r.headers['Content-Disposition'])
+            self.assertEqual(r.headers['Cache-Control'], 'no-store')
+            texto = r.read().decode('utf-8')
+        eventos = [json.loads(x) for x in texto.splitlines()]
+        # beta-corp.mx tiene un hallazgo abierto y ningún escaneo ni score en la semilla 001. La exportación siempre
+        # cierra con su evento lowtide:export.
+        self.assertEqual([e['sourcetype'] for e in eventos], ['lowtide:finding', 'lowtide:export'])
+        ev = eventos[0]['event']
+        self.assertEqual((ev['finding_id'], ev['signature_id'], ev['dest'], ev['dest_port'], ev['domain'],
+                          ev['vendor_product']),
+                         ('80000000-0000-4000-8000-000000000011', 'exposed_rdp', '192.0.2.50', 3389,
+                          'beta-corp.mx', 'LowTide'))
+        # signature es el título de la regla (003_textos_reglas.sql), no el de la evidencia (semilla 003_titulos_espanol).
+        self.assertEqual(ev['signature'], 'Puerto del escritorio remoto de Windows abierto a internet')
+        self.assertNotIn('evidence', texto)
+        self.assertNotIn('Escritorio remoto (RDP) expuesto', texto)
+        # El hallazgo es del 28 sep, pero el time de HEC es el de la exportación, igual en todos los eventos.
+        self.assertEqual(len({(e['time'], e['event']['export_id']) for e in eventos}), 1)
+        self.assertGreater(eventos[0]['time'], datetime.fromisoformat(ev['detected_at']).timestamp() + 86400)
+        self.assertEqual(eventos[1]['event']['findings'], 1)
+        # Con la empresa suspendida, la sesión que ya tenía abierta no exporta (como el login, solo trial o active).
+        beta = "UPDATE organizations SET status = '%s' WHERE id = '20000000-0000-4000-8000-000000000002';"
+        ok, _, err = psql(beta % 'suspended', user='postgres')
+        self.assertTrue(ok, err)
+        self.addCleanup(self.psql_o_falla, beta % 'active', 'Beta Corp se quedó suspendida')
+        estado, cuerpo = self.beta.get('/api/v1/domains/beta-corp.mx/export/siem')[:2]
+        # El texto dice que la empresa está suspendida, no que el plan no incluye SIEM (Beta Corp sí lo incluye).
+        self.assertEqual((estado, cuerpo['detail']),
+                         (403, 'La empresa está suspendida o cancelada: no puede exportar a SIEM'))
+        self.psql_o_falla(beta % 'active', 'Beta Corp se quedó suspendida')
+        # Una cuenta desactivada después de iniciar sesión ya no exporta: 401 y la sesión se borra (como las llaves).
+        dana = "UPDATE users SET is_active = %s WHERE email = 'dana.cruz@beta-corp.mx';"
+        vieja = sesion.login('dana.cruz@beta-corp.mx')
+        self.psql_o_falla(dana % 'false', 'no se pudo desactivar a Dana')
+        try:
+            estado, cuerpo = vieja.get('/api/v1/domains/beta-corp.mx/export/siem')[:2]
+        finally:
+            self.psql_o_falla(dana % 'true', 'Dana se quedó desactivada')
+        self.assertEqual((estado, cuerpo['detail']), (401, 'Tu sesión terminó. Vuelve a iniciar sesión.'))
+        self.assertEqual(vieja.get('/api/v1/domains/beta-corp.mx/export/siem')[0], 401)
+        # Con un escaneo del dominio en curso responde 409: sus fuentes ya guardaron hallazgos y el escaneo y el score
+        # serían los anteriores. El trigger de la autorización pide un TXT de menos de 1 hora y dns_txt_verifications
+        # no deja borrar, así que la fila del escaneo entra sin triggers (solo en esta transacción) y se borra al final.
+        escaneo = "'60000000-0000-4000-8000-0000000000f1'"
+        ok, _, err = psql(
+            "BEGIN; SET LOCAL session_replication_role = replica; "
+            "INSERT INTO scans (id, organization_id, domain_id, authorization_id, txt_verification_id, trigger_type, "
+            "status) SELECT %s, organization_id, domain_id, id, '42000000-0000-4000-8000-000000000006', 'on_demand', "
+            "'running' "
+            "FROM domain_authorizations WHERE id = '41000000-0000-4000-8000-000000000006'; COMMIT;" % escaneo,
+            user='postgres')
+        self.assertTrue(ok, err)
+        borrar = 'DELETE FROM scans WHERE id = %s;' % escaneo
+        self.addCleanup(self.psql_o_falla, borrar, 'quedó un escaneo en curso de beta-corp.mx')
+        estado, cuerpo = self.beta.get('/api/v1/domains/beta-corp.mx/export/siem')[:2]
+        self.assertEqual(estado, 409, cuerpo)
+        # Sin marca de vida en 30 minutos (la API se reinició a mitad), la exportación lo da por caído, como GET /scans.
+        ok, _, err = psql("UPDATE scans SET updated_at = now() - interval '31 minutes' WHERE id = %s;" % escaneo,
+                          user='postgres')
+        self.assertTrue(ok, err)
+        with self.beta.opener.open(url, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+        ok, salida, err = psql('SELECT status FROM scans WHERE id = %s;' % escaneo, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(salida.strip(), 'failed')
+        self.psql_o_falla(borrar, 'quedó un escaneo de prueba de beta-corp.mx')
+        with self.beta.opener.open(url, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+        # Acme tiene el plan starter, sin API ni SIEM. Un dominio de otra empresa responde 404 y sin sesión, 401.
+        self.assertEqual(self.acme.get('/api/v1/domains/acme-demo.mx/export/siem')[0], 403)
+        for fqdn in ('acme-demo.mx', 'olmardo.com'):
+            self.assertEqual(self.beta.get('/api/v1/domains/%s/export/siem' % fqdn)[0], 404, fqdn)
+        self.assertEqual(sesion.Client().get('/api/v1/domains/beta-corp.mx/export/siem')[0], 401)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

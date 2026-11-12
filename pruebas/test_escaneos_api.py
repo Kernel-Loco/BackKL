@@ -41,6 +41,19 @@ class EscaneosApi(unittest.TestCase):
         self.assertIn('authorization_expired', body['reasons'])
 
     def test_5_los_dominios_de_la_demo_no_se_consultan_en_vivo(self):
+        # live_scan_not_allowed solo sale con una carta vigente. La de acme-demo.mx de la semilla 001 (41...01) vence
+        # el 31 dic 2026: si ya no hay una vigente, se inserta una renovación por 30 días, como renovar_carta() de
+        # test_orquestador.py. Aquí la API usa su propia conexión, así que la fila no se va con un rollback: se queda
+        # (la tabla es inmutable, renovar crea otra fila) y mientras siga vigente no se agrega otra. La semilla no se
+        # toca.
+        sesion.psql(
+            'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
+            'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+            'SELECT organization_id, domain_id, signer_name, signer_title, signer_email, '
+            "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
+            "accepted_by FROM domain_authorizations a WHERE id = '41000000-0000-4000-8000-000000000001' "
+            'AND NOT EXISTS (SELECT 1 FROM domain_authorizations v WHERE v.domain_id = a.domain_id '
+            'AND v.revoked_at IS NULL AND current_date BETWEEN v.valid_from AND v.valid_until)')
         code, body = self.analista.post(SCANS % 'acme-demo.mx')
         self.assertEqual((code, body['reasons']), (409, ['live_scan_not_allowed']))
 
