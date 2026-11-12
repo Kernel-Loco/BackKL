@@ -13,16 +13,18 @@ Los nombres que dan otras fuentes no se usan: eso necesita pasar datos entre fue
 
 CDN (politica_uso_etico.md, punto 5: de una IP de CDN solo se registra que existe). Solo se consultan las IPv4 globales
 que no son multicast, reservadas ni de 192.88.99.0/24 (consultable). No se consultan las de los rangos IPv4 de
-Cloudflare (RANGOS_CLOUDFLARE) ni las que llegan por una cadena CNAME en la que cualquier nombre, intermedio o final,
-termina en un sufijo de SUFIJOS_CDN (CDN y bordes compartidos conocidos). La cadena sale de la misma respuesta del A,
-sin consultas extra (_cadena_cname). Tampoco las de un ASN que es solo de un CDN o un proxy inverso, aunque no haya
-CNAME a la vista (geoip.cdn_por_asn con la base local de DB-IP Lite, #15b, RC-166). Un ASN mixto de nube y CDN
-(Amazon, Microsoft, Google) no cuenta, porque una IP suya puede ser un servidor de la empresa: ahí el CDN sale solo por
-el CNAME. Quedan como activo ip con su marca y sin consulta. Si aun así InternetDB trae el tag 'cdn', sus datos se
-descartan con un aviso. Una IP sin ASN conocido, porque falta la base de ASN de DB-IP o porque la base no la trae, no
-se consulta (RC-49, H11 de la auditoría del 12 nov): sin el ASN no se puede descartar que sea de un CDN. Queda como
-activo ip con internetdb 'sin_asn' y la cobertura parcial, así no se cierran sus hallazgos de antes. El aviso de base
-faltante lo dice (SIN_CDN_POR_ASN) y, con la base abierta, SIN_ASN cuenta cuántas fueron.
+Cloudflare (RANGOS_CLOUDFLARE), las de los rangos IPv4 publicados de CloudFront, Azure Front Door y los bordes propios
+de Google (RANGOS_CDN, de rangos_cdn.json, sin red) ni las que llegan por una cadena CNAME en la que cualquier nombre,
+intermedio o final, termina en un sufijo de SUFIJOS_CDN (CDN y bordes compartidos conocidos). La cadena sale de la
+misma respuesta del A, sin consultas extra (_cadena_cname). Tampoco las de un ASN que es solo de un CDN o un proxy
+inverso, aunque no haya CNAME a la vista (geoip.cdn_por_asn con la base local de DB-IP Lite, #15b, RC-166). Un ASN
+mixto de nube y CDN (Amazon, Microsoft, Google) no cuenta, porque una IP suya puede ser un servidor de la empresa: ahí
+el CDN sale por sus rangos publicados o por el CNAME (RC-49, H11 de la auditoría del 12 nov). Quedan como activo ip
+con su marca y sin consulta. Si aun así InternetDB trae el tag 'cdn', sus datos se descartan con un aviso. Una IP
+sin ASN conocido, porque falta la base de ASN de DB-IP o porque la base no la trae, no se consulta (RC-49, H11 de la
+auditoría del 12 nov): sin el ASN no se puede descartar que sea de un CDN. Queda como activo ip con internetdb
+'sin_asn' y la cobertura parcial, así no se cierran sus hallazgos de antes. El aviso de base faltante lo dice
+(SIN_CDN_POR_ASN) y, con la base abierta, SIN_ASN cuenta cuántas fueron.
 
 Devuelve:
 - un activo ip por IP, con 'hosts' (los nombres que resuelven a ella) e 'internetdb' con puertos, tags, CPE, cuántos
@@ -180,6 +182,14 @@ RANGOS_CLOUDFLARE = tuple(ipaddress.ip_network(r) for r in (
     '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
     '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
     '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'))
+# Rangos IPv4 publicados de CloudFront ('cloudfront'), Azure Front Door ('azure_front_door') y los bordes propios de
+# Google ('google', goog.json menos cloud.json), para las nubes mixtas que geoip.CDN_POR_ASN no lista (RC-49, H11).
+# rangos_cdn.py los arma desde los archivos de cada nube, bajados una vez con OK. Se leen sin red y
+# RANGOS_CDN_FECHA dice de qué día son: cambian (Azure publica cada semana).
+_RANGOS_CDN = json.loads((Path(__file__).resolve().parent / 'rangos_cdn.json').read_text(encoding='utf-8'))
+RANGOS_CDN_FECHA = _RANGOS_CDN['procedencia']['descargado']
+RANGOS_CDN = tuple((ipaddress.ip_network(r), cdn) for cdn, redes in sorted(_RANGOS_CDN['rangos'].items())
+                   for r in redes)
 # Sufijo de cualquier nombre de la cadena CNAME, intermedio o final -> CDN o borde compartido. Una IP que llega por una
 # cadena con uno de estos no se consulta. Sufijos públicos conocidos, sin verificar en vivo, hasta #15b.
 SUFIJOS_CDN = {'cdn.cloudflare.net': 'cloudflare', 'cloudfront.net': 'cloudfront', 'akamaiedge.net': 'akamai',
@@ -207,11 +217,13 @@ CAMPOS = ('ports', 'tags', 'cpes', 'vulns', 'hostnames')   # los de una respuest
 # Avisos con texto fijo.
 SIN_GRABACION_DOMINIO = 'shodan: no hay grabación de Shodan de este dominio, no se revisó InternetDB'
 LIMITES = ('shodan: solo IPv4 y sin la llave de Shodan (#8): exposed_iot_device, exposed_ot_device y outdated_software '
-           'quedan sin cobertura, y no se detecta un CDN que no llegue por un CNAME conocido y cuyo ASN no esté en '
-           'geoip.CDN_POR_ASN (las nubes mixtas como Amazon, Microsoft o Google, y otros fuera de la lista)')
+           'quedan sin cobertura, y no se detecta un CDN que no llegue por un CNAME conocido, cuyo ASN no esté en '
+           'geoip.CDN_POR_ASN y cuya IP no esté en los rangos publicados de CloudFront, Azure Front Door y los bordes '
+           'de Google del %s (en las nubes mixtas, por ejemplo Cloud CDN en un balanceador de Google Cloud, que '
+           'comparte rangos con las VM, y otros fuera de la lista)' % RANGOS_CDN_FECHA)
 # Lo que shodan agrega al aviso de geoip.aviso_sin_base cuando falta la base de ASN: el filtro de CDN por ASN no corrió.
-SIN_CDN_POR_ASN = ('las IP fuera de Cloudflare y sin un CNAME de CDN no se consultaron en InternetDB, porque sin el ASN no '
-                   'se puede descartar que sean de un CDN')
+SIN_CDN_POR_ASN = ('las IP fuera de los rangos de CDN y sin un CNAME de CDN no se consultaron en InternetDB, porque '
+                   'sin el ASN no se puede descartar que sean de un CDN')
 # Las IP que la base de ASN abierta no trae, por la misma razón.
 SIN_ASN = 'shodan: %s sin ASN en la base de DB-IP no se consultaron en InternetDB, porque no se puede descartar un CDN: %s'
 SIN_IP = 'shodan: ninguna IP pública del dominio fuera de un CDN, no hubo nada que consultar en InternetDB'
@@ -701,11 +713,15 @@ def consultable(ip):
 
 
 def cdn_de(ip, cnames=()):
-    """El CDN de una IP: 'cloudflare' por sus rangos, el del sufijo de cualquier nombre de su cadena CNAME (intermedio o
-    final, con SUFIJOS_CDN o CDN_NUMERADOS), o None. `cnames` es un nombre o una lista de nombres."""
+    """El CDN de una IP: 'cloudflare' por sus rangos, el de RANGOS_CDN (CloudFront, Azure Front Door o Google) por los
+    suyos, el del sufijo de cualquier nombre de su cadena CNAME (intermedio o final, con SUFIJOS_CDN o CDN_NUMERADOS), o
+    None. `cnames` es un nombre o una lista de nombres."""
     direccion = ipaddress.ip_address(ip)
     if any(direccion in red for red in RANGOS_CLOUDFLARE):
         return 'cloudflare'
+    for red, cdn in RANGOS_CDN:
+        if direccion in red:
+            return cdn
     if isinstance(cnames, str):
         cnames = (cnames,)
     for cname in sorted(c for c in cnames or () if c):

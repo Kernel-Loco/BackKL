@@ -26,7 +26,7 @@ from pruebas.test_certspotter import emision  # noqa: E402
 from pruebas.test_crtsh import AHORA  # noqa: E402
 from pruebas.test_subfinder import Cronometro  # noqa: E402
 from pruebas.test_geoip import NOMBRES, LectorFalso, bases, registro_asn, registro_pais  # noqa: E402
-from cirdan.recolectores import REGISTRO, cargar, contrato, geoip, shodan  # noqa: E402
+from cirdan.recolectores import REGISTRO, cargar, contrato, geoip, rangos_cdn, shodan  # noqa: E402
 from cirdan.recolectores.contrato import FuenteNoResponde  # noqa: E402
 
 SEMILLA = Path(__file__).resolve().parents[1] / 'db' / 'semillas' / '007_shodan.sql'
@@ -271,7 +271,7 @@ class Shodan(unittest.TestCase):
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
 
     def test_8_cname_de_cdn_no_se_consulta_y_el_tag_cdn_descarta(self):
-        nube, marcada = '52.84.17.10', '23.45.67.89'
+        nube, marcada = '3.80.0.10', '23.45.67.89'   # una IP de Amazon fuera de los rangos de CloudFront: sale por el CNAME
         zona = {DOMINIO: a(marcada), 'www.olmardo.com': a(nube, cname='d111abc.cloudfront.net')}
         http = HttpSimulado(paginas('www.olmardo.com'), {nube: CAMARA_8080,
                                                           marcada: internetdb(marcada, ports=[8080], tags=['cdn'])})
@@ -575,7 +575,7 @@ class Arreglos(unittest.TestCase):
     def test_28_cadena_cname_con_el_intermedio_de_cdn_no_se_consulta(self):
         """etica-1: la cadena tiene 3 saltos y solo el primer destino es de un CDN (azurefd.net). El nombre final no está
         en SUFIJOS_CDN, y aun así la IP no llega a InternetDB."""
-        nube = '13.107.246.40'
+        nube = '20.69.154.10'   # de Microsoft, fuera de los rangos de Front Door: sale por la cadena
         cadena = ['lowtide.azurefd.net', 'star-azurefd-prod.trafficmanager.net', 'borde-final.ejemplo-cdn.net']
         self.assertIsNone(shodan.cdn_de(nube, cadena[-1]))
         zona = {DOMINIO: a(CAMARA), 'www.olmardo.com': a(nube, cname=cadena)}
@@ -1478,7 +1478,9 @@ class Geo(unittest.TestCase):
         """geo-G2: LIMITES no dice que solo se escapan los CDN de una nube mixta. También los que no están en
         CDN_POR_ASN (CDN77, Edgecast u otros). Sin la base ya no se escapa ninguno: no se consulta nada (RC-49, H11)."""
         self.assertNotIn('#15b', shodan.LIMITES)
-        for texto in ('CNAME conocido', 'geoip.CDN_POR_ASN', 'nubes mixtas', 'otros fuera de la lista'):
+        for texto in ('CNAME conocido', 'geoip.CDN_POR_ASN', 'nubes mixtas', 'otros fuera de la lista',
+                      'CloudFront, Azure Front Door y los bordes de Google del ' + shodan.RANGOS_CDN_FECHA,
+                      'Cloud CDN en un balanceador de Google Cloud'):
             self.assertIn(texto, shodan.LIMITES)
         self.assertNotIn('sin la base', shodan.LIMITES)
         self.assertEqual(shodan.MAX_CONSULTAS, 184)   # la ubicación es local: no suma consultas
@@ -1588,6 +1590,59 @@ class Geo(unittest.TestCase):
             self.assertEqual(otra.avisos[0], shodan.NO_SE_GRABO)
             self.assertEqual({f.name: f.read_bytes() for f in carpeta.glob('*.json')}, antes)
         self.assertEqual(shodan.codigo_salida(otra), 3)
+
+    def test_53_las_ip_de_los_rangos_de_cdn_de_las_nubes_no_van_a_internetdb(self):
+        """H11 de la auditoría del 12 nov (RC-49): una IP de CloudFront, de Azure Front Door o de un borde de Google, sin
+        CNAME a la vista y con un ASN mixto que geoip.CDN_POR_ASN no lista, no se consulta. Una VM de Amazon, una de
+        Google Cloud y la de camaras (Microsoft, AS8075) sí."""
+        cloudfront, front_door, google = '52.84.17.10', '13.107.246.40', '142.250.0.10'
+        ec2, gce = '3.80.0.10', '34.123.45.67'
+        zona = {DOMINIO: a(CAMARA), 'cf.olmardo.com': a(cloudfront), 'fd.olmardo.com': a(front_door),
+                'g.olmardo.com': a(google), 'ec2.olmardo.com': a(ec2), 'gce.olmardo.com': a(gce)}
+        respuestas = {ip: 404 for ip in (cloudfront, front_door, google, ec2, gce)}
+        respuestas[CAMARA] = CAMARA_8080
+        http = HttpSimulado(paginas(*sorted(n for n in zona if n != DOMINIO)), respuestas)
+        res = recolectar(http, ResolvedorSimulado(zona))
+        self.assertEqual(http.consultadas(), {CAMARA, ec2, gce})
+        self.assertEqual({ip: activo(res, ip).atributos.get('cdn') for ip in (cloudfront, front_door, google, ec2, gce)},
+                         {cloudfront: 'cloudfront', front_door: 'azure_front_door', google: 'google', ec2: None,
+                          gce: None})
+        self.assertEqual((res.estado, shodan.codigo_salida(res)), ('succeeded', 0))
+        for ip in (CAMARA, RESERVAS, ec2, gce, '199.36.158.100'):
+            self.assertIsNone(shodan.cdn_de(ip), ip)
+        self.assertEqual({cdn for _, cdn in shodan.RANGOS_CDN}, {'cloudfront', 'azure_front_door', 'google'})
+        self.assertTrue(all(r.version == 4 and r.is_global for r, _ in shodan.RANGOS_CDN))
+
+    def test_54_rangos_cdn_arma_el_json_sin_red_y_el_del_repo_tiene_su_forma(self):
+        """H11 (RC-49): rangos_cdn.armar toma solo CLOUDFRONT de Amazon, solo AzureFrontDoor.Frontend de Azure y goog.json
+        menos cloud.json de Google, sin IPv6 ni redes que no son globales. rangos_cdn.json es lo que escribe main()."""
+        aws = {'syncToken': '1', 'createDate': 'x', 'prefixes': [
+            {'ip_prefix': '52.84.0.0/16', 'service': 'CLOUDFRONT'}, {'ip_prefix': '52.85.0.0/16', 'service': 'CLOUDFRONT'},
+            {'ip_prefix': '3.80.0.0/12', 'service': 'EC2'}]}
+        azure = {'changeNumber': 2, 'cloud': 'Public', 'values': [
+            {'name': 'AzureFrontDoor.Frontend', 'properties': {'changeNumber': 3, 'addressPrefixes': [
+                '13.107.246.0/24', '2620:1ec:bdf::/48', '10.0.0.0/8']}},
+            {'name': 'AzureCloud', 'properties': {'changeNumber': 4, 'addressPrefixes': ['20.69.154.0/24']}}]}
+        goog = {'syncToken': '5', 'creationTime': 'y', 'prefixes': [
+            {'ipv4Prefix': '8.8.8.0/24'}, {'ipv4Prefix': '34.0.0.0/15'}, {'ipv6Prefix': '2001:4860::/32'}]}
+        cloud = {'syncToken': '5', 'prefixes': [{'ipv4Prefix': '34.0.0.0/16', 'service': 'Google Cloud'}]}
+        armado = rangos_cdn.armar(aws, azure, goog, cloud, '2026-11-12')
+        self.assertEqual(armado['rangos'], {'cloudfront': ['52.84.0.0/15'], 'azure_front_door': ['13.107.246.0/24'],
+                                            'google': ['8.8.8.0/24', '34.1.0.0/16']})
+        self.assertEqual(armado['procedencia']['descargado'], '2026-11-12')
+        with self.assertRaises(ValueError):
+            rangos_cdn.armar(aws, {'changeNumber': 2, 'cloud': 'Public', 'values': azure['values'][1:]}, goog, cloud, 'f')
+        with self.assertRaises(ValueError):
+            rangos_cdn.armar(aws, azure, goog, {'syncToken': '5', 'prefixes': goog['prefixes']}, 'f')   # Google sin rangos
+        archivo = Path(rangos_cdn.__file__).with_name('rangos_cdn.json')
+        texto = archivo.read_text(encoding='utf-8')
+        leido = json.loads(texto)
+        self.assertEqual(texto, json.dumps(leido, ensure_ascii=False, indent=1, sort_keys=True) + '\n')
+        self.assertEqual(leido['procedencia']['descargado'], shodan.RANGOS_CDN_FECHA)
+        self.assertRegex(shodan.RANGOS_CDN_FECHA, r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        for cdn, redes in leido['rangos'].items():
+            unidas = [str(r) for r in ipaddress.collapse_addresses(ipaddress.ip_network(x) for x in redes)]
+            self.assertEqual(redes, unidas, cdn)
 
 
 class Semilla(unittest.TestCase):
