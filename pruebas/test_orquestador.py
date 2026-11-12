@@ -113,6 +113,21 @@ def resultado_shodan(*puertos, revisados=None, sin_revisar=None, cves=(), omitid
 HOY_UTC = "(now() AT TIME ZONE 'UTC')::date"
 
 
+# La carta de acme-demo.mx de la semilla 001 (41...01) vence el 31 dic 2026. renovar_carta() inserta en la transacción
+# de la prueba una renovación vigente hoy, que se va con el rollback (la tabla es inmutable: renovar crea otra
+# fila), así las pruebas no dependen de la fecha en que corren. La semilla no se toca.
+CARTA_ACME_DEMO = '41000000-0000-4000-8000-000000000001'
+
+
+def renovar_carta(conn):
+    conn.execute(
+        'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
+        'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+        'SELECT organization_id, domain_id, signer_name, signer_title, signer_email, '
+        "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
+        'accepted_by FROM domain_authorizations WHERE id = %s', (CARTA_ACME_DEMO,))
+
+
 def conexion_postgres():
     """Conexión como postgres, solo para preparar lo que cirdan_app no puede escribir. Sin la clave, la prueba se salta."""
     clave = config('POSTGRES_PASSWORD')
@@ -130,6 +145,7 @@ class Orquestador(unittest.TestCase):
         self.tx = self.conn.transaction(force_rollback=True)
         self.tx.__enter__()
         self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+        renovar_carta(self.conn)
 
     def tearDown(self):
         self.tx.__exit__(None, None, None)
@@ -361,15 +377,7 @@ class Orquestador(unittest.TestCase):
         # previous_severity sale del más viejo de los dos scores (el del 1 ene), no del último ni del de corrección
         self.assertEqual(consulta('previous_severity'), [solo_viejo['severity'], 'low', None, None])
 
-        # La autorización de la semilla vence el 31 dic 2026: una renovación vigente hoy, que se va con el rollback de
-        # la prueba (la tabla es inmutable, renovar crea otra fila), así la prueba no depende de la fecha en que corre.
-        self.conn.execute(
-            'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
-            'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
-            'SELECT organization_id, domain_id, signer_name, signer_title, signer_email, '
-            "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
-            "accepted_by FROM domain_authorizations WHERE id = '41000000-0000-4000-8000-000000000001'")
-
+        # solicitar() usa la carta que renovó setUp (renovar_carta), así la prueba no depende de la fecha en que corre
         def solicitar():
             s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
             self.assertTrue(s.aceptada, s.detalle)
@@ -404,7 +412,8 @@ class Orquestador(unittest.TestCase):
         self.conn.execute("UPDATE scans SET stats = '{\"sources_ok\": 1, \"sources_failed\": 0}' WHERE id = %s",
                           (vacio,))
         self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
-        # cvss, como en el portal: de la tabla cves o, si la CVE no está ahí, de evidence.cvss si es un número de 0 a 10
+        # cvss, con la expresión del portal sobre la CVE combinada: de la tabla cves o, si cves no tiene su CVSS, de
+        # evidence.cvss si es un número de 0 a 10
         self.conn.execute("INSERT INTO cves (cve_id, cvss_base_score) VALUES ('CVE-2099-0002', 5.0)")
         self.conn.execute("UPDATE findings SET cve_id = 'CVE-2099-0002' WHERE id = %s", (ninguno['id'],))
         for f, cvss in ((solo_viejo, '9.8'), (uno, '11'), (solo_nuevo, '"7.5"'), (ninguno, '9.0')):
@@ -1310,6 +1319,7 @@ class Orquestador(unittest.TestCase):
                        "WHERE code = 'ct_logs'", (ayer,))
             pg.execute('SET LOCAL ROLE cirdan_app')  # desde aquí, con los permisos de la API
             pg.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+            renovar_carta(pg)  # la de setUp está en otra transacción que esta conexión no ve
             s = self.solicitar('acme-demo.mx', responde(TXT_ACME), conn=pg)
             resumen = self.en_vivo(s, [BIEN], lambda segundos: None, fuentes=('ct_logs',), conn=pg)
             self.assertEqual(resumen['sources'][0]['status'], 'succeeded')  # lo de ayer no cuenta hoy
@@ -1374,13 +1384,13 @@ class Orquestador(unittest.TestCase):
 
     def test_5b_si_el_trigger_rechaza_el_motivo_sale_de_la_base_y_no_del_texto_del_error(self):
         """Segundo candado: la carta se revoca entre la revisión y la fila de scans, y el trigger la rechaza."""
-        carta = self.uno("SELECT a.id::text FROM domain_authorizations a JOIN domains d ON d.id = a.domain_id "
-                         "WHERE d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL "
-                         "AND current_date BETWEEN a.valid_from AND a.valid_until ORDER BY a.valid_until DESC LIMIT 1")['id']
         consulta = ConsultaTxt((TXT_ACME,))
 
         def revoca_y_responde(fqdn):
-            self.conn.execute('UPDATE domain_authorizations SET revoked_at = now() WHERE id = %s', (carta,))
+            # Las dos vigentes (la de la semilla y la que renovó setUp): así se revoca la que eligió solicitar(),
+            # aunque las dos venzan el mismo día
+            self.conn.execute("UPDATE domain_authorizations a SET revoked_at = now() FROM domains d "
+                              "WHERE d.id = a.domain_id AND d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL")
             return consulta
         s = self.solicitar('acme-demo.mx', revoca_y_responde)
         self.assertEqual((s.aceptada, s.motivos), (False, ['authorization_revoked']))  # antes salía authorization_expired

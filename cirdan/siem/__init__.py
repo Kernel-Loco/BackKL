@@ -91,8 +91,10 @@ def evento_hallazgo(dominio, h, ahora, export_id):
         # de escaneo, cirdan/api/v1.py) y los que siguen abiertos pero no eran críticos en el más viejo de esos dos
         # scores (los subió el ML o el motor). Así uno que sigue abierto y crítico no vuelve a ser alerta en cada
         # escaneo, y uno que se reabre o sube sí. Dos exportaciones después del mismo escaneo la repiten: se deduplica
-        # por finding_id. También alerta, y se repite, uno que subió a crítico sin un escaneo con fuentes (un score
-        # rules_change o de un escaneo con sources_ok = 0) o porque el ML cayó a reglas: repite alertas, no las pierde.
+        # por finding_id. También alerta, y se repite, uno que subió a crítico en un escaneo con sources_ok = 0 o
+        # porque el ML cayó a reglas (un score rules_change no sube nada, solo arrastra la severidad del anterior). Un
+        # score que baja la severidad sin un escaneo que cuente puede hacer que se pierda la de un crítico nuevo si
+        # nadie exportó antes (cirdan/api/v1.py).
         evento['type'] = 'alert'
     return _sobre('lowtide:finding', ahora, export_id, evento)
 
