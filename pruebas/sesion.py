@@ -58,8 +58,10 @@ def reset():
     subprocess.run(['docker', 'exec', 'cirdan-pg16', 'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c',
                     'UPDATE users SET last_totp_step = NULL'], check=True, capture_output=True)
     subprocess.run(['docker', 'exec', 'cirdan-valkey', 'sh', '-c',
-                    'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "login:fail:*" '
-                    '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del'], check=True, capture_output=True)
+                    'for p in "login:fail:*" "password:fail:*"; do '
+                    'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "$p" '
+                    '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del; '
+                    'done'], check=True, capture_output=True)
     _last_step.clear()
 
 

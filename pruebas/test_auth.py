@@ -22,6 +22,7 @@ DANA = 'dana.cruz@beta-corp.mx'       # de Beta, para las pruebas que la dejan b
 INVALID = 'Correo o contraseña incorrectos.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
+ADMIN_MFA_REQUIRED = 'Activa MFA para iniciar sesión con una cuenta admin.'
 
 
 def codigos_malos(email, n):
@@ -112,11 +113,10 @@ class Login(unittest.TestCase):
                         user='postgres')
         scalar("UPDATE users SET mfa_enabled_at = NULL WHERE email = '%s' RETURNING 1;" % email, user='postgres')
 
-    def test_9_sin_mfa_la_sesion_lleva_el_rol_de_la_base(self):
+    def test_9_sin_mfa_solo_no_admin_puede_entrar(self):
         # login_lookup() ya no devuelve el rol (migración 004): sin MFA, la API lo lee con RLS.
-        # El rol de la sesión se ve en lo que deja hacer: solo admin lee los TXT y el gerente no pide
-        # escaneos. Un dominio que no existe responde 404 sin escribir nada.
-        for email, role, txt, scan in ((JORDAN, 'analyst', 403, 404), (ALEX, 'admin', 200, 404)):
+        # Si el rol es admin, MFA es obligatorio y no se crea sesión sin configurarlo.
+        for email, role, txt, scan in ((JORDAN, 'analyst', 403, 404),):
             with self.subTest(email=email):
                 self._sin_mfa(email)
                 client = Client()
@@ -129,6 +129,12 @@ class Login(unittest.TestCase):
                 self.assertEqual(client.get('/api/v1/domains/txt')[0], txt, 'solo admin lee los TXT')
                 self.assertEqual(client.post('/api/v1/domains/no-existe.acme-demo.mx/scans')[0], scan,
                                  'el gerente no puede pedir escaneos')
+
+            self._sin_mfa(ALEX)
+            client = Client()
+            code, body = client.post(AUTH + '/login', {'email': ALEX, 'password': PASSWORD})
+            self.assertEqual((code, body['detail']), (403, ADMIN_MFA_REQUIRED))
+            self.assertIsNone(client.cookie())
 
     def test_10_la_contrasena_mala_queda_en_la_bitacora(self):
         # La API escribe el fallo después de mandar el 401, para que el tiempo no delate que el correo
@@ -202,7 +208,8 @@ class Login(unittest.TestCase):
             respuestas = list(pool.map(intento, codigos))
         self.assertEqual(respuestas.count((401, MFA_INVALID)), 5, respuestas)
         self.assertEqual(respuestas.count((401, MFA_EXPIRED)), len(codigos) - 5, respuestas)
-        self.assertEqual(int(scalar(contar, user='postgres')) - antes, 5, 'cada código revisado queda en la bitácora')
+        self.assertEqual(int(scalar(contar, user='postgres')) - antes, 1,
+                 'solo el primer fallo del mfa_token deja evidencia')
         code, body = Client().post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': sesion.next_code(DANA)})
         self.assertEqual((code, body['detail']), (401, MFA_EXPIRED), 'gastados los 5 intentos, el token ya no sirve')
 
@@ -237,6 +244,35 @@ class Login(unittest.TestCase):
             self.assertEqual(code, 200, 'login %d' % (i + 1))
             code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': sesion.next_code(DANA)})
             self.assertEqual(code, 200, 'código %d' % (i + 1))
+
+    def test_16_el_mismo_codigo_no_pasa_en_paralelo_con_distintos_tokens(self):
+        # Dos mfa_token distintos con el mismo código en paralelo: solo una petición puede gastar el step.
+        self.addCleanup(sesion.reset)
+        c1, c2 = Client(), Client()
+        t1 = c1.post(AUTH + '/login', {'email': MAYA, 'password': PASSWORD})[1]['mfa_token']
+        t2 = c2.post(AUTH + '/login', {'email': MAYA, 'password': PASSWORD})[1]['mfa_token']
+        codigo = sesion.next_code(MAYA)
+        salida = threading.Barrier(2)
+
+        def intento(client, token):
+            salida.wait()
+            return client.post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': codigo})
+
+        with ThreadPoolExecutor(2) as pool:
+            r1, r2 = list(pool.map(lambda par: intento(*par), ((c1, t1), (c2, t2))))
+        estados = sorted((r1[0], r2[0]))
+        self.assertEqual(estados, [200, 401], (r1, r2))
+
+    def test_17_password_actual_tiene_limite_de_intentos(self):
+        self.addCleanup(sesion.reset)
+        client = sesion.login(JORDAN)
+        nuevo = 'Lowtide-Demo-2026!'
+        for _ in range(5):
+            code, body = client.post(AUTH + '/password', {'current_password': 'incorrecta', 'new_password': nuevo})
+            self.assertEqual((code, body['detail']), (401, 'La contraseña actual no es correcta.'))
+        code, body = client.post(AUTH + '/password', {'current_password': 'incorrecta', 'new_password': nuevo})
+        self.assertEqual(code, 429)
+        self.assertIn('Demasiados intentos', body['detail'])
 
 
 if __name__ == '__main__':

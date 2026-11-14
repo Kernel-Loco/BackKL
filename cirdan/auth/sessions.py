@@ -24,6 +24,8 @@ MFA_MAX_ATTEMPTS = 5
 LOCK_SECONDS = 15 * 60
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
+MAX_PASSWORD_FAILS_USER = 5
+MAX_PASSWORD_FAILS_IP = 20
 
 
 @cache
@@ -151,3 +153,26 @@ def register_mfa_fail(ip):
 
 def clear_fails(email):
     _valkey().delete(_email_key(email))
+
+
+# ------------------------------------------------------------------ cambio de contraseña
+
+def _password_user_key(user_id):
+    return 'password:fail:user:' + _digest(str(user_id))
+
+
+def _password_ip_key(ip):
+    return 'password:fail:ip:' + (ip or 'desconocida')
+
+
+def is_password_locked(user_id, ip):
+    fails_user, fails_ip = _valkey().mget(_password_user_key(user_id), _password_ip_key(ip))
+    return int(fails_user or 0) >= MAX_PASSWORD_FAILS_USER or int(fails_ip or 0) >= MAX_PASSWORD_FAILS_IP
+
+
+def register_password_fail(user_id, ip):
+    _count(_password_user_key(user_id), _password_ip_key(ip))
+
+
+def clear_password_fails(user_id):
+    _valkey().delete(_password_user_key(user_id))

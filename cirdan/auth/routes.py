@@ -21,6 +21,7 @@ INVALID = 'Correo o contraseña incorrectos.'
 LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
+ADMIN_MFA_REQUIRED = 'Activa MFA para iniciar sesión con una cuenta admin.'
 
 
 class LoginIn(BaseModel):
@@ -102,16 +103,20 @@ def login(body: LoginIn, request: Request, response: Response):
                             background=BackgroundTask(_audit_bad_password, org, user_id, ip))
 
     with transaction(org) as conn:
+        row = conn.execute(
+            'SELECT role, mfa_enabled_at IS NOT NULL AND totp_secret_enc IS NOT NULL AS mfa_enabled '
+            'FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(401, INVALID)
+        if row['role'] == 'admin' and not row['mfa_enabled']:
+            audit(conn, org, 'auth.admin_mfa_required', user_id, ip, 'user', user_id)
+            raise HTTPException(403, ADMIN_MFA_REQUIRED)
         if passwords.needs_rehash(found['password_hash']):
             conn.execute('UPDATE users SET password_hash = %s WHERE id = %s', (passwords.hash_password(body.password), user_id))
-        if found['mfa_enabled']:
+        if row['mfa_enabled']:
             # Los fallos del correo se borran hasta que el código sea correcto. Borrados aquí, quien
             # tiene la contraseña repetiría el login y 5 códigos sin llegar nunca al bloqueo.
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
-        # login_lookup() no devuelve el rol (migración 004): se lee aquí con RLS, como en /mfa/verify
-        row = conn.execute('SELECT role FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
-        if not row:  # se desactivó la cuenta entre la búsqueda y aquí
-            raise HTTPException(401, INVALID)
         user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': email}, ip, 'password')
     _clear_fails(email)
     return {'mfa_required': False, 'user': user}
@@ -137,15 +142,30 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
         if not row or not row['totp_secret_enc']:
             sessions.delete_mfa(body.mfa_token)
             raise HTTPException(401, MFA_EXPIRED)
-        step = totp.verify_code(totp.decrypt_secret(row['totp_secret_enc'], user_id), body.code, row['last_totp_step'])
+        try:
+            secret = totp.decrypt_secret(row['totp_secret_enc'], user_id)
+        except Exception:
+            log.exception('Secreto TOTP inválido para user_id=%s', user_id)
+            sessions.delete_mfa(body.mfa_token)
+            raise HTTPException(401, MFA_EXPIRED)
+        step = totp.verify_code(secret, body.code, row['last_totp_step'])
         if step is None:
-            audit(conn, org, 'auth.mfa_failed', user_id, ip, 'user', user_id)
+            # El primer fallo del mfa_token deja evidencia; los siguientes solo repiten ruido.
+            if pending.get('attempts', 0) == 0:
+                audit(conn, org, 'auth.mfa_failed', user_id, ip, 'user', user_id)
             fail = True
         else:
-            fail = False
-            conn.execute('UPDATE users SET last_totp_step = %s WHERE id = %s', (step, user_id))
-            sessions.delete_mfa(body.mfa_token)
-            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, 'totp')
+            used = conn.execute(
+                'UPDATE users SET last_totp_step = %s WHERE id = %s AND (last_totp_step IS NULL OR last_totp_step < %s) '
+                'RETURNING id', (step, user_id, step)).fetchone()
+            if not used:
+                if pending.get('attempts', 0) == 0:
+                    audit(conn, org, 'auth.mfa_failed', user_id, ip, 'user', user_id)
+                fail = True
+            else:
+                fail = False
+                sessions.delete_mfa(body.mfa_token)
+                user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, 'totp')
     if fail:
         sessions.register_mfa_fail(ip)
         raise HTTPException(401, MFA_INVALID)
@@ -176,10 +196,15 @@ def me(session: Session = Depends(current_session)):
 
 @router.post('/password', status_code=204, summary='Cambia la contraseña del usuario de la sesión')
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
+    ip = client_ip(request)
+    if sessions.is_password_locked(session.user_id, ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
     with transaction(session.org_id) as conn:
         row = conn.execute('SELECT password_hash FROM users WHERE id = %s', (session.user_id,)).fetchone()
         if not row or not passwords.verify_password(row['password_hash'], body.current_password):
-            raise HTTPException(400, 'La contraseña actual no es correcta.')
+            sessions.register_password_fail(session.user_id, ip)
+            raise HTTPException(401, 'La contraseña actual no es correcta.')
         conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
                      (passwords.hash_password(body.new_password), session.user_id))
-        audit(conn, session.org_id, 'auth.password_changed', session.user_id, client_ip(request), 'user', session.user_id)
+        audit(conn, session.org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
+    sessions.clear_password_fails(session.user_id)

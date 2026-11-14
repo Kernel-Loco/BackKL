@@ -1,5 +1,6 @@
 """Dependencias de FastAPI: quién llama, a partir de la cookie de sesión."""
 from dataclasses import dataclass
+import ipaddress
 
 from fastapi import HTTPException, Request
 
@@ -8,6 +9,8 @@ from cirdan.config import config
 
 COOKIE = 'lt_session'
 COOKIE_SECURE = config('COOKIE_SECURE', 'false').lower() == 'true'  # true en producción (HTTPS)
+TRUST_X_FORWARDED_FOR = config('TRUST_X_FORWARDED_FOR', 'false').lower() == 'true'
+FORWARDED_ALLOW_IPS = {ip.strip() for ip in config('FORWARDED_ALLOW_IPS', '').split(',') if ip.strip()}
 
 
 @dataclass(frozen=True)
@@ -29,7 +32,21 @@ def current_session(request: Request) -> Session:
 
 
 def client_ip(request: Request):
-    return request.client.host if request.client else None
+    peer = request.client.host if request.client else None
+    trusted = TRUST_X_FORWARDED_FOR and peer and ('*' in FORWARDED_ALLOW_IPS or peer in FORWARDED_ALLOW_IPS)
+    if trusted:
+        raw = (request.headers.get('x-forwarded-for') or '').split(',', 1)[0].strip()
+        if raw:
+            try:
+                return str(ipaddress.ip_address(raw))
+            except ValueError:
+                pass
+    if not peer:
+        return None
+    try:
+        return str(ipaddress.ip_address(peer))
+    except ValueError:
+        return None
 
 
 def require_roles(*roles):
