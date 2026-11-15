@@ -28,11 +28,12 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 
 from cirdan import orquestador
+from cirdan.api import v1 as api_v1
 from cirdan.config import config
 from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
-from cirdan.recolectores import certspotter, crtsh, ejemplo, github, shodan
+from cirdan.recolectores import api_docs, certspotter, crtsh, ejemplo, github, shodan
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado
 from pruebas.test_certspotter import AHORA, EMISIONES, RespaldoSimulado, emision
 from pruebas.test_certspotter import recolectar as recolectar_ct
@@ -112,6 +113,21 @@ def resultado_shodan(*puertos, revisados=None, sin_revisar=None, cves=(), omitid
 HOY_UTC = "(now() AT TIME ZONE 'UTC')::date"
 
 
+# La carta de acme-demo.mx de la semilla 001 (41...01) vence el 31 dic 2026. renovar_carta() inserta en la transacción
+# de la prueba una renovación vigente hoy, que se va con el rollback (la tabla es inmutable: renovar crea otra
+# fila), así las pruebas no dependen de la fecha en que corren. La semilla no se toca.
+CARTA_ACME_DEMO = '41000000-0000-4000-8000-000000000001'
+
+
+def renovar_carta(conn):
+    conn.execute(
+        'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
+        'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+        'SELECT organization_id, domain_id, signer_name, signer_title, signer_email, '
+        "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
+        'accepted_by FROM domain_authorizations WHERE id = %s', (CARTA_ACME_DEMO,))
+
+
 def conexion_postgres():
     """Conexión como postgres, solo para preparar lo que cirdan_app no puede escribir. Sin la clave, la prueba se salta."""
     clave = config('POSTGRES_PASSWORD')
@@ -129,6 +145,7 @@ class Orquestador(unittest.TestCase):
         self.tx = self.conn.transaction(force_rollback=True)
         self.tx.__enter__()
         self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+        renovar_carta(self.conn)
 
     def tearDown(self):
         self.tx.__exit__(None, None, None)
@@ -311,6 +328,100 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.conteos(s.scan_id), (1, 0))  # estaba resuelto y se reabre
         self.assertEqual(self.estado(f['id'])['status'], 'open')
 
+    def test_2h2_la_salida_a_siem_da_por_recurrente_solo_lo_que_aporto_a_los_dos_ultimos_scores(self):
+        """recurrence de la salida a SIEM (#98, RC-212). Cada score de escaneo guarda un aporte por hallazgo vigente:
+        recurring si el hallazgo está en los dos últimos scores de escaneo del dominio y new si no, como uno resuelto
+        que se reabre (está en el último y no en el anterior). Un score de otro motivo (correction) no cuenta.
+        solo_viejo es la brecha 80...0001, que también aportó al score de la semilla a0...01: con 'todos los scores' en
+        vez de 'los dos últimos' saldría recurring. solo_nuevo también aportó a un score de escaneo más viejo que los
+        dos: con 'el último y cualquier anterior' saldría recurring. Un escaneo caído que terminó después del más viejo
+        de los dos scores, en el que la fuente de 'uno' respondió, pudo cerrarlo, y el último reabrirlo: sale new. Si
+        esa fuente falló en el caído y solo respondió otra, sigue recurring. Un score de escaneo sin ninguna fuente que
+        respondiera (sources_ok = 0) no cuenta. previous_severity es la del más viejo de los dos scores.
+        Los scores y el escaneo caído llevan momentos fijos, porque en esta transacción now() es el mismo para todos."""
+        abiertos = self.conn.execute(
+            "SELECT f.id::text, f.rule_id, f.severity, f.domain_id, f.source_id FROM findings f "
+            "JOIN domains d ON d.id = f.domain_id "
+            "WHERE d.fqdn = 'acme-demo.mx' AND f.status = 'open' ORDER BY f.id LIMIT 4").fetchall()
+        self.assertEqual(len(abiertos), 4)
+        solo_viejo, uno, solo_nuevo, ninguno = abiertos
+        self.assertEqual(solo_viejo['id'], '80000000-0000-4000-8000-000000000001')
+        self.assertIsNotNone(self.uno("SELECT 1 FROM score_contributions WHERE finding_id = %s "
+                                      "AND score_id = 'a0000000-0000-4000-8000-000000000001'", solo_viejo['id']))
+        escaneo = self.uno("SELECT s.id FROM scans s JOIN domains d ON d.id = s.domain_id "
+                           "WHERE d.fqdn = 'acme-demo.mx' ORDER BY s.queued_at DESC LIMIT 1")['id']
+
+        def score(momento, motivo, hallazgos, scan_id=escaneo, severidades=None):
+            score_id = self.uno(
+                'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
+                "reason, computed_at) VALUES (%s, %s, %s, '90000000-0000-4000-8000-000000000001', 50, '{}', %s, %s) "
+                'RETURNING id', ACME, uno['domain_id'], scan_id, motivo, momento)['id']
+            for f in hallazgos:
+                self.conn.execute(
+                    'INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, severity, '
+                    "factors) VALUES (%s, %s, %s, %s, 1, %s, '{}')",
+                    (ACME, score_id, f['id'], f['rule_id'], (severidades or {}).get(f['id'], f['severity'])))
+            return score_id
+        score('2098-12-30T00:00:00+00:00', 'scan', [solo_nuevo])
+        score('2099-01-01T00:00:00+00:00', 'scan', [uno, solo_viejo], severidades={uno['id']: 'low'})
+        score('2099-01-02T00:00:00+00:00', 'scan', [uno, solo_nuevo])
+        score('2099-01-03T00:00:00+00:00', 'correction', abiertos)
+
+        def consulta(campo):
+            filas = {f['id']: f[campo] for f in self.conn.execute(api_v1.SIEM_FINDINGS_SQL, {'fqdn': 'acme-demo.mx'})}
+            return [filas[f['id']] for f in abiertos]
+
+        def recurrencia():
+            return consulta('recurrence')
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # previous_severity sale del más viejo de los dos scores (el del 1 ene), no del último ni del de corrección
+        self.assertEqual(consulta('previous_severity'), [solo_viejo['severity'], 'low', None, None])
+
+        # solicitar() siempre tiene una carta vigente gracias a setUp (renovar_carta), así la prueba no depende de la
+        # fecha en que corre
+        def solicitar():
+            s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+            self.assertTrue(s.aceptada, s.detalle)
+            return s.scan_id
+        # Un escaneo caído (sin score) pedido antes del más viejo de los dos scores y que terminó después: cuenta por
+        # finished_at. queued_at es de antes de la consulta TXT y puede quedar antes del score del escaneo anterior.
+        caido = solicitar()
+        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2098-12-31T23:00:00+00:00', "
+                          "finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s", (caido,))
+        corrida = ('INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status) VALUES (%s, %s, %s, %s) '
+                   'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status')
+        self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'failed'))
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Solo respondió otra fuente (la de 'ninguno'): no tocó los hallazgos de 'uno', que sigue recurring
+        self.assertNotEqual(ninguno['source_id'], uno['source_id'])
+        self.conn.execute(corrida, (ACME, caido, ninguno['source_id'], 'succeeded'))
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'succeeded'))
+        self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
+        # Terminó antes del más viejo de los dos scores: ya no cuenta, ese score es posterior y tiene la foto
+        self.conn.execute("UPDATE scans SET queued_at = '2098-12-31T12:00:00+00:00', "
+                          "finished_at = '2098-12-31T13:00:00+00:00' WHERE id = %s", (caido,))
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Un escaneo posterior en el que no respondió ninguna fuente guarda score sin 'uno', pero no cuenta
+        vacio = solicitar()
+        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2099-01-04T00:00:00+00:00', "
+                          "finished_at = '2099-01-04T01:00:00+00:00', "
+                          "stats = '{\"sources_ok\": 0, \"sources_failed\": 1}' WHERE id = %s", (vacio,))
+        score('2099-01-04T01:00:00+00:00', 'scan', [], scan_id=vacio)
+        self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
+        # Con una fuente que respondió sí cuenta, y 'uno', que no aportó a ese score, sale new
+        self.conn.execute("UPDATE scans SET stats = '{\"sources_ok\": 1, \"sources_failed\": 0}' WHERE id = %s",
+                          (vacio,))
+        self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
+        # cvss, con la expresión del portal sobre la CVE combinada: de la tabla cves o, si cves no tiene su CVSS, de
+        # evidence.cvss si es un número de 0 a 10
+        self.conn.execute("INSERT INTO cves (cve_id, cvss_base_score) VALUES ('CVE-2099-0002', 5.0)")
+        self.conn.execute("UPDATE findings SET cve_id = 'CVE-2099-0002' WHERE id = %s", (ninguno['id'],))
+        for f, cvss in ((solo_viejo, '9.8'), (uno, '11'), (solo_nuevo, '"7.5"'), (ninguno, '9.0')):
+            self.conn.execute("UPDATE findings SET evidence = evidence || jsonb_build_object('cvss', %s::jsonb) "
+                              'WHERE id = %s', (cvss, f['id']))
+        self.assertEqual([None if x is None else float(x) for x in consulta('cvss')], [9.8, None, None, 5.0])
+
     def test_2i_no_cuentan_la_fuente_caida_sin_cobertura_ni_lo_que_decidio_el_cliente(self):
         _, f = self.escanear_ejemplo()
         for resultado in (FALLA, Resultado(**dict(vars(BIEN), sin_cobertura=['spf_missing']))):
@@ -427,6 +538,25 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.abiertos('ip', *rdp), {ip_a: 'open', ip_b: 'open', ip_c: 'resolved'})
         self.assertEqual(self.abiertos('cve', *cves), dict.fromkeys(cve_b, 'open'))
 
+    def test_2n2_un_documento_de_api_se_guarda_como_api_doc_hijo_de_su_sitio(self):
+        """La migración 015 (#63, RC-118): la base acepta el tipo api_doc, el activo cuelga de su sitio y su hallazgo
+        queda sobre él."""
+        sitio = 'api.acme-demo.mx'
+        url = 'https://%s/openapi.json' % sitio
+        res = Resultado('acme-demo.mx', 'ejemplo')
+        res.activos += [Activo('subdomain', sitio, {}),
+                        Activo('api_doc', url, {'host': sitio, 'parent': sitio, 'formato': 'OpenAPI'})]
+        hallazgo = api_docs._hallazgo('api_auth_not_declared', 'acme-demo.mx', url, 'api_doc', 'Sin autenticación',
+                                      {'host': sitio, 'url': url}, AHORA, sitio)
+        res.hallazgos.append(hallazgo)
+        self.reescanear(res)
+        fila = self.uno('SELECT a.asset_type, p.value AS padre, p.asset_type AS tipo_padre FROM assets a '
+                        'JOIN assets p ON p.id = a.parent_asset_id WHERE a.value = %s', url)
+        self.assertEqual(fila, {'asset_type': 'api_doc', 'padre': sitio, 'tipo_padre': 'subdomain'})
+        guardado = self.uno('SELECT a.value, f.status FROM findings f JOIN assets a ON a.id = f.asset_id '
+                            'WHERE f.fingerprint = %s', bytes.fromhex(hallazgo.huella))
+        self.assertEqual(guardado, {'value': url, 'status': 'open'})
+
     def test_2o_lo_guardado_sin_partes_las_saca_de_su_evidencia(self):
         """Lo guardado antes de evidence.partes (#23): el secreto las saca de 'repo', el puerto de 'ip', la CVE de 'ip'
         con '/cve' y el correo de 'repos', este solo si no se cortó en MAX_REPOS_ACTIVO. Lo de otra fuente que no
@@ -460,7 +590,11 @@ class Orquestador(unittest.TestCase):
                      'huella': 'ab' * 32, 'caracteristicas': {'tipo': 'x'}}
         fila = dict.fromkeys(('id', 'breach_name', 'rule_code', 'asset', 'asset_type', 'category', 'source', 'severity',
                               'base_severity', 'status', 'recurrence', 'cve_id', 'cvss', 'epss', 'in_kev', 'detected_at',
-                              'last_scan_id'), None)
+                              'last_scan_id', 'attack_version', 'attack_technique_id', 'attack_technique_name',
+                              'attack_source_url', 'attack_unmapped_reason', 'iso_version', 'iso_control_id',
+                              'iso_control_name', 'iso_source_url', 'cis_version', 'cis_safeguard_id',
+                              'cis_safeguard_name', 'cis_source_url'), None)
+        fila['attack_version'] = 'Enterprise v19'
         self.assertEqual(v1._finding(dict(fila, evidence=evidencia))['evidence'], {'origen': 'certspotter'})
 
     def test_2q_con_la_cobertura_parcial_lo_abierto_conserva_las_partes_que_no_se_revisaron(self):
@@ -479,6 +613,63 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.partes(en_sitio), ['acme-demo/sitio'])   # api se revisó y el correo ya no salió ahí
         self.reescanear(resultado_github(), 'github')
         self.assertEqual(self.abiertos('title', en_sitio).popitem()[1], 'resolved')
+
+    def test_2s_las_cve_van_a_cves_y_a_findings_cve_id(self):
+        """La visita web (#18) trae de la NVD sus CVE con CVSS: entran completas en cves como cirdan_app y cada
+        known_vulnerability lleva su cve_id. En el orden de producción (fuentes_activas va por code: shodan antes que
+        web) la CVE que Shodan deduce entra como stub y la fila de la NVD de la misma CVE ya no cambia (eso es del
+        cargador diario): la API toma el CVSS de la evidencia. Una CVE que ya está no cambia y cve_id se conserva."""
+        from cirdan.recolectores import contrato, nvd, visita
+        from pruebas.test_huellas import fixture, tecnologia
+        self.assertEqual(self.uno('SELECT current_user AS u')['u'], 'cirdan_app')
+        ip = '198.51.100.7'
+        # 1. Shodan primero: sus dos CVE entran como stub
+        self.reescanear(resultado_shodan(cves=[(ip, 'CVE-2099-7777'), (ip, 'CVE-2099-0101')]), 'shodan')
+        stubs = self.conn.execute('SELECT cve_id, description, cvss_base_score FROM cves WHERE cve_id = ANY(%s)',
+                                  (['CVE-2099-7777', 'CVE-2099-0101'],)).fetchall()
+        self.assertEqual(sorted((f['cve_id'], f['description'], f['cvss_base_score']) for f in stubs),
+                         [('CVE-2099-0101', None, None), ('CVE-2099-7777', None, None)])
+        # 2. La visita web después: sus otras CVE entran completas; la de Shodan sigue como stub
+        revision = nvd.revisar(tecnologia('Nginx', '1.18.0'), fixture('nvd_nginx_1.18.0'), 'acme-demo.mx')
+        web = Resultado('acme-demo.mx', 'web', cves=revision['cves'])
+        web.activos.append(Activo('domain', 'acme-demo.mx', {'web': {'estado': 'visitado', 'fuente': 'web'}}))
+        web.hallazgos = [visita._hallazgo(c, 'acme-demo.mx', 'acme-demo.mx', AHORA, 'https://acme-demo.mx/')
+                         for c in revision['hallazgos']]
+        self.assertEqual(contrato.validar(web, codigos=set(visita.CODIGOS)), [])
+        ids = sorted(h.evidencia['cve'] for h in web.hallazgos)
+        self.assertEqual(len(ids), 3)
+        self.assertIn('CVE-2099-0101', ids)
+        completas = {f['cve_id']: f for f in revision['cves']}
+        for _ in range(2):   # la segunda vez es el ON CONFLICT de cves y el DO UPDATE de findings
+            s, _ = self.reescanear(web, 'web')
+            filas = {f['cve_id']: f for f in self.conn.execute(
+                'SELECT cve_id, description, cvss_base_score, cvss_vector, published_at FROM cves '
+                'WHERE cve_id = ANY(%s)', (ids,)).fetchall()}
+            self.assertEqual(sorted(filas), ids)
+            for cve in ids:
+                if cve == 'CVE-2099-0101':
+                    self.assertEqual((filas[cve]['description'], filas[cve]['cvss_base_score']), (None, None))
+                    continue
+                puntaje = filas[cve]['cvss_base_score']
+                self.assertEqual((filas[cve]['description'], None if puntaje is None else float(puntaje),
+                                  filas[cve]['cvss_vector']),
+                                 (completas[cve]['description'], completas[cve]['cvss_base_score'],
+                                  completas[cve]['cvss_vector']))
+                self.assertEqual(filas[cve]['published_at'] is None, completas[cve].get('published_at') is None)
+            guardadas = self.conn.execute('SELECT evidence->>%s AS cve, cve_id FROM findings WHERE fingerprint = ANY(%s)',
+                                          ('cve', [bytes.fromhex(h.huella) for h in web.hallazgos])).fetchall()
+            self.assertEqual(sorted((f['cve'], f['cve_id']) for f in guardadas), [(c, c) for c in ids])
+        shodan_ids = self.conn.execute(
+            "SELECT f.cve_id FROM findings f JOIN data_sources d ON d.id = f.source_id WHERE d.code = 'shodan' "
+            'AND f.cve_id = ANY(%s)', (['CVE-2099-7777', 'CVE-2099-0101'],)).fetchall()
+        self.assertEqual(sorted(f['cve_id'] for f in shodan_ids), ['CVE-2099-0101', 'CVE-2099-7777'])
+        # 3. La API da el CVSS de la NVD: de cves si la fila está completa y de la evidencia si es un stub
+        from cirdan.api import v1
+        cvss = {f['evidence']['cve']: f['cvss'] for f in self.conn.execute(v1.FINDINGS_SQL, ('acme-demo.mx',))
+                if f['source'] == 'web' and 'cve' in f['evidence']}
+        self.assertEqual({c: None if v is None else float(v) for c, v in cvss.items()},
+                         {c: completas[c]['cvss_base_score'] for c in ids})
+        self.assertIsNotNone(cvss['CVE-2099-0101'])   # el stub toma el CVSS de la evidencia
 
     def test_2r_una_cve_que_el_tope_dejo_fuera_sigue_abierta(self):
         """Las CVE que MAX_CVE deja fuera van en omitidos (#23): la que se reportó antes y ahora quedó fuera sigue
@@ -648,6 +839,41 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.abiertos('host', nuevo), {'nuevo.acme-demo.mx': 'resolved'})
         self.assertEqual(self.conteos(s.scan_id)[1], 1)
 
+    def test_2z2_un_archivo_danado_de_la_grabacion_de_ct_logs_no_cierra_nada(self):
+        """RC-46 (Ernesto, 9 nov): al reproducir con un archivo de la grabación dañado, ct_logs no cierra ningún
+        hallazgo en ese escaneo, ni el por vencer de pagos, que solo trae crt.sh. El escaneo queda parcial, con ct_logs
+        en sources_partial, y el primer aviso de la fuente nombra el archivo. Con la grabación sana otra vez tampoco se
+        cierra nada, porque todo sigue ahí."""
+        pagos = cert(40, ['pagos.acme-demo.mx'], '2026-07-27T00:00:00', '2026-10-24T12:00:00')
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)):
+            carpeta = crtsh.carpeta_de('acme-demo.mx')
+            simulado = RespaldoSimulado([EMISIONES[:3], []], crtsh={'%.acme-demo.mx': SUBDOMINIOS + [pagos]})
+            antes, _ = recolectar_ct(simulado, carpeta, 'grabar', nueva=True)
+
+            def escanear():
+                s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+                return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], modo='reproducir',
+                                             ahora=AHORA, conn=self.conn)
+            escanear()
+            todos = dict.fromkeys(('api.acme-demo.mx', 'dev.acme-demo.mx', 'pagos.acme-demo.mx'), 'open')
+            self.assertEqual(self.abiertos('host', *antes.hallazgos), todos)
+            for nombre in ('subdominios_acme-demo.mx.json', 'certspotter_acme-demo.mx.json',
+                           'dns_dev.acme-demo.mx.json'):
+                bueno = (carpeta / nombre).read_bytes()
+                (carpeta / nombre).write_bytes(b'')
+                s, resumen = escanear()
+                (carpeta / nombre).write_bytes(bueno)
+                with self.subTest(nombre=nombre):
+                    self.assertEqual(self.abiertos('host', *antes.hallazgos), todos)
+                    self.assertEqual(self.conteos(s.scan_id)[1], 0)
+                    self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
+                    fuente = resumen['sources'][0]
+                    self.assertEqual((fuente['status'], fuente['error']), ('succeeded', None))
+                    self.assertEqual(fuente['avisos'][0], crtsh.DANADA % ('1 archivo dañado', nombre))
+            s, resumen = escanear()
+            self.assertEqual(self.abiertos('host', *antes.hallazgos), todos)
+            self.assertNotIn('sources_partial', resumen['stats'])
+
     def test_3_una_fuente_que_falla_al_reproducir_deja_el_escaneo_parcial_sin_reintento(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         # crt.sh no tiene respuestas grabadas de acme-demo.mx: falla sin salir a la red
@@ -681,24 +907,169 @@ class Orquestador(unittest.TestCase):
         score = self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s', s.scan_id)
         self.assertTrue(score['partial_coverage'])
 
-    def test_3c_un_escaneo_en_vivo_nunca_busca_dominios_parecidos(self):
-        """Lo que corre POST /api/v1/domains/{fqdn}/scans: crt.sh solo consulta el dominio autorizado. El crt.sh es
-        simulado, así que nada sale a la red aunque se deje pasar acme-demo.mx como dominio en vivo."""
+    def test_3c_un_escaneo_en_vivo_busca_dominios_parecidos_solo_en_crtsh(self):
+        """Lo que corre POST /api/v1/domains/{fqdn}/scans (#109, RC-226): crt.sh consulta el dominio autorizado, %marca%
+        y las variantes aprobadas, y lookalike_domain ya tiene cobertura. El crt.sh es simulado, así que nada sale a
+        la red aunque se deje pasar acme-demo.mx como dominio en vivo."""
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         self.exige_cupo('ct_logs', crtsh.MAX_CONSULTAS)  # en vivo, ct_logs reserva su máximo antes de correr
         t = CrtshSimulado()
         with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
-                mock.patch.object(crtsh, '_descargar', t), \
+                mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
                 mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
             resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
                                          conn=self.conn)
         consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
-        self.assertEqual(consultas, ['%.acme-demo.mx'])  # ni %acme-demo% ni variantes como acme-dem0.mx
+        self.assertEqual(consultas, ['%.acme-demo.mx', '%acme-demo%'] + crtsh.candidatos_parecidos('acme-demo.mx'))
         dominios = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['domain'] for u in t.cert_spotter]
         self.assertEqual(dominios, [['acme-demo.mx']])  # Cert Spotter tampoco sale del dominio autorizado
+        self.assertEqual([n for n in t.dns if not n.endswith('acme-demo.mx')], [])  # ni su DNS
+        self.assertNotIn('rules_without_coverage', resumen['stats'])
+        self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 7)  # el vencido, el que vence pronto y 5 parecidos
+        parecidos = self.conn.execute(
+            "SELECT f.evidence->>'dominio_parecido' AS d, a.value AS activo FROM findings f "
+            "JOIN scoring_rules r ON r.id = f.rule_id JOIN assets a ON a.id = f.asset_id "
+            "WHERE f.last_scan_id = %s AND r.code = 'lookalike_domain' AND f.status = 'open' ORDER BY 1",
+            (s.scan_id,)).fetchall()
+        esperados = ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com', 'acme-demo.com.mx', 'cuenta-segura.net']
+        self.assertEqual(sorted((p['d'], p['activo']) for p in parecidos), [(p, 'acme-demo.mx') for p in esperados])
+        # el dominio parecido solo va en la evidencia: nunca entra a assets
+        self.assertIsNone(self.uno('SELECT 1 FROM assets WHERE value = ANY(%s)', esperados))
+
+    def test_3c2_si_crtsh_no_responde_a_los_parecidos_el_escaneo_queda_parcial(self):
+        """Hecho cuando 3 de RC-226: sin respuesta de crt.sh a %marca% ni a las variantes, lookalike_domain va en
+        rules_without_coverage y un parecido abierto de antes no se da por resuelto."""
+        class SinParecidos(CrtshSimulado):
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
+                if q and q[0] != '%.acme-demo.mx':
+                    raise crtsh.urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+
+        def escanear(t):
+            s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+            with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                    mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                    mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+                return orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA, conn=self.conn)
+
+        def abiertos():
+            return self.uno("SELECT count(*) AS n FROM findings f JOIN scoring_rules r ON r.id = f.rule_id "
+                            "WHERE r.code = 'lookalike_domain' AND f.status = 'open' AND f.evidence->>'origen' = 'crtsh'")['n']
+        self.exige_cupo('ct_logs', 2 * crtsh.MAX_CONSULTAS)  # dos escaneos en vivo, cada uno reserva su máximo
+        antes = abiertos()
+        escanear(CrtshSimulado())
+        self.assertEqual(abiertos(), antes + 5)
+        resumen = escanear(SinParecidos())
         self.assertEqual(resumen['status'], 'partial')
         self.assertEqual(resumen['stats']['rules_without_coverage'], ['lookalike_domain'])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 2)  # el vencido y el que vence pronto, ningún parecido
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 2)
+        self.assertEqual(abiertos(), antes + 5)  # nunca '0 parecidos': siguen abiertos
+
+    def escanear_ct(self, t):
+        """Un escaneo en vivo de acme-demo.mx solo con ct_logs y un crt.sh simulado: nada sale a la red."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+            return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
+                                         conn=self.conn)
+
+    def test_3c3_una_variante_sin_respuesta_mantiene_abierto_su_parecido(self):
+        """B4 de RC-226, con base. Si %marca% responde y la variante acme-dem0.mx no, su huella va en omitidos y el
+        parecido que abrió un escaneo anterior sigue abierto. El escaneo queda parcial (B3 de la ronda 4): le faltó
+        una de las búsquedas. Cuando crt.sh vuelve a responder y ya no tiene certificados de esa variante, se cierra."""
+        class SinLaVariante(CrtshSimulado):
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
+                if q and q[0] == 'acme-dem0.mx':
+                    raise crtsh.urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        huella = bytes.fromhex(crtsh._huella('lookalike_domain', 'acme-demo.mx', 'acme-dem0.mx'))
+
+        def estado():
+            return [f['status'] for f in self.conn.execute(
+                'SELECT status FROM findings WHERE fingerprint = %s', (huella,)).fetchall()]
+        self.exige_cupo('ct_logs', 3 * crtsh.MAX_CONSULTAS)
+        self.assertEqual(estado(), [])
+        self.escanear_ct(CrtshSimulado())
+        self.assertEqual(estado(), ['open'])
+        _, resumen = self.escanear_ct(SinLaVariante())
+        self.assertNotIn('rules_without_coverage', resumen['stats'])
+        self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 6)  # los 7 de siempre menos el de la variante
+        self.assertEqual(estado(), ['open'])  # no saber si sigue ahí no es que ya no esté
+        self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
+        sin_certificado = CrtshSimulado()
+        del sin_certificado.respuestas['acme-dem0.mx']
+        _, resumen = self.escanear_ct(sin_certificado)
+        self.assertEqual(estado(), ['resolved'])  # crt.sh respondió y ya no lo trae: ahora sí se cierra
+        self.assertNotIn('sources_partial', resumen['stats'])
+
+    def test_3c5_con_certificados_parciales_un_parecido_que_ya_no_sale_se_cierra(self):
+        """B2 y H9 de la ronda 4 de RC-226, con base. Si Cert Spotter no responde, pueden faltar certificados y el
+        escaneo queda parcial, pero la búsqueda de parecidos sí se hizo completa: el parecido de una variante que
+        respondió y ya no tiene certificado se cierra. El de una variante que no respondió sigue abierto, y los que
+        siguen saliendo también."""
+        class SinCertSpotter(CrtshSimulado):
+            def __init__(self, caida=None):
+                super().__init__()
+                self.caida = caida
+
+            def __call__(self, url, timeout):
+                partes = crtsh.urllib.parse.urlparse(url)
+                q = crtsh.urllib.parse.parse_qs(partes.query).get('q')
+                if partes.netloc == 'api.certspotter.com' or (q and q[0] == self.caida):
+                    raise crtsh.urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+
+        def estado(parecido):
+            huella = bytes.fromhex(crtsh._huella('lookalike_domain', 'acme-demo.mx', parecido))
+            return [f['status'] for f in self.conn.execute(
+                'SELECT status FROM findings WHERE fingerprint = %s', (huella,)).fetchall()]
+        self.exige_cupo('ct_logs', 3 * crtsh.MAX_CONSULTAS)
+        self.escanear_ct(CrtshSimulado())
+        self.assertEqual((estado('acme-dem0.mx'), estado('acme-demo-login.com')), (['open'], ['open']))
+        caida = SinCertSpotter(caida='acme-dem0.mx')  # certificados parciales y la variante sin respuesta
+        _, resumen = self.escanear_ct(caida)
+        self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
+        self.assertEqual((estado('acme-dem0.mx'), estado('acme-demo-login.com')), (['open'], ['open']))
+        sin_certificado = SinCertSpotter()  # certificados parciales, y la variante responde sin certificados
+        del sin_certificado.respuestas['acme-dem0.mx']
+        _, resumen = self.escanear_ct(sin_certificado)
+        self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
+        self.assertNotIn('rules_without_coverage', resumen['stats'])
+        self.assertEqual((estado('acme-dem0.mx'), estado('acme-demo-login.com')), (['resolved'], ['open']))
+
+    def test_3c4_solo_los_dominios_vigentes_de_la_organizacion_cuentan_como_propios(self):
+        """B1 de RC-226. Un dominio dado de baja o sin verificar no es propio: su parecido se sigue reportando y no
+        deja de consultarse como variante. Uno verificado o en pausa sí lo es."""
+        for fqdn, estado in (('acme-dem0.mx', 'removed'), ('acme-demo-login.com', 'pending_verification'),
+                             ('acme-demo-pagos.com', 'paused')):
+            self.conn.execute('INSERT INTO domains (organization_id, fqdn, status, txt_token) VALUES (%s, %s, %s, %s)',
+                              (ACME, fqdn, estado, 'rc226-' + estado))
+        vistos = []
+        real = orquestador.ejecutar
+
+        def ejecutar(*a, **k):
+            vistos.append(sorted(k.get('propios') or ()))
+            return real(*a, **k)
+        self.exige_cupo('ct_logs', crtsh.MAX_CONSULTAS)
+        t = CrtshSimulado()
+        with mock.patch.object(orquestador, 'ejecutar', ejecutar):
+            s, _ = self.escanear_ct(t)
+        # de la semilla: acme-portal.mx y acme-tienda.mx (verified) y old-example.net (paused). partner-example.com,
+        # sin verificar, no va
+        self.assertEqual(vistos, [['acme-demo-pagos.com', 'acme-portal.mx', 'acme-tienda.mx', 'old-example.net']])
+        consultas = [crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls]
+        self.assertIn('acme-dem0.mx', consultas)  # el dado de baja se sigue consultando como variante
+        parecidos = [f['d'] for f in self.conn.execute(
+            "SELECT f.evidence->>'dominio_parecido' AS d FROM findings f JOIN scoring_rules r ON r.id = f.rule_id "
+            "WHERE f.last_scan_id = %s AND r.code = 'lookalike_domain' AND f.status = 'open' ORDER BY 1",
+            (s.scan_id,)).fetchall()]
+        self.assertEqual(sorted(parecidos),
+                         ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo.com.mx', 'cuenta-segura.net'])
 
     def test_3d_en_vivo_la_fuente_que_falla_se_reintenta_en_el_mismo_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
@@ -949,6 +1320,7 @@ class Orquestador(unittest.TestCase):
                        "WHERE code = 'ct_logs'", (ayer,))
             pg.execute('SET LOCAL ROLE cirdan_app')  # desde aquí, con los permisos de la API
             pg.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+            renovar_carta(pg)  # la de setUp está en otra transacción que esta conexión no ve
             s = self.solicitar('acme-demo.mx', responde(TXT_ACME), conn=pg)
             resumen = self.en_vivo(s, [BIEN], lambda segundos: None, fuentes=('ct_logs',), conn=pg)
             self.assertEqual(resumen['sources'][0]['status'], 'succeeded')  # lo de ayer no cuenta hoy
@@ -1013,13 +1385,13 @@ class Orquestador(unittest.TestCase):
 
     def test_5b_si_el_trigger_rechaza_el_motivo_sale_de_la_base_y_no_del_texto_del_error(self):
         """Segundo candado: la carta se revoca entre la revisión y la fila de scans, y el trigger la rechaza."""
-        carta = self.uno("SELECT a.id::text FROM domain_authorizations a JOIN domains d ON d.id = a.domain_id "
-                         "WHERE d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL "
-                         "AND current_date BETWEEN a.valid_from AND a.valid_until ORDER BY a.valid_until DESC LIMIT 1")['id']
         consulta = ConsultaTxt((TXT_ACME,))
 
         def revoca_y_responde(fqdn):
-            self.conn.execute('UPDATE domain_authorizations SET revoked_at = now() WHERE id = %s', (carta,))
+            # Todas las no revocadas (la de la semilla y la que renovó setUp, vigentes o no): así se revoca la que
+            # eligió solicitar(), sea cual sea
+            self.conn.execute("UPDATE domain_authorizations a SET revoked_at = now() FROM domains d "
+                              "WHERE d.id = a.domain_id AND d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL")
             return consulta
         s = self.solicitar('acme-demo.mx', revoca_y_responde)
         self.assertEqual((s.aceptada, s.motivos), (False, ['authorization_revoked']))  # antes salía authorization_expired
@@ -1038,6 +1410,21 @@ class Orquestador(unittest.TestCase):
         self.assertEqual((sin_txt.aceptada, sin_txt.txt), (False, 'missing'))
         sin_dns = self.solicitar('acme-demo.mx', DnsSimulado(ConsultaTxt(None, error='Timeout')))
         self.assertEqual((sin_dns.aceptada, sin_dns.txt), (False, 'dns_error'))
+
+    def test_7b_la_evidencia_guarda_el_resolvedor_que_dio_el_resultado(self):
+        """#119, RC-236: un match por DNS sobre HTTPS queda con resolver_ip 1.0.0.1, y uno por el 53 con 1.1.1.1."""
+        for resolvedor in ('1.0.0.1', '1.1.1.1'):
+            with self.subTest(resolvedor=resolvedor):
+                s = self.solicitar('acme-demo.mx', DnsSimulado(ConsultaTxt((TXT_ACME,), resolvedor)))
+                self.assertTrue(s.aceptada, s.detalle)
+                try:
+                    evidencia = self.uno('SELECT host(v.resolver_ip) AS ip, v.result FROM scans s JOIN '
+                                         'dns_txt_verifications v ON v.id = s.txt_verification_id WHERE s.id = %s',
+                                         s.scan_id)
+                    self.assertEqual((evidencia['ip'], evidencia['result']), (resolvedor, 'match'))
+                finally:   # el siguiente subTest no choca con este escaneo aunque aquí falle algo
+                    self.conn.execute("UPDATE scans SET status = 'completed', finished_at = now() WHERE id = %s",
+                                      (s.scan_id,))
 
     def test_8_no_consulta_en_vivo_un_dominio_de_la_demo(self):
         s = orquestador.solicitar(ACME, 'acme-demo.mx', conn=self.conn)  # sin DNS simulado = consulta real

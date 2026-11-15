@@ -1,0 +1,11 @@
+{
+  "_nota": "Respuesta armada a mano con señales públicas de nginx, PHP, WordPress y jQuery. No es una grabación de ningún dominio y la cookie es falsa.",
+  "estado": 200,
+  "cabeceras": [
+    ["Server", "nginx/1.24.0 (Ubuntu)"],
+    ["X-Powered-By", "PHP/8.1.2-1ubuntu2.14"],
+    ["Set-Cookie", "PHPSESSID=CIRDAN_FAKE_sesion_php; path=/; HttpOnly"],
+    ["Link", "<https://www.acme-demo.mx/wp-json/>; rel=\"https://api.w.org/\""]
+  ],
+  "cuerpo": "<!DOCTYPE html><html><head><META NAME=\"Generator\" CONTENT=\"WordPress 5.8.1\"><link rel='stylesheet' href='https://www.acme-demo.mx/wp-content/themes/demo/style.css'><script src=\"https://code.jquery.com/jquery-3.5.1.min.js\"></script></head><body><p>Acme demo</p></body></html>"
+}

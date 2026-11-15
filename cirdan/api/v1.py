@@ -2,18 +2,30 @@
 
 Todo con sesión: la empresa sale de la cookie y RLS filtra en la base. Las bandas, el ponderado y
 el piso salen del criterio de criticidad (cirdan/score/criterio.py, #29).
+
+Los GET de datos también aceptan una llave de API (#87, RC-129) con session_or_api_key, salvo la salida
+a SIEM (export/siem), que por ahora pide la sesión. La empresa sale de la llave y RLS filtra igual.
+Una llave de un solo dominio además pasa por in_scope(): toda ruta nueva que acepte llave y lea datos
+de un dominio tiene que revisarlo, porque RLS aísla por empresa, no por dominio.
 """
+import json
 import uuid
 from datetime import date, datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
+from psycopg import IsolationLevel
+from psycopg.types.json import Jsonb
 
-from cirdan import orquestador
-from cirdan.auth.deps import Session, current_session, require_roles
+from cirdan import orquestador, siem
+from cirdan.api.llaves import SIN_SESION
+from cirdan.auth import sessions
+from cirdan.auth.deps import Session, current_session, in_scope, require_roles, session_or_api_key
+from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
-from cirdan.db import transaction
-from cirdan.score import criterio, motor, plan as plan_accion
+from cirdan.db import audit, transaction
+from cirdan.score import cambios, comparacion, configuracion, criterio, motor, plan as plan_accion, subcategorias
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
@@ -82,9 +94,38 @@ def _query(session, sql, params=()):
         return conn.execute(sql, params).fetchall()
 
 
+# Sin respaldo: la FK diferida de la migración 012 obliga a que todo texto de regla tenga su mapeo
+# (scoring_rule_framework_mappings, 011). Si falta, la base no tiene la 012 (entró un texto sin mapeo o se borró un
+# mapeo) y responden 500 toda la lista de hallazgos del dominio y la explicación del hallazgo.
+def _marcos(f):
+    if not f['attack_version']:
+        raise RuntimeError('Falta el mapeo de marcos para la regla %s' % f['rule_code'])
+    return {
+        'mitre_attack': {
+            'version': f['attack_version'],
+            'technique_id': f['attack_technique_id'],
+            'technique_name': f['attack_technique_name'],
+            'source_url': f['attack_source_url'],
+            'unmapped_reason': f['attack_unmapped_reason'],
+        },
+        'iso_27001_2022': {
+            'version': f['iso_version'],
+            'control_id': f['iso_control_id'],
+            'control_name': f['iso_control_name'],
+            'source_url': f['iso_source_url'],
+        },
+        'cis_controls_v8_1': {
+            'version': f['cis_version'],
+            'safeguard_id': f['cis_safeguard_id'],
+            'safeguard_name': f['cis_safeguard_name'],
+            'source_url': f['cis_source_url'],
+        },
+    }
+
+
 def _domain_id(session, fqdn):
     rows = _query(session, 'SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,))
-    if not rows:
+    if not rows or not in_scope(session, rows[0]['id']):  # fuera del alcance de la llave se ve igual que ajeno
         raise HTTPException(404, 'Dominio no encontrado para esta organización')
     return rows[0]['id']
 
@@ -144,6 +185,7 @@ def _domain(r):
         'txt': {'status': txt, 'checked_at': r['txt_checked_at']},
         'scan_eligibility': {'can_scan': not reasons, 'reasons': reasons},
         'score': r['score'], 'band': criterio.banda(r['score']) if r['score'] is not None else None,
+        'grade': criterio.letra(r['score']) if r['score'] is not None else None,
         'open_findings': counts, 'last_scan_at': r['last_scan_at'], 'next_scan_at': r['next_scan_at'],
     }
 
@@ -163,8 +205,8 @@ def txt_records(session: Session = Depends(require_roles('admin'))):
 
 
 @router.get('/domains', summary='Dominios con autorización, TXT, si se pueden escanear, score y hallazgos abiertos')
-def domains(session: Session = Depends(current_session)):
-    items = [_domain(r) for r in _query(session, DOMAINS_SQL)]
+def domains(session: Session = Depends(session_or_api_key)):
+    items = [_domain(r) for r in _query(session, DOMAINS_SQL) if in_scope(session, r['id'])]
     return {'items': items, 'total': len(items)}
 
 
@@ -174,15 +216,23 @@ FINDINGS_SQL = '''
 SELECT f.id::text, f.evidence, a.value AS asset, a.asset_type, a.first_seen_at AS asset_first_seen,
     r.category, r.code AS rule_code, r.base_severity, s.code AS source,
     coalesce(sc_score.severity, f.severity) AS severity, f.status,
-       f.cve_id, c.cvss_base_score AS cvss, c.epss_score AS epss, coalesce(c.in_kev, false) AS in_kev,
+       f.cve_id, coalesce(c.cvss_base_score, CASE WHEN jsonb_typeof(f.evidence->'cvss') = 'number' THEN
+           CASE WHEN (f.evidence->>'cvss')::numeric BETWEEN 0 AND 10 THEN (f.evidence->>'cvss')::numeric END END)
+           AS cvss,
+       c.epss_score AS epss, coalesce(c.in_kev, false) AS in_kev,
        f.detected_at, f.last_scan_id::text, sc.queued_at AS scan_at,
        b.breach_name, b.breach_date, b.data_classes,
+       fm.attack_version, fm.attack_technique_id, fm.attack_technique_name,
+       fm.attack_source_url, fm.attack_unmapped_reason,
+       fm.iso_version, fm.iso_control_id, fm.iso_control_name, fm.iso_source_url,
+       fm.cis_version, fm.cis_safeguard_id, fm.cis_safeguard_name, fm.cis_source_url,
        CASE WHEN sc.id IS NULL OR f.detected_at >= sc.queued_at THEN 'new' ELSE 'recurring' END AS recurrence
   FROM findings f
   JOIN domains d       ON d.id = f.domain_id
   JOIN assets a        ON a.id = f.asset_id
   JOIN scoring_rules r ON r.id = f.rule_id
   JOIN data_sources s  ON s.id = f.source_id
+  LEFT JOIN scoring_rule_framework_mappings fm ON fm.rule_code = r.code
   LEFT JOIN scans sc   ON sc.id = f.last_scan_id
   LEFT JOIN cves c     ON c.cve_id = f.cve_id
   LEFT JOIN breach_exposures b ON b.finding_id = f.id
@@ -206,12 +256,13 @@ def _finding(f):
         'cve_id': f['cve_id'], 'cvss': float(f['cvss']) if f['cvss'] is not None else None,
         'epss': float(f['epss']) if f['epss'] is not None else None, 'in_kev': f['in_kev'],
         'evidence': evidence, 'caracteristicas': caracteristicas(f),
+        'frameworks': _marcos(f),
         'detected_at': f['detected_at'], 'last_scan_id': f['last_scan_id'],
     }
 
 
 @router.get('/domains/{fqdn}/findings', summary='Hallazgos abiertos del dominio, de más a menos severo')
-def domain_findings(fqdn: str, session: Session = Depends(current_session)):
+def domain_findings(fqdn: str, session: Session = Depends(session_or_api_key)):
     _domain_id(session, fqdn)
     items = [_finding(f) for f in _query(session, FINDINGS_SQL, (fqdn,))]
     return {'domain': fqdn, 'items': items, 'total': len(items)}
@@ -220,9 +271,9 @@ def domain_findings(fqdn: str, session: Session = Depends(current_session)):
 # ---------------------------------------------------------------- score e histórico
 
 SCORES_SQL = '''
-SELECT ds.id::text AS score_id, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
+SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
     ds.model_version, ds.model_fallback_reason, ds.computed_at,
-    rs.version AS rule_set_version, rs.category_weights, sc.stats,
+    rs.version AS rule_set_version, rs.category_weights, sc.stats, sc.queued_at, sc.finished_at,
        (SELECT count(*) FROM score_contributions x WHERE x.score_id = ds.id AND x.severity = 'critical') AS critical_at_time
   FROM domain_scores ds
   JOIN domains d ON d.id = ds.domain_id
@@ -233,11 +284,25 @@ SELECT ds.id::text AS score_id, ds.score, ds.category_scores, ds.method, ds.reas
 '''
 
 
+SCORE_APORTES_SQL = '''
+SELECT r.code, r.category, x.severity, x.penalty
+  FROM score_contributions x JOIN scoring_rules r ON r.id = x.rule_id
+ WHERE x.score_id = %s::uuid
+'''
+
+SCORE_CORRIDAS_SQL = '''
+SELECT ds.code AS source, r.status
+  FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id
+ WHERE r.scan_id = %s::uuid
+'''
+
+
 def _score_base(row, critical_open):
     weights = {k: float(v) for k, v in row['category_weights'].items()}
     calc = criterio.score_dominio(row['category_scores'], weights, critical_open)
     return {
         'score_id': row['score_id'], 'score': row['score'], 'band': criterio.banda(row['score']),
+        'grade': criterio.letra(row['score']),
         'weighted': calc['ponderado'], 'floor': calc['piso'], 'floor_applied': row['score'] > calc['ponderado'],
         'critical_open': critical_open, 'method': row['method'], 'rule_set_version': row['rule_set_version'],
         'reason': row['reason'], 'partial_coverage': row['partial_coverage'], 'computed_at': row['computed_at'],
@@ -247,7 +312,7 @@ def _score_base(row, critical_open):
 
 
 @router.get('/domains/{fqdn}/score', summary='Score más reciente con su desglose por categoría')
-def domain_score(fqdn: str, session: Session = Depends(current_session)):
+def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
     domain_id = _domain_id(session, fqdn)
     rows = _query(session, SCORES_SQL, (fqdn,))
     if not rows:
@@ -257,24 +322,177 @@ def domain_score(fqdn: str, session: Session = Depends(current_session)):
             "SELECT count(*) AS n FROM findings WHERE domain_id = %s AND severity = 'critical' AND status = ANY(%s)",
             (domain_id, list(criterio.ESTADOS_VIGENTES))).fetchone()['n']
         threshold = conn.execute('SELECT alert_score_threshold AS t FROM organizations').fetchone()['t']
+        # Subcategorías y KRI (#114): los aportes de este score y las corridas de su escaneo, sin columnas nuevas.
+        aportes = conn.execute(SCORE_APORTES_SQL, (rows[-1]['score_id'],)).fetchall()
+        corridas = {r['source']: r['status']
+                    for r in conn.execute(SCORE_CORRIDAS_SQL, (rows[-1]['scan_id'],)).fetchall()}
     base, weights = _score_base(rows[-1], critical_open)
+    stats = rows[-1]['stats'] or {}
+    subs, kris = subcategorias.resumen(aportes, corridas, stats.get('rules_without_coverage') or (),
+                                       stats.get('sources_partial') or ())
     categories = [{'category': c, 'score': rows[-1]['category_scores'][c], 'band': criterio.banda(rows[-1]['category_scores'][c]),
                    'weight': weights[c]} for c in criterio.CATEGORIAS]
     return {'domain': fqdn, **base, 'categories': categories,
+            'subcategories': subs, 'kris': kris, 'kri_map_version': subcategorias.VERSION,
             'alert': {'threshold': threshold, 'triggered': criterio.dispara_alerta(base['score'], threshold)}}
 
 
 @router.get('/domains/{fqdn}/score/history', summary='Todos los scores del dominio, del más viejo al más nuevo')
-def score_history(fqdn: str, session: Session = Depends(current_session)):
+def score_history(fqdn: str, session: Session = Depends(session_or_api_key)):
     _domain_id(session, fqdn)
+    rows = _query(session, SCORES_SQL, (fqdn,))
+    scan_ids = [row['scan_id'] for row in rows if row['reason'] == 'scan']
+    nuevos_activos = {}
+    if scan_ids:
+        nuevos_activos = {
+            row['scan_id']: row['new_assets']
+            for row in _query(session, '''
+                SELECT s.id::text AS scan_id, count(a.id) AS new_assets
+                  FROM scans s
+                  LEFT JOIN assets a ON a.domain_id = s.domain_id
+                                    AND a.first_seen_at >= s.queued_at
+                                    AND a.first_seen_at <= s.finished_at
+                 WHERE s.id::text = ANY(%s)
+                 GROUP BY s.id
+            ''', (scan_ids,))
+        }
     items = []
-    for row in _query(session, SCORES_SQL, (fqdn,)):
+    escaneo_anterior = None
+    for row in rows:
         base, _ = _score_base(row, row['critical_at_time'])
         # Un recálculo no encuentra ni resuelve hallazgos. Un escaneo que no los contó (antes de RC-55) da null, no 0.
         stats = (row['stats'] or {}) if row['reason'] == 'scan' else {'new_findings': 0, 'resolved_findings': 0}
+        cambios_semanales = None
+        if row['reason'] == 'scan':
+            escaneo = {**row, 'new_assets': nuevos_activos.get(row['scan_id'], 0)}
+            cambios_semanales = cambios.resumen_semanal(escaneo, escaneo_anterior)
+            escaneo_anterior = escaneo
         items.append({**base, 'categories': row['category_scores'],
-                      'new_findings': stats.get('new_findings'), 'resolved_findings': stats.get('resolved_findings')})
+                      'new_findings': stats.get('new_findings'), 'resolved_findings': stats.get('resolved_findings'),
+                      'weekly_changes': cambios_semanales})
     return {'domain': fqdn, 'items': items, 'total': len(items)}
+
+
+# ---------------------------------------------------------------- comparación y exportaciones (#24, RC-57)
+# Las dos piden autorización firmada vigente (retro-11): un dominio de otra empresa responde 404, como
+# en el resto de la API, y uno de la empresa sin autorización vigente responde 403.
+
+def _dominio_autorizado(session, fqdn):
+    rows = _query(session, '''
+        SELECT d.id::text,
+               EXISTS (SELECT 1 FROM domain_authorizations a
+                        WHERE a.domain_id = d.id AND a.revoked_at IS NULL
+                          AND current_date BETWEEN a.valid_from AND a.valid_until) AS vigente
+          FROM domains d WHERE d.fqdn = %s
+    ''', (fqdn,))
+    if not rows or not in_scope(session, rows[0]['id']):
+        raise HTTPException(404, 'Dominio no encontrado para esta organización')
+    if not rows[0]['vigente']:
+        raise HTTPException(403, 'El dominio no tiene una autorización firmada vigente')
+    return rows[0]['id']
+
+
+def _formato(formato):
+    if formato not in ('csv', 'json'):
+        raise HTTPException(422, "El formato debe ser 'csv' o 'json'")
+    return formato
+
+
+def _descarga(contenido, media_type, nombre):
+    return Response(content=contenido, media_type=media_type,
+                    headers={'Content-Disposition': 'attachment; filename="%s"' % nombre})
+
+
+def _json(data):
+    return json.dumps(jsonable_encoder(data), ensure_ascii=False, separators=(',', ':'))
+
+
+ENCABEZADOS_HALLAZGOS = (
+    'dominio', 'hallazgo_id', 'titulo', 'severidad', 'severidad_base', 'categoria', 'regla', 'activo',
+    'tipo_activo', 'fuente', 'estado', 'recurrencia', 'cve', 'cvss', 'epss', 'en_kev', 'detectado',
+    'ultimo_escaneo_id', 'mitre_attack', 'iso_27001_2022', 'cis_controls_v8_1', 'evidencia',
+)
+
+
+@router.get('/domains/{fqdn}/findings/export', summary='Descarga los hallazgos abiertos del dominio en CSV o JSON')
+def export_findings(fqdn: str, formato: str = Query(default='json'), session: Session = Depends(session_or_api_key)):
+    formato = _formato(formato)
+    _dominio_autorizado(session, fqdn)
+    items = [_finding(f) for f in _query(session, FINDINGS_SQL, (fqdn,))]
+    if formato == 'json':
+        return _descarga(_json({'domain': fqdn, 'items': items, 'total': len(items)}),
+                         'application/json; charset=utf-8', '%s-hallazgos.json' % fqdn)
+    filas = [(fqdn, i['id'], i['title'], i['severity'], i['base_severity'], i['category'], i['rule_code'], i['asset'],
+              i['asset_type'], i['source'], i['status'], i['recurrence'], i['cve_id'], i['cvss'], i['epss'], i['in_kev'],
+              i['detected_at'], i['last_scan_id'], i['frameworks']['mitre_attack']['technique_id'],
+              i['frameworks']['iso_27001_2022']['control_id'], i['frameworks']['cis_controls_v8_1']['safeguard_id'],
+              i['evidence']) for i in items]
+    return _descarga(csv_con_bom(ENCABEZADOS_HALLAZGOS, filas), 'text/csv; charset=utf-8', '%s-hallazgos.csv' % fqdn)
+
+
+COMPARE_SCORES_SQL = '''
+SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.reason, ds.partial_coverage, ds.computed_at
+  FROM domain_scores ds WHERE ds.domain_id = %s AND ds.id = ANY(%s::uuid[])
+'''
+
+# El aporte (severidad, puntos y regla) es del score del dominio y siempre sale. El título, el activo y
+# el estado se leen del hallazgo de hoy, y el upsert por huella puede haberlo movido a otro dominio de
+# la empresa: una llave de un solo dominio (%(solo)s) no los recibe de un hallazgo que ya no es suyo.
+COMPARE_CONTRIBUTIONS_SQL = '''
+SELECT x.score_id::text, f.id::text AS finding_id, x.severity, x.penalty,
+       CASE WHEN v.visible THEN coalesce(f.evidence->>'title', r.code) ELSE r.code END AS title,
+       r.code AS rule_code, r.category,
+       CASE WHEN v.visible THEN a.value END AS asset,
+       CASE WHEN v.visible THEN a.asset_type END AS asset_type,
+       CASE WHEN v.visible THEN f.status END AS status
+  FROM score_contributions x
+  JOIN domain_scores ds ON ds.id = x.score_id
+  JOIN findings f       ON f.id = x.finding_id  -- sin f.domain_id: el upsert por huella puede haberlo movido
+  JOIN assets a         ON a.id = f.asset_id
+  JOIN scoring_rules r  ON r.id = x.rule_id
+ CROSS JOIN LATERAL (SELECT %(solo)s::uuid IS NULL OR f.domain_id = %(solo)s::uuid AS visible) v
+ WHERE ds.domain_id = %(domain_id)s AND x.score_id = ANY(%(scores)s::uuid[])
+'''
+
+
+def _score_ids(*valores):
+    try:
+        return [str(uuid.UUID(v)) for v in valores]
+    except ValueError:
+        raise HTTPException(404, 'Escaneo no encontrado')  # un id mal formado se responde igual que uno ajeno
+
+
+def _comparacion(session, fqdn, desde, hasta):
+    domain_id = _dominio_autorizado(session, fqdn)
+    desde, hasta = _score_ids(desde, hasta)
+    with transaction(session.org_id) as conn:  # una sola transacción: las dos fotos y sus aportes del mismo momento
+        scores = {r['score_id']: r for r in conn.execute(COMPARE_SCORES_SQL, (domain_id, [desde, hasta])).fetchall()}
+        if desde not in scores or hasta not in scores:
+            raise HTTPException(404, 'Escaneo no encontrado')
+        aportes = conn.execute(COMPARE_CONTRIBUTIONS_SQL, {'domain_id': domain_id, 'scores': [desde, hasta],
+                                                           'solo': session.domain_id}).fetchall()
+    items, resumen = comparacion.comparar([a for a in aportes if a['score_id'] == desde],
+                                          [a for a in aportes if a['score_id'] == hasta])
+    return {'domain': fqdn, 'from': scores[desde], 'to': scores[hasta], 'summary': resumen,
+            'items': items, 'total': len(items)}
+
+
+@router.get('/domains/{fqdn}/score/compare',
+            summary='Compara hallazgo por hallazgo dos scores del histórico: nuevos, que ya no están y que siguen')
+def compare_scores(fqdn: str, desde: str = Query(..., description='score_id del histórico'),
+                   hasta: str = Query(..., description='score_id del histórico'),
+                   session: Session = Depends(session_or_api_key)):
+    return _comparacion(session, fqdn, desde, hasta)
+
+
+@router.get('/domains/{fqdn}/score/compare/export', summary='Descarga la comparación de dos scores en CSV o JSON')
+def export_comparison(fqdn: str, desde: str = Query(...), hasta: str = Query(...),
+                      formato: str = Query(default='json'), session: Session = Depends(session_or_api_key)):
+    formato = _formato(formato)
+    data = _comparacion(session, fqdn, desde, hasta)
+    if formato == 'json':
+        return _descarga(_json(data), 'application/json; charset=utf-8', '%s-comparacion.json' % fqdn)
+    return _descarga(comparacion.exportar_csv(data), 'text/csv; charset=utf-8', '%s-comparacion.csv' % fqdn)
 
 
 # ---------------------------------------------------------------- plan de acción y simulador (#42, #70)
@@ -289,7 +507,7 @@ def _contexto_plan(session, fqdn):
         if score:
             rule_set_id, method, parcial = score['rule_set_id'], score['method'], score['partial_coverage']
         else:
-            active = conn.execute('SELECT id::text FROM scoring_rule_sets WHERE is_active').fetchone()
+            active = configuracion.juego_activo(conn, session.org_id)
             if not active:
                 raise HTTPException(409, 'El dominio aún no tiene un juego de reglas activo')
             rule_set_id, method, parcial = active['id'], 'rules', False
@@ -334,7 +552,7 @@ def _plan_data(session, fqdn):
 
 
 @router.get('/domains/{fqdn}/action-plan', summary='Plan de acción con el impacto estimado por acción')
-def action_plan(fqdn: str, session: Session = Depends(current_session)):
+def action_plan(fqdn: str, session: Session = Depends(session_or_api_key)):
     return _plan_data(session, fqdn)
 
 
@@ -357,7 +575,7 @@ def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
 
 @router.get('/domains/{fqdn}/action-plan/export', summary='Descarga el plan de acción en CSV o JSON')
 def export_action_plan(fqdn: str, formato: str = Query(default='json'),
-                       session: Session = Depends(current_session)):
+                       session: Session = Depends(session_or_api_key)):
     if formato not in ('csv', 'json'):
         raise HTTPException(422, "El formato debe ser 'csv' o 'json'")
     data = _plan_data(session, fqdn)
@@ -374,13 +592,175 @@ def export_action_plan(fqdn: str, formato: str = Query(default='json'),
     )
 
 
+# ---------------------------------------------------------------- salida a SIEM (#98, RC-212)
+# Consultas propias y no las del portal: de la evidencia solo leen sus llaves 'cve' y 'cvss', validadas, y el valor de
+# un activo de tipo email no sale de la base.
+
+SIEM_FINDINGS_SQL = '''
+WITH ultimos AS (SELECT ds.id, ds.computed_at, row_number() OVER (ORDER BY ds.computed_at DESC, ds.id) AS n
+                   FROM domain_scores ds JOIN domains dd ON dd.id = ds.domain_id
+                   LEFT JOIN scans ss ON ss.id = ds.scan_id
+                  WHERE dd.fqdn = %(fqdn)s AND ds.reason = 'scan'
+                    AND ss.stats->'sources_ok' IS DISTINCT FROM '0'::jsonb
+                  ORDER BY ds.computed_at DESC, ds.id LIMIT 2),
+     caidos AS (SELECT r.source_id FROM scans cs JOIN domains dd ON dd.id = cs.domain_id
+                  JOIN scan_source_runs r ON r.scan_id = cs.id AND r.status = 'succeeded'
+                 WHERE dd.fqdn = %(fqdn)s AND cs.finished_at IS NOT NULL
+                   AND cs.finished_at > (SELECT min(u.computed_at) FROM ultimos u)
+                   AND NOT EXISTS (SELECT 1 FROM domain_scores x WHERE x.scan_id = cs.id))
+SELECT f.id::text, t.title AS rule_title, r.code AS rule_code, r.category,
+       coalesce(sc_score.severity, f.severity) AS severity, f.status, cv.cve_id,
+       coalesce(c.cvss_base_score, CASE WHEN jsonb_typeof(f.evidence->'cvss') = 'number' THEN
+           CASE WHEN (f.evidence->>'cvss')::numeric BETWEEN 0 AND 10 THEN (f.evidence->>'cvss')::numeric END END)
+           AS cvss,
+       (SELECT x.severity FROM score_contributions x
+         WHERE x.finding_id = f.id AND x.score_id = (SELECT u.id FROM ultimos u WHERE u.n = 2)) AS previous_severity,
+       CASE WHEN a.asset_type = 'email' THEN NULL ELSE a.value END AS asset, a.asset_type,
+       host(a.ip_address) AS asset_ip,
+       CASE WHEN pa.asset_type IN ('domain','subdomain') THEN pa.value END AS asset_parent,
+       fm.attack_technique_id, s.code AS data_source, f.detected_at, f.last_scan_id::text,
+       sc.finished_at AS scan_finished_at,
+       CASE WHEN (SELECT count(*) FROM score_contributions x
+                   WHERE x.finding_id = f.id AND x.score_id IN (SELECT u.id FROM ultimos u)) = 2
+                 AND f.source_id NOT IN (SELECT k.source_id FROM caidos k)
+            THEN 'recurring' ELSE 'new' END AS recurrence
+  FROM findings f
+  JOIN domains d       ON d.id = f.domain_id
+  JOIN assets a        ON a.id = f.asset_id
+  LEFT JOIN assets pa  ON pa.id = a.parent_asset_id
+  JOIN scoring_rules r ON r.id = f.rule_id
+  JOIN scoring_rule_texts t ON t.code = r.code
+  JOIN data_sources s  ON s.id = f.source_id
+  LEFT JOIN scoring_rule_framework_mappings fm ON fm.rule_code = r.code
+  LEFT JOIN scans sc   ON sc.id = f.last_scan_id
+  CROSS JOIN LATERAL (SELECT coalesce(f.cve_id, CASE WHEN f.evidence->>'cve' ~ '^CVE-[0-9]{4}-[0-9]{4,}$'
+                                                     THEN f.evidence->>'cve' END) AS cve_id) cv
+  LEFT JOIN cves c     ON c.cve_id = cv.cve_id
+  LEFT JOIN LATERAL (SELECT x.severity FROM score_contributions x
+                      WHERE x.finding_id = f.id
+                        AND x.score_id = (SELECT ds.id FROM domain_scores ds WHERE ds.domain_id = f.domain_id
+                                           ORDER BY ds.computed_at DESC LIMIT 1)) sc_score ON true
+ WHERE d.fqdn = %(fqdn)s AND f.status = 'open'
+ ORDER BY array_position(ARRAY['critical','high','medium','low'], coalesce(sc_score.severity, f.severity)),
+          f.detected_at DESC, f.id
+'''
+# recurrence: cada score de escaneo guarda en score_contributions un aporte por hallazgo vigente (open o accepted_risk),
+# así que un hallazgo que está en los dos últimos scores de escaneo del dominio ya venía de antes ('recurring') y
+# cualquier otro es 'new': uno que apareció o se reabrió en el último escaneo, o después de su score. No usa
+# detected_at, que no cambia al reabrir, ni last_scan_id, que no avanza si la fuente del hallazgo falla. Los scores con
+# otro motivo (correction, intel_update, rules_change) no cuentan, ni el de un escaneo en el que no respondió ninguna
+# fuente (stats.sources_ok = 0): guarda score, pero ninguna fuente confirmó sus hallazgos.
+# Se mide contra los escaneos y no contra la exportación anterior: con dos escaneos entre dos exportaciones, un crítico
+# que abrió el primero ya sale recurring en la segunda. La alerta de un crítico nuevo solo sale antes del siguiente
+# escaneo con score que cuente (el de ultimos, con sources_ok distinto de 0, y tras un escaneo caído hasta el segundo,
+# ver abajo). El envío automático al cerrar cada escaneo (#98b, RC-213) es el que no pierde ninguna.
+# previous_severity es la severidad del hallazgo en el más viejo de los dos scores: un crítico que no lo era ahí (lo
+# subió el ML o el motor) también es alerta (cirdan/siem/__init__.py), aunque siga abierto. La severidad que se compara
+# sale del último score de cualquier motivo, así que también alerta un crítico que subió en el score de un escaneo
+# con sources_ok = 0, que ultimos no cuenta, o porque el ML cayó a reglas con severidad base critical. Un score
+# rules_change no sube nada por sí solo: recalcular_scores (cirdan/score/configuracion.py) copia la severidad ML
+# congelada del score anterior o f.severity, así que solo arrastra la subida de un score anterior o el f.severity
+# que dejó un escaneo caído (el upsert del orquestador la reescribe aunque el escaneo no deje score). Esas alertas se
+# repiten: la del escaneo con sources_ok = 0 otra vez tras el siguiente escaneo con score que cuente, y la del ML cada
+# vez que vuelve a caer a reglas. En uno que sigue abierto, todas dependen de que no fuera critical en el más viejo de
+# los dos scores de ultimos (previous_severity): si ya lo era (critical ahí, high en el siguiente y otra vez critical
+# en uno con sources_ok = 0), la subida ni alerta ni se repite. Al revés, un score que baja la severidad sin un
+# escaneo que cuente (el de un escaneo con sources_ok = 0) cierra antes la ventana de un crítico nuevo: si nadie
+# exportó entre los dos, esa alerta se pierde.
+# Un escaneo que terminó sin score (abandonar_vencidos o marcar_fallido) no deja foto, pero sus fuentes que respondieron
+# ya guardaron: pudieron cerrar un hallazgo que el siguiente escaneo reabrió, y el reabrir no deja rastro (el upsert del
+# orquestador limpia resolved_at). Por eso, si después del más viejo de esos dos scores terminó un escaneo así (se mide
+# con finished_at: queued_at es de antes de la consulta TXT y puede quedar antes del score anterior) en el que la
+# fuente del hallazgo respondió ('caidos'), el hallazgo sale 'new': se prefiere repetir una alerta a perderla. Sale así
+# hasta el segundo escaneo con score que siga, y un crítico que abrió el escaneo caído alerta otra vez después del
+# siguiente. Una fuente que falló en el escaneo caído no tocó sus hallazgos y no cuenta.
+# Antes de RC-46 el orquestador no llenaba findings.cve_id y la CVE quedaba solo en evidence['cve']: por eso el
+# coalesce. El CVSS sale de la tabla cves o, si esa tabla no tiene su CVSS (una CVE que trae Shodan entra sin CVSS
+# hasta el cargador diario, #69, salvo que ya estuviera completa: el orquestador inserta con ON CONFLICT DO NOTHING),
+# de evidence['cvss'] cuando es un número de 0 a 10, con la misma expresión que el portal
+# (FINDINGS_SQL). La diferencia es la CVE que se busca en cves: aquí la combinada (cve_id o evidence['cve']) y en el
+# portal solo f.cve_id. De la evidencia no se lee nada más.
+# La severidad sale del último score del dominio y no del último que contó el hallazgo: uno resuelto y reabierto
+# después de ese score lleva su severidad de regla y no la de un score viejo.
+SIEM_SCAN_SQL = '''
+SELECT s.id::text, s.status, s.trigger_type AS trigger, s.queued_at, s.finished_at, s.stats,
+       coalesce((SELECT jsonb_agg(jsonb_build_object('data_source', ds.code, 'status', r.status) ORDER BY ds.code)
+                   FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id WHERE r.scan_id = s.id), '[]') AS sources
+  FROM scans s JOIN domains d ON d.id = s.domain_id
+ WHERE d.fqdn = %s AND s.finished_at IS NOT NULL
+ ORDER BY s.finished_at DESC LIMIT 1
+'''
+SIEM_EN_CURSO_SQL = '''
+SELECT 1 FROM scans s JOIN domains d ON d.id = s.domain_id WHERE d.fqdn = %s AND s.status IN ('queued','running') LIMIT 1
+'''
+SIEM_SCORE_SQL = '''
+SELECT ds.id::text, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.model_version, ds.reason,
+       ds.partial_coverage, ds.computed_at, rs.version AS rule_set_version
+  FROM domain_scores ds
+  JOIN domains d ON d.id = ds.domain_id
+  JOIN scoring_rule_sets rs ON rs.id = ds.rule_set_id
+ WHERE d.fqdn = %s
+ ORDER BY ds.computed_at DESC LIMIT 1
+'''
+# Como en el login (004_login_lookup_seguro.sql): una empresa suspendida o cancelada no exporta aunque su sesión siga viva.
+SIEM_PLAN_SQL = '''
+SELECT o.status, p.api_and_siem FROM organizations o JOIN plans p ON p.id = o.plan_id
+'''
+SIEM_SIN_PLAN = 'El plan de la empresa no incluye la salida a SIEM'
+SIEM_EMPRESA_INACTIVA = 'La empresa está suspendida o cancelada: no puede exportar a SIEM'
+
+
+@router.get('/domains/{fqdn}/export/siem',
+            summary='Descarga en NDJSON para el HEC de Splunk los hallazgos abiertos, el último escaneo y el último score')
+def export_siem(fqdn: str, session: Session = Depends(current_session)):
+    # REPEATABLE READ: las consultas ven una sola foto, así un escaneo que cierra a la mitad no mezcla dos escaneos.
+    # Con uno activo esa foto ya traería lo que guardaron sus fuentes (cada una confirma sola, en el orquestador) junto
+    # al escaneo y al score anteriores: no se exporta hasta que cierre o lo den por caído, con los mismos estados que el
+    # índice único de scans. Uno sin marca de vida en 30 minutos (la API se reinició a mitad) se da por caído antes, como
+    # en GET /scans, en su propia transacción READ COMMITTED: dentro de la foto, el UPDATE chocaría con la marca de vida
+    # que el escaneo escribió después (error de serialización) en vez de esperarla.
+    with transaction(session.org_id) as conn:
+        # Como al crear una llave (cirdan/api/llaves.py): la sesión dura hasta 8 h, así que una cuenta desactivada
+        # después de iniciarla ya no exporta. Responde 401 y la sesión se borra.
+        if not conn.execute('SELECT 1 FROM users WHERE id = %s AND is_active', (session.user_id,)).fetchone():
+            sessions.delete(session.token)
+            raise HTTPException(401, SIN_SESION)
+        plan = conn.execute(SIEM_PLAN_SQL).fetchone()
+        if plan and plan['status'] not in ('trial', 'active'):
+            raise HTTPException(403, SIEM_EMPRESA_INACTIVA)
+        if not plan or not plan['api_and_siem']:
+            raise HTTPException(403, SIEM_SIN_PLAN)
+        dominio = conn.execute('SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
+        if dominio:
+            orquestador.abandonar_vencidos(conn, session.org_id, domain_id=dominio['id'])
+    with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
+        dominio = conn.execute('SELECT fqdn::text, now() AS ahora FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
+        if not dominio:
+            raise HTTPException(404, 'Dominio no encontrado para esta organización')
+        if conn.execute(SIEM_EN_CURSO_SQL, (fqdn,)).fetchone():
+            raise HTTPException(409, 'Hay un escaneo en curso del dominio: exporta cuando termine')
+        hallazgos = conn.execute(SIEM_FINDINGS_SQL, {'fqdn': fqdn}).fetchall()
+        escaneo = conn.execute(SIEM_SCAN_SQL, (fqdn,)).fetchone()
+        score = conn.execute(SIEM_SCORE_SQL, (fqdn,)).fetchone()
+    fqdn = dominio['fqdn']
+    return Response(
+        content=siem.ndjson(fqdn, hallazgos, escaneo, score, ahora=dominio['ahora'], export_id=str(uuid.uuid4())),
+        media_type='application/x-ndjson; charset=utf-8',
+        headers={'Content-Disposition': 'attachment; filename="%s-siem.ndjson"' % fqdn, 'Cache-Control': 'no-store'},
+    )
+
+
 # ---------------------------------------------------------------- explicación
 
 EXPLANATION_SQL = '''
-SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, coalesce(x.severity, f.severity) AS severity,
+SELECT f.id::text AS finding_id, f.domain_id::text AS domain_id, d.fqdn::text AS domain, f.evidence, coalesce(x.severity, f.severity) AS severity,
        r.base_severity, r.category,
        r.code AS rule_code, r.max_penalty, a.value AS asset, a.asset_type, a.first_seen_at AS asset_first_seen,
        f.detected_at, sc.queued_at AS scan_at, b.breach_date,
+       fm.attack_version, fm.attack_technique_id, fm.attack_technique_name,
+       fm.attack_source_url, fm.attack_unmapped_reason,
+       fm.iso_version, fm.iso_control_id, fm.iso_control_name, fm.iso_source_url,
+       fm.cis_version, fm.cis_safeguard_id, fm.cis_safeguard_name, fm.cis_source_url,
     ds.id::text AS score_id, ds.computed_at, ds.method, ds.model_version, x.penalty, x.factors,
        t.title AS rule_title, t.meaning, t.recommendation
   FROM findings f
@@ -388,6 +768,7 @@ SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, coalesce(x.
   JOIN assets a ON a.id = f.asset_id
   JOIN scoring_rules r ON r.id = f.rule_id
   JOIN scoring_rule_texts t ON t.code = r.code
+  LEFT JOIN scoring_rule_framework_mappings fm ON fm.rule_code = r.code
   LEFT JOIN scans sc ON sc.id = f.last_scan_id
   LEFT JOIN breach_exposures b ON b.finding_id = f.id
   LEFT JOIN LATERAL (SELECT * FROM domain_scores s WHERE s.domain_id = f.domain_id ORDER BY s.computed_at DESC LIMIT 1) ds ON true
@@ -397,14 +778,14 @@ SELECT f.id::text AS finding_id, d.fqdn::text AS domain, f.evidence, coalesce(x.
 
 
 @router.get('/findings/{finding_id}/explanation', summary='Por qué el hallazgo tiene su severidad y cuánto suma al score')
-def finding_explanation(finding_id: str, session: Session = Depends(current_session)):
+def finding_explanation(finding_id: str, session: Session = Depends(session_or_api_key)):
     try:
         finding_id = str(uuid.UUID(finding_id))
     except ValueError:
         raise HTTPException(404, 'Hallazgo no encontrado')  # un id mal formado se responde igual que uno de otra empresa
     # Sin try: un error de la base (por ejemplo, sin la migración 003) llega al log y responde 500, no 404.
     rows = _query(session, EXPLANATION_SQL, (finding_id,))
-    if not rows:
+    if not rows or not in_scope(session, rows[0]['domain_id']):
         raise HTTPException(404, 'Hallazgo no encontrado')
     f = rows[0]
     factors = [{'label': FACTOR_ES.get(r['label'], r['label']), 'points': r['points']}
@@ -419,6 +800,7 @@ def finding_explanation(finding_id: str, session: Session = Depends(current_sess
         'factors': factors, 'caracteristicas': caracteristicas(f),
         'summary': RESUMEN[f['severity']],
         'recommendation': f['recommendation'],
+        'frameworks': _marcos(f),
         'confidence': (f['factors'] or {}).get('confidence'),
         'model_prediction': (f['factors'] or {}).get('model_prediction'),
         'explanation_model_version': (f['factors'] or {}).get('explanation_model_version'),
@@ -429,9 +811,9 @@ def finding_explanation(finding_id: str, session: Session = Depends(current_sess
 # ---------------------------------------------------------------- pesos, activos y escaneos
 
 @router.get('/scoring/weights', summary='Juego de reglas activo: pesos, bandas, piso, umbral y reglas')
-def scoring_weights(session: Session = Depends(current_session)):
+def scoring_weights(session: Session = Depends(session_or_api_key)):
     with transaction(session.org_id) as conn:
-        rs = conn.execute('SELECT id, version, category_weights, activated_at, validated_by FROM scoring_rule_sets WHERE is_active').fetchone()
+        rs = configuracion.juego_activo(conn, session.org_id)
         rules = conn.execute('SELECT r.code, r.category, r.base_severity, r.weight, r.max_penalty, '
                              't.title, t.meaning, t.recommendation FROM scoring_rules r '
                              'JOIN scoring_rule_texts t ON t.code = r.code '
@@ -440,6 +822,7 @@ def scoring_weights(session: Session = Depends(current_session)):
         'rule_set_version': rs['version'], 'is_active': True, 'activated_at': rs['activated_at'],
         'validated_by': rs['validated_by'], 'category_weights': {k: float(v) for k, v in rs['category_weights'].items()},
         'bands': [{'band': c, 'from': d, 'to': h} for d, h, c, _ in criterio.BANDAS],
+        'grades': [{'grade': g, 'from': d, 'to': h} for d, h, g in criterio.LETRAS],
         'floor': {'one_critical': criterio.PISO_UN_CRITICO, 'two_or_more_critical': criterio.PISO_VARIOS_CRITICOS,
                   'counts_statuses': list(criterio.ESTADOS_VIGENTES)},
         'alert_threshold_default': criterio.UMBRAL_ALERTA,
@@ -447,27 +830,86 @@ def scoring_weights(session: Session = Depends(current_session)):
     }
 
 
+@router.put('/scoring/weights', summary='Crea una nueva versión de pesos para la organización y recalcula sus scores')
+def update_scoring_weights(payload: dict[str, object] = Body(...),
+                           session: Session = Depends(require_roles('admin'))):
+    try:
+        pesos = configuracion.validar_pesos(payload.get('category_weights'))
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
+    with transaction(session.org_id) as conn:
+        conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 32))', (str(session.org_id),))
+        anterior = configuracion.juego_activo(conn, session.org_id)
+        if not anterior:
+            raise HTTPException(409, 'No hay un juego de reglas global para usar como plantilla')
+        pesos_anteriores = {categoria: float(valor)
+                            for categoria, valor in anterior['category_weights'].items()}
+        if pesos == pesos_anteriores:
+            return {
+                'rule_set_version': anterior['version'],
+                'category_weights': pesos_anteriores,
+                'recalculated_domains': 0,
+                'unchanged': True,
+            }
+
+        version_local = conn.execute(
+            'SELECT COALESCE(MAX(version), 0) AS version FROM scoring_rule_sets WHERE organization_id = %s',
+            (session.org_id,),
+        ).fetchone()['version']
+        version = max(int(anterior['version']), int(version_local)) + 1
+        conn.execute('UPDATE scoring_rule_sets SET is_active = false '
+                     'WHERE organization_id = %s AND is_active', (session.org_id,))
+        nuevo = conn.execute(
+            'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, activated_at) '
+            'VALUES (%s, %s, %s, true, %s, now()) RETURNING id::text',
+            (session.org_id, version, Jsonb(pesos), session.email),
+        ).fetchone()['id']
+        conn.execute(
+            'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
+            'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
+            (nuevo, anterior['id']),
+        )
+        try:
+            recalculados = configuracion.recalcular_scores(conn, session.org_id, nuevo, pesos)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        audit(conn, session.org_id, 'scoring.weights_changed', user_id=session.user_id,
+              entity_type='scoring_rule_set', entity_id=nuevo,
+              details={'version': version, 'previous_version': anterior['version'],
+                       'category_weights': pesos, 'recalculated_domains': recalculados})
+
+    return {
+        'rule_set_version': version,
+        'category_weights': pesos,
+        'recalculated_domains': recalculados,
+        'unchanged': False,
+    }
+
+
 @router.get('/domains/{fqdn}/assets', summary='Activos del dominio (provisional, aún no está en el contrato #21)')
-def domain_assets(fqdn: str, session: Session = Depends(current_session)):
+def domain_assets(fqdn: str, session: Session = Depends(session_or_api_key)):
     _domain_id(session, fqdn)
     rows = _query(session, '''
         SELECT a.id::text, a.asset_type AS type, a.value, p.value AS parent, a.attributes, a.first_seen_at, a.last_seen_at
           FROM assets a JOIN domains d ON d.id = a.domain_id LEFT JOIN assets p ON p.id = a.parent_asset_id
-         WHERE d.fqdn = %s ORDER BY array_position(ARRAY['domain','subdomain','certificate','ip','service','email'], a.asset_type), a.value
+         WHERE d.fqdn = %s ORDER BY array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email'], a.asset_type), a.value
     ''', (fqdn,))
     return {'items': rows, 'total': len(rows)}
 
 
 @router.get('/scans', summary='Escaneos de la organización, del más nuevo al más viejo (provisional)')
-def scans(session: Session = Depends(current_session)):
+def scans(session: Session = Depends(session_or_api_key)):
     with transaction(session.org_id) as conn:
-        orquestador.abandonar_vencidos(conn, session.org_id)  # uno caído no se muestra en curso
+        # uno caído no se muestra en curso. Una llave de un dominio solo toca los de su dominio
+        orquestador.abandonar_vencidos(conn, session.org_id, domain_id=session.domain_id)
     rows = _query(session, '''
         SELECT s.id::text, d.fqdn::text AS domain, s.trigger_type AS trigger, s.status, s.queued_at, s.finished_at, s.stats,
                coalesce((SELECT jsonb_agg(jsonb_build_object('source', ds.code, 'status', r.status, 'attempt', r.attempt,
                                                              'error', r.error, 'finished_at', r.finished_at) ORDER BY ds.code)
                            FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id WHERE r.scan_id = s.id), '[]') AS sources
           FROM scans s JOIN domains d ON d.id = s.domain_id
+         WHERE %s::uuid IS NULL OR s.domain_id = %s::uuid
          ORDER BY s.queued_at DESC LIMIT 50
-    ''')
+    ''', (session.domain_id, session.domain_id))
     return {'items': rows, 'total': len(rows)}

@@ -4,7 +4,9 @@ Entra como el rol de la aplicación `cirdan_app` (sin superusuario ni BYPASSRLS)
 de quien llama sale de su sesión (cookie httpOnly `lt_session`, #25): cada petición fija
 `app.current_org` con ella y Row-Level Security hace el resto, así que ninguna consulta
 filtra por organización. Ninguna ruta toma la empresa de un encabezado. El explorador de /demo
-y /db solo existe con DEMO_EXPLORER=true y también pide sesión (RC-58).
+y /db solo existe con DEMO_EXPLORER=true y también pide sesión (RC-58). Los GET de datos de
+/api/v1 también aceptan una llave de API en `Authorization: Bearer` (#87, RC-129): ahí la empresa
+sale de la fila de la llave, que se busca por su hash.
 
     docker compose up -d            (o, fuera de Docker: python -m uvicorn cirdan.api.main:app --port 8000)
     Documentación: http://127.0.0.1:8000/docs
@@ -12,18 +14,19 @@ y /db solo existe con DEMO_EXPLORER=true y también pide sesión (RC-58).
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from cirdan.auth.deps import Session, current_session
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
+from cirdan.api.llaves import router as api_keys_router
 from cirdan.api.v1 import router as v1_router
 from cirdan.auth.routes import router as auth_router
-from cirdan.config import config
+from cirdan.config import ORIGENES_LOCALES, config
 from cirdan.db import transaction
 
 app = FastAPI(
-    title='Cirdan API',
+    title='LowTide API',
     version='0.2.0',
     description='Inicio de sesión con MFA y endpoints de solo lectura sobre la base cirdan (PostgreSQL 16). '
                 'La empresa sale de la sesión y el aislamiento lo aplica Row-Level Security en la base. '
@@ -31,8 +34,7 @@ app = FastAPI(
 )
 
 # Orígenes que pueden mandar POST con la cookie: el portal y la propia API.
-ALLOWED_ORIGINS = {o.strip() for o in config(
-    'ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000').split(',')}
+ALLOWED_ORIGINS = {o.strip() for o in config('ALLOWED_ORIGINS', ORIGENES_LOCALES).split(',')}
 
 
 @app.middleware('http')
@@ -46,8 +48,31 @@ async def same_origin_writes(request: Request, call_next):
     return await call_next(request)
 
 
+# Ningún sitio mete una respuesta de la API en un marco y el navegador no adivina su tipo (RC-283). Van aquí y no
+# solo en el portal porque la API también se llama sin él, y porque el portal entrega tal cual lo que reenvía a
+# /api/v1/*: sus cabeceras de next.config.ts no llegan a esas respuestas. La CSP completa y HSTS son de RC-89.
+CABECERAS_SEGURIDAD = {'X-Frame-Options': 'DENY', 'Content-Security-Policy': "frame-ancestors 'none'",
+                       'X-Content-Type-Options': 'nosniff'}
+
+
+@app.middleware('http')
+async def cabeceras_de_seguridad(request: Request, call_next):
+    """Va después de same_origin_writes para envolverlo: su 403 también sale con las cabeceras."""
+    response = await call_next(request)
+    for nombre, valor in CABECERAS_SEGURIDAD.items():
+        response.headers[nombre] = valor
+    return response
+
+
+@app.exception_handler(Exception)
+async def error_no_manejado(request: Request, exc: Exception):
+    """El 500 de un error sin manejar lo arma Starlette por fuera de los middlewares: aquí lleva las cabeceras."""
+    return PlainTextResponse('Internal Server Error', status_code=500, headers=CABECERAS_SEGURIDAD)
+
+
 app.include_router(auth_router)
 app.include_router(scans_router)
+app.include_router(api_keys_router)
 app.include_router(v1_router)
 
 # Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas

@@ -37,8 +37,8 @@ from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar
-from cirdan.recolectores.contrato import Resultado, ejecutar, siguiente_estado
-from cirdan.score import motor
+from cirdan.recolectores.contrato import COLUMNAS_CVES, CVE_VALIDA, Resultado, ejecutar, siguiente_estado
+from cirdan.score import configuracion, motor
 
 log = logging.getLogger(__name__)
 
@@ -63,8 +63,12 @@ TXT_DETALLE = {
 }
 FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
 
-# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 16 minutos solo de HTTP (sus 2 búsquedas y
-# las 4 páginas de Cert Spotter, cada consulta con 3 intentos), y el DNS de los nombres vencidos no tiene tope.
+# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 18 minutos solo de HTTP: 1055 s en el peor caso,
+# con crt.sh arriba y lento (155 s de cada una de sus 2 búsquedas con 3 intentos de 45 s, 180 s de las 4 páginas de Cert
+# Spotter con 2 intentos de 20 s, 95 s de %marca% con 2 intentos de 45 s y 470 s de las 10 variantes, que es
+# PRESUPUESTO_VARIANTES de crtsh.py, con 20 s en el primer intento y hasta 45 s en el segundo, o 45 s desde el primero
+# si crt.sh viene lento: el presupuesto no cambia, #109, RC-226).
+# Quedan 145 s antes de TOPE_CORRIDA, y el DNS de los nombres vencidos no tiene tope.
 # Por eso, mientras corre una fuente, un hilo aparte marca vida cada LATIDO, hasta TOPE_CORRIDA: una corrida
 # colgada para siempre deja de marcar y el escaneo se da por caído pasado ABANDONO.
 LATIDO = 60                           # segundos entre marcas
@@ -291,6 +295,13 @@ PARTES = ('''COALESCE(evidence->'partes', '''
           '''THEN jsonb_build_array((evidence->>'host') || '@' || (evidence->>'vence')) END, '[]'::jsonb)''')
 
 
+def _cve_de(hallazgo):
+    """La CVE de un hallazgo (su evidencia 'cve', como la ponen Shodan y la visita web), o None si no trae una con la
+    forma del CHECK de cves.cve_id."""
+    cve = hallazgo.evidencia.get('cve') if isinstance(hallazgo.evidencia, dict) else None
+    return cve if isinstance(cve, str) and CVE_VALIDA.fullmatch(cve) else None
+
+
 def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas, ahora=None):
     """Guarda activos y hallazgos de una fuente que respondió. Devuelve dos conjuntos de id de hallazgos: los que
     abrió (insertó o reabrió) y los que dio por resueltos. `ahora` es la hora del escaneo (la de correr), y sin ella
@@ -355,6 +366,22 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
             previas[bytes(f['fingerprint']).hex()] = f['partes']
     abiertos = set()
 
+    # Las CVE van a la tabla global cves antes que los hallazgos que las nombran (llave foránea de findings.cve_id). Las
+    # filas de la NVD que trae el recolector (Resultado.cves, la visita web) entran completas y las demás, como las que
+    # Shodan deduce, entran como stub. Nunca se actualiza una que ya está: eso es del cargador diario de inteligencia
+    # (#69, RC-127), que llena el CVSS de los stubs, y cirdan_app no tiene UPDATE en cves (migraciones 001 y 014, #18).
+    # Como shodan corre antes que web (fuentes_activas va por code), una CVE que los dos ven queda como stub hasta el
+    # cargador: la API toma entonces el CVSS de la evidencia del hallazgo (cirdan/api/v1.py).
+    for fila in resultado.cves:
+        columnas = [c for c in COLUMNAS_CVES if c in fila]
+        conn.execute(
+            'INSERT INTO cves ({c}) VALUES ({v}) ON CONFLICT (cve_id) DO NOTHING'.format(
+                c=', '.join(columnas), v=', '.join(['%s'] * len(columnas))),
+            [fila[c] for c in columnas])
+    con_fila = {f['cve_id'] for f in resultado.cves}
+    for cve in sorted({_cve_de(h) for h in resultado.hallazgos} - con_fila - {None}):
+        conn.execute('INSERT INTO cves (cve_id) VALUES (%s) ON CONFLICT (cve_id) DO NOTHING', (cve,))
+
     for hallazgo in resultado.hallazgos:
         regla = reglas.get(hallazgo.codigo)
         if not regla:
@@ -379,15 +406,17 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         huella = bytes.fromhex(hallazgo.huella)
         finding_id = conn.execute(
             'INSERT INTO findings (organization_id, domain_id, asset_id, rule_id, source_id, fingerprint, severity, '
-            "status, evidence, detected_at, last_scan_id) VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, now(), %s) "
+            "status, evidence, cve_id, detected_at, last_scan_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, now(), %s) "
             'ON CONFLICT (organization_id, fingerprint) DO UPDATE SET '
             'domain_id = EXCLUDED.domain_id, asset_id = EXCLUDED.asset_id, rule_id = EXCLUDED.rule_id, '
             'source_id = EXCLUDED.source_id, severity = EXCLUDED.severity, evidence = EXCLUDED.evidence, '
+            'cve_id = EXCLUDED.cve_id, '
             'status = CASE WHEN findings.status = %s THEN %s ELSE findings.status END, '
             'resolved_at = CASE WHEN findings.status = %s THEN NULL ELSE findings.resolved_at END, '
             'last_scan_id = EXCLUDED.last_scan_id, updated_at = now() RETURNING id::text',
             (org, domain_id, asset_id, regla['id'], source_id, huella, hallazgo.severidad,
-             Jsonb(evidencia), scan_id, 'resolved', 'open', 'resolved'),
+             Jsonb(evidencia), _cve_de(hallazgo), scan_id, 'resolved', 'open', 'resolved'),
         ).fetchone()['id']
         if previos.get(huella) in (None, 'resolved'):  # no existía o estaba resuelto: ahora queda abierto
             abiertos.add(finding_id)
@@ -573,8 +602,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
     se muestran como 0 hallazgos, o si revisó solo una parte de lo suyo (revisados, en stats.sources_partial).
-    crt.sh nunca busca dominios parecidos desde aquí, porque consulta
-    variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
+    crt.sh busca dominios parecidos en cada escaneo, solo en los registros de certificados (#109, RC-226): si
+    ninguna de esas búsquedas responde, si no responde la de %marca% o si el dominio no tiene marca (un subdominio,
+    un sufijo que crtsh.py no conoce o un hosting), lookalike_domain queda en sin_cobertura, nunca en 0. Si solo
+    falta la respuesta de alguna variante, ct_logs da revisados y va en stats.sources_partial. Devuelve
+    un resumen.
     En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
     ct_logs y subfinder cuenta una vez. En assets van una sola vez, con sus atributos unidos.
     new_findings cuenta los hallazgos que el escaneo dejó abiertos y antes no lo estaban: los que insertó y los que
@@ -593,11 +625,15 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         fuentes = fuentes if fuentes is not None else fuentes_activas(c)
         catalogo = {f['code']: f for f in c.execute(
             'SELECT id::text, code, keep_raw_payload FROM data_sources WHERE code = ANY(%s)', (fuentes,)).fetchall()}
-        propios = [r['fqdn'] for r in c.execute('SELECT fqdn::text FROM domains WHERE fqdn <> %s', (fqdn,)).fetchall()]
+        # Solo los dominios vigentes de la organización cuentan como propios (#109, RC-226). Uno dado de baja
+        # ('removed') puede ser hoy de un tercero, y uno sin verificar ('pending_verification') no probó ser suyo:
+        # darlo de alta no debe esconder ni resolver un dominio parecido.
+        propios = [r['fqdn'] for r in c.execute(
+            "SELECT fqdn::text FROM domains WHERE fqdn <> %s AND status IN ('verified', 'paused')", (fqdn,)).fetchall()]
         domain = c.execute('SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
         if not domain:
             raise ValueError('dominio no encontrado para el escaneo: %s' % fqdn)
-        rule_set = c.execute('SELECT id::text, category_weights FROM scoring_rule_sets WHERE is_active').fetchone()
+        rule_set = configuracion.juego_activo(c, org)
         if not rule_set:
             raise RuntimeError('no hay un juego de reglas activo')
         reglas = {r['code']: r for r in c.execute(

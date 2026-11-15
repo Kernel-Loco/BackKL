@@ -17,9 +17,15 @@ DSN = make_conninfo(host=config('PGHOST', '127.0.0.1'), port=config('PGPORT', '5
 
 
 @contextmanager
-def transaction(org=None):
-    """Transacción con la zona horaria de México y, si se da, la empresa para RLS."""
+def transaction(org=None, isolation=None):
+    """Transacción con la zona horaria de México y, si se da, la empresa para RLS.
+
+    `isolation` (psycopg.IsolationLevel) fija el aislamiento antes del BEGIN. Con REPEATABLE_READ todas las consultas
+    de la transacción ven la misma foto de la base, como en la salida a SIEM (#98, RC-212). Sin él queda el de la base,
+    READ COMMITTED."""
     with psycopg.connect(DSN, row_factory=dict_row) as conn:
+        if isolation is not None:
+            conn.isolation_level = isolation
         with conn.transaction():
             conn.execute("SET LOCAL TIME ZONE 'America/Mexico_City'")
             if org:

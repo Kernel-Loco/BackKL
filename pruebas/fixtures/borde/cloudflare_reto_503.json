@@ -1,0 +1,20 @@
+{
+  "nota": "Respuesta armada a mano para las pruebas, no grabada de ningún dominio. Valores falsos.",
+  "descripcion": "Reto de Cloudflare con 503, sin cabecera de reto",
+  "estado": 503,
+  "cabeceras": [
+    [
+      "Content-Type",
+      "text/html; charset=UTF-8"
+    ],
+    [
+      "Server",
+      "cloudflare"
+    ],
+    [
+      "CF-RAY",
+      "0000000000000002-QRO"
+    ]
+  ],
+  "cuerpo": "<html><head><title>Just a moment...</title></head><body>Checking your browser</body></html>"
+}

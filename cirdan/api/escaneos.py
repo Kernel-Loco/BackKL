@@ -11,13 +11,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from cirdan import orquestador
-from cirdan.auth.deps import Session, client_ip, current_session, require_roles
+from cirdan.auth.deps import Session, client_ip, in_scope, require_roles, session_or_api_key
 from cirdan.db import transaction
 
 router = APIRouter(prefix='/api/v1', tags=['escaneos'])
 
 SCAN_SQL = '''
-SELECT s.id::text, d.fqdn::text AS domain, s.trigger_type AS trigger, s.status, s.queued_at, s.finished_at, s.stats
+SELECT s.id::text, s.domain_id::text AS domain_id, d.fqdn::text AS domain, s.trigger_type AS trigger, s.status, s.queued_at, s.finished_at, s.stats
   FROM scans s JOIN domains d ON d.id = s.domain_id
  WHERE s.id = %s
 '''
@@ -28,8 +28,10 @@ SELECT ds.code AS source, r.status, r.attempt, r.error, r.finished_at
 '''
 
 
-def _scan(conn, scan_id):
+def _scan(conn, scan_id, session):
     scan = conn.execute(SCAN_SQL, (scan_id,)).fetchone()
+    if scan and not in_scope(session, scan.pop('domain_id')):
+        return None  # fuera del alcance de la llave se ve igual que uno que no existe
     if scan:
         scan['sources'] = conn.execute(RUNS_SQL, (scan_id,)).fetchall()
     return scan
@@ -51,15 +53,15 @@ def request_scan(fqdn: str, request: Request, session: Session = Depends(require
     threading.Thread(target=_correr, args=(session.org_id, solicitud.scan_id, solicitud.fqdn),
                      name='escaneo-' + solicitud.scan_id, daemon=True).start()
     with transaction(session.org_id) as conn:
-        return {'accepted': True, 'scan': _scan(conn, solicitud.scan_id)}
+        return {'accepted': True, 'scan': _scan(conn, solicitud.scan_id, session)}
 
 
 @router.get('/scans/{scan_id}', summary='Estado de un escaneo y de cada fuente')
-def get_scan(scan_id: str, session: Session = Depends(current_session)):
+def get_scan(scan_id: str, session: Session = Depends(session_or_api_key)):
     try:
         with transaction(session.org_id) as conn:
-            orquestador.abandonar_vencidos(conn, session.org_id, scan_id=scan_id)
-            scan = _scan(conn, scan_id)
+            orquestador.abandonar_vencidos(conn, session.org_id, domain_id=session.domain_id, scan_id=scan_id)
+            scan = _scan(conn, scan_id, session)
     except Exception:
         scan = None  # un id mal formado se responde igual que uno de otra empresa
     if not scan:

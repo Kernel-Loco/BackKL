@@ -26,6 +26,7 @@ import json
 import re
 import time
 import urllib.error
+import urllib.parse
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,7 +34,7 @@ from pathlib import Path
 CARPETA_GRABADAS = Path(__file__).resolve().parent / 'respuestas_grabadas'   # dentro del paquete, viaja con el código
 MODOS = ('vivo', 'grabar', 'reproducir')
 ESTADOS = ('succeeded', 'failed')                                                    # scan_source_runs.status final de una corrida
-TIPOS_ACTIVO = ('domain', 'subdomain', 'ip', 'service', 'certificate', 'email')      # assets.asset_type
+TIPOS_ACTIVO = ('domain', 'subdomain', 'ip', 'service', 'certificate', 'email', 'api_doc')   # assets.asset_type
 SEVERIDADES = ('critical', 'high', 'medium', 'low')                                  # scoring_rules.base_severity
 CARACTERISTICAS = ('tipo', 'antiguedad_dias', 'exposicion', 'sensibilidad')          # las del reto (lámina 7)
 EXPOSICIONES = ('directa', 'publica')     # directa: el activo responde en internet. publica: el dato es público
@@ -42,9 +43,16 @@ MAX_INTENTO = 3                           # scan_source_runs.attempt va de 0 a 3
 ESPERAS_REINTENTO = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=25))
 SIN_GRABACION = 'no hay respuesta grabada para '
 MARCA = '.grabacion'                      # inicio de la grabación en curso, dentro de la carpeta del dominio
+# El User-Agent de toda petición de LowTide, el que nombra la sección 9 de la carta (docs/plantilla_carta_autorizacion.md)
+# para que el cliente lo reconozca en sus registros. Uno solo para todas las fuentes y la visita web (#18, RC-46).
+AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'
 NOMBRE_VALIDO = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
 CODIGO_VALIDO = re.compile(r'^[a-z][a-z0-9_]{1,62}$')
 HUELLA_VALIDA = re.compile(r'^[0-9a-f]{64}$')
+CVE_VALIDA = re.compile(r'CVE-[0-9]{4}-[0-9]{4,19}')   # la forma del CHECK de cves.cve_id, con un tope de dígitos
+# Las columnas de cves que un recolector puede dar (la migración 014 le da a cirdan_app INSERT solo en estas). EPSS y
+# KEV son del cargador diario de inteligencia.
+COLUMNAS_CVES = ('cve_id', 'description', 'cvss_base_score', 'cvss_vector', 'published_at')
 
 
 class FuenteNoResponde(Exception):
@@ -61,8 +69,8 @@ class SinGrabacion(FuenteNoResponde):
 @dataclass
 class Activo:
     tipo: str                      # uno de TIPOS_ACTIVO
-    valor: str                     # nombre, IP, ip:puerto/protocolo, correo o huella del certificado
-    atributos: dict = field(default_factory=dict)   # va a assets.attributes. ip, service y certificate llevan 'host' o 'hosts'
+    valor: str                     # nombre, IP, ip:puerto/protocolo, correo, huella del certificado o URL del documento
+    atributos: dict = field(default_factory=dict)   # va a assets.attributes. ip, service, certificate y api_doc llevan 'host' o 'hosts'
 
 
 @dataclass
@@ -92,6 +100,7 @@ class Resultado:
     revisados: list | None = None    # None si revisó todo. Si no, las partes que sí revisó completas (#23)
     sin_revisar: list | None = None  # con revisados, las que existen, revisaría y no revisó. None si no las sabe
     omitidos: list = field(default_factory=list)  # huellas de lo que sigue ahí pero un tope no deja reportar (#23)
+    cves: list = field(default_factory=list)      # filas para la tabla cves (COLUMNAS_CVES) de sus hallazgos (#18)
 
     def a_dict(self):
         return asdict(self)
@@ -106,6 +115,41 @@ def _errores_partes(nombre, partes, puede_faltar=False):
     if len(set(partes)) != len(partes):
         return ['%s tiene partes repetidas' % nombre]
     return []
+
+
+def _errores_cves(cves):
+    """Resultado.cves: filas sin repetir con cve_id válido, solo COLUMNAS_CVES, y valores que cves acepta: textos,
+    un puntaje de 0 a 10 y una fecha ISO con zona. Una fila mala tumbaría en la base todo lo de la fuente."""
+    if not isinstance(cves, list) or not all(isinstance(f, dict) for f in cves):
+        return ['cves debe ser una lista de filas']
+    errores, vistas = [], set()
+    for f in cves:
+        cve = f.get('cve_id')
+        if not isinstance(cve, str) or not CVE_VALIDA.fullmatch(cve):
+            errores.append('cves: cve_id inválido %r' % (cve,))
+            continue
+        if cve in vistas:
+            errores.append('cves: %s repetida' % cve)
+        vistas.add(cve)
+        if set(f) - set(COLUMNAS_CVES):
+            errores.append('cves: %s trae columnas que no son de COLUMNAS_CVES' % cve)
+        for columna in ('description', 'cvss_vector'):
+            if f.get(columna) is not None and not isinstance(f[columna], str):
+                errores.append('cves: %s %s debe ser texto' % (cve, columna))
+        puntaje = f.get('cvss_base_score')
+        if puntaje is not None and (isinstance(puntaje, bool) or not isinstance(puntaje, (int, float))
+                                    or not 0 <= puntaje <= 10):
+            errores.append('cves: %s cvss_base_score fuera de 0 a 10' % cve)
+        fecha = f.get('published_at')
+        if fecha is not None:
+            try:
+                zona = datetime.fromisoformat(fecha).utcoffset() if isinstance(fecha, str) else None
+                ok = zona is not None and abs(zona) <= timedelta(hours=14)   # Postgres no acepta más de 15:59
+            except ValueError:
+                ok = False
+            if not ok:
+                errores.append('cves: %s published_at no es una fecha ISO con zona' % cve)
+    return errores
 
 
 def _nombre_ok(nombre):
@@ -156,7 +200,28 @@ def _errores_activo(a):
     hosts = a.atributos.get('hosts') or ([a.atributos['host']] if a.atributos.get('host') else [])
     if not isinstance(hosts, list) or not hosts or not all(_nombre_ok(h) for h in hosts):
         errores.append("activo %r: necesita 'host' o 'hosts' con nombres válidos para el filtro de alcance" % a.valor)
+    elif a.tipo == 'api_doc' and {h.lower().rstrip('.') for h in hosts} != {_host_de_url(a.valor)}:
+        # El filtro de alcance mira 'host' y 'hosts': con la URL de otro sitio, o con otro nombre además del suyo,
+        # pasaría como si fuera del dominio
+        errores.append("activo %r: debe ser una URL https del sitio de su 'host', y solo de ese" % a.valor)
     return errores
+
+
+def _host_de_url(valor):
+    """El sitio de una URL https sin usuario, puerto, consulta ni fragmento, en minúsculas, o None si no es una."""
+    # urlsplit quita tabuladores y saltos de línea de toda la URL antes de leerla: con uno, o con un espacio, no es una
+    if not isinstance(valor, str) or any(c <= ' ' or c == '\x7f' for c in valor):
+        return None
+    try:
+        url = urllib.parse.urlsplit(valor)
+        puerto = url.port
+    except ValueError:
+        return None
+    if url.scheme != 'https' or not url.hostname or url.username is not None or url.password is not None:
+        return None
+    if puerto is not None or url.query or url.fragment or not url.path.startswith('/') or valor != valor.strip():
+        return None
+    return url.hostname.lower().rstrip('.')
 
 
 def validar(res, codigos=None):
@@ -194,6 +259,7 @@ def validar(res, codigos=None):
         errores.append('omitidos debe ser una lista de huellas')
     elif len(set(omitidos)) != len(omitidos):
         errores.append('omitidos tiene huellas repetidas')
+    errores += _errores_cves(res.cves)
     if not isinstance(res.activos, list) or not isinstance(res.hallazgos, list):
         return errores + ['activos y hallazgos deben ser listas']
     if res.estado == 'failed' and (res.activos or res.hallazgos):
@@ -283,7 +349,8 @@ def en_alcance_nombre(nombre, dominio):
 
 
 def en_alcance(activo, dominio):
-    """Nombres por su nombre, correos por su dominio, y IP, servicios y certificados por su 'host' o 'hosts'."""
+    """Nombres por su nombre, correos por su dominio, y IP, servicios, certificados y documentos de API por su 'host' o
+    'hosts'."""
     if activo.tipo in ('domain', 'subdomain'):
         return en_alcance_nombre(activo.valor, dominio)
     if activo.tipo == 'email':
@@ -323,8 +390,9 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
     Si el dominio no es un nombre válido, no llama al recolector. El resultado tiene que ser del dominio
     autorizado y de la fuente del recolector. Primero se valida y luego se filtra por alcance, así un activo
     mal formado deja la fuente en 'failed' en lugar de perderse.
-    A recolectar() solo le pasa dominio, cliente, ahora y propios. Lo que un recolector apaga por defecto, como
-    la búsqueda de dominios parecidos de crt.sh, nunca se prende desde un escaneo.
+    A recolectar() le pasa dominio, cliente, ahora y propios, más las opciones que el recolector declare en
+    EN_ESCANEO (un diccionario, ninguna si no lo trae). Así crt.sh busca dominios parecidos en cada escaneo
+    (#109, RC-226). Un EN_ESCANEO que no es un diccionario de opciones deja la fuente en 'failed'.
     """
     fuente = getattr(recolector, 'FUENTE', '') or getattr(recolector, '__name__', '?')
     fuente = fuente if isinstance(fuente, str) else '?'
@@ -337,8 +405,12 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
     if not NOMBRE_VALIDO.fullmatch(autorizado):  # también evita que '..' o '/' saquen la carpeta de grabaciones
         return fallido('dominio inválido: %s' % repr(dominio)[:100])
     try:
+        opciones = getattr(recolector, 'EN_ESCANEO', None)
+        opciones = {} if opciones is None else opciones  # [], '' o 0 no son un diccionario: failed, no se ignoran
+        if not isinstance(opciones, dict) or set(opciones) & {'dominio', 'cliente', 'ahora', 'propios'}:
+            return fallido('EN_ESCANEO debe ser un diccionario de opciones de recolectar()')
         cliente = recolector.crear_cliente(modo, autorizado)
-        res = recolector.recolectar(autorizado, cliente, ahora=ahora, propios=propios)
+        res = recolector.recolectar(autorizado, cliente, ahora=ahora, propios=propios, **opciones)
     except Exception as e:  # un recolector con errores no tumba el escaneo
         return fallido(_texto_error(e), getattr(cliente, 'consultas', 0))
     if not isinstance(res, Resultado):
@@ -425,26 +497,36 @@ class Grabadora:
       la carpeta, el siguiente guardado lo vuelve a intentar. Con `completar`,
       reutiliza lo grabado desde `desde` y vuelve a consultar lo demás.
     - 'reproducir': solo lee del disco y lanza SinGrabacion si falta una respuesta.
+    Un archivo vacío no se puede leer (ValueError con el nombre del archivo): es una escritura que se cortó, no una
+    respuesta sin datos. Con `sobre`, tampoco uno sin {grabado, datos} (el formato anterior). Con `completar`, un
+    archivo que no se puede leer cuenta como que no está y esa respuesta se consulta otra vez.
     """
 
-    def __init__(self, carpeta, modo='vivo', completar=False, desde=None, nueva=False, reloj=None, nombre=nombre_archivo):
+    def __init__(self, carpeta, modo='vivo', completar=False, desde=None, nueva=False, reloj=None,
+                 nombre=nombre_archivo, sobre=False):
         assert modo in MODOS, modo
         assert not completar or modo == 'grabar', 'completar solo aplica al grabar'
         self.carpeta, self.modo, self.completar, self.desde = Path(carpeta), modo, completar, desde
         self.nueva = nueva and modo == 'grabar'
         self.reloj = reloj or (lambda: datetime.now(timezone.utc))
-        self.nombre = nombre
+        self.nombre, self.sobre = nombre, sobre
         self.leidas = []           # (archivo, fecha de grabación) de cada respuesta tomada del disco
 
     def archivo(self, consulta):
         return self.carpeta / self.nombre(consulta)
 
     @staticmethod
-    def abrir(archivo):
-        """(datos, fecha de grabación). El formato anterior (solo los datos) usa la fecha del sistema."""
-        contenido = json.loads(archivo.read_text(encoding='utf-8') or '[]')
+    def abrir(archivo, sobre=False):
+        """(datos, fecha de grabación). El formato anterior (solo los datos) usa la fecha del sistema, salvo con
+        `sobre`, que lo rechaza. Un archivo vacío o cortado lanza ValueError con el nombre del archivo."""
+        try:
+            contenido = json.loads(archivo.read_text(encoding='utf-8'))
+        except ValueError as e:   # nunca el texto del error: puede traer pedazos de la respuesta
+            raise ValueError('la grabación %s no se puede leer (%s)' % (archivo.name, type(e).__name__)) from None
         if isinstance(contenido, dict) and 'datos' in contenido:
             return contenido['datos'], fecha_iso(contenido['grabado'])
+        if sobre:
+            raise ValueError('la grabación %s no trae {grabado, datos}' % archivo.name)
         return contenido, datetime.fromtimestamp(archivo.stat().st_mtime, timezone.utc)
 
     def de_disco(self, consulta):
@@ -453,11 +535,14 @@ class Grabadora:
         if self.modo == 'reproducir':
             if not archivo.exists():
                 raise SinGrabacion(SIN_GRABACION + consulta)
-            datos, fecha = self.abrir(archivo)
+            datos, fecha = self.abrir(archivo, self.sobre)
             self.leidas.append((archivo.name, fecha))
             return True, datos
         if self.completar and archivo.exists():
-            datos, fecha = self.abrir(archivo)
+            try:
+                datos, fecha = self.abrir(archivo, self.sobre)
+            except ValueError:   # una escritura que se cortó: esa respuesta se consulta otra vez
+                return False, None
             if self.desde is None or fecha >= self.desde:
                 self.leidas.append((archivo.name, fecha))
                 return True, datos

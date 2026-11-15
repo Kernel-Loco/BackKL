@@ -13,14 +13,18 @@ Los nombres que dan otras fuentes no se usan: eso necesita pasar datos entre fue
 
 CDN (politica_uso_etico.md, punto 5: de una IP de CDN solo se registra que existe). Solo se consultan las IPv4 globales
 que no son multicast, reservadas ni de 192.88.99.0/24 (consultable). No se consultan las de los rangos IPv4 de
-Cloudflare (RANGOS_CLOUDFLARE) ni las que llegan por una cadena CNAME en la que cualquier nombre, intermedio o final,
-termina en un sufijo de SUFIJOS_CDN (CDN y bordes compartidos conocidos). La cadena sale de la misma respuesta del A,
-sin consultas extra (_cadena_cname). Tampoco las de un ASN que es solo de un CDN o un proxy inverso, aunque no haya
-CNAME a la vista (geoip.cdn_por_asn con la base local de DB-IP Lite, #15b, RC-166). Un ASN mixto de nube y CDN
-(Amazon, Microsoft, Google) no cuenta, porque una IP suya puede ser un servidor de la empresa: ahí el CDN sale solo por
-el CNAME. Quedan como activo ip con su marca y sin consulta. Si aun así InternetDB trae el tag 'cdn', sus datos se
-descartan con un aviso. Sin la base de ASN de DB-IP ese filtro no corre: las IP de un CDN sin CNAME conocido se
-consultan igual y el aviso de base faltante lo dice (SIN_CDN_POR_ASN).
+Cloudflare (RANGOS_CLOUDFLARE), las de los rangos IPv4 publicados de CloudFront, Azure Front Door y los bordes propios
+de Google (RANGOS_CDN, de rangos_cdn.json, sin red) ni las que llegan por una cadena CNAME en la que cualquier nombre,
+intermedio o final, termina en un sufijo de SUFIJOS_CDN (CDN y bordes compartidos conocidos). La cadena sale de la
+misma respuesta del A, sin consultas extra (_cadena_cname). Tampoco las de un ASN que es solo de un CDN o un proxy
+inverso, aunque no haya CNAME a la vista (geoip.cdn_por_asn con la base local de DB-IP Lite, #15b, RC-166). Un ASN
+mixto de nube y CDN (Amazon, Microsoft, Google) no cuenta, porque una IP suya puede ser un servidor de la empresa: ahí
+el CDN sale por sus rangos publicados o por el CNAME (RC-49, H11 de la auditoría del 12 nov). Quedan como activo ip
+con su marca y sin consulta. Si aun así InternetDB trae el tag 'cdn', sus datos se descartan con un aviso. Una IP
+sin ASN conocido, porque falta la base de ASN de DB-IP o porque la base no la trae, no se consulta (RC-49, H11 de la
+auditoría del 12 nov): sin el ASN no se puede descartar que sea de un CDN. Queda como activo ip con internetdb
+'sin_asn' y la cobertura parcial, así no se cierran sus hallazgos de antes. El aviso de base faltante lo dice
+(SIN_CDN_POR_ASN) y, con la base abierta, SIN_ASN cuenta cuántas fueron.
 
 Devuelve:
 - un activo ip por IP, con 'hosts' (los nombres que resuelven a ella) e 'internetdb' con puertos, tags, CPE, cuántos
@@ -116,7 +120,7 @@ from pathlib import Path
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import certspotter, geoip, transporte
+from cirdan.recolectores import certspotter, contrato, geoip, transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos, en_alcance_nombre)
@@ -132,7 +136,7 @@ SIN_LLAVE = ('exposed_iot_device', 'exposed_ot_device', 'outdated_software')
 
 URL_INTERNETDB = 'https://internetdb.shodan.io/'
 NOMBRE_INTERNETDB = 'Shodan InternetDB'          # atribución: va en los atributos y la evidencia
-AGENTE = 'cirdan-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
+AGENTE = contrato.AGENTE   # uno solo para todas las fuentes (contrato.py)
 ORIGEN = 'cert_spotter_a'                        # de dónde salió la IP: un nombre de Cert Spotter y su A
 RESOLVEDORES = ('1.1.1.1', '8.8.8.8')            # públicos y fijos, como registros_dns.py. Nunca el DNS del sistema
 
@@ -178,6 +182,14 @@ RANGOS_CLOUDFLARE = tuple(ipaddress.ip_network(r) for r in (
     '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
     '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
     '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'))
+# Rangos IPv4 publicados de CloudFront ('cloudfront'), Azure Front Door ('azure_front_door') y los bordes propios de
+# Google ('google', goog.json menos cloud.json), para las nubes mixtas que geoip.CDN_POR_ASN no lista (RC-49, H11).
+# rangos_cdn.py los arma desde los archivos de cada nube, bajados una vez con OK. Se leen sin red y
+# RANGOS_CDN_FECHA dice de qué día son: cambian (Azure publica cada semana).
+_RANGOS_CDN = json.loads((Path(__file__).resolve().parent / 'rangos_cdn.json').read_text(encoding='utf-8'))
+RANGOS_CDN_FECHA = _RANGOS_CDN['procedencia']['descargado']
+RANGOS_CDN = tuple((ipaddress.ip_network(r), cdn) for cdn, redes in sorted(_RANGOS_CDN['rangos'].items())
+                   for r in redes)
 # Sufijo de cualquier nombre de la cadena CNAME, intermedio o final -> CDN o borde compartido. Una IP que llega por una
 # cadena con uno de estos no se consulta. Sufijos públicos conocidos, sin verificar en vivo, hasta #15b.
 SUFIJOS_CDN = {'cdn.cloudflare.net': 'cloudflare', 'cloudfront.net': 'cloudfront', 'akamaiedge.net': 'akamai',
@@ -205,15 +217,20 @@ CAMPOS = ('ports', 'tags', 'cpes', 'vulns', 'hostnames')   # los de una respuest
 # Avisos con texto fijo.
 SIN_GRABACION_DOMINIO = 'shodan: no hay grabación de Shodan de este dominio, no se revisó InternetDB'
 LIMITES = ('shodan: solo IPv4 y sin la llave de Shodan (#8): exposed_iot_device, exposed_ot_device y outdated_software '
-           'quedan sin cobertura, y no se detecta un CDN que no llegue por un CNAME conocido y cuyo ASN no esté en '
-           'geoip.CDN_POR_ASN (las nubes mixtas como Amazon, Microsoft o Google, y otros fuera de la lista), ni ninguno '
-           'sin la base de DB-IP')
+           'quedan sin cobertura, y no se detecta un CDN que no llegue por un CNAME conocido, cuyo ASN no esté en '
+           'geoip.CDN_POR_ASN y cuya IP no esté en los rangos publicados de CloudFront, Azure Front Door y los bordes '
+           'de Google del %s (en las nubes mixtas, por ejemplo Cloud CDN en un balanceador de Google Cloud, que '
+           'comparte rangos con las VM, y otros fuera de la lista)' % RANGOS_CDN_FECHA)
 # Lo que shodan agrega al aviso de geoip.aviso_sin_base cuando falta la base de ASN: el filtro de CDN por ASN no corrió.
-SIN_CDN_POR_ASN = 'las IP de un CDN sin un CNAME conocido no se pudieron descartar por ASN y se consultaron igual en InternetDB'
+SIN_CDN_POR_ASN = ('las IP fuera de los rangos de CDN y sin un CNAME de CDN no se consultaron en InternetDB, porque '
+                   'sin el ASN no se puede descartar que sean de un CDN')
+# Las IP que la base de ASN abierta no trae, por la misma razón.
+SIN_ASN = 'shodan: %s sin ASN en la base de DB-IP no se consultaron en InternetDB, porque no se puede descartar un CDN: %s'
 SIN_IP = 'shodan: ninguna IP pública del dominio fuera de un CDN, no hubo nada que consultar en InternetDB'
 PARCIAL = 'shodan: cobertura parcial'
 PARTE_CVE = '/cve'   # las CVE de una IP son otra parte que sus puertos: 'vulns' roto no frena el cierre de sus puertos
-NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiempo o una respuesta que no se puede leer), '
+NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiempo, una respuesta que no se puede leer o IP '
+               'sin ASN), '
                'no se grabó y se conserva la grabación anterior')
 NOTA_SIN_FECHA = ('InternetDB no dice cuándo vio este dato: puede ser viejo o de quien tuvo la IP antes que el dominio')
 
@@ -441,10 +458,14 @@ class ClienteShodan:
     _resolver_a, buscados en el módulo en cada consulta, así una prueba los puede cambiar con mock.patch.object.
     `cronometro` y `dormir` son time.monotonic y time.sleep por omisión. `consultas` suma cada intento de cada petición HTTP o DNS."""
 
+    PREFIJO = 'shodan: '             # lo que abre sus errores. La visita web (visita.py) hereda el cliente con el suyo
+    TIEMPO_CORRIDA = TIEMPO_CORRIDA
+    TOPES = TOPES
+
     def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, descargar=None, resolver=None, nueva=False, reloj=None,
                  cronometro=None, dormir=None):
         self.modo = modo
-        self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj)
+        self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj, sobre=True)
         self.descargar, self.resolver = descargar, resolver
         self.cronometro = cronometro or time.monotonic
         self.dormir = dormir or time.sleep
@@ -469,10 +490,10 @@ class ClienteShodan:
     def restante(self):
         """Segundos que le quedan a la corrida, sin la reserva. Al reproducir no hay consultas y no hay tope."""
         if self.modo == 'reproducir':
-            return TIEMPO_CORRIDA
+            return self.TIEMPO_CORRIDA
         if self.inicio is None:
             self.inicio = self.cronometro()
-        return TIEMPO_CORRIDA - self.reserva - (self.cronometro() - self.inicio)
+        return self.TIEMPO_CORRIDA - self.reserva - (self.cronometro() - self.inicio)
 
     def esperar(self, segundos):
         """El dormir de con_reintentos. Si después de esperar `segundos` quedaría menos de MIN_INTENTO más HOLGURA para
@@ -487,7 +508,7 @@ class ClienteShodan:
     def degradada(self, parcial=()):
         """True si la corrida tuvo alguna falla: una consulta que falló, de cualquier tipo, o una razón de cobertura
         parcial (`parcial`, de _revisar) que no es un tope determinista de TOPES. Con eso 'grabar' no escribe."""
-        return bool(self.fallas) or bool(set(parcial) - set(TOPES))
+        return bool(self.fallas) or bool(set(parcial) - set(self.TOPES))
 
     def terminar(self):
         """La corrida terminó: graba todo lo pendiente. Una corrida que falla no llega aquí y no toca la grabación."""
@@ -501,8 +522,14 @@ class ClienteShodan:
 
     def _de_disco(self, consulta):
         """(True, datos) si sale de la grabación. Una corrida con fallas ya no se graba, pero una grabación de antes o
-        editada a mano puede traer una falla: se lanza otra vez, con su clase y su texto, y no se lee como datos."""
-        del_disco, datos = self.grabadora.de_disco(consulta)
+        editada a mano puede traer una falla: se lanza otra vez, con su clase y su texto, y no se lee como datos. Un
+        archivo vacío, truncado, que no es JSON o sin su sobre {grabado, datos} es una consulta que no llegó
+        (FuenteNoResponde), nunca un error que tumbe la fuente ni una respuesta sin datos: vale para toda consulta,
+        también el A y las páginas de Cert Spotter."""
+        try:
+            del_disco, datos = self.grabadora.de_disco(consulta)
+        except (ValueError, KeyError, TypeError, AttributeError):   # SinGrabacion no es ninguna de estas
+            raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta) from None
         if del_disco and isinstance(datos, dict) and 'falla' in datos:
             raise FALLAS.get(datos.get('tipo'), FuenteNoResponde)(str(datos['falla'])[:300])
         return del_disco, datos
@@ -517,27 +544,35 @@ class ClienteShodan:
             self.fallas += 1
             raise
 
-    def _http(self, url, intentos, timeout, que, sin_reintento=()):
+    def _transporte(self, url, timeout):
+        """La petición HTTP por omisión: _descargar, buscada en el módulo en cada consulta (mock.patch.object). La
+        visita web la cambia por la suya, con otro tope de bytes."""
+        return _descargar(url, timeout)
+
+    def _http(self, url, intentos, timeout, que, sin_reintento=(), turno=None):
         """JSON de `url` con hasta `intentos` intentos dentro del tiempo de la corrida. None solo con un 404. Un 429
         lanza LimiteAlcanzado, y otro 4xx, un 200 vacío o 'null' o una redirección RespuestaIlegible, sin reintentar.
         Si un 5xx o un 408 traen Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le
-        alcanza a la corrida, pero nunca más de MAX_ESPERA."""
+        alcanza a la corrida, pero nunca más de MAX_ESPERA. `turno()`, si se pasa, corre antes de cada intento, también
+        de los reintentos: la visita web espera ahí el ritmo de la NVD."""
         pedida = {}   # el Retry-After del último intento
 
         def intento():
             pedida.clear()
+            if turno:
+                turno()
             limite = min(timeout, self.restante())
             if limite < MIN_INTENTO:
-                raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de consultar %s' % que)
+                raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de consultar %s' % que)
             self.consultas += 1
             try:
-                cuerpo = (self.descargar or _descargar)(url, limite)
+                cuerpo = (self.descargar or self._transporte)(url, limite)
             except SinTiempo:
                 # La respuesta se pasó de su plazo. Si con eso se acabó la corrida, es el corte por tiempo. Si no, es
                 # una respuesta lenta y cuenta como una falla de red, que con_reintentos reintenta.
                 if self.restante() < MIN_INTENTO:
-                    raise SinTiempo('shodan: se acabó el tiempo de la corrida mientras se leía %s' % que) from None
-                raise TimeoutError('shodan: %s tardó más de %s s en responder' % (que, limite)) from None
+                    raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida mientras se leía %s' % que) from None
+                raise TimeoutError(self.PREFIJO + '%s tardó más de %s s en responder' % (que, limite)) from None
             except urllib.error.HTTPError as e:
                 codigo, espera = e.code, (e.headers or {}).get('Retry-After')
                 pedida['segundos'] = min(transporte.retry_after(e.headers) or 0, MAX_ESPERA)   # aunque pida más
@@ -546,18 +581,18 @@ class ClienteShodan:
                 if codigo == 404:
                     return _NO_ENCONTRADO
                 if codigo == 429:
-                    raise LimiteAlcanzado('shodan: %s llegó a su límite de consultas (429, Retry-After %s s)'
+                    raise LimiteAlcanzado(self.PREFIJO + '%s llegó a su límite de consultas (429, Retry-After %s s)'
                                           % (que, espera or '?')) from None
                 if codigo in sin_reintento or (codigo < 500 and codigo != 408):
-                    raise RespuestaIlegible('shodan: %s respondió %d' % (que, codigo)) from None
+                    raise RespuestaIlegible(self.PREFIJO + '%s respondió %d' % (que, codigo)) from None
                 raise
             if not cuerpo or not cuerpo.strip():
-                raise RespuestaIlegible('shodan: %s respondió sin cuerpo' % que)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió sin cuerpo' % que)
             datos = json.loads(cuerpo)
             if datos is None:
-                raise RespuestaIlegible('shodan: %s respondió null' % que)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió null' % que)
             return datos
-        intento.__name__ = 'shodan: %s no respondió' % que
+        intento.__name__ = self.PREFIJO + '%s no respondió' % que
         datos = con_reintentos(intento, intentos=intentos, esperas=ESPERAS,
                                dormir=lambda segundos: self.esperar(max(segundos, pedida.get('segundos') or 0)))
         return None if datos is _NO_ENCONTRADO else datos
@@ -570,7 +605,7 @@ class ClienteShodan:
         del_disco, datos = self._de_disco(consulta)
         if del_disco:
             if not isinstance(datos, list):
-                raise FuenteNoResponde('shodan: la grabación de %s no se puede leer' % consulta)
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta)
         else:
             que = '%s (%s)' % (fuente, texto or consulta)
 
@@ -579,7 +614,7 @@ class ClienteShodan:
                     self.dormir(pausa)
                 datos = self._http(url, intentos, timeout or TIMEOUT_CT, que, sin_reintento)
                 if not isinstance(datos, list) or (valida and not valida(datos)):
-                    raise RespuestaIlegible('shodan: %s respondió algo que no se puede leer' % que)
+                    raise RespuestaIlegible(self.PREFIJO + '%s respondió algo que no se puede leer' % que)
                 return reducir_pagina(datos)
             datos = self._consultar(consulta, pagina)
             self._grabar(consulta, datos)
@@ -596,15 +631,15 @@ class ClienteShodan:
             try:
                 return limpiar_a(datos['estado'], datos['ips'], datos.get('cnames', datos.get('cname')))
             except (ValueError, KeyError, TypeError, AttributeError):
-                raise FuenteNoResponde('shodan: la grabación de %s no se puede leer' % consulta) from None
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta) from None
 
         def intento():
             limite = min(TIMEOUT_DNS, self.restante())
             if limite < MIN_INTENTO:
-                raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de resolver %s' % nombre)
+                raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de resolver %s' % nombre)
             self.consultas += 1
             return limpiar_a(*(self.resolver or _resolver_a)(nombre, limite))
-        intento.__name__ = 'shodan: el DNS no respondió al A de %s' % nombre
+        intento.__name__ = self.PREFIJO + 'el DNS no respondió al A de %s' % nombre
 
         datos = self._consultar(consulta, lambda: con_reintentos(intento, intentos=INTENTOS, esperas=ESPERAS,
                                                                  errores=(ConsultaFallida,), dormir=self.esperar))
@@ -619,7 +654,7 @@ class ClienteShodan:
         if del_disco:
             limpio = limpiar_internetdb(datos, dominio)
             if limpio is None:
-                raise FuenteNoResponde('shodan: la grabación de %s no se puede leer' % consulta)
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta)
             return limpio
         que = 'InternetDB (%s)' % ip
 
@@ -629,7 +664,7 @@ class ClienteShodan:
             crudo = self._http(URL_INTERNETDB + ip, INTENTOS, TIMEOUT_HTTP, que)
             limpio = {'sin_datos': True} if crudo is None else limpiar_internetdb(crudo, dominio)
             if limpio is None:
-                raise RespuestaIlegible('shodan: %s respondió algo que no es un objeto' % que)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió algo que no es un objeto' % que)
             return limpio
         limpio = self._consultar(consulta, consulta_ip)
         self._grabar(consulta, limpio)
@@ -678,11 +713,15 @@ def consultable(ip):
 
 
 def cdn_de(ip, cnames=()):
-    """El CDN de una IP: 'cloudflare' por sus rangos, el del sufijo de cualquier nombre de su cadena CNAME (intermedio o
-    final, con SUFIJOS_CDN o CDN_NUMERADOS), o None. `cnames` es un nombre o una lista de nombres."""
+    """El CDN de una IP: 'cloudflare' por sus rangos, el de RANGOS_CDN (CloudFront, Azure Front Door o Google) por los
+    suyos, el del sufijo de cualquier nombre de su cadena CNAME (intermedio o final, con SUFIJOS_CDN o CDN_NUMERADOS), o
+    None. `cnames` es un nombre o una lista de nombres."""
     direccion = ipaddress.ip_address(ip)
     if any(direccion in red for red in RANGOS_CLOUDFLARE):
         return 'cloudflare'
+    for red, cdn in RANGOS_CDN:
+        if direccion in red:
+            return cdn
     if isinstance(cnames, str):
         cnames = (cnames,)
     for cname in sorted(c for c in cnames or () if c):
@@ -873,24 +912,33 @@ def _revisar(res, cliente, dominio, ahora):
 
     # 3. Qué IP se consultan: públicas (consultable), fuera de un CDN en toda su cadena CNAME y fuera de un ASN de CDN.
     # La ubicación sale de la base local, sin red: las bases se piden una vez por corrida y solo si alguna IP es
-    # ubicable (con solo IP privadas no se busca nada y el aviso de base faltante no diría nada cierto). Sin la base de
-    # ASN el filtro de CDN por ASN queda apagado y esas IP se consultan igual: el mismo aviso lo dice (SIN_CDN_POR_ASN).
+    # ubicable (con solo IP privadas no se busca nada y el aviso de base faltante no diría nada cierto). Una IP sin ASN
+    # conocido no se consulta: sin la base de ASN lo dice el aviso de base faltante (SIN_CDN_POR_ASN) y, con la base
+    # abierta, SIN_ASN.
     ips = sorted(por_ip, key=ipaddress.ip_address)
     bases = geoip.bases_por_omision() if any(geoip.ubicable(ip) for ip in ips) else None
     ubicadas = {ip: geoip.ubicar(ip, bases) for ip in ips}
     aviso_geo = None if bases is None else geoip.aviso_sin_base(FUENTE, bases, sin_asn=SIN_CDN_POR_ASN)
     if aviso_geo:
         res.avisos.append(aviso_geo)
-    marcas, consultar = {}, []
+    marcas, consultar, sin_asn = {}, [], []
     for ip in ips:
         if not consultable(ip):
             marcas[ip] = {'no_publica': True}
             continue
-        cdn = cdn_de(ip, cnames.get(ip, ())) or geoip.cdn_por_asn(ubicadas[ip]['asn'])
+        asn = ubicadas[ip]['asn']
+        cdn = cdn_de(ip, cnames.get(ip, ())) or geoip.cdn_por_asn(asn)
         if cdn:
             marcas[ip] = {'cdn': cdn}
+        elif isinstance(asn, bool) or not isinstance(asn, int):   # 'No disponible': no se sabe si es de un CDN
+            marcas[ip] = {'internetdb': 'sin_asn'}
+            sin_asn.append(ip)
         else:
             consultar.append(ip)
+    if sin_asn:
+        parcial.append('asn')
+        if not (aviso_geo and bases.asn is None):   # sin la base, el aviso de base faltante ya lo dijo
+            res.avisos.append(SIN_ASN % (_cuantos(len(sin_asn), 'IP', 'IP'), _lista(sin_asn)))
     # Las IP de la raíz van primero: con MAX_NOMBRES nombres las de los subdominios no la dejan fuera de MAX_IPS (RC-55)
     consultar.sort(key=lambda ip: (dominio not in por_ip[ip], ipaddress.ip_address(ip)))
     if len(consultar) > MAX_IPS:

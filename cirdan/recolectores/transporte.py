@@ -1,4 +1,5 @@
-"""HTTPS con un plazo absoluto por petición y sin redirecciones, para rdap.py y shodan.py (#15b, RC-166).
+"""HTTPS con un plazo absoluto por petición y sin redirecciones, para rdap.py y shodan.py (#15b, RC-166) y para el
+TXT de verificación por DNS sobre HTTPS de orquestador/txt.py (#119, RC-236).
 
 urllib solo pone un timeout a cada operación del socket: getaddrinfo no tiene, y el connect de cada dirección, el
 handshake TLS, el envío y cada lectura de las cabeceras o del cuerpo tienen el timeout entero. Un servidor que contesta
@@ -20,12 +21,27 @@ registros RDAP, InternetDB y Cert Spotter responden sin redirigir. Si alguno red
 respuesta que no se puede leer. Tampoco se usan los proxies del entorno (HTTPS_PROXY y los demás): cada
 petición va directa al servidor, porque el plazo no cubriría el CONNECT de un túnel.
 
+Solo direcciones públicas (#18, RC-46, comentario 10283). _conectar se conecta solo a las direcciones globales de lo que
+dio getaddrinfo (publica()), la misma lista a la que se conecta: un DNS que cambia entre una consulta anterior y la
+conexión no lo salta. Si ninguna es global lanza NoPublica, que urllib entrega dentro de un URLError (su reason). Así
+un nombre que apunta a 127.0.0.1, a la red interna (10.0.0.0/8 y las demás) o a 169.254.169.254 nunca recibe la
+petición, ni en la visita web (visita.py) ni en las consultas a las fuentes.
+
+Solo los puertos de PUERTOS (#181, RC-299): _conectar lanza PuertoNoPermitido antes de resolver el nombre si el puerto
+de la URL es otro. Así una URL que llega de fuera (el bootstrap de IANA, una redirección) nunca apunta la petición al
+6379 o al 5432 de un host público. Hoy solo se pide por https en el 443.
+
+visitar() es la petición de la visita web: da el estado, las cabeceras y hasta `tope` bytes del cuerpo de cualquier
+respuesta, también un 4xx o un 5xx, y corta el cuerpo en vez de fallar. Una redirección tampoco se sigue: Redirigida
+trae el destino (`destino`) y quien llama decide si lo visita.
+
 retry_after() lee la cabecera Retry-After, para que un 5xx que la trae espere lo que pide antes de otro intento.
 """
 import contextlib
 import email.utils
 import functools
 import http.client
+import ipaddress
 import re
 import socket
 import ssl
@@ -38,6 +54,13 @@ from datetime import datetime, timezone
 
 BLOQUE = 64 * 1024           # bytes que descargar lee de una vez
 SEGUNDOS = re.compile(r'[0-9]{1,9}')
+# Prefijos NAT64 (RFC 6052 y RFC 8215): llevan una IPv4 en los últimos 32 bits, que también tiene que ser pública.
+NAT64 = (ipaddress.ip_network('64:ff9b::/96'), ipaddress.ip_network('64:ff9b:1::/48'))
+IPV4_COMPATIBLE = ipaddress.ip_network('::/96')
+# IPv6 que ipaddress da como globales y no lo son: site-local (en desuso, RFC 3879) y la IPv4 traducida de SIIT
+# (RFC 2765), que lleva una IPv4 en los últimos 32 bits.
+IPV6_INTERNAS = (ipaddress.ip_network('fec0::/10'), ipaddress.ip_network('::ffff:0:0:0/96'))
+PUERTOS = frozenset({443})   # los únicos puertos a los que se conecta _conectar (#181, RC-299)
 
 
 class PlazoVencido(Exception):
@@ -45,11 +68,41 @@ class PlazoVencido(Exception):
 
 
 class Redirigida(Exception):
-    """El servidor respondió con una redirección, que no se sigue."""
+    """El servidor respondió con una redirección, que no se sigue. `destino` es la URL absoluta a la que manda (la de
+    urllib, ya unida con la de la petición), o None."""
 
-    def __init__(self, codigo, host):
+    def __init__(self, codigo, host, destino=None):
         super().__init__('%s redirigió (%d) y no se siguen redirecciones' % (host, codigo))
-        self.codigo, self.host = codigo, host
+        self.codigo, self.host, self.destino = codigo, host, destino
+
+
+class NoPublica(OSError):
+    """El nombre solo resolvió a direcciones que no son públicas: no se conecta a ninguna."""
+
+
+class PuertoNoPermitido(OSError):
+    """La URL pide un puerto que no está en PUERTOS: no se resuelve el nombre ni se abre un socket."""
+
+
+def publica(ip):
+    """True si `ip` es una dirección pública: un nombre que resuelve a 127.0.0.1, 10.x o 169.254.169.254 no se usa, así
+    un DNS que miente no abre conexiones dentro de la red del contenedor ni de la VM. is_global da True en 64:ff9b::/96
+    aunque por dentro sea 127.0.0.1 (64:ff9b::7f00:1), y en una red con NAT64 esa conexión llega a la IPv4: en los
+    prefijos de NAT64 también se revisa la IPv4 de los últimos 32 bits. 6to4 (2002::/16) no se repite aquí: ipaddress
+    ya lo da como no global en la versión de la imagen (2002:7f00:1::1 da False). Antes estaba en rdap.py
+    (_publica)."""
+    try:
+        direccion = ipaddress.ip_address(str(ip).split('%')[0])
+    except ValueError:
+        return False
+    if direccion.version == 6 and direccion in IPV4_COMPATIBLE and int(direccion) > 1:
+        return False   # ::a.b.c.d (en desuso) puede llegar a la IPv4 y ipaddress la da como global
+    if direccion.version == 6 and any(direccion in red for red in IPV6_INTERNAS):
+        return False
+    if direccion.version == 6 and any(direccion in red for red in NAT64) \
+            and not ipaddress.IPv4Address(int(direccion) & 0xFFFFFFFF).is_global:
+        return False
+    return direccion.is_global
 
 
 def resolver(host, puerto, espera):
@@ -100,9 +153,9 @@ class _Conexion(http.client.HTTPSConnection):
     """Una conexión HTTPS en la que todo pasa dentro de `plazo`: getaddrinfo, el connect, el TLS y cada lectura o
     escritura. El `timeout` que pasa urllib no se usa."""
 
-    def __init__(self, host, plazo, cronometro, **otros):
+    def __init__(self, host, plazo, cronometro, familia=socket.AF_UNSPEC, **otros):
         super().__init__(host, **otros)
-        self.plazo, self.cronometro = plazo, cronometro
+        self.plazo, self.cronometro, self.familia = plazo, cronometro, familia
         self._create_connection = self._conectar
 
     def queda(self):
@@ -113,10 +166,21 @@ class _Conexion(http.client.HTTPSConnection):
         return segundos
 
     def _conectar(self, direccion, *_):
-        """El socket conectado a la primera dirección de `direccion` (host, puerto) que responda, con settimeout en lo
-        que queda para el handshake TLS. Todo socket que falla se cierra."""
+        """El socket conectado a la primera dirección pública de `direccion` (host, puerto) que responda, con
+        settimeout en lo que queda para el handshake TLS. Las que no son públicas (publica()) se saltan sin crear su
+        socket, y si no queda ninguna lanza NoPublica. Con un puerto fuera de PUERTOS lanza PuertoNoPermitido sin
+        resolver el nombre. Todo socket que falla se cierra. Con `familia` solo cuentan las
+        direcciones de esa familia: la visita web pide AF_INET, así una AAAA que el DNS de la red arma con su propio
+        prefijo de NAT64 (uno que publica() no puede conocer) nunca se usa para llegar a una IPv4 interna."""
         host, puerto = direccion
-        direcciones = resolver(host, puerto, self.queda())
+        if puerto not in PUERTOS:   # antes de getaddrinfo: ni una consulta DNS por una URL con otro puerto
+            raise PuertoNoPermitido('%s pide el puerto %s, que no está permitido' % (host, puerto))
+        todas = resolver(host, puerto, self.queda())
+        if self.familia:
+            todas = [d for d in todas if d[0] == self.familia]
+        direcciones = [d for d in todas if publica(d[4][0])]
+        if todas and not direcciones:
+            raise NoPublica('%s resolvió solo a direcciones que no son públicas' % host)
         ultimo = OSError('%s no resolvió a ninguna dirección' % host)
         for i, (familia, tipo, protocolo, _, destino) in enumerate(direcciones):
             try:
@@ -146,9 +210,9 @@ class _Conexion(http.client.HTTPSConnection):
 class _Https(urllib.request.HTTPSHandler):
     """Abre cada petición https con una _Conexion que tiene el plazo de la petición."""
 
-    def __init__(self, plazo, cronometro):
+    def __init__(self, plazo, cronometro, familia=socket.AF_UNSPEC):
         super().__init__(context=_contexto())
-        self._conexion = functools.partial(_Conexion, plazo=plazo, cronometro=cronometro)
+        self._conexion = functools.partial(_Conexion, plazo=plazo, cronometro=cronometro, familia=familia)
 
     def https_open(self, req):
         return self.do_open(self._conexion, req, context=self._context)
@@ -160,28 +224,34 @@ class _SinRedirecciones(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         with contextlib.suppress(Exception):
             fp.close()
-        raise Redirigida(code, urllib.parse.urlsplit(req.full_url).hostname)
+        raise Redirigida(code, urllib.parse.urlsplit(req.full_url).hostname, newurl)
 
 
-def abrir(req, plazo, cronometro):
+def abrir(req, plazo, cronometro, familia=socket.AF_UNSPEC):
     """La respuesta a `req`, con _Https, _SinRedirecciones y sin proxies (un ProxyHandler vacío, que build_opener ya no
-    agrega con los del entorno). Las pruebas la cambian por una respuesta simulada."""
+    agrega con los del entorno). Con `familia` la conexión solo va a direcciones de esa familia (_Conexion._conectar).
+    Las pruebas la cambian por una respuesta simulada."""
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _SinRedirecciones,
-                                       _Https(plazo, cronometro)).open(req)
+                                       _Https(plazo, cronometro, familia)).open(req)
 
 
-def descargar(req, plazo, tope, cronometro=None):
+def descargar(req, plazo, tope, cronometro=None, tipo=None, familia=socket.AF_UNSPEC):
     """El cuerpo de la respuesta a `req`, que tiene que ser https, de a lo más `tope` bytes y todo antes de `plazo`.
+    Con `familia` la conexión solo va a direcciones de esa familia, como en visitar(): la pide quien consulta a un
+    servidor cuyo nombre llega de fuera (rdap.py, con el del bootstrap de IANA).
 
     Lee por bloques (read1, una lectura del socket a la vez) y revisa el plazo antes de cada uno. Lanza PlazoVencido si
     se pasa, también cuando un timeout del socket llega con el plazo ya vencido, Redirigida con un 3xx y ValueError si
-    la respuesta pasa de `tope`. El HTTPError de un 4xx o un 5xx y el OSError de la red salen tal cual."""
+    la respuesta pasa de `tope` o si, con `tipo`, su Content-Type (sin parámetros) es otro. El HTTPError de un 4xx o un
+    5xx y el OSError de la red salen tal cual."""
     cronometro = cronometro or time.monotonic
     if req.type != 'https':
         raise ValueError('solo se pide por https: %s' % req.full_url)
     partes, total = [], 0
     try:
-        with abrir(req, plazo, cronometro) as r:
+        with (abrir(req, plazo, cronometro, familia) if familia else abrir(req, plazo, cronometro)) as r:
+            if tipo is not None and r.headers.get_content_type() != tipo:
+                raise ValueError('respuesta de tipo %s, no %s' % (r.headers.get_content_type(), tipo))
             leer = r.read1 if hasattr(r, 'read1') else r.read
             while True:
                 if cronometro() > plazo:
@@ -200,6 +270,52 @@ def descargar(req, plazo, tope, cronometro=None):
             raise PlazoVencido('%s no terminó dentro de su plazo' % req.host) from None
         raise
     return b''.join(partes)
+
+
+def visitar(req, plazo, tope, cronometro=None):
+    """(estado, cabeceras, cuerpo, cortado) de la respuesta a `req`, que tiene que ser https, todo antes de `plazo`:
+    la visita web de la actividad 6 (visita.py). `cabeceras` es la lista de pares (nombre, valor) como llegaron, con
+    las repetidas. Un 4xx o un 5xx es una respuesta como cualquier otra (un reto del WAF es un 403 o un 503). Del cuerpo
+    se leen a lo más `tope` bytes y `cortado` dice si quedaba más: una página grande no es una falla.
+
+    Lanza Redirigida con el destino si responde con una redirección que urllib sigue (301, 302, 303, 307 y 308 con
+    Location), PlazoVencido si se pasa del plazo, también cuando un timeout del socket llega con el plazo ya vencido, y
+    el OSError de la red tal cual: un URLError cuyo reason es NoPublica si el nombre solo resolvió a direcciones que no
+    son públicas, o el de un certificado que no se pudo verificar.
+
+    La conexión va solo por IPv4 (AF_INET), como el A con el que la visita decide si el nombre tiene sitio público: una
+    red con NAT64 y un prefijo propio no puede llevarla a una IPv4 interna con una AAAA armada."""
+    cronometro = cronometro or time.monotonic
+    if req.type != 'https':
+        raise ValueError('solo se pide por https: %s' % req.full_url)
+    try:
+        try:
+            r = abrir(req, plazo, cronometro, socket.AF_INET)
+        except urllib.error.HTTPError as e:   # la respuesta del sitio con su estado, que se analiza igual
+            if e.fp is None:
+                raise
+            r = e
+        with r:
+            estado = r.getcode()
+            cabeceras = list(r.headers.items()) if r.headers is not None else []
+            leer = r.read1 if hasattr(r, 'read1') else r.read
+            partes, total = [], 0
+            while total <= tope:
+                if cronometro() > plazo:
+                    raise PlazoVencido('%s no terminó dentro de su plazo' % req.host)
+                parte = leer(min(BLOQUE, tope + 1 - total))
+                if not parte:
+                    break
+                partes.append(parte)
+                total += len(parte)
+    except (Redirigida, PlazoVencido):
+        raise
+    except OSError:
+        if cronometro() >= plazo:   # el timeout del socket era lo que quedaba del plazo
+            raise PlazoVencido('%s no terminó dentro de su plazo' % req.host) from None
+        raise
+    cuerpo = b''.join(partes)
+    return estado, cabeceras, cuerpo[:tope], len(cuerpo) > tope
 
 
 def retry_after(cabeceras, ahora=None):

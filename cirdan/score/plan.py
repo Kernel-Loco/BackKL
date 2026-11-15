@@ -3,6 +3,7 @@ import csv
 import io
 import json
 
+from cirdan.exportar import escapar_formula  # noqa: F401 (también lo importan las pruebas)
 from cirdan.score import criterio, motor
 
 
@@ -106,17 +107,6 @@ def construir_plan(dominio, hallazgos, reglas, pesos_categoria, method='rules', 
         'actions': acciones,
         'total': len(acciones),
     }
-
-
-def escapar_formula(value):
-    """Evita que texto de hallazgos se ejecute como fórmula al abrir las exportaciones."""
-    if isinstance(value, str) and value.startswith(('=', '+', '-', '@')):
-        return "'" + value
-    if isinstance(value, list):
-        return [escapar_formula(item) for item in value]
-    if isinstance(value, dict):
-        return {key: escapar_formula(item) for key, item in value.items()}
-    return value
 
 
 def exportar_json(plan):

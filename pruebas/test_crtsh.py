@@ -7,6 +7,7 @@ import io
 import json
 import functools
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -48,6 +49,7 @@ SUBDOMINIOS = [
 ]
 CONTIENE_MARCA = [
     cert(20, ['acme-demo-login.com', 'www.acme-demo-login.com'], '2026-09-30T00:00:00', '2026-12-29T00:00:00'),
+    # el dominio autorizado completo dentro de un dominio ajeno: se reporta como cuenta-segura.net (RC-226, R1)
     cert(21, ['acme-demo.mx.cuenta-segura.net'], '2026-08-01T00:00:00', '2026-10-30T00:00:00'),
     # certificado compartido de una CDN: solo cuenta el nombre parecido, no los ajenos
     cert(22, ['sni.cdn-ejemplo.com', 'acme-demo-pagos.com', 'tienda-ajena.com'], '2026-09-10T00:00:00', '2026-12-09T00:00:00'),
@@ -91,7 +93,8 @@ class CrtshSimulado:
 
 def recolectar(transporte, **kw):
     cliente = crtsh.ClienteCrtsh(transporte=transporte, dormir=lambda s: None)
-    return crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'], **kw)
+    kw.setdefault('propios', ['acme-demo.com.mx'])
+    return crtsh.recolectar('acme-demo.mx', cliente, AHORA, **kw)
 
 
 def consulta(url):
@@ -150,10 +153,14 @@ class DominiosParecidos(unittest.TestCase):
         self.parecidos = {h.evidencia['dominio_parecido']: h for h in self.res.hallazgos if h.codigo == 'lookalike_domain'}
 
     def test_1_encuentra_los_parecidos_recientes(self):
-        self.assertEqual(sorted(self.parecidos), ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com',
-                                                  'cuenta-segura.net'])
-        self.assertEqual(self.parecidos['acme-dem0.mx'].evidencia['tipo_parecido'], 'error_tipografico')
+        self.assertEqual(sorted(self.parecidos),
+                         ['acme-dem0.mx', 'acme-demo-login.com', 'acme-demo-pagos.com', 'cuenta-segura.net'])
+        # R1: el dominio autorizado completo dentro de un dominio ajeno se reporta con ese dominio.
         self.assertEqual(self.parecidos['cuenta-segura.net'].evidencia['nombres'], ['acme-demo.mx.cuenta-segura.net'])
+        self.assertEqual(self.parecidos['cuenta-segura.net'].evidencia['tipo_parecido'], 'contiene_marca')
+        self.assertEqual(self.parecidos['acme-dem0.mx'].evidencia['tipo_parecido'], 'error_tipografico')
+        self.assertEqual(self.parecidos['acme-demo-login.com'].evidencia['nombres'],
+                         ['acme-demo-login.com', 'www.acme-demo-login.com'])
 
     def test_2_no_cuenta_propios_viejos_ni_ajenos_de_la_cdn(self):
         for fuera in ('acme-demo.com.mx', 'acme-demo-viejo.com', 'cdn-ejemplo.com', 'tienda-ajena.com', 'ajeno.org',
@@ -171,6 +178,16 @@ class DominiosParecidos(unittest.TestCase):
         self.assertEqual(v[:4], ['acme-demo.com', 'acme-demo.com.mx', 'acme-demo.net', 'acmedemo.mx'])
         self.assertIn('acme-dem0.mx', v)
 
+    def test_4c_la_lista_aprobada_de_olmardo_com(self):
+        """Las 10 variantes de docs/contrato_plugin.md, que ErnestoDL aprobó el 10 nov 2026 (#109, RC-226). Si
+        candidatos_parecidos() cambia, cambia lo que se consulta de terceros: se aprueba otra vez y se corrige el doc."""
+        self.assertEqual(crtsh.candidatos_parecidos('olmardo.com'),
+                         ['olmardo.mx', 'olmardo.com.mx', 'olmardo.net', '0lmardo.com', 'o1mardo.com', 'olrnardo.com',
+                          'olm4rdo.com', 'olmardo.org', 'olmardo.co', 'olmardo.io'])
+        doc = (Path(__file__).resolve().parents[1] / 'docs' / 'contrato_plugin.md').read_text(encoding='utf-8')
+        for variante in ['%olmardo%'] + crtsh.candidatos_parecidos('olmardo.com'):
+            self.assertIn('`%s`' % variante, doc)
+
     def test_5_por_defecto_no_se_buscan_y_quedan_sin_cobertura(self):
         t = CrtshSimulado()
         res = recolectar(t)
@@ -181,7 +198,7 @@ class DominiosParecidos(unittest.TestCase):
         self.assertEqual(crtsh.resumen(res)[-1],
                          'Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).')
 
-    def test_6_la_linea_de_comandos_solo_los_busca_con_con_parecidos(self):
+    def test_6_la_linea_de_comandos_los_busca_salvo_con_sin_parecidos(self):
         def correr(*argv):
             t, salida = CrtshSimulado(), io.StringIO()
             with mock.patch.object(crtsh, '_descargar', t), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
@@ -189,17 +206,250 @@ class DominiosParecidos(unittest.TestCase):
                 codigo = crtsh._main(['acme-demo.mx', '--json'] + list(argv))
             return codigo, json.loads(salida.getvalue()), [consulta(u) for u in t.urls]
 
-        for argv in ((), ('--sin-parecidos',)):
+        codigo, res, consultas = correr('--sin-parecidos')
+        self.assertEqual((codigo, res['sin_cobertura'], consultas), (0, ['lookalike_domain'], ['%.acme-demo.mx']))
+        for argv in ((), ('--con-parecidos',)):  # desde #109 (RC-226) es lo predeterminado
             codigo, res, consultas = correr(*argv)
-            self.assertEqual((codigo, res['sin_cobertura'], consultas), (0, ['lookalike_domain'], ['%.acme-demo.mx']),
+            self.assertEqual(res['sin_cobertura'], [], argv)
+            self.assertEqual(consultas, ['%.acme-demo.mx', '%acme-demo%'] + crtsh.candidatos_parecidos('acme-demo.mx'),
                              argv)
-        codigo, res, consultas = correr('--con-parecidos')
-        self.assertEqual(res['sin_cobertura'], [])
-        self.assertEqual(consultas[:2], ['%.acme-demo.mx', '%acme-demo%'])
-        self.assertIn('acme-dem0.mx', consultas)
         with self.assertRaises(SystemExit) as salida, contextlib.redirect_stderr(io.StringIO()):
             crtsh._main(['acme-demo.mx', '--con-parecidos', '--sin-parecidos'])
         self.assertEqual(salida.exception.code, 2)
+        ayuda = io.StringIO()  # la terminal no recibe los dominios propios: la ayuda avisa que no los excluye
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(ayuda):
+            crtsh._main(['--help'])
+        self.assertIn('no los excluye', ' '.join(ayuda.getvalue().split()))
+
+    def test_7_sin_marca_no_se_busca_ningun_parecido(self):
+        """A1 de RC-226. registrable() solo conoce SUFIJOS_DOBLES: de acme.com.kg la etiqueta saldría 'com' y se
+        consultarían com.com o com.mx, que no son variantes del dominio autorizado. Con un dominio que no es su
+        propio dominio registrable no se consulta nada de parecidos y lookalike_domain queda sin cobertura."""
+        for dominio in ('acme.com.kg', 'api.acme-demo.mx', 'tienda.acme.com.mx', 'acme-demo.github.io'):
+            t = CrtshSimulado(respuestas={
+                '%.' + dominio: [cert(50, ['www.' + dominio], '2026-09-20T00:00:00', '2026-12-19T00:00:00')]})
+            cliente = crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None)
+            res = crtsh.recolectar(dominio, cliente, AHORA, parecidos=True, max_candidatos=50)
+            self.assertEqual([consulta(u) for u in t.urls], ['%.' + dominio], dominio)  # ni %com% ni com.com
+            self.assertEqual((res.estado, res.sin_cobertura, res.omitidos), ('succeeded', ['lookalike_domain'], []),
+                             dominio)
+            self.assertEqual(res.avisos, [crtsh.SIN_MARCA % dominio], dominio)
+            self.assertNotIn('lookalike_domain', {h.codigo for h in res.hallazgos}, dominio)
+            self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [], dominio)
+            self.assertEqual(crtsh.candidatos_parecidos(dominio), [], dominio)
+            self.assertIsNone(crtsh._marca(dominio), dominio)
+        for solo in ('com.mx', 'com.gt', 'github.io', 'mx'):  # un sufijo solo tampoco tiene marca
+            self.assertEqual((crtsh.candidatos_parecidos(solo), crtsh._marca(solo)), ([], None), solo)
+        self.assertEqual((crtsh._marca('acme.com.mx'), crtsh._marca('acme-demo.mx')), ('acme', 'acme-demo'))
+        self.assertEqual(crtsh.candidatos_parecidos('acme.com.mx')[:3], ['acme.com', 'acme.mx', 'acme.net'])
+
+    def test_8_la_marca_tiene_que_estar_en_el_dominio_registrable(self):
+        """A2 de RC-226: acme-demo.github.io traído por %acme-demo% nunca es un parecido de github.io. R1: en un
+        hosting de HOSTINGS el parecido es el sitio del cliente, y el dominio autorizado completo dentro de un dominio
+        ajeno se reporta con ese dominio. La marca sola como subdominio de un dominio ajeno no cuenta. R2: un parecido
+        bajo un sufijo de dos niveles de la lista sale con su dominio registrable, no como el sufijo."""
+        vigente = ('2026-09-10T00:00:00', '2026-12-09T00:00:00')
+        marca = [cert(60, ['acme-demo.github.io', 'www.acme-demo.github.io'], *vigente),
+                 cert(61, ['acme-demo.mx.cuenta-segura.net'], *vigente),
+                 cert(62, ['www.acme-demo-login.com'], *vigente), cert(63, ['miacme-demo.com.mx'], *vigente),
+                 cert(64, ['acme-demo-login.netlify.app'], *vigente), cert(65, ['acme-demo.sharepoint.com'], *vigente),
+                 cert(66, ['www.acme-demo.com.gt'], *vigente), cert(67, ['acme-demo.org.ar'], *vigente),
+                 cert(68, ['acme-demo.co.za'], *vigente), cert(69, ['xacme-demo.mx.otro.org'], *vigente),
+                 cert(70, ['acme-demo.com.kg'], *vigente), cert(71, ['acme-demo-pagos.github.io'], *vigente)]
+        t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': marca})
+        res = recolectar(t, parecidos=True)
+        self.assertEqual(res.sin_cobertura, [])
+        parecidos = {h.clave: h for h in res.hallazgos if h.codigo == 'lookalike_domain'}
+        self.assertEqual(sorted(parecidos), [
+            'acme-demo-login.com', 'acme-demo-login.netlify.app', 'acme-demo-pagos.github.io', 'acme-demo.co.za',
+            'acme-demo.com.gt',
+            'acme-demo.github.io', 'acme-demo.org.ar', 'cuenta-segura.net'])  # miacme-demo.com.mx va pegada: H2
+        self.assertEqual(parecidos['cuenta-segura.net'].evidencia['nombres'], ['acme-demo.mx.cuenta-segura.net'])
+        self.assertEqual(parecidos['acme-demo.github.io'].evidencia['nombres'],
+                         ['acme-demo.github.io', 'www.acme-demo.github.io'])
+        for fuera in ('github.io', 'netlify.app', 'sharepoint.com', 'otro.org', 'com.gt', 'org.ar', 'co.za', 'com.kg'):
+            self.assertNotIn(fuera, parecidos)  # com.kg no está en SUFIJOS_DOBLES: acme-demo.com.kg se descarta
+        # Un sitio del hosting dado de alta como propio no sale, y no esconde el de otro cliente del mismo hosting.
+        t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': marca})
+        res = recolectar(t, parecidos=True, propios=['acme-demo.github.io'])
+        claves = {h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'}
+        self.assertEqual(claves & {'acme-demo.github.io', 'acme-demo-pagos.github.io'}, {'acme-demo-pagos.github.io'})
+
+    def test_8c_sufijos_y_hostings(self):
+        """R1 y R2 de RC-226: registrable() con los sufijos de dos niveles y con los hostings, y la marca."""
+        for nombre, esperado in (('www.acme.com.gt', 'acme.com.gt'), ('a.b.acme.org.ar', 'acme.org.ar'),
+                                 ('acme.co.za', 'acme.co.za'), ('www.acme.github.io', 'acme.github.io'),
+                                 ('acme.github.io', 'acme.github.io'), ('github.io', 'github.io'),
+                                 ('x.acme.com.kg', 'com.kg'), ('www.acme.mx', 'acme.mx')):
+            self.assertEqual(crtsh.registrable(nombre), esperado, nombre)
+        self.assertEqual(crtsh.SUFIJOS_DOBLES & crtsh.HOSTINGS, set())
+        self.assertTrue(all(s.count('.') == 1 for s in crtsh.SUFIJOS_DOBLES | crtsh.HOSTINGS))
+        self.assertEqual((crtsh._marca('acme.com.gt'), crtsh._marca('acme.co.nz')), ('acme', 'acme'))
+        self.assertEqual(crtsh.candidatos_parecidos('acme-demo.com.gt'), [
+            'acme-demo.com', 'acme-demo.mx', 'acme-demo.com.mx', 'acme-demo.net', 'acmedemo.com.gt',
+            'acme-dem0.com.gt', 'acrne-demo.com.gt', 'acm3-demo.com.gt', '4cme-demo.com.gt', 'acme-demo.org'])
+        # El dominio autorizado no cuenta como dirección dentro de un dominio ajeno, ni un nombre que solo termina igual.
+        for nombre, cuenta in (('acme-demo.mx.cuenta-segura.net', True), ('login.acme-demo.mx.otro.org', True),
+                               ('acme-demo.mx', True), ('acme-demo.sharepoint.com', False),
+                               ('xacme-demo.mx.otro.org', False), ('acme-demo.mxx.otro.org', False),
+                               ('acme-demo-pagos.com', True), ('tienda.github.io', False),
+                               ('acme-demo.mx.com', False), ('acme-demo.mx.sitio.com.kg', True),
+                               ('acme-demo.mx.github.io', False), ('acme-demo.mx.sitio.github.io', True),
+                               # H1 de la ronda 3: el dominio autorizado pegado con guion al dominio de un tercero
+                               ('acme-demo.mx-login.com', True), ('www.acme-demo.mx-login.com', True),
+                               ('x.acme-demo.mx-login.com.mx', True), ('acme-demo.mx-login.github.io', True),
+                               ('acme-demo.mx-login.com.kg', False), ('acme-demo.mx-login.otro.org', False),
+                               ('xacme-demo.mx-login.com', False), ('acme-demo.mxlogin.com', False),
+                               ('www.acme-demo.mx', True)):
+            self.assertEqual(crtsh._lleva_marca(nombre, 'acme-demo', 'acme-demo.mx'), cuenta, nombre)
+        # Un sufijo nunca sale como parecido: el dominio autorizado tiene que quedar a la izquierda del registrable.
+        for nombre in ('olmardo.com.kg', 'olmardo.com.de', 'olmardo.com.github.io', 'www.olmardo.com.kg'):
+            self.assertFalse(crtsh._lleva_marca(nombre, 'olmardo', 'olmardo.com'), nombre)
+        vigente = ('2026-09-10T00:00:00', '2026-12-09T00:00:00')
+        t = CrtshSimulado(respuestas={'%.olmardo.com': [], '%olmardo%': [
+            cert(80, ['olmardo.com.kg'], *vigente), cert(81, ['olmardo.com.de'], *vigente),
+            cert(82, ['olmardo.com.github.io'], *vigente), cert(83, ['olmardo.com.otro.net'], *vigente)]})
+        cliente = crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None)
+        res = crtsh.recolectar('olmardo.com', cliente, AHORA, parecidos=True)
+        self.assertEqual([h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'], ['otro.net'])
+
+    def test_8d_el_dominio_autorizado_pegado_al_dominio_de_un_tercero(self):
+        """H1 de la ronda 3 de RC-226: acme-demo.mx-login.com (registrable mx-login.com) trae el dominio autorizado
+        completo a la vista y sale como parecido, también con un sufijo de dos niveles. El dominio autorizado, sus
+        subdominios y un dominio propio no salen, y tampoco un sufijo desconocido (R1) ni un proveedor (N1)."""
+        vigente = ('2026-09-10T00:00:00', '2026-12-09T00:00:00')
+        for dominio, pegado, clave, propio in (
+                ('acme-demo.mx', 'acme-demo.mx-login.com', 'mx-login.com', 'mx-propio.com'),
+                ('acme-demo.com.mx', 'acme-demo.com.mx-seguro.net', 'mx-seguro.net', 'mx-propio.com')):
+            self.assertTrue(crtsh._lleva_marca(pegado, 'acme-demo', dominio), pegado)
+            marca = [cert(90, [pegado, 'www.' + pegado], *vigente), cert(91, [dominio, 'www.' + dominio], *vigente),
+                     cert(92, [dominio + '-login.com.kg'], *vigente), cert(93, [dominio + '-login.otro.org'], *vigente),
+                     cert(94, [dominio + '-propio.com'], *vigente)]
+            t = CrtshSimulado(respuestas={'%.' + dominio: [], '%acme-demo%': marca})
+            cliente = crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None)
+            res = crtsh.recolectar(dominio, cliente, AHORA, parecidos=True, propios=[propio])
+            self.assertEqual(res.sin_cobertura, [], dominio)
+            parecidos = [h for h in res.hallazgos if h.codigo == 'lookalike_domain']
+            self.assertEqual([h.clave for h in parecidos], [clave], dominio)
+            self.assertEqual((parecidos[0].evidencia['nombres'], parecidos[0].evidencia['tipo_parecido']),
+                             ([pegado, 'www.' + pegado], 'contiene_marca'), dominio)
+            self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [], dominio)
+            sin_propio = crtsh.recolectar(dominio, crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None), AHORA,
+                                          parecidos=True)
+            self.assertEqual([h.clave for h in sin_propio.hallazgos if h.codigo == 'lookalike_domain'],
+                             sorted([clave, propio]), dominio)  # sin darlo de alta, el pegado propio sí sale
+
+    def test_8e_la_marca_cuenta_como_palabra_y_no_hay_tope_de_parecidos(self):
+        """H2 de la ronda 3 de RC-226: la marca pegada a otras letras no cuenta ('plata' en plataforma.com). No hay
+        tope de parecidos: todo el que pasa el filtro se reporta, ninguno va en omitidos ni deja aviso."""
+        for nombre, cuenta in (('plataforma.com', False), ('www.plataformadigital.mx', False), ('laplata.com', False),
+                               ('plata-pagos.com', True), ('mi-plata.mx', True), ('plata2.com', True),
+                               ('1plata.com', True), ('pagos-plata-mx.com', True), ('plata.net', True),
+                               ('plataplata-plata.com', True), ('plata.sharepoint.com', False)):
+            self.assertEqual(crtsh._lleva_marca(nombre, 'plata', 'plata.mx'), cuenta, nombre)
+        self.assertFalse(crtsh._lleva_marca('fernandes.com', 'andes', 'andes.mx'))
+        self.assertFalse(crtsh._lleva_marca('miacme-demo.com.mx', 'acme-demo', 'acme-demo.mx'))
+        self.assertTrue(crtsh._lleva_marca('mi-acme-demo.com.mx', 'acme-demo', 'acme-demo.mx'))
+
+        def de_marca(n):  # n dominios con la marca como palabra: el más reciente es el de número más alto
+            return [cert(100 + i, ['plata-%02d.com' % i], '2026-09-10T00:00:00', '2026-12-%02dT00:00:00' % (i + 1))
+                    for i in range(n)]
+        variante = cert(99, ['p1ata.mx'], '2026-09-01T00:00:00', '2026-11-20T00:00:00')  # vence antes que todos
+
+        def correr(n):
+            t = CrtshSimulado(respuestas={'%.plata.mx': [], '%plata%': de_marca(n) + [cert(98, ['plataforma.com'],
+                              '2026-09-10T00:00:00', '2026-12-30T00:00:00')], 'p1ata.mx': [variante]})
+            return crtsh.recolectar('plata.mx', crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None), AHORA,
+                                    parecidos=True)
+        res = correr(25)
+        claves = sorted(h.clave for h in res.hallazgos)
+        # los 25 de %marca% y la variante, aunque su certificado sea el más viejo. plataforma.com no
+        self.assertEqual(claves, sorted(['p1ata.mx'] + ['plata-%02d.com' % i for i in range(25)]))
+        self.assertEqual((res.omitidos, res.avisos), ([], []))
+        self.assertEqual((res.sin_cobertura, res.revisados), ([], None))
+        self.assertFalse(hasattr(crtsh, 'MAX_PARECIDOS'))
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+
+    def test_8f_un_tld_que_es_palabra_no_acusa_a_un_proveedor(self):
+        """G1 de la ronda 3 de RC-226: olmardo.no-ip.org es un cliente de no-ip.org, no el dominio olmardo.no pegado
+        con un guion. Con un TLD de TLD_PALABRA esa regla no aplica. Con .mx o .com sigue aplicando (H1)."""
+        for nombre, dominio in (('olmardo.no-ip.org', 'olmardo.no'), ('olmardo.is-a.dev', 'olmardo.is'),
+                                ('olmardo.in-berlin.de', 'olmardo.in'), ('www.olmardo.at-band-camp.net', 'olmardo.at'),
+                                ('olmardo.com.co-op.net', 'olmardo.com.co')):
+            self.assertFalse(crtsh._lleva_marca(nombre, 'olmardo', dominio), nombre)
+        for nombre, dominio in (('olmardo.mx-login.com', 'olmardo.mx'), ('olmardo.com-login.net', 'olmardo.com'),
+                                ('olmardo.net-pagos.org', 'olmardo.net'),
+                                ('olmardo.no.cuenta-segura.net', 'olmardo.no'),  # dentro de un dominio ajeno sí cuenta
+                                ('olmardo-login.org', 'olmardo.no')):
+            self.assertTrue(crtsh._lleva_marca(nombre, 'olmardo', dominio), nombre)
+        t = CrtshSimulado(respuestas={'%.olmardo.no': [], '%olmardo%': [
+            cert(95, ['olmardo.no-ip.org'], '2026-09-10T00:00:00', '2026-12-09T00:00:00')]})
+        res = crtsh.recolectar('olmardo.no', crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None), AHORA,
+                               parecidos=True)
+        self.assertEqual(([h.clave for h in res.hallazgos], res.sin_cobertura), ([], []))
+
+    def test_8g_la_variante_le_gana_a_contiene_marca(self):
+        """Pendiente de la ronda 4 de RC-226: acme-demo.com llega por %acme-demo% y por su variante. El tipo es el de
+        la variante (otro_tld), sin importar el orden de las búsquedas, y la huella y la clave no cambian."""
+        vigente = ('2026-09-10T00:00:00', '2026-12-09T00:00:00')
+        por_marca = [cert(90, ['acme-demo.com'], *vigente), cert(92, ['acme-demo-pagos.com'], *vigente)]
+        por_variante = [cert(90, ['acme-demo.com'], *vigente), cert(91, ['www.acme-demo.com'], *vigente)]
+
+        def correr(variante):
+            t = CrtshSimulado(respuestas={'%.acme-demo.mx': [], '%acme-demo%': por_marca, 'acme-demo.com': variante})
+            res = crtsh.recolectar('acme-demo.mx', crtsh.ClienteCrtsh(transporte=t, dormir=lambda s: None), AHORA,
+                                   parecidos=True)
+            self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+            return {h.clave: h for h in res.hallazgos if h.codigo == 'lookalike_domain'}
+        con, sin = correr(por_variante), correr([])
+        self.assertEqual({k: h.evidencia['tipo_parecido'] for k, h in con.items()},
+                         {'acme-demo.com': 'otro_tld', 'acme-demo-pagos.com': 'contiene_marca'})
+        self.assertEqual((con['acme-demo.com'].evidencia['certificados'], con['acme-demo.com'].evidencia['nombres']),
+                         (2, ['acme-demo.com', 'www.acme-demo.com']))
+        # si la variante responde vacía, lo que trajo %marca% sigue como contiene_marca, con la misma huella
+        self.assertEqual(sin['acme-demo.com'].evidencia['tipo_parecido'], 'contiene_marca')
+        self.assertEqual(con['acme-demo.com'].huella, sin['acme-demo.com'].huella)
+        self.assertEqual(con['acme-demo.com'].huella,
+                         crtsh._huella('lookalike_domain', 'acme-demo.mx', 'acme-demo.com'))
+        marca = ('contiene_marca', crtsh._con_fechas(por_marca),
+                 lambda n: crtsh._lleva_marca(n, 'acme-demo', 'acme-demo.mx'))
+        for tipo in ('otro_tld', 'error_tipografico'):
+            variante = (tipo, crtsh._con_fechas(por_variante), lambda n: crtsh.registrable(n) == 'acme-demo.com')
+            for orden in ([marca, variante], [variante, marca]):
+                hallados = crtsh._parecidos('acme-demo.mx', orden, set(), AHORA)
+                tipos = {h.clave: h.evidencia['tipo_parecido'] for h in hallados}
+                self.assertEqual(tipos, {'acme-demo.com': tipo, 'acme-demo-pagos.com': 'contiene_marca'})
+
+    def test_9_nunca_mas_de_diez_variantes(self):
+        """A3 de RC-226: el tope de 10 es fijo, aunque quien llame pida más. Es lo que cuenta MAX_CONSULTAS."""
+        diez = crtsh.candidatos_parecidos('acme-demo.mx')
+        self.assertEqual(crtsh.candidatos_parecidos('acme-demo.mx', 50), diez)
+        self.assertEqual(crtsh.candidatos_parecidos('acme-demo.mx', 3), diez[:3])
+        self.assertEqual(crtsh.candidatos_parecidos('acme-demo.mx', -1), [])
+        t = CrtshSimulado()
+        res = recolectar(t, parecidos=True, max_candidatos=50)
+        self.assertEqual([consulta(u) for u in t.urls][2:], [v for v in diez if v != 'acme-demo.com.mx'])
+        self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
+
+
+class SemillaDelCupo(unittest.TestCase):
+    """Lectura estática de db/semillas/014_cupo_ct_logs.sql, sin base (RC-226)."""
+
+    def test_1_la_014_sube_el_limite_a_11_corridas_sin_pisar_uno_puesto_a_mano(self):
+        semilla = Path(__file__).resolve().parents[1] / 'db' / 'semillas' / '014_cupo_ct_logs.sql'
+        texto = semilla.read_text(encoding='utf-8')
+        sin_comentarios = '\n'.join(linea.split('--')[0] for linea in texto.splitlines())
+        [(limite, anterior)] = re.findall(
+            r"UPDATE\s+data_sources\s+SET\s+daily_limit\s*=\s*(\d+)\s+WHERE\s+code\s*=\s*'ct_logs'"
+            r"\s+AND\s+daily_limit\s*=\s*(\d+);", sin_comentarios)
+        limite, normal = int(limite), 14  # un escaneo normal: la del dominio, 2 de Cert Spotter y 11 de parecidos
+        self.assertEqual((limite, int(anterior)), (400, 200))  # solo cambia el 200 de la semilla 005
+        self.assertEqual(limite // crtsh.MAX_CONSULTAS, 11)  # corridas de peor caso, como antes con 18 y 200
+        self.assertEqual(1 + (limite - crtsh.MAX_CONSULTAS) // normal, 27)  # escaneos en vivo por día
+        self.assertLess(sin_comentarios.index("SET client_encoding = 'UTF8';"), sin_comentarios.index('BEGIN;'))
+        self.assertRegex(sin_comentarios, r"code\s*=\s*'ct_logs'\s+AND\s+daily_limit\s*<\s*%d\)" % crtsh.MAX_CONSULTAS)
+        self.assertIn("RAISE WARNING 'ct_logs tiene un límite diario menor que %d" % crtsh.MAX_CONSULTAS, sin_comentarios)
+        self.assertEqual([p.name for p in semilla.parent.glob('014_*.sql')], ['014_cupo_ct_logs.sql'])
 
 
 class FallasYGrabacion(unittest.TestCase):
@@ -244,6 +494,320 @@ class FallasYGrabacion(unittest.TestCase):
         variantes = [u for u in t.urls if 'q=%25' not in u]
         self.assertEqual(len(variantes), crtsh.FALLAS_SEGUIDAS * 2)  # 2 intentos por variante
         self.assertIn('crt.sh saturado', res.avisos[-1])
+
+    def _con_cronometro(self, tarda, duerme=None, **cliente):
+        """Corre los parecidos de acme-demo.mx con un cronómetro falso. `tarda(variante, intento)` dice cuántos
+        segundos tarda crt.sh con esa petición: si pasa del timeout que recibe el transporte, es un timeout.
+        `duerme(segundos, cronómetro)` dice cuánto dura de verdad una pausa (sin él, lo pedido). `cliente` va a
+        ClienteCrtsh, que queda en self.cliente.
+        Devuelve el resultado, las peticiones de variantes (variante, timeout) y los segundos que duraron."""
+        reloj, pedidas, intentos = [0.0], [], {}
+
+        class Lento(CrtshSimulado):
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
+                if not q or q[0].startswith('%'):
+                    return super().__call__(url, timeout)
+                intentos[q[0]] = intentos.get(q[0], 0) + 1
+                pedidas.append((q[0], timeout))
+                segundos = tarda(q[0], intentos[q[0]])
+                if segundos > timeout:
+                    reloj[0] += timeout
+                    raise TimeoutError('timed out')
+                reloj[0] += segundos
+                return super().__call__(url, timeout)
+
+        def dormir(s):
+            reloj[0] += duerme(s, reloj[0]) if duerme else s
+        self.cliente = crtsh.ClienteCrtsh(transporte=Lento(), dormir=dormir, cronometro=lambda: reloj[0], **cliente)
+        res = crtsh.recolectar('acme-demo.mx', self.cliente, AHORA, parecidos=True, propios=['acme-demo.com.mx'])
+        return res, pedidas, reloj[0]
+
+    def test_4d_una_variante_de_35_segundos_responde(self):
+        """El 11 nov olmardo.com.mx tardó unos 35 s y con 2 intentos de 20 s dejaba el escaneo parcial. El segundo
+        intento de una variante espera hasta 45 s (TIMEOUTS_VARIANTE) y la lenta responde ahí."""
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        lenta = variantes[1]
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 35 if v == lenta else 1)
+        self.assertEqual(crtsh.TIMEOUTS_VARIANTE, (20, 45))
+        self.assertEqual(pedidas, [(variantes[0], 20), (lenta, 20), (lenta, 45)] + [(v, 45) for v in variantes[2:]])
+        self.assertEqual((res.estado, res.sin_cobertura, res.omitidos), ('succeeded', [], []))
+        self.assertFalse([a for a in res.avisos if 'no respondió' in a or 'tiempo de las variantes' in a])
+        self.assertIsNone(res.revisados)  # corrida completa: el escaneo no termina 'partial' por la variante lenta
+        self.assertEqual(duro, (len(variantes) - 1) * (crtsh.PAUSA_PARECIDOS + 1)
+                         + crtsh.PAUSA_PARECIDOS + 20 + crtsh.ESPERAS[0] + 35)
+        # Todas se cuelgan al primer intento y responden en 1 s al segundo: cuesta lo mismo que antes y caben todas
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if n == 1 else 1)
+        self.assertEqual((res.omitidos, res.revisados), ([], None))
+        self.assertEqual(duro, len(variantes) * (crtsh.PAUSA_PARECIDOS + 20 + crtsh.ESPERAS[0] + 1))
+
+    def test_4e_las_variantes_no_pasan_de_su_presupuesto(self):
+        """Con crt.sh lento en todas las variantes (un timeout y luego 40 s), las variantes juntas no pasan de
+        PRESUPUESTO_VARIANTES: las que no caben quedan sin consultar, con su aviso y su huella en omitidos, ninguna
+        petición recibe menos de MINIMO_VARIANTE ni más de 45 s y nunca hay más de 2 por variante."""
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 100 if n == 1 else 40)
+        self.assertLessEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
+        self.assertTrue(all(crtsh.MINIMO_VARIANTE <= t <= crtsh.TIMEOUTS_VARIANTE[1] for _, t in pedidas), pedidas)
+        # La 1.ª responde en 40 s al reintento y la 2.ª prueba 45 s desde el primer intento. Ese intento falla y el
+        # resto vuelve a 20 y 45: 67 + 92 + 4 x 67 = 427 s con 6 respuestas. La 7.ª hace su primer intento (449 s) y
+        # ya no le caben la espera y otro de 20 s. A las 3 últimas no se les pregunta.
+        primeros = {}
+        for v, t in pedidas:
+            primeros.setdefault(v, t)
+        self.assertEqual(primeros, {v: 45 if v == variantes[1] else 20 for v in variantes[:7]})
+        self.assertEqual([[v for v, _ in pedidas].count(v) for v in variantes[:7]],
+                         [crtsh.INTENTOS_PARECIDOS] * 6 + [1])
+        self.assertEqual(duro, 449)
+        cortada, faltan = variantes[6], variantes[7:]
+        self.assertEqual(res.avisos[-2:], [
+            crtsh.SIN_REINTENTO % (crtsh.PRESUPUESTO_VARIANTES, '1 variante', cortada),
+            crtsh.SIN_TIEMPO % (crtsh.PRESUPUESTO_VARIANTES, '%d variantes' % len(faltan), ', '.join(faltan))])
+        # a las que faltan no se les preguntó y a la cortada la cortó el tiempo: ninguna es falla de crt.sh
+        self.assertFalse([a for a in res.avisos if 'después de' in a or 'saturado' in a])
+        self.assertEqual(sorted(res.omitidos),
+                         sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in [cortada] + faltan))
+        self.assertIsNotNone(res.revisados)  # faltaron variantes: el escaneo termina 'partial'
+        self.assertEqual(res.consultas, 3 + len(pedidas))  # la del dominio, Cert Spotter, %marca% y lo que sí se pidió
+        # crt.sh colgado en todas: corta a las FALLAS_SEGUIDAS variantes, también dentro del presupuesto
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000)
+        self.assertEqual(len(pedidas), crtsh.FALLAS_SEGUIDAS * crtsh.INTENTOS_PARECIDOS)
+        self.assertLessEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
+        self.assertIn('crt.sh saturado', res.avisos[-1])
+        # el último intento se recorta a lo que queda (42 s) y el presupuesto se gasta exacto
+        ultima = variantes[-1]
+        caida = variantes[-2]
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v in (caida, ultima) or n == 1 else 20)
+        cada_una = crtsh.PAUSA_PARECIDOS + 20 + crtsh.ESPERAS[0]  # pausa, timeout del primer intento y espera
+        # 7 variantes de 47 s y una caída de 72 s: a la última le quedan 42 s para su segundo intento
+        resto = crtsh.PRESUPUESTO_VARIANTES - (len(variantes) - 2) * (cada_una + 20) - (cada_una + 45) - cada_una
+        self.assertTrue(crtsh.MINIMO_VARIANTE <= resto < crtsh.TIMEOUTS_VARIANTE[1], resto)
+        self.assertEqual(pedidas[-2:], [(ultima, 20), (ultima, resto)])
+        self.assertEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
+        self.assertIn('no respondió a %s después de 2 intentos' % ultima, res.avisos[-1])  # sí tuvo sus 2 intentos
+        # si después del primer intento ya no caben la espera y MINIMO_VARIANTE, no hay segundo intento ni espera: 6
+        # variantes de 47 s y 2 caídas de 72 s dejan 44 s, y tras la pausa y el primer intento de la última quedan 22
+        caidas = variantes[-3:-1]
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v in caidas + [ultima] or n == 1 else 20)
+        self.assertEqual([t for v, t in pedidas if v == ultima], [20])
+        self.assertEqual(duro, (len(variantes) - 3) * (cada_una + 20) + 2 * (cada_una + 45)
+                         + crtsh.PAUSA_PARECIDOS + 20)
+        self.assertEqual(crtsh.PRESUPUESTO_VARIANTES - duro, 22)
+        self.assertEqual(res.avisos[-1], crtsh.SIN_REINTENTO % (crtsh.PRESUPUESTO_VARIANTES, '1 variante', ultima))
+        self.assertFalse([a for a in res.avisos if 'saturado' in a])
+
+    def test_4g_si_crtsh_viene_lento_las_siguientes_esperan_45_desde_el_primer_intento(self):
+        """Con casi todas las variantes entre 21 y 45 s, el primer intento de 20 s se perdía en cada una: de 10
+        variantes de 35 s respondían 7. Cuando una respuesta tarda más de 20 s, las siguientes esperan 45 s desde el
+        primer intento, y vuelven a 20 s si con eso una falla su primer intento."""
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        corto, largo = crtsh.TIMEOUTS_VARIANTE
+        pausa, espera = crtsh.PAUSA_PARECIDOS, crtsh.ESPERAS[0]
+        self.assertEqual(len(variantes), 9)
+        # todas tardan 35 s: 62 + 8 x 37 = 358 s, responden las 9 con 10 consultas. Antes eran 7 con 15
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 35)
+        self.assertEqual(pedidas, [(variantes[0], corto), (variantes[0], largo)] + [(v, largo) for v in variantes[1:]])
+        self.assertEqual(duro, pausa + corto + espera + 35 + 8 * (pausa + 35))
+        self.assertEqual((duro, res.estado, res.omitidos, res.revisados), (358, 'succeeded', [], None))
+        self.assertFalse([a for a in res.avisos if 'no respondió' in a or 'tiempo de las variantes' in a])
+        self.assertEqual(res.consultas, 3 + len(variantes) + 1)
+        # una lenta y las demás se cuelgan al primer intento y responden en 1 s: solo la 2.ª paga el intento largo
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 35 if v == variantes[0] else 1000 if n == 1 else 1)
+        self.assertEqual(pedidas, [(variantes[0], corto), (variantes[0], largo), (variantes[1], largo),
+                                   (variantes[1], largo)] + [(v, t) for v in variantes[2:] for t in (corto, largo)])
+        self.assertEqual(duro, 62 + (pausa + largo + espera + 1) + 7 * (pausa + corto + espera + 1))
+        self.assertEqual((res.omitidos, res.revisados), ([], None))
+        # con 45 s, una respuesta rápida al primer intento no cambia nada: la lenta que sigue responde al primero
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 35 if v in (variantes[0], variantes[4]) else 1)
+        self.assertEqual(pedidas, [(variantes[0], corto), (variantes[0], largo)] + [(v, largo) for v in variantes[1:]])
+        # con 45 s, una variante que no responde regresa las siguientes a 20 y 45, y ahí se quedan aunque tarden
+        res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v == variantes[1] else 35)
+        self.assertEqual(pedidas[:8], [(variantes[0], corto), (variantes[0], largo), (variantes[1], largo),
+                                       (variantes[1], largo), (variantes[2], corto), (variantes[2], largo),
+                                       (variantes[3], corto), (variantes[3], largo)])
+        self.assertLessEqual(duro, crtsh.PRESUPUESTO_VARIANTES)
+        # el ritmo, caso por caso: (intentos, segundos de la respuesta), o None si salió del disco
+        normal, lento, fijo = crtsh.NORMAL, crtsh.LENTO, crtsh.FIJO
+        for ritmo, ultima, sigue in ((normal, (1, 1), normal), (normal, (2, 1), normal), (normal, (2, 20), normal),
+                                     (normal, (2, 20.5), lento), (normal, (1, 21), lento), (normal, None, normal),
+                                     (lento, (1, 1), lento), (lento, (1, 44), lento), (lento, None, lento),
+                                     (lento, (2, 1), fijo), (lento, (2, 40), fijo),
+                                     (fijo, (2, 40), fijo), (fijo, (1, 30), fijo), (fijo, None, fijo)):
+            self.assertEqual(crtsh._ritmo(ritmo, ultima), sigue, (ritmo, ultima))
+        self.assertEqual([crtsh._timeouts_variante(r) for r in (normal, lento, fijo)],
+                         [(corto, largo), (largo, largo), (corto, largo)])
+
+    def test_4h_el_tiempo_se_vuelve_a_medir_despues_de_la_pausa_y_antes_de_cada_intento(self):
+        """Si la pausa o la espera duran de más, la petición no sale con menos de MINIMO_VARIANTE, ni con 0 o menos
+        segundos: una variante a la que no se le preguntó no es falla de crt.sh ni toca la grabación."""
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        una = crtsh.PAUSA_PARECIDOS + 20 + crtsh.ESPERAS[0] + 20  # se cuelga al primer intento y responde en 20 s
+        for de_mas in (0.5, 30):  # la pausa se pasa medio segundo, o el proceso se detiene 30 s
+            # la 2.ª variante empieza con 22 s, justo la pausa y MINIMO_VARIANTE, y su pausa dura de más
+            with mock.patch.object(crtsh, 'PRESUPUESTO_VARIANTES', una + 22):
+                res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if n == 1 else 20,
+                                                          duerme=lambda s, t: s + de_mas if t >= una else s)
+            self.assertEqual(pedidas, [(variantes[0], 20), (variantes[0], 42)], de_mas)  # 42 s: lo que quedaba
+            self.assertEqual(res.avisos[-1], crtsh.SIN_TIEMPO % (una + 22, '8 variantes', ', '.join(variantes[1:])))
+            self.assertFalse([a for a in res.avisos if 'no respondió' in a or 'saturado' in a], de_mas)
+            self.assertEqual(res.consultas, 3 + len(pedidas))  # a la 2.ª no se le preguntó: no gasta cupo
+        # la espera entre intentos dura de más: no hay segundo intento, y el aviso dice que fue el tiempo
+        with mock.patch.object(crtsh, 'PRESUPUESTO_VARIANTES', 72):
+            res, pedidas, duro = self._con_cronometro(lambda v, n: 1000,
+                                                      duerme=lambda s, t: s + 31 if s == crtsh.ESPERAS[0] else s)
+        self.assertEqual(pedidas, [(variantes[0], 20)])
+        self.assertEqual(res.avisos[-2:], [crtsh.SIN_REINTENTO % (72, '1 variante', variantes[0]),
+                                           crtsh.SIN_TIEMPO % (72, '8 variantes', ', '.join(variantes[1:]))])
+        self.assertFalse([a for a in res.avisos if 'después de' in a or 'saturado' in a])
+        # en el cliente: sin preguntar no se descarta lo grabado ni se cuenta la consulta. Con un intento sí
+        reloj = [0.0]
+
+        def colgado(url, timeout):
+            reloj[0] += timeout
+            raise TimeoutError('timed out')
+
+        def dormir(s):
+            reloj[0] += s + 0.5
+        with tempfile.TemporaryDirectory() as d:
+            viejo = crtsh._archivo_grabado('acme-demo.com', d)
+            viejo.write_text(json.dumps({'grabado': '2026-10-08T18:00:00+00:00', 'consulta': 'acme-demo.com',
+                                         'datos': []}), encoding='utf-8')
+            cliente = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=colgado, dormir=dormir,
+                                         cronometro=lambda: reloj[0])
+            pedir = functools.partial(cliente.consultar, 'acme-demo.com', intentos=2, timeout=crtsh.TIMEOUTS_VARIANTE,
+                                      pausa=crtsh.PAUSA_PARECIDOS)
+            with self.assertRaises(crtsh.SinTiempo) as sin:
+                pedir(plazo=reloj[0] + 22)
+            self.assertEqual((sin.exception.intentos, cliente.consultas, viejo.exists()), (0, 0, True))
+            self.assertEqual(str(sin.exception), 'no quedó tiempo para consultar acme-demo.com')
+            with self.assertRaises(crtsh.SinTiempo) as sin:
+                pedir(plazo=reloj[0] + 46)  # pausa de 2.5 s, un intento de 20 s y quedan 23.5: no cabe otro
+            self.assertEqual((sin.exception.intentos, cliente.consultas, viejo.exists()), (1, 1, False))
+            self.assertIn('después de 1 intento (TimeoutError: timed out) y no quedó tiempo para otro',
+                          str(sin.exception))
+            self.assertIsNone(cliente.ultima)
+
+    def test_4i_una_variante_cortada_por_el_tiempo_no_cuenta_como_saturacion(self):
+        """Dos variantes sin respuesta y luego una a la que el tiempo no le dejó su segundo intento no son 3 fallas
+        seguidas: el aviso dice que fue el tiempo, no 'crt.sh saturado', y a la que sigue sí se le pregunta."""
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        # 2 caídas de 72 s (144), la 3.ª hace un intento (166) y quedan 22 s: la 4.ª hace el suyo (188)
+        with mock.patch.object(crtsh, 'PRESUPUESTO_VARIANTES', 188):
+            res, pedidas, duro = self._con_cronometro(lambda v, n: 1000)
+        self.assertEqual(duro, 188)
+        self.assertEqual(pedidas, [(variantes[0], 20), (variantes[0], 45), (variantes[1], 20), (variantes[1], 45),
+                                   (variantes[2], 20), (variantes[3], 20)])
+        self.assertFalse([a for a in res.avisos if 'saturado' in a])
+        self.assertEqual([a.split(' después de ')[0] for a in res.avisos if ' después de ' in a],
+                         ['crt.sh no respondió a %s' % v for v in variantes[:2]])
+        self.assertEqual(res.avisos[-2:], [
+            crtsh.SIN_REINTENTO % (188, '2 variantes', ', '.join(variantes[2:4])),
+            crtsh.SIN_TIEMPO % (188, '5 variantes', ', '.join(variantes[4:]))])
+        self.assertEqual(sorted(res.omitidos),
+                         sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in variantes))
+        self.assertIsNotNone(res.revisados)  # el escaneo termina 'partial'
+        self.assertEqual(res.consultas, 3 + len(pedidas))
+
+    def test_4j_sin_tiempo_no_es_saturacion_y_lo_grabado_se_lee_igual(self):
+        """Más de FALLAS_SEGUIDAS variantes seguidas sin tiempo no cortan las demás por saturación, y con --grabar
+        --completar la que ya está en el disco se lee aunque el presupuesto se haya acabado."""
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        grabada, vigente = variantes[8], ('2026-09-10T00:00:00', '2026-12-09T00:00:00')
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'PRESUPUESTO_VARIANTES', 100):
+            crtsh._archivo_grabado(grabada, d).write_text(json.dumps({
+                'grabado': '2026-11-11T18:00:00+00:00', 'consulta': grabada,
+                'datos': [cert(97, [grabada], *vigente)]}), encoding='utf-8')
+            res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if n == 1 else 20, modo='grabar', carpeta=d,
+                                                      completar=True)
+        self.assertEqual(pedidas, [(variantes[0], 20), (variantes[0], 45), (variantes[1], 20), (variantes[1], 26)])
+        self.assertEqual(duro, 94)  # 2 x 47 s y quedan 6
+        faltan = variantes[2:8] + variantes[9:]
+        self.assertGreater(len(variantes[2:8]), crtsh.FALLAS_SEGUIDAS)
+        self.assertEqual(res.avisos[-1], crtsh.SIN_TIEMPO % (100, '%d variantes' % len(faltan), ', '.join(faltan)))
+        self.assertFalse([a for a in res.avisos if 'saturado' in a or 'no respondió' in a])
+        self.assertIn(crtsh._nombre_grabado(grabada), [archivo for archivo, _ in self.cliente.leidas])
+        self.assertIn(grabada, {h.evidencia.get('dominio_parecido') for h in res.hallazgos})
+        self.assertEqual(sorted(res.omitidos),
+                         sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in faltan))
+
+    def test_4k_la_pausa_cuenta_al_revisar_si_cabe_la_variante(self):
+        """Una variante que empieza con menos de la pausa más MINIMO_VARIANTE (entre 20 y 22 s) no se consulta ni
+        gasta la pausa. Con 22 s justos sí se consulta."""
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        una = crtsh.PAUSA_PARECIDOS + 20 + crtsh.ESPERAS[0] + 20
+        for quedan in (20, 21, 21.9):
+            with mock.patch.object(crtsh, 'PRESUPUESTO_VARIANTES', una + quedan):
+                res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if n == 1 else 20)
+            self.assertEqual(([v for v, _ in pedidas], duro), ([variantes[0]] * 2, una), quedan)
+            self.assertEqual(res.avisos[-1], crtsh.SIN_TIEMPO % (una + quedan, '8 variantes', ', '.join(variantes[1:])))
+        with mock.patch.object(crtsh, 'PRESUPUESTO_VARIANTES', una + 22):
+            res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if n == 1 else 20)
+        self.assertEqual(pedidas[2:], [(variantes[1], 20)])
+        self.assertEqual(duro, una + 22)
+
+    def test_4f_el_peor_caso_de_tiempo_documentado(self):
+        """El peor caso de una corrida, que citan el orquestador y docs/contrato_plugin.md, sale de las constantes:
+        1055 s, debajo de TOPE_CORRIDA. Si cambia un timeout o el presupuesto, cambian los textos y se revisa el tope."""
+        from cirdan.recolectores import certspotter
+        general = crtsh.ClienteCrtsh(transporte=CrtshSimulado()).timeout
+        busqueda = crtsh.INTENTOS * general + sum(crtsh.ESPERAS[:crtsh.INTENTOS - 1])
+        pagina = (certspotter.COMPLEMENTO['intentos'] * certspotter.COMPLEMENTO['timeout']
+                  + sum(crtsh.ESPERAS[:certspotter.COMPLEMENTO['intentos'] - 1]))
+        marca = crtsh.INTENTOS_PARECIDOS * general + sum(crtsh.ESPERAS[:crtsh.INTENTOS_PARECIDOS - 1])
+        peor = 2 * busqueda + certspotter.MAX_PAGINAS * pagina + marca + crtsh.PRESUPUESTO_VARIANTES
+        self.assertEqual((busqueda, pagina, marca, crtsh.PRESUPUESTO_VARIANTES, peor), (155, 45, 95, 470, 1055))
+        raiz = Path(crtsh.__file__).resolve().parents[2]
+        orquestador = (raiz / 'cirdan' / 'orquestador' / '__init__.py').read_text(encoding='utf-8')
+        tope = int(re.search(r'^TOPE_CORRIDA = timedelta\(minutes=(\d+)\)', orquestador, re.M).group(1)) * 60
+        self.assertLess(peor, tope)
+        self.assertIn('%d s en el peor' % peor, orquestador)
+        self.assertIn('Quedan %d s antes de TOPE_CORRIDA' % (tope - peor), orquestador)
+        doc = (raiz / 'docs' / 'contrato_plugin.md').read_text(encoding='utf-8')
+        self.assertIn('espera %d segundos y el segundo hasta %d segundos (`TIMEOUTS_VARIANTE`)' % crtsh.TIMEOUTS_VARIANTE, doc)
+        self.assertIn('con %d s en el primer intento y hasta %d s en el segundo, o %d s desde el primero'
+                      % (crtsh.TIMEOUTS_VARIANTE + crtsh.TIMEOUTS_VARIANTE[1:]), orquestador)
+        self.assertIn('tarda más de %d segundos, las siguientes esperan %d segundos desde el primer intento'
+                      % crtsh.TIMEOUTS_VARIANTE, doc)
+        self.assertIn('vuelven a %d segundos por el resto de la corrida' % crtsh.TIMEOUTS_VARIANTE[0], doc)
+        self.assertEqual(crtsh._timeouts_variante(crtsh.LENTO),
+                         (crtsh.TIMEOUTS_VARIANTE[1],) * crtsh.INTENTOS_PARECIDOS)
+        self.assertIn('tienen %d segundos (`PRESUPUESTO_VARIANTES`)' % crtsh.PRESUPUESTO_VARIANTES, doc)
+        self.assertIn('sigue en %d segundos' % peor, doc)
+
+    def test_4c_las_variantes_sin_respuesta_van_en_omitidos_tambien_las_del_corte(self):
+        """B4 de RC-226. Si %marca% responde y las variantes no, hay cobertura y van en omitidos las huellas de las 3
+        que fallaron y de las que se dejaron de probar por el corte: el orquestador no cierra su parecido."""
+        class SinVariantes(CrtshSimulado):
+            def __call__(self, url, timeout):
+                q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q')
+                if q and not q[0].startswith('%'):
+                    self.urls.append(url)
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        t = SinVariantes()
+        res = recolectar(t, parecidos=True)
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        probadas = [consulta(u) for u in t.urls if 'q=%25' not in u]
+        self.assertEqual(probadas, [v for v in variantes[:crtsh.FALLAS_SEGUIDAS]
+                                    for _ in range(crtsh.INTENTOS_PARECIDOS)])
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', []))
+        self.assertEqual(sorted(res.omitidos),
+                         sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in variantes))
+        self.assertEqual(sorted(h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'),
+                         ['acme-demo-login.com', 'acme-demo-pagos.com', 'cuenta-segura.net'])  # lo de %marca% sí
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        # B3 y H10: con búsquedas de parecidos sin respuesta la corrida es parcial. revisados trae las partes de los
+        # certificados y los parecidos que sí se revisaron, nunca el de una variante que no respondió.
+        completo = recolectar(CrtshSimulado(), parecidos=True)
+        self.assertEqual((completo.revisados, completo.sin_revisar), (None, None))
+        self.assertIsNone(res.sin_revisar)
+        sin_certificados = recolectar(CrtshSimulado(), parecidos=False)
+        partes = {p for h in sin_certificados.hallazgos for p in h.partes}
+        self.assertTrue(partes and partes <= set(res.revisados))
+        de_parecidos = [p for p in res.revisados if '@' not in p]
+        self.assertEqual(de_parecidos, ['acme-demo-login.com', 'acme-demo-pagos.com', 'acme-demo-viejo.com',
+                                        'acme-demo.com.mx', 'cuenta-segura.net'])  # el viejo y el propio también
+        self.assertFalse(set(variantes) & set(res.revisados))
 
     def test_4b_grabar_y_reproducir_sin_red(self):
         with tempfile.TemporaryDirectory() as d:
@@ -294,6 +858,23 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertTrue(res.avisos)
         self.assertTrue(all(a.startswith(crtsh.SIN_GRABACION) for a in res.avisos))
         self.assertEqual(crtsh.codigo_salida(res), 2)
+
+    def test_8b_una_variante_sin_grabar_va_en_omitidos_si_otra_busqueda_respondio(self):
+        """B4 de RC-226. Al reproducir, la variante que falta en la grabación no cuenta como saturación ni quita la
+        cobertura si %marca% está grabada: su huella va en omitidos y lo demás se reporta."""
+        with tempfile.TemporaryDirectory() as d:
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=CrtshSimulado(), dormir=lambda s: None)
+            vivo = crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            (Path(d) / 'acme-dem0.mx.json').unlink()
+            res = crtsh.recolectar('acme-demo.mx', crtsh.ClienteCrtsh(modo='reproducir', carpeta=d), AHORA,
+                                   propios=['acme-demo.com.mx'], parecidos=True)
+        del_0 = next(h.huella for h in vivo.hallazgos if h.clave == 'acme-dem0.mx')
+        self.assertEqual((res.estado, res.sin_cobertura, res.omitidos), ('succeeded', [], [del_0]))
+        self.assertEqual([a for a in res.avisos if a.startswith(crtsh.SIN_GRABACION)], res.avisos)
+        self.assertEqual(len(res.avisos), 1)
+        self.assertEqual(sorted(h.clave for h in res.hallazgos if h.codigo == 'lookalike_domain'),
+                         ['acme-demo-login.com', 'acme-demo-pagos.com', 'cuenta-segura.net'])
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_9_completar_vuelve_a_consultar_lo_de_grabaciones_anteriores(self):
         inicio = datetime(2026, 10, 15, 18, 0, tzinfo=timezone.utc)

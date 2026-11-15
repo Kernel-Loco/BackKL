@@ -10,6 +10,13 @@
     {"band": "high", "from": 60, "to": 79},
     {"band": "critical", "from": 80, "to": 100}
   ],
+  "grades": [
+    {"grade": "A", "from": 0, "to": 19},
+    {"grade": "B", "from": 20, "to": 39},
+    {"grade": "C", "from": 40, "to": 59},
+    {"grade": "D", "from": 60, "to": 79},
+    {"grade": "F", "from": 80, "to": 100}
+  ],
   "floor": {"one_critical": 60, "two_or_more_critical": 80, "counts_statuses": ["open", "accepted_risk"]},
   "alert_threshold_default": 60,
   "rules": [

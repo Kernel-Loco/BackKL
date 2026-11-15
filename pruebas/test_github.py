@@ -846,6 +846,28 @@ class GrabarYReproducir(unittest.TestCase):
         self.assertIn('github: cobertura parcial, se revisaron 1 de 2 repos', res.avisos)
         self.assertEqual((res.revisados, res.sin_revisar), (['acme-demo/sitio'], ['acme-demo/api']))
 
+    def test_4b_reproducir_con_el_archivo_vacio_de_un_repo_es_cobertura_parcial(self):
+        """Regresión 1 de la ronda 4 (RC-46): un archivo de 0 bytes o cortado de un repo deja ese repo sin revisar y los
+        demás dan sus hallazgos. El de la lista de repos sí detiene la fuente: sin ella no se sabe qué faltó."""
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d)
+            completa, _ = recolectar(modo='grabar', carpeta=carpeta, nueva=True)
+            grabadora = github.ClienteGitHub(modo='grabar', carpeta=carpeta).grabadora
+            archivo = grabadora.archivo('repo:acme-demo/sitio')
+            for roto in (b'', b'{"grabado": "2026-10-15T12:00:00+00:00", "datos": {"secr'):
+                archivo.write_bytes(roto)
+                res, _ = recolectar(sin_api, sin_procesos, modo='reproducir', carpeta=carpeta)
+                with self.subTest(roto=roto):
+                    self.assertEqual((res.estado, res.revisados, res.sin_revisar),
+                                     ('succeeded', ['acme-demo/api'], ['acme-demo/sitio']))
+                    self.assertIn('github: la grabación de un repo no se puede leer', res.avisos)
+                    self.assertIn('github: cobertura parcial, se revisaron 1 de 2 repos', res.avisos)
+                    self.assertTrue(res.hallazgos)
+                    self.assertLess(len(res.hallazgos), len(completa.hallazgos))
+            grabadora.archivo('repos:acme-demo').write_bytes(b'')
+            with self.assertRaises(FuenteNoResponde):
+                recolectar(sin_api, sin_procesos, modo='reproducir', carpeta=carpeta)
+
     def test_5_una_grabacion_cambiada_a_mano_no_mete_otra_cosa(self):
         with tempfile.TemporaryDirectory() as d:
             carpeta = Path(d)

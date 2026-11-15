@@ -1,0 +1,6 @@
+[
+  {"cycle": "8.3", "eol": "2027-12-31", "latest": "8.3.9", "_nota": "Armada a mano con la forma de la API de antes de endoflife.date (/api/php.json). Ciclos y fechas de ejemplo, no consultados."},
+  {"cycle": "8.1", "eol": "2025-12-31", "latest": "8.1.30"},
+  {"cycle": "7.4", "eol": "2022-11-28", "latest": "7.4.33"},
+  {"cycle": "5.4", "eol": "2015-09-03", "latest": "5.4.45"}
+]

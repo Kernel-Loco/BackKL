@@ -1,0 +1,11 @@
+{
+  "_nota": "Respuesta armada a mano con señales públicas de IIS y ASP.NET. No es una grabación de ningún dominio y los valores son falsos.",
+  "estado": 200,
+  "cabeceras": [
+    ["Server", "Microsoft-IIS/10.0"],
+    ["X-AspNet-Version", "4.0.30319"],
+    ["X-Powered-By", "ASP.NET"],
+    ["Set-Cookie", "ASP.NET_SessionId=CIRDAN_FAKE_aspnet; path=/; HttpOnly"]
+  ],
+  "cuerpo": "<html><body><form><input type=\"hidden\" name=\"__VIEWSTATE\" value=\"CIRDAN_FAKE_viewstate\" /></form></body></html>"
+}
