@@ -1,6 +1,6 @@
 # Dependencias de la API (FastAPI sobre PostgreSQL). Versiones fijas para que el
 # contenedor y cualquier PC instalen exactamente lo mismo. Las actualiza Dependabot.
-fastapi==0.162.0
+fastapi==0.162.5
 # fastapi pide starlette>=0.46.0 y pydantic>=2.9.0 sin tope: se fijan para que no cambien solas.
 starlette==1.10.0
 pydantic==2.14.3
