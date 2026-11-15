@@ -119,7 +119,7 @@ _HUELLA_DOC = re.compile(r'[0-9a-f]{16}')
 # Lo que no se guarda de un texto del documento: controles, marcas de dirección y espacios invisibles (cambian cómo
 # se lee en el portal), mitades sueltas de un par (la base no las acepta), etiquetas, uso privado y los que nunca
 # serán un carácter, más los rellenos Hangul, que no se ven. Es una lista fija y no la categoría de unicodedata,
-# que cambia con la versión de Python (3.13 en una PC, 3.14 en el contenedor). U+200C, U+200D y U+00AD se quedan:
+# que cambia con la versión de Python (3.13 en una PC, 3.15 en el contenedor). U+200C, U+200D y U+00AD se quedan:
 # los usan el persa, los emoji y el guion.
 _RARAS = re.compile('[\x00-\x1f\x7f-\x9f\u061c\u115f\u1160\u180e\u3164\uffa0\u200b\u200e\u200f'
                     '\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb'
