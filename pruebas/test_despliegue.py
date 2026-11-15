@@ -37,8 +37,9 @@ ENV_FALSO = {
 }
 
 
-def _config(env):
-    """Corre `docker compose config` con solo las variables de env. Devuelve (código de salida, salida)."""
+def _config(env, proyecto='prueba-despliegue'):
+    """Corre `docker compose config` con solo las variables de env. Devuelve (código de salida, salida). Con
+    `proyecto=None` no pasa `-p` y el nombre del proyecto sale de env (COMPOSE_PROJECT_NAME) o de la carpeta."""
     with tempfile.TemporaryDirectory() as tmp:
         archivo = Path(tmp) / 'despliegue.env'
         archivo.write_text(''.join('%s=%s\n' % kv for kv in env.items()), encoding='utf-8')
@@ -46,8 +47,8 @@ def _config(env):
         base = {k: v for k, v in os.environ.items()
                 if k.upper() not in ENV_FALSO and not k.upper().startswith(('COMPOSE_', 'PG', 'POSTGRES_', 'VALKEY_',
                                                                           'PORTAL_', 'DOMINIOS_', 'ORGS_'))}
-        cmd = ['docker', 'compose', '--project-directory', str(RAIZ), '-p', 'prueba-despliegue',
-               '--env-file', str(archivo)]
+        cmd = ['docker', 'compose', '--project-directory', str(RAIZ)] + (['-p', proyecto] if proyecto else []) + [
+            '--env-file', str(archivo)]
         for a in ARCHIVOS:
             cmd += ['-f', str(RAIZ / a)]
         r = subprocess.run(cmd + ['config', '--format', 'json'], capture_output=True, text=True, env=base,
@@ -120,7 +121,7 @@ class Despliegue(unittest.TestCase):
             self.assertIn(ipaddress.ip_address(ip), ipaddress.ip_network(subred))
 
     def test_7b_subredes_fuera_de_los_rangos_comunes(self):
-        # Los que Docker reparte solo (172.17.0.0/12 y 192.168.0.0/16), que incluyen la VPC por omisión de AWS
+        # Los que Docker reparte solo (172.16.0.0/12 y 192.168.0.0/16), que incluyen la VPC por omisión de AWS
         # (172.31.0.0/16) (hallazgo 14).
         comunes = [ipaddress.ip_network(r) for r in ('172.16.0.0/12', '192.168.0.0/16')]
         for red in ('interna', 'borde'):
@@ -150,6 +151,18 @@ class Despliegue(unittest.TestCase):
         # docker-compose.yml y no se cambian.
         for nombre in ('portal', 'cloudflared'):
             self.assertNotIn('container_name', self.svc[nombre], nombre)
+
+    def test_12_el_plan_b_tiene_su_propio_proyecto_y_volumen(self):
+        # R1 de la revisión de RC-91: C:\lowtide-planb\BackKL daría el proyecto 'backkl', el mismo que la carpeta de
+        # desarrollo, y los dos usarían el mismo volumen de la base. COMPOSE_PROJECT_NAME en el .env del plan B lo
+        # evita.
+        rc, salida = _config(dict(ENV_FALSO, COMPOSE_PROJECT_NAME='lowtide-planb'), proyecto=None)
+        self.assertEqual(rc, 0, salida[-500:])
+        cfg = json.loads(salida)
+        self.assertEqual(cfg['name'], 'lowtide-planb')
+        self.assertEqual(cfg['volumes']['cirdan-pg16-data']['name'], 'lowtide-planb_cirdan-pg16-data')
+        ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
+        self.assertIn('# COMPOSE_PROJECT_NAME=lowtide-planb\n', ejemplo)
 
 
 if __name__ == '__main__':

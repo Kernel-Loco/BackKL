@@ -24,10 +24,15 @@ VARIABLES = ('DEMO_ACCOUNTS', 'ALLOWED_ORIGINS')
 
 
 class BaseFalsa:
-    """Hace de cirdan.db.transaction: no abre conexión y guarda cada consulta."""
+    """Hace de cirdan.db.transaction: no abre conexión y guarda cada consulta.
 
-    def __init__(self):
+    Los UPDATE cambian una fila, salvo los de los id de `sin_fila`. login_lookup() devuelve una fila para los correos
+    de `pueden_entrar`."""
+
+    def __init__(self, sin_fila=(), pueden_entrar=()):
         self.consultas = []
+        self.sin_fila = set(sin_fila)
+        self.pueden_entrar = set(pueden_entrar)
 
     @contextmanager
     def transaction(self, org=None):
@@ -35,6 +40,11 @@ class BaseFalsa:
 
     def execute(self, sql, parametros=()):
         self.consultas.append((sql, parametros))
+        if sql.startswith('UPDATE'):
+            return mock.Mock(rowcount=0 if parametros[-1] in self.sin_fila else 1)
+        if 'login_lookup' in sql:
+            return mock.Mock(**{'fetchone.return_value': (1,) if parametros[0] in self.pueden_entrar else None})
+        raise AssertionError('consulta no esperada: %s' % sql)
 
 
 @contextmanager
@@ -47,9 +57,9 @@ def entorno(**variables):
         yield
 
 
-def correr(**variables):
+def correr(base=None, **variables):
     """Corre el script como `python -m cirdan.auth.demo` con una base falsa. Da las consultas y lo que imprimió."""
-    base, salida = BaseFalsa(), io.StringIO()
+    base, salida = base or BaseFalsa(), io.StringIO()
     with entorno(**variables), mock.patch.object(demo, 'transaction', base.transaction), redirect_stdout(salida):
         demo.main(['demo'])
     return base.consultas, salida.getvalue()
@@ -168,6 +178,28 @@ class Script(unittest.TestCase):
         puestas, _ = correr(DEMO_ACCOUNTS='true')
         apagadas, _ = correr(DEMO_ACCOUNTS='false')
         self.assertEqual(sorted(p[2] for _, p in puestas), sorted(p[1] for _, p in apagadas))
+
+    def test_9d_una_cuenta_que_no_puede_entrar_y_no_cambio_solo_avisa(self):
+        # R3 de la revisión de RC-91: sin fila que cambiar no se dice 'apagada'.
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        consultas, salida = correr(BaseFalsa(sin_fila={alex}), DEMO_ACCOUNTS='false')
+        self.assertEqual(salida.count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
+        self.assertNotIn('apagada: alex.morgan@acme-demo.mx', salida)
+        self.assertIn('nada que apagar: alex.morgan@acme-demo.mx', salida)
+        self.assertEqual([p for sql, p in consultas if 'login_lookup' in sql], [('alex.morgan@acme-demo.mx',)])
+
+    def test_9e_una_cuenta_que_puede_entrar_y_no_cambio_termina_con_error(self):
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx'})
+        salida = io.StringIO()
+        with self.assertRaises(SystemExit) as error, entorno(DEMO_ACCOUNTS='true', ALLOWED_ORIGINS=PUBLICADO), \
+                mock.patch.object(demo, 'transaction', base.transaction), redirect_stdout(salida):
+            demo.main(['demo'])
+        self.assertTrue(str(error.exception.code).startswith('ERROR: '))
+        self.assertIn('No se apagaron: alex.morgan@acme-demo.mx', str(error.exception.code))
+        # Las otras cuatro sí se apagan antes del error.
+        self.assertEqual(salida.getvalue().count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
+        self.assertNotIn('apagada: alex.morgan@acme-demo.mx', salida.getvalue())
 
     def test_10_el_codigo_totp_sigue_saliendo_y_no_toca_la_base(self):
         base, salida = BaseFalsa(), io.StringIO()

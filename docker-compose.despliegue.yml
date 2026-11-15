@@ -13,7 +13,7 @@
 # Docker Engine reciente: uno viejo rechaza la opción y `up` falla). Así un proceso de la máquina no llega al portal
 # sin pasar por el túnel, ni elige su IP con X-Forwarded-For (hallazgo 8 de la revisión de RC-91).
 # Las IP de cloudflared y del portal están fijas para que FORWARDED_ALLOW_IPS no dependa de cómo Docker reparta la subred.
-# Las subredes caen fuera de los rangos que Docker reparte solo (172.17.0.0/12 y 192.168.0.0/16) y de la VPC por
+# Las subredes caen fuera de los rangos que Docker reparte solo (172.16.0.0/12 y 192.168.0.0/16) y de la VPC por
 # omisión de AWS (172.31.0.0/16).
 #
 # IP del cliente para el bloqueo por intentos del login: Cloudflare agrega la IP real al final de X-Forwarded-For.
