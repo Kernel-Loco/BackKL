@@ -5,9 +5,11 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
 - Duración máxima: 8 h aunque haya actividad.
 - Verificación en dos pasos pendiente: 5 min y 5 intentos.
 - Bloqueo por intentos: 5 fallos por correo o 20 por IP en 15 min. Un código equivocado también
-  cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto.
+  cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Una IPv6
+  cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
 """
 import hashlib
+import ipaddress
 import json
 import secrets
 import time
@@ -113,8 +115,23 @@ def _email_key(email):
     return 'login:fail:email:' + _digest(email.lower())
 
 
+def _ip_bloque(ip):
+    """La IP con la que cuenta el bloqueo. Una IPv6 cuenta por su /64: quien tiene una red /64 puede estrenar
+    dirección en cada intento, y con la dirección completa nunca llegaría a MAX_FAILS_IP. Una IPv4 escrita como
+    IPv6 (::ffff:a.b.c.d) cuenta como la IPv4. Lo que no se lee como IP queda tal cual."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip or 'desconocida'
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.IPv6Network((int(addr), 64), strict=False))
+    return str(addr)
+
+
 def _ip_key(ip):
-    return 'login:fail:ip:' + (ip or 'desconocida')
+    return 'login:fail:ip:' + _ip_bloque(ip)
 
 
 def _count(*keys):

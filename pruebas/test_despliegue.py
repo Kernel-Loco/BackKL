@@ -3,8 +3,9 @@
 Arman la config de docker-compose.yml con docker-compose.despliegue.yml (`docker compose config`, que no crea nada
 ni baja imágenes) con un .env de valores falsos y revisan lo que pide el Hecho cuando y sus comentarios: las cuentas
 de demo apagadas aunque el .env diga true (comentario 10420), ALLOWED_ORIGINS en la API (10312), rotación del registro
-(10266), ningún puerto abierto a la red, el túnel sin acceso a la API y FORWARDED_ALLOW_IPS con las IP fijas del portal
-y de cloudflared. Sin docker en el PATH se saltan.
+(10266), ningún puerto publicado en el host, el túnel sin acceso a la API, el portal fuera del alcance del host,
+FORWARDED_ALLOW_IPS con las IP fijas del portal y de cloudflared, y lo que arregló la revisión de riesgo de RC-91
+(keep-alive de uvicorn, subredes y nombres de contenedor). Sin docker en el PATH se saltan.
 
     python -m unittest -v pruebas/test_despliegue.py
 """
@@ -83,21 +84,30 @@ class Despliegue(unittest.TestCase):
             self.assertNotEqual(rc, 0, falta)
             self.assertIn('Falta ' + falta, salida)
 
-    def test_5_ningun_puerto_abierto_a_la_red(self):
+    def test_5_ningun_puerto_publicado_en_el_host(self):
+        # Ni en 127.0.0.1: docker-compose.yml publica db, valkey y api en loopback y el despliegue los quita.
         for nombre, s in self.svc.items():
-            for p in s.get('ports', []):
-                self.assertEqual(p.get('host_ip'), '127.0.0.1', '%s publica %s' % (nombre, p))
-        self.assertNotIn('ports', self.svc['portal'])
-        self.assertNotIn('ports', self.svc['cloudflared'])
+            self.assertFalse(s.get('ports'), '%s publica %s' % (nombre, s.get('ports')))
 
     def test_6_tunel_sin_acceso_a_la_api(self):
         redes = {n: set(s.get('networks', {})) for n, s in self.svc.items()}
-        self.assertEqual(redes['cloudflared'], {'borde'})
+        self.assertEqual(redes['cloudflared'], {'borde', 'salida'})
         self.assertFalse(redes['cloudflared'] & (redes['api'] | redes['db'] | redes['valkey']))
-        # La única red que comparten el portal y la API es la interna, que no sale a internet.
+        # salida es solo de cloudflared: por ella llega a Cloudflare y nadie más la comparte.
+        self.assertEqual([n for n, r in redes.items() if 'salida' in r], ['cloudflared'])
+        # La única red que comparten el portal y la API es la interna.
         self.assertEqual(redes['portal'] & redes['api'], {'interna'})
-        self.assertTrue(self.cfg['networks']['interna'].get('internal'))
+        self.assertEqual(redes['portal'], {'interna', 'borde'})
         self.assertNotIn('interna', redes['db'] | redes['valkey'])
+
+    def test_6b_el_host_no_llega_al_portal(self):
+        # Sin salida a internet y sin IP del host en la red: un proceso de la máquina no llega al portal por la IP
+        # de su red ni elige su IP con X-Forwarded-For (hallazgo 8). Se probó en una pila aislada.
+        for red in ('interna', 'borde'):
+            cfg = self.cfg['networks'][red]
+            self.assertTrue(cfg.get('internal'), red)
+            self.assertEqual(cfg.get('driver_opts', {}).get('com.docker.network.bridge.gateway_mode_ipv4'),
+                             'isolated', red)
 
     def test_7_ip_del_cliente_solo_del_portal_y_del_tunel(self):
         permitidas = set(self.svc['api']['environment']['FORWARDED_ALLOW_IPS'].split(','))
@@ -108,6 +118,15 @@ class Despliegue(unittest.TestCase):
         for ip, red in ((portal, 'interna'), (tunel, 'borde')):
             subred = self.cfg['networks'][red]['ipam']['config'][0]['subnet']
             self.assertIn(ipaddress.ip_address(ip), ipaddress.ip_network(subred))
+
+    def test_7b_subredes_fuera_de_los_rangos_comunes(self):
+        # Los que Docker reparte solo (172.17.0.0/12 y 192.168.0.0/16), que incluyen la VPC por omisión de AWS
+        # (172.31.0.0/16) (hallazgo 14).
+        comunes = [ipaddress.ip_network(r) for r in ('172.16.0.0/12', '192.168.0.0/16')]
+        for red in ('interna', 'borde'):
+            subred = ipaddress.ip_network(self.cfg['networks'][red]['ipam']['config'][0]['subnet'])
+            for comun in comunes:
+                self.assertFalse(subred.overlaps(comun), '%s %s choca con %s' % (red, subred, comun))
 
     def test_8_rotacion_del_registro(self):
         for nombre, s in self.svc.items():
@@ -121,6 +140,16 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(self.svc['portal']['environment']['API_INTERNAL_URL'], 'http://api:8000')
         self.assertEqual(self.svc['portal']['build']['args']['API_INTERNAL_URL'], 'http://api:8000')
         self.assertEqual(self.svc['cloudflared']['environment']['TUNNEL_TOKEN'], 'CIRDAN_FAKE_tunel')
+
+    def test_10_keep_alive_de_uvicorn_mayor_que_el_de_node(self):
+        # El agente de Node suelta una conexión ociosa a los 5 s. uvicorn tiene que tardar más (hallazgo 13).
+        self.assertGreater(int(self.svc['api']['environment']['UVICORN_TIMEOUT_KEEP_ALIVE']), 5)
+
+    def test_11_portal_y_tunel_sin_nombre_de_contenedor_fijo(self):
+        # Un plan B desde otra carpeta no choca con estos nombres (hallazgo 16). Los de db, valkey y api vienen de
+        # docker-compose.yml y no se cambian.
+        for nombre in ('portal', 'cloudflared'):
+            self.assertNotIn('container_name', self.svc[nombre], nombre)
 
 
 if __name__ == '__main__':
