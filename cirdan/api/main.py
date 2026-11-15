@@ -11,6 +11,7 @@ sale de la fila de la llave, que se busca por su hash.
     docker compose up -d            (o, fuera de Docker: python -m uvicorn cirdan.api.main:app --port 8000)
     Documentación: http://127.0.0.1:8000/docs
 """
+from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -21,11 +22,22 @@ from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
 from cirdan.api.v1 import router as v1_router
+from cirdan.auth import totp
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import ORIGENES_LOCALES, config
 from cirdan.db import transaction
 
+
+@asynccontextmanager
+async def _arranque(app):
+    # Sin la llave del MFA la API no arranca: con Key Vault, un error de la identidad o del rol sale aquí, en
+    # `docker compose logs api`, y no en el primer inicio de sesión (#49, RC-91).
+    totp.comprobar_llave()
+    yield
+
+
 app = FastAPI(
+    lifespan=_arranque,
     title='LowTide API',
     version='0.2.0',
     description='Inicio de sesión con MFA y endpoints de solo lectura sobre la base cirdan (PostgreSQL 16). '

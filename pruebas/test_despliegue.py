@@ -46,7 +46,7 @@ def _config(env, proyecto='prueba-despliegue'):
         # Sin las variables del compose que traiga la terminal: le ganarían al archivo de valores falsos.
         base = {k: v for k, v in os.environ.items()
                 if k.upper() not in ENV_FALSO and not k.upper().startswith(('COMPOSE_', 'PG', 'POSTGRES_', 'VALKEY_',
-                                                                          'PORTAL_', 'DOMINIOS_', 'ORGS_'))}
+                                                                          'PORTAL_', 'DOMINIOS_', 'ORGS_', 'TOTP_'))}
         cmd = ['docker', 'compose', '--project-directory', str(RAIZ)] + (['-p', proyecto] if proyecto else []) + [
             '--env-file', str(archivo)]
         for a in ARCHIVOS:
@@ -163,6 +163,22 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(cfg['volumes']['cirdan-pg16-data']['name'], 'lowtide-planb_cirdan-pg16-data')
         ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
         self.assertIn('# COMPOSE_PROJECT_NAME=lowtide-planb\n', ejemplo)
+
+    def test_13_llave_del_mfa_desde_key_vault(self):
+        # En la VM la llave del MFA no va en el .env: solo la URL de su secreto en Key Vault (opción 4 de RC-91). La
+        # pila tiene que armarse sin TOTP_ENCRYPTION_KEY y la API y el script de demo reciben la URL. Que no vengan
+        # las dos lo revisa la API al arrancar (pruebas/test_llave_totp.py).
+        url = 'https://kv-lowtide.vault.azure.net/secrets/totp-encryption-key'
+        env = {k: v for k, v in ENV_FALSO.items() if k != 'TOTP_ENCRYPTION_KEY'}
+        rc, salida = _config(dict(env, TOTP_KEY_VAULT_SECRET_URL=url))
+        self.assertEqual(rc, 0, salida[-500:])
+        svc = json.loads(salida)['services']
+        for nombre in ('api', 'demo-accounts'):
+            self.assertEqual(svc[nombre]['environment']['TOTP_KEY_VAULT_SECRET_URL'], url, nombre)
+            self.assertEqual(svc[nombre]['environment']['TOTP_ENCRYPTION_KEY'], '', nombre)
+        # Con la llave en el .env (desarrollo, CI y plan B) la URL llega vacía.
+        self.assertEqual(self.svc['api']['environment']['TOTP_KEY_VAULT_SECRET_URL'], '')
+        self.assertEqual(self.svc['api']['environment']['TOTP_ENCRYPTION_KEY'], 'CIRDAN_FAKE_totp')
 
 
 if __name__ == '__main__':

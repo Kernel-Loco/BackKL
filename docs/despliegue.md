@@ -15,6 +15,7 @@ navegador → Cloudflare (HTTPS) → cloudflared ─borde─ portal ─interna�
    - `TUNNEL_TOKEN`, el token del túnel de Cloudflare. Sin él la pila no arranca. Nunca va en git.
    - `COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml` y `COMPOSE_PATH_SEPARATOR=:`. Con eso cualquier `docker compose` de esa carpeta usa los dos archivos, aunque se escriba sin los `-f`. Sin ellos, un `docker compose up -d --build` recrea la API con la config de desarrollo, sin la red interna, y lowtidesec.com responde 500 en `/api/v1`. `COMPOSE_PATH_SEPARATOR=:` hace falta en Windows (plan B), donde el separador por omisión es `;`. En Linux no estorba.
    - `DOMINIOS_EN_VIVO` y `ORGS_GITHUB_DECLARADAS` según las cartas vigentes.
+   - La llave del MFA. En la VM va `TOTP_KEY_VAULT_SECRET_URL` y no va `TOTP_ENCRYPTION_KEY` (sección 'Llave del MFA en Azure Key Vault'). En el plan B es al revés (paso 3 de 'Carpeta y volumen'). Con las dos puestas, o con ninguna, la API no arranca.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
    - SSL/TLS > Edge Certificates: 'Always Use HTTPS' prendido. Sin él el portal también responde por `http://` y el formulario de login manda la contraseña sin cifrar hasta Cloudflare (la API la rechaza después por el Origin, pero ya viajó). Se comprueba con `curl -sI http://lowtidesec.com/login` y `curl -sI http://www.lowtidesec.com/login`: los dos responden 301 con `Location: https://...`. HSTS queda para RC-89.
@@ -47,6 +48,43 @@ Las redes `interna` (10.249.91.0/28) y `borde` (10.249.92.0/28) tienen subred fi
 
 `portal` y `cloudflared` no llevan `container_name`: su nombre sale del proyecto. `db`, `valkey` y `api` siguen con los nombres fijos de `docker-compose.yml` (`cirdan-pg16`, `cirdan-valkey` y `cirdan-api`).
 
+## Llave del MFA en Azure Key Vault
+
+`TOTP_ENCRYPTION_KEY` cifra los secretos TOTP de todas las cuentas. En la VM no vive en el `.env`: vive en un secreto de Azure Key Vault y la API lo lee al arrancar con la identidad administrada de vm-lowtide (`cirdan/auth/keyvault.py`). El `.env` solo trae la URL del secreto en `TOTP_KEY_VAULT_SECRET_URL`.
+
+- La llave queda solo en la memoria del proceso. No está en el disco de la VM, en sus respaldos ni en `docker inspect`, que sí muestra las variables de entorno.
+- La API pide el token al servicio de metadatos de Azure (169.254.169.254), sin proxy. Solo manda el token a una URL `https://<bóveda>.vault.azure.net/secrets/<nombre>` y no sigue redirecciones.
+- Si Key Vault o la identidad fallan, la API no arranca y `docker compose logs api` dice por qué (HTTP 403 es que falta el rol). Ningún mensaje lleva el token ni la llave.
+- Lo que no cambia: quien sea root en la VM puede pedir el mismo token. Lo que se gana es que cada lectura queda en el registro de la bóveda y que quitar el rol corta el acceso.
+- Costo: Key Vault Standard cobra 0.03 USD por cada 10 mil operaciones, sin cuota por bóveda. La API hace dos peticiones por arranque, una a la identidad y otra a la bóveda, y solo la de la bóveda cuenta como operación.
+
+### Armarla (una vez, desde la terminal de quien administra Azure)
+
+La llave nunca se escribe en un archivo ni en un comando que se quede en el historial.
+
+1. Bóveda en `rg-lowtide`, en la región de la VM, con permisos por RBAC: `az keyvault create -g rg-lowtide -n <bóveda> -l <región> --enable-rbac-authorization true`. El borrado suave viene prendido (90 días). La protección contra purga (`--enable-purge-protection true`) ya no se puede apagar después: se decide aparte.
+2. Quien carga el secreto necesita el rol 'Key Vault Secrets Officer' sobre la bóveda.
+3. Cargar el secreto `totp-encryption-key` con el valor que hoy tiene la VM. Desde PowerShell, con la copia del gestor de contraseñas: `$v = bw get password 'LowTide vm-lowtide TOTP_ENCRYPTION_KEY'`, luego `az keyvault secret set --vault-name <bóveda> -n totp-encryption-key --value $v --output none` y después `Remove-Variable v`.
+4. Identidad de la VM: `az vm identity assign -g rg-lowtide -n vm-lowtide`. Su `principalId` es el que recibe el rol.
+5. Solo lectura y solo de ese secreto: `az role assignment create --assignee-object-id <principalId> --assignee-principal-type ServicePrincipal --role 'Key Vault Secrets User' --scope <id de la bóveda>/secrets/totp-encryption-key`. El id sale de `az keyvault show -n <bóveda> --query id -o tsv`.
+
+### Pasar la VM a Key Vault
+
+Con la API todavía leyendo la llave del `.env`, en la carpeta de BackKL de la VM:
+
+1. Comprobar que el contenedor llega a la bóveda y que su valor es el mismo. Sin las dos cosas no se sigue: con otra llave ninguna cuenta pasa la verificación en dos pasos.
+
+   ```bash
+   docker compose exec api python -c "import hmac, os; from cirdan.auth import keyvault; v = keyvault.leer_secreto('https://<bóveda>.vault.azure.net/secrets/totp-encryption-key'); print('igual' if hmac.compare_digest(v, os.environ['TOTP_ENCRYPTION_KEY']) else 'distinta')"
+   ```
+
+   Tiene que imprimir `igual`. Un 403 puede tardar unos minutos en irse después de asignar el rol.
+2. En el `.env`, agregar `TOTP_KEY_VAULT_SECRET_URL=https://<bóveda>.vault.azure.net/secrets/totp-encryption-key` y borrar la línea de `TOTP_ENCRYPTION_KEY`.
+3. `docker compose up -d --build` recrea la API con el `.env` nuevo. Primero se corre `docker compose --dry-run up -d --build` para ver qué contenedores recrea.
+4. `docker compose ps api` dice `healthy`. Además, `docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' cirdan-api | grep -c '^TOTP_ENCRYPTION_KEY=.'` da 0, y una cuenta real entra con contraseña y MFA.
+
+Para regresar, se pone otra vez `TOTP_ENCRYPTION_KEY` en el `.env` con la copia del gestor de contraseñas, se borra `TOTP_KEY_VAULT_SECRET_URL` y se repite el paso 3. La copia del gestor se queda siempre: el plan B la usa y, sin ella o sin la bóveda, los secretos TOTP de la base ya no se descifran.
+
 ## Plan B
 
 En una PC del equipo, la misma pila con un túnel propio (otro `TUNNEL_TOKEN`). Para pasar el tráfico se cambia en Cloudflare el destino de `lowtidesec.com` y `www.lowtidesec.com` al túnel del plan B. Al probarlo se anotan la fecha, los pasos y los minutos hasta que respondió lowtidesec.com (comentario 10383 de RC-91).
@@ -57,7 +95,7 @@ El plan B no usa la base de desarrollo de esa PC: sus datos son de prueba y las 
 
 1. En la carpeta de desarrollo, `docker compose down` (sin `-v`, la base de desarrollo se queda). Hace falta porque `cirdan-pg16`, `cirdan-valkey` y `cirdan-api` tienen nombre fijo y el plan B los volvería a crear.
 2. Un clon aparte de BackKL y FrontKL, por ejemplo en `C:\lowtide-planb\BackKL` y `C:\lowtide-planb\FrontKL`, en el mismo commit que la VM. En la VM, `git -C BackKL rev-parse HEAD` y `git -C FrontKL rev-parse HEAD` dan los dos commits, y en cada clon del plan B `git checkout <commit>` los fija. Con otro commit el portal o la API pueden esperar otra versión de la base que la del respaldo de la VM.
-3. Su `.env` como el de la VM (paso 2 de 'Antes de levantar'), con el `TUNNEL_TOKEN` del plan B, el mismo `TOTP_ENCRYPTION_KEY` de la VM y además `COMPOSE_PROJECT_NAME=lowtide-planb` (viene comentada en `.env.example`). Con otra llave TOTP los secretos de las cuentas reales no se descifran y nadie pasa la verificación en dos pasos. Sin `COMPOSE_PROJECT_NAME`, el proyecto toma el nombre de la carpeta: `C:\lowtide-planb\BackKL` da `backkl`, el mismo que la carpeta de desarrollo, y los dos usan el mismo volumen de la base, así que el `pg_restore --clean` y el `down -v` de abajo borrarían la base de desarrollo. Las contraseñas de PostgreSQL y Valkey pueden ser otras.
+3. Su `.env` como el de la VM (paso 2 de 'Antes de levantar'), con el `TUNNEL_TOKEN` del plan B, sin `TOTP_KEY_VAULT_SECRET_URL` y además `COMPOSE_PROJECT_NAME=lowtide-planb` (viene comentada en `.env.example`). Esa PC no tiene la identidad de la VM, así que la llave del MFA es la misma de la VM, pero va en `TOTP_ENCRYPTION_KEY`. Se toma del gestor de contraseñas ('LowTide vm-lowtide TOTP_ENCRYPTION_KEY') o de la bóveda con la sesión de `az` de quien la administra (`az keyvault secret show --vault-name <bóveda> -n totp-encryption-key --query value -o tsv`). Mientras dure el plan B puede ir en ese `.env`, y al terminar se borra de ahí. Con otra llave TOTP los secretos de las cuentas reales no se descifran y nadie pasa la verificación en dos pasos. Sin `COMPOSE_PROJECT_NAME`, el proyecto toma el nombre de la carpeta: `C:\lowtide-planb\BackKL` da `backkl`, el mismo que la carpeta de desarrollo, y los dos usan el mismo volumen de la base, así que el `pg_restore --clean` y el `down -v` de abajo borrarían la base de desarrollo. Las contraseñas de PostgreSQL y Valkey pueden ser otras.
 4. La primera línea de `docker compose config` tiene que ser `name: lowtide-planb`. Después, `docker compose up -d --build` y la comprobación de `logs demo-accounts`.
 5. `docker volume ls` muestra `lowtide-planb_cirdan-pg16-data`, el volumen nuevo y vacío del plan B, aparte del de desarrollo (`backkl_cirdan-pg16-data` o el nombre de esa carpeta).
 
@@ -96,4 +134,4 @@ Al terminar, en la carpeta del plan B, la primera línea de `docker compose conf
 
 ## Pruebas
 
-`python -m unittest pruebas/test_despliegue.py` arma la config con valores falsos y revisa todo lo de arriba, sin crear nada. El CI la corre con las pruebas sin base ni red. `pruebas/test_demo_cuentas.py` revisa que el script de demo apague las cuentas y `pruebas/test_bloqueo_ip.py` el contador por /64, las dos dentro del contenedor.
+`python -m unittest pruebas/test_despliegue.py` arma la config con valores falsos y revisa todo lo de arriba, sin crear nada. El CI la corre con las pruebas sin base ni red. `pruebas/test_llave_totp.py` revisa la lectura de Key Vault con una identidad y una bóveda falsas, sin red: la URL, el token, los reintentos, una sola lectura por proceso y que la API no arranque sin llave. `pruebas/test_demo_cuentas.py` revisa que el script de demo apague las cuentas y `pruebas/test_bloqueo_ip.py` el contador por /64, las dos dentro del contenedor.

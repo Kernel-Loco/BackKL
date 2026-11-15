@@ -1,28 +1,64 @@
 """Verificación en dos pasos con TOTP (RFC 6238, códigos de 6 dígitos cada 30 s).
 
-El secreto se guarda cifrado con AES-256-GCM en `users.totp_secret_enc`; la llave vive en
-`TOTP_ENCRYPTION_KEY` (fuera de la base). `users.last_totp_step` impide usar dos veces el
-mismo código.
+El secreto se guarda cifrado con AES-256-GCM en `users.totp_secret_enc`; la llave vive fuera de
+la base. `users.last_totp_step` impide usar dos veces el mismo código. La llave sale de una de dos
+variables, nunca de las dos:
+- `TOTP_KEY_VAULT_SECRET_URL`: en la VM, el secreto de Azure Key Vault que se lee con la identidad
+  administrada (`cirdan/auth/keyvault.py`, docs/despliegue.md). Se lee una vez por proceso y queda
+  solo en memoria.
+- `TOTP_ENCRYPTION_KEY`: la llave misma, en el `.env` de desarrollo, del CI y del plan B.
 """
 import base64
+import binascii
 import hmac
 import os
+import threading
 import time
 
 import pyotp
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from cirdan.config import required
+from cirdan.auth import keyvault
+from cirdan.config import config
 
 STEP_SECONDS = 30
 VALID_WINDOW = 1  # acepta el código anterior y el siguiente por desfase de reloj
 
+_llave_vault = None
+_candado = threading.Lock()
+
+
+def _decodificar(valor, origen):
+    try:
+        key = base64.urlsafe_b64decode(valor)
+    except (binascii.Error, ValueError):
+        key = b''
+    if len(key) != 32:
+        raise RuntimeError('%s debe ser de 32 bytes en base64 url-safe' % origen)
+    return key
+
 
 def _key():
-    key = base64.urlsafe_b64decode(required('TOTP_ENCRYPTION_KEY'))
-    if len(key) != 32:
-        raise RuntimeError('TOTP_ENCRYPTION_KEY debe ser de 32 bytes en base64 url-safe')
-    return key
+    url = config('TOTP_KEY_VAULT_SECRET_URL')
+    directa = config('TOTP_ENCRYPTION_KEY')
+    if url and directa:
+        raise RuntimeError('TOTP_KEY_VAULT_SECRET_URL y TOTP_ENCRYPTION_KEY están puestas: con Key Vault, '
+                           'quita TOTP_ENCRYPTION_KEY del .env')
+    if directa:
+        return _decodificar(directa, 'TOTP_ENCRYPTION_KEY')
+    if not url:
+        raise RuntimeError('Falta TOTP_ENCRYPTION_KEY o TOTP_KEY_VAULT_SECRET_URL: copia .env.example como .env y '
+                           'llena sus valores')
+    global _llave_vault
+    with _candado:
+        if _llave_vault is None or _llave_vault[0] != url:
+            _llave_vault = (url, _decodificar(keyvault.leer_secreto(url), 'El secreto de Key Vault'))
+        return _llave_vault[1]
+
+
+def comprobar_llave():
+    """Al arrancar la API: sin llave válida no arranca, en vez de fallar en el primer inicio de sesión con MFA."""
+    _key()
 
 
 def encrypt_secret(secret, user_id):
