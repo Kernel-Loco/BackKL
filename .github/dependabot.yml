@@ -10,12 +10,13 @@ updates:
       interval: weekly
     # Los cambios menores y de parche van juntos en un PR, porque dos PR sueltos chocan
     # en líneas vecinas de requirements.txt (scikit-learn y pandas, 14 nov). Los mayores
-    # siguen en su propio PR. scikit-learn y joblib van aparte: modelo_v1.joblib se guarda
-    # con una versión dada y al subirlas hay que volver a guardarlo.
+    # siguen en su propio PR. scikit-learn, joblib, numpy y scipy van aparte: modelo_v1.joblib
+    # se guarda con una versión dada y al subirlas hay que volver a guardarlo y comparar las
+    # predicciones. Además scipy pone tope a numpy y un numpy nuevo trabaría el grupo entero.
     groups:
       pip:
         patterns: ["*"]
-        exclude-patterns: ["scikit-learn", "joblib"]
+        exclude-patterns: ["scikit-learn", "joblib", "numpy", "scipy"]
         update-types: ["minor", "patch"]
   - package-ecosystem: docker
     directory: /
