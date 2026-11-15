@@ -1,6 +1,6 @@
 # Cuentas de prueba y cómo pasar el MFA
 
-Cuentas para entrar al portal LowTide en tu PC mientras desarrollamos. Son **solo para desarrollo, el CI y las pruebas de roles y aislamiento**: la contraseña y los secretos de MFA son públicos a propósito y nunca deben usarse fuera de desarrollo. No se usan en las demos con el socio formador ni en la VM. Ahí se entra con cuentas reales de Grupo Olmardo, que no se documentan.
+Cuentas para entrar al portal LowTide en tu PC mientras desarrollamos. Son **solo para desarrollo, el CI y las pruebas de roles y aislamiento**: la contraseña y los secretos de MFA son públicos a propósito y nunca deben usarse fuera de desarrollo. No se usan en las demos con el socio formador ni en la VM. Ahí se entra con las cuentas reales de Grupo Olmardo y con equipo@lowtidesec.com de la organización LowTide. Sus contraseñas y su MFA no se documentan.
 
 ## Antes de entrar
 
