@@ -7,10 +7,15 @@ agregan una vez a la app autenticadora. NUNCA activar DEMO_ACCOUNTS en producci�
 
 Segundo candado, por si el `.env` de un despliegue se armó copiando uno de desarrollo: si
 `ALLOWED_ORIGINS` trae algún origen que no sea localhost ni 127.0.0.1, la API está publicada y
-el script no toca las cuentas aunque `DEMO_ACCOUNTS` sea true (#169, RC-287). Un origen local con barra final,
+el script no les pone credenciales aunque `DEMO_ACCOUNTS` sea true (#169, RC-287). Un origen local con barra final,
 ruta o pegado a otro sin coma tampoco cuenta como local.
 
-    python -m cirdan.auth.demo                 # pone las credenciales (idempotente)
+En esos dos casos, sin `DEMO_ACCOUNTS=true` o con un origen publicado, el script además apaga las cuentas: les vuelve
+a poner el hash de relleno de la semilla y les quita el secreto TOTP. Así un volumen de la base que ya traía las
+credenciales públicas, como el de una PC de desarrollo que se usa para el plan B del despliegue, deja de servir para
+entrar (#49, RC-91).
+
+    python -m cirdan.auth.demo                 # pone o apaga las credenciales (idempotente)
     python -m cirdan.auth.demo codigo CORREO   # código TOTP vigente de una cuenta de demo
 """
 import sys
@@ -37,6 +42,44 @@ CUENTAS = {
     'dana.cruz@beta-corp.mx': (BETA, '30000000-0000-4000-8000-000000000004', 'CMPPTNCOFPU3YUPJB4KJGFDMN5QZPXOV'),
     'admin@olmardo.com': (OLMARDO, '30000000-0000-4000-8000-000000000005', 'SNSA4TTR4FCTTDMKEYMPWGD6ZAKG3G5B'),
 }
+
+
+# El mismo marcador de db/semillas/001_datos_demo.sql: no es un hash que argon2 pueda verificar, así que ninguna
+# contraseña entra con él (passwords.verify_password da False).
+HASH_DE_RELLENO = '$argon2id$v=19$m=65536,t=3,p=4$ZGVtby1zYWx0$ZGVtby1vbmx5'
+
+
+def apagar_credenciales():
+    """Les quita a las cuentas de demo la contraseña y el MFA públicos. Idempotente.
+
+    El UPDATE va por el id, así que una cuenta inactiva o de una empresa que no está activa también se apaga. Si no
+    cambia ninguna fila (no hay fila con ese id en esa empresa), se pregunta a login_lookup() (migración 004) si ese
+    correo todavía puede iniciar sesión:
+    - si no puede, no hay nada que apagar y solo se avisa;
+    - si puede, pero su hash no acepta la contraseña pública, es otra fila que este script nunca tocó (con otro id) y
+      no se toca: solo se avisa (N2 de la ronda 3 de RC-91);
+    - si entra con la contraseña pública, el script apaga las demás y termina con error: esa cuenta sigue con las
+      credenciales públicas y la API, que espera a demo-accounts, no arranca (R3 de la revisión de RC-91)."""
+    sin_apagar = []
+    for email, (org, user_id, _) in CUENTAS.items():
+        with transaction(org) as conn:
+            cambiadas = conn.execute(
+                'UPDATE users SET password_hash = %s, totp_secret_enc = NULL, last_totp_step = NULL, '
+                'mfa_enabled_at = NULL WHERE id = %s',
+                (HASH_DE_RELLENO, user_id)).rowcount
+            fila = None if cambiadas else conn.execute(
+                'SELECT password_hash FROM login_lookup(%s)', (email,)).fetchone()
+        if cambiadas:
+            print('cuenta de demo apagada:', email)
+        elif fila is None:
+            print('cuenta de demo que no puede iniciar sesión, nada que apagar:', email)
+        elif passwords.verify_password(fila['password_hash'], PASSWORD):
+            sin_apagar.append(email)
+        else:
+            print('cuenta de demo con otro id y sin la contraseña de demo, no se toca:', email)
+    if sin_apagar:
+        raise SystemExit('ERROR: estas cuentas de demo entran con la contraseña pública, pero el UPDATE no cambió su '
+                         'fila (¿otro id o empresa que los de CUENTAS?). No se apagaron: %s' % ', '.join(sin_apagar))
 
 
 def poner_credenciales():
@@ -86,13 +129,15 @@ def main(argv):
         print(codigo(argv[2]))
         return
     if config('DEMO_ACCOUNTS', 'false').lower() != 'true':
-        print('DEMO_ACCOUNTS no es true: no se tocan las cuentas.')
+        print('DEMO_ACCOUNTS no es true: se apagan las cuentas de demo.')
+        apagar_credenciales()
         return
     publicados = origenes_publicados()
     if publicados:
-        print('ALLOWED_ORIGINS trae un origen que no es localhost ni 127.0.0.1 (%s): no se tocan las cuentas de demo, '
+        print('ALLOWED_ORIGINS trae un origen que no es localhost ni 127.0.0.1 (%s): se apagan las cuentas de demo, '
               'aunque DEMO_ACCOUNTS sea true. Un origen local se escribe sin barra final ni ruta, como '
               'http://localhost:3000.' % ', '.join(publicados))
+        apagar_credenciales()
         return
     poner_credenciales()
 

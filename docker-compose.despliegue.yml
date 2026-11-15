@@ -1,0 +1,123 @@
+# Despliegue de LowTide (#49, RC-91): la VM y el plan B usan este archivo encima de docker-compose.yml.
+#   docker compose -f docker-compose.yml -f docker-compose.despliegue.yml up -d --build
+# Suma el portal (FrontKL) y Cloudflare Tunnel. Ningún puerto queda publicado en el host, ni en 127.0.0.1 (`ports:
+# !reset []`, pide Compose 2.24 o más nuevo): el tráfico entra por el túnel, que solo llega al portal, y el portal
+# reenvía /api/v1 a la API (next.config.ts de FrontKL). La API no tiene nombre público. En la PC de desarrollo no se
+# usa: sin este archivo todo sigue igual.
+#
+# Redes:
+# - borde: cloudflared y el portal. cloudflared no ve la API, la base ni Valkey.
+# - interna: el portal y la API.
+# - salida: solo cloudflared, para llegar a Cloudflare. La API sale a internet por la red default.
+# borde e interna no salen a internet (internal) y el host no tiene IP en ellas (gateway_mode_ipv4=isolated, pide un
+# Docker Engine reciente: uno viejo rechaza la opción y `up` falla). Así un proceso de la máquina no llega al portal
+# sin pasar por el túnel, ni elige su IP con X-Forwarded-For (hallazgo 8 de la revisión de RC-91).
+# Las IP de cloudflared y del portal están fijas para que FORWARDED_ALLOW_IPS no dependa de cómo Docker reparta la subred.
+# Las subredes caen fuera de los rangos que Docker reparte solo (172.16.0.0/12 y 192.168.0.0/16) y de la VPC por
+# omisión de AWS (172.31.0.0/16).
+#
+# IP del cliente para el bloqueo por intentos del login: Cloudflare agrega la IP real al final de X-Forwarded-For.
+# Next no agrega la suya si el encabezado ya viene (base-server.js, `??=`). uvicorn toma, de derecha a izquierda, la
+# primera IP que no está en FORWARDED_ALLOW_IPS. Una IP falsa que mande el navegador queda a la izquierda y no cuenta.
+# cloudflared está en la lista por si agrega su propia IP al reenviar.
+
+x-registro: &registro
+  # Rotación del registro de Docker (comentario 10266 de RC-91): a lo más 30 MB por contenedor.
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  db:
+    <<: *registro
+    ports: !reset []
+
+  valkey:
+    <<: *registro
+    ports: !reset []
+
+  api:
+    <<: *registro
+    ports: !reset []
+    environment:
+      # Sin esto la API rechaza el login desde https://lowtidesec.com con 403 'Origen no permitido'
+      # (cirdan/api/main.py, comentario 10312 de RC-91).
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Falta ALLOWED_ORIGINS en .env, ver docs/despliegue.md}
+      # El despliegue siempre va con HTTPS (Cloudflare): la cookie de sesión solo viaja cifrada.
+      COOKIE_SECURE: "true"
+      FORWARDED_ALLOW_IPS: "10.249.91.10,10.249.92.11"
+      # Nunca en el despliegue, aunque el .env diga otra cosa.
+      DEMO_EXPLORER: "false"
+      # uvicorn cierra una conexión ociosa a los 5 s por omisión, lo mismo que tarda el proxy de Next (agente de Node)
+      # en soltarla: un POST que sale justo entonces termina en 500. Con 65 s siempre la suelta Next primero.
+      UVICORN_TIMEOUT_KEEP_ALIVE: "65"
+    networks:
+      default:
+      interna:
+
+  demo-accounts:
+    <<: *registro
+    environment:
+      # Las contraseñas y los secretos MFA de las cuentas de demo son públicos (regla 10 de AGENTS.md y
+      # comentario 10420 de RC-91). Con false el script además las apaga, aunque el volumen de la base ya trajera
+      # esas credenciales. Se comprueba con `docker compose logs demo-accounts`.
+      DEMO_ACCOUNTS: "false"
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Falta ALLOWED_ORIGINS en .env, ver docs/despliegue.md}
+
+  portal:
+    <<: *registro
+    build:
+      # Carpeta de FrontKL junto a BackKL. Otra ruta, con PORTAL_DIR en .env.
+      context: ${PORTAL_DIR:-../FrontKL}
+      args:
+        # Next fija el destino de /api/v1 al compilar (rewrites de next.config.ts).
+        API_INTERNAL_URL: http://api:8000
+    # Sin container_name: el nombre sale del proyecto, y un plan B levantado desde otra carpeta no choca con este.
+    environment:
+      API_INTERNAL_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      interna:
+        ipv4_address: 10.249.91.10
+      borde:
+        ipv4_address: 10.249.92.10
+    init: true
+    restart: unless-stopped
+
+  cloudflared:
+    <<: *registro
+    image: cloudflare/cloudflared:2026.10.7
+    # Túnel administrado desde Cloudflare: los nombres (lowtidesec.com y www) y su destino, http://portal:3000,
+    # se configuran en el panel de Zero Trust. Aquí solo va el token del túnel.
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Falta TUNNEL_TOKEN en .env}
+    depends_on:
+      portal:
+        condition: service_healthy
+    networks:
+      borde:
+        ipv4_address: 10.249.92.11
+      salida:
+    restart: unless-stopped
+
+networks:
+  interna:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: 10.249.91.0/28
+  borde:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: 10.249.92.0/28
+  salida:
