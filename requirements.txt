@@ -4,6 +4,8 @@ fastapi==0.162.0
 # fastapi pide starlette>=0.46.0 y pydantic>=2.9.0 sin tope: se fijan para que no cambien solas.
 starlette==1.10.0
 pydantic==2.14.3
+# pydantic-core no va aquí: cada pydantic pide una sola versión (2.14.3 pide pydantic-core==2.50.4).
+# Fijarlo aparte haría que el grupo pip de Dependabot lo suba sin mirar a pydantic y pip choque.
 uvicorn==0.54.0
 psycopg[binary]==3.3.8
 argon2-cffi==25.1.0
@@ -16,3 +18,7 @@ pandas==3.1.1
 scikit-learn==1.9.1
 shap==0.54.1
 joblib==1.6.0
+# pandas, scikit-learn, shap y scipy piden numpy y scipy sin tope fijo, y los arreglos de
+# numpy viajan dentro de modelo_v1.joblib: se fijan a lo que instala hoy la imagen.
+numpy==2.5.4
+scipy==1.18.1
