@@ -20,7 +20,8 @@ from cirdan.auth import demo, passwords
 
 LOCALES = 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000'
 PUBLICADO = 'https://portal.ejemplo.test'
-VARIABLES = ('DEMO_ACCOUNTS', 'ALLOWED_ORIGINS')
+# La URL de Key Vault también sale: con ella y la llave al azar puestas, la llave del MFA falla por configuración.
+VARIABLES = ('DEMO_ACCOUNTS', 'ALLOWED_ORIGINS', 'TOTP_KEY_VAULT_SECRET_URL')
 
 
 class BaseFalsa:
@@ -229,6 +230,22 @@ class Script(unittest.TestCase):
             demo.main(['demo', 'codigo', 'Alex.Morgan@acme-demo.mx'])
         self.assertRegex(salida.getvalue().strip(), r'^\d{6}$')
         self.assertEqual(base.consultas, [])
+
+    def test_10b_sin_llave_del_mfa_o_con_las_dos_no_termina_bien(self):
+        # Hallazgo 9 de la revisión de la opción 4 de RC-91: la API espera a este script, así que con su error
+        # `docker compose up -d` se detiene, en vez de dejar la API reiniciándose. No toca la base ni Key Vault.
+        url = 'https://kv-lowtide.vault.azure.net/secrets/totp-encryption-key/0123456789abcdef0123456789abcdef'
+        casos = ({'TOTP_ENCRYPTION_KEY': ''}, {'TOTP_KEY_VAULT_SECRET_URL': url})
+        for variables in casos:
+            with self.subTest(variables=variables):
+                base = BaseFalsa()
+                with entorno(DEMO_ACCOUNTS='false', **variables), \
+                        mock.patch.object(demo, 'transaction', base.transaction), \
+                        mock.patch('cirdan.auth.keyvault._abrir', side_effect=AssertionError('sin red')), \
+                        self.assertRaises(SystemExit) as error:
+                    demo.main(['demo'])
+                self.assertIn('TOTP_', str(error.exception.code))
+                self.assertEqual(base.consultas, [])
 
 
 class ComoProceso(unittest.TestCase):

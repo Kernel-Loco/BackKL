@@ -91,7 +91,7 @@ Correo y contraseña, y después el código de 6 dígitos de una app autenticado
 Seguridad:
 - **Contraseñas con argon2id.** Si el correo no existe, el mensaje y el tiempo son los mismos que con una contraseña equivocada, así que no se puede saber qué correos existen. Por eso el fallo se escribe en la bitácora después de mandar el 401.
 - **Bloqueo:** 5 fallos por correo o 20 por IP en 15 min responden 429. Un código equivocado también cuenta como fallo, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Cada código gasta su intento antes de revisarse, así que las peticiones en paralelo tampoco pasan de 5.
-- **El secreto TOTP** se guarda cifrado con AES-256-GCM (llave `TOTP_ENCRYPTION_KEY`, fuera de la base). `last_totp_step` impide usar dos veces el mismo código.
+- **El secreto TOTP** se guarda cifrado con AES-256-GCM (llave `TOTP_ENCRYPTION_KEY`, fuera de la base). En la VM la llave vive en Azure Key Vault y la API la lee con la identidad administrada (`TOTP_KEY_VAULT_SECRET_URL`, docs/despliegue.md). `last_totp_step` impide usar dos veces el mismo código.
 - **Contra CSRF:** las escrituras con un `Origin` que no esté en `ALLOWED_ORIGINS` responden 403.
 - Cada inicio, fallo, código equivocado, cierre de sesión y cambio de contraseña queda en la bitácora (`auth.*`).
 - **La búsqueda del correo al iniciar sesión** usa `login_lookup()` (migraciones 002 y 004), porque antes del login no hay empresa para RLS. Solo devuelve el id, la empresa, el hash y si la cuenta tiene MFA. Su `search_path` termina en `pg_temp` y `cirdan_app` no puede crear objetos temporales, así que nadie puede cambiarle la tabla `users` por una vista temporal. El rol y el secreto TOTP se leen después, ya con RLS.

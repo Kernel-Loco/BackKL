@@ -9,6 +9,9 @@
 # - borde: cloudflared y el portal. cloudflared no ve la API, la base ni Valkey.
 # - interna: el portal y la API.
 # - salida: solo cloudflared, para llegar a Cloudflare. La API sale a internet por la red default.
+# - default: la API, la base, Valkey y demo-accounts. Subred fija y la API con IP fija fuera del rango que Docker
+#   reparte solo, para que la regla de DOCKER-USER de docs/despliegue.md ('Solo la API llega a IMDS') deje pedir el
+#   token de la identidad de la VM a la API y a nadie más.
 # borde e interna no salen a internet (internal) y el host no tiene IP en ellas (gateway_mode_ipv4=isolated, pide un
 # Docker Engine reciente: uno viejo rechaza la opción y `up` falla). Así un proceso de la máquina no llega al portal
 # sin pasar por el túnel, ni elige su IP con X-Forwarded-For (hallazgo 8 de la revisión de RC-91).
@@ -29,13 +32,20 @@ x-registro: &registro
       max-size: "10m"
       max-file: "3"
 
+# Sin sockets crudos en la red default, salvo la API: con NET_RAW, que Docker da por omisión, un contenedor tomado
+# podría envenenar el ARP del puente para quedarse con la IP de la API (.20) y recibir la respuesta de IMDS. Ninguno
+# de estos servicios lo usa.
+x-sin-raw: &sin-raw
+  cap_drop:
+    - NET_RAW
+
 services:
   db:
-    <<: *registro
+    <<: [*registro, *sin-raw]
     ports: !reset []
 
   valkey:
-    <<: *registro
+    <<: [*registro, *sin-raw]
     ports: !reset []
 
   api:
@@ -55,10 +65,13 @@ services:
       UVICORN_TIMEOUT_KEEP_ALIVE: "65"
     networks:
       default:
+        # La única IP que la regla de IMDS deja pasar (docs/despliegue.md). Por eso en la VM se usa
+        # `docker compose exec api`: un `run --rm api` pide la misma IP y falla con 'Address already in use'.
+        ipv4_address: 10.249.93.20
       interna:
 
   demo-accounts:
-    <<: *registro
+    <<: [*registro, *sin-raw]
     environment:
       # Las contraseñas y los secretos MFA de las cuentas de demo son públicos (regla 10 de AGENTS.md y
       # comentario 10420 de RC-91). Con false el script además las apaga, aunque el volumen de la base ya trajera
@@ -106,6 +119,13 @@ services:
     restart: unless-stopped
 
 networks:
+  default:
+    ipam:
+      config:
+        # Docker reparte solo 10.249.93.0/28 (puerta de enlace en .1). La IP fija de la API (.20) queda fuera, así
+        # que ningún otro contenedor la puede recibir.
+        - subnet: 10.249.93.0/27
+          ip_range: 10.249.93.0/28
   interna:
     internal: true
     driver_opts:
