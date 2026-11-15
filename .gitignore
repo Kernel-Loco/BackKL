@@ -44,3 +44,8 @@ datos/geo/*
 
 # Carpeta de grabaciones de antes del 11 oct: su contenido se mueve a cirdan/recolectores/respuestas_grabadas/
 /respuestas_grabadas/
+
+# Respaldos de la base (db/respaldo, RC-233): traen datos personales y nunca van a git ni a la imagen
+respaldos/
+*.dump
+*.dump.age

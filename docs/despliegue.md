@@ -132,6 +132,66 @@ Los pasos marcados (Azure) van en la terminal de quien administra Azure y los ma
 
 Para regresar, se pone otra vez `TOTP_ENCRYPTION_KEY` en el `.env` con la copia del gestor de contraseñas, se borra `TOTP_KEY_VAULT_SECRET_URL` y se repite el paso 10. La copia del gestor se queda siempre: el plan B la usa y, sin ella o sin la bóveda, los secretos TOTP de la base ya no se descifran. Rotar la llave pide volver a cifrar los secretos TOTP de todas las cuentas, y no hay herramienta para eso: una versión nueva en la bóveda no se usa hasta que alguien cambie la URL del `.env`.
 
+## Respaldo diario (RC-233)
+
+Una vez al día, a las 09:00 UTC (03:00 en Monterrey), `lowtide-respaldo.timer` corre `db/respaldo/respaldar.sh`:
+
+1. `pg_dump -Fc` de la base `cirdan` con el usuario postgres dentro de `cirdan-pg16`. Nunca con `cirdan_app`, que con FORCE RLS no ve todas las filas.
+2. Lo cifra al vuelo con [age](https://age-encryption.org) y una llave pública. El respaldo sin cifrar nunca toca el disco. La llave privada no está en la VM: vive en la PC de Ernesto, cifrada con DPAPI, y en el gestor de contraseñas. Quien entre a la VM no puede leer los respaldos.
+3. Deja `cirdan_<fecha UTC>.dump.age` en `/var/backups/lowtide` (carpeta 700, archivo 600) y conserva los últimos 7. La retención solo borra archivos con ese nombre exacto dentro de esa carpeta.
+4. Lo sube a un contenedor de Azure Blob con la identidad administrada de la VM, la misma de Key Vault. No hay llave de almacenamiento en la VM: el token sale de IMDS y llega a `curl` por stdin. La subida nunca escribe encima de un blob con el mismo nombre (`If-None-Match: *`) y Azure revisa el MD5 del archivo.
+
+El contenedor tiene una política de inmutabilidad de 7 días: nadie, ni con el rol de la VM, borra ni cambia un respaldo antes de ese plazo. Una regla del ciclo de vida lo borra a los 8 días. Valkey no se respalda: guarda sesiones, MFA pendientes y bloqueos, y no escribe a disco. El respaldo no lleva contraseñas de roles: en una base nueva los roles los crea `db/init`.
+
+Lo que no cubre: la cuenta de almacenamiento está en la misma suscripción que la VM. Si la suscripción se suspende (por ejemplo, al acabarse el crédito), se pierden las dos. Si el respaldo falla, `systemctl --failed` y `journalctl -u lowtide-respaldo` lo dicen, pero nadie recibe aviso.
+
+### Armarlo (una vez)
+
+En Azure, desde una PC con `az login` (el nombre de la cuenta es un ejemplo y tiene que ser único en Azure):
+
+```bash
+az storage account create -g rg-lowtide -n stlowtiderespaldo -l westus2 --sku Standard_LRS --kind StorageV2 \
+  --https-only true --min-tls-version TLS1_2 --allow-blob-public-access false --allow-shared-key-access false
+az storage container-rm create -g rg-lowtide --storage-account stlowtiderespaldo -n respaldos --public-access off
+az storage container immutability-policy create -g rg-lowtide --account-name stlowtiderespaldo -c respaldos --period 7
+az storage account management-policy create -g rg-lowtide --account-name stlowtiderespaldo --policy @db/respaldo/ciclo_de_vida.json
+az role assignment create --role 'Storage Blob Data Contributor' \
+  --assignee-object-id "$(az vm show -g rg-lowtide -n vm-lowtide --query identity.principalId -o tsv)" \
+  --assignee-principal-type ServicePrincipal \
+  --scope "$(az storage account show -g rg-lowtide -n stlowtiderespaldo --query id -o tsv)/blobServices/default/containers/respaldos"
+```
+
+Quien baje los respaldos necesita además `Storage Blob Data Reader` en el mismo contenedor, con `--assignee` y su correo: con las llaves de la cuenta apagadas, ser dueño de la suscripción no alcanza para leer blobs. La política de inmutabilidad queda sin bloquear: se puede quitar desde Azure con permisos de la suscripción, no con el rol de la VM. Bloquearla es irreversible. La llave de age se crea en la PC con `age-keygen`: la pública (`age1...`) va a la VM y la privada nunca sale de la PC y del gestor de contraseñas.
+
+En la VM, desde `/opt/lowtide/BackKL`:
+
+```bash
+sudo apt-get install -y age
+sudo install -d -m 700 /etc/lowtide /var/backups/lowtide
+sudo install -m 600 db/respaldo/respaldo.conf.example /etc/lowtide/respaldo.conf   # y se llenan RECEPTOR_AGE y CUENTA_BLOB
+sudo install -m 644 db/respaldo/lowtide-respaldo.service db/respaldo/lowtide-respaldo.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now lowtide-respaldo.timer
+sudo systemctl start lowtide-respaldo.service   # el primero, para ver que sube
+journalctl -u lowtide-respaldo -n 20 --no-pager
+```
+
+El registro dice `respaldo: cirdan_<fecha>.dump.age, <bytes> bytes, sha256 ...` y `respaldo: subido a ...`. `systemctl list-timers lowtide-respaldo.timer` da la siguiente corrida. Un `403` al subir es que falta el rol de la identidad en el contenedor, o que el rol se acaba de dar y Azure tarda unos minutos en verlo.
+
+### Restaurar
+
+`db/respaldo/restaurar.sh` siempre crea una base nueva con otro nombre. Nunca hace DROP DATABASE ni escribe sobre `cirdan`, y se niega si la base ya existe. Se corre donde esté la llave privada, en Git Bash o Linux, contra el contenedor de una base de Postgres 16 con los roles de `db/init`, por ejemplo una pila aislada:
+
+```bash
+az storage blob download --auth-mode login --account-name stlowtiderespaldo -c respaldos -n <blob> -f <blob>
+AGE_IDENTIDAD=<llave privada> db/respaldo/restaurar.sh <blob> <contenedor> cirdan_restaurada
+db/respaldo/comparar.sh <contenedor> cirdan cirdan_restaurada
+```
+
+`AGE_IDENTIDAD=-` lee la llave de stdin, para no dejarla en un archivo. `comparar.sh` compara filas por tabla, RLS, FORCE y políticas entre dos bases del mismo contenedor con `db/respaldo/conteos.sql`. Para comparar contra la base de la VM, se corre `conteos.sql` en las dos y se comparan las salidas: las tablas que cambiaron después del respaldo (la bitácora, por ejemplo) pueden traer más filas en la VM. Para volver a poner un respaldo en la base de producción se siguen los pasos de 'Copiar los datos de la VM' en el plan B, con su `pg_restore --clean`.
+
+`pruebas/test_respaldo.py` saca un respaldo de la base del compose de prueba, lo restaura en una base nueva y compara todo, y revisa la retención, que la restauración no pise ninguna base y que una configuración mala no deje nada. Corre en el CI con las pruebas de la base. No prueba la subida a Azure, que se revisa en la VM con el primer `systemctl start`.
+
 ## Plan B
 
 En una PC del equipo, la misma pila con un túnel propio (otro `TUNNEL_TOKEN`). Para pasar el tráfico se cambia en Cloudflare el destino de `lowtidesec.com` y `www.lowtidesec.com` al túnel del plan B. Al probarlo se anotan la fecha, los pasos y los minutos hasta que respondió lowtidesec.com (comentario 10383 de RC-91).

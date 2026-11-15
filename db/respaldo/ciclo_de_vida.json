@@ -1,0 +1,20 @@
+{
+  "rules": [
+    {
+      "enabled": true,
+      "name": "borrar-respaldos-de-mas-de-8-dias",
+      "type": "Lifecycle",
+      "definition": {
+        "actions": {
+          "baseBlob": {
+            "delete": { "daysAfterCreationGreaterThan": 8 }
+          }
+        },
+        "filters": {
+          "blobTypes": ["blockBlob"],
+          "prefixMatch": ["respaldos/cirdan_"]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Respaldo diario de la base de LowTide a las 09:00 UTC (03:00 en Monterrey)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 UTC
+# Si la VM estaba apagada a esa hora, corre al arrancar.
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
