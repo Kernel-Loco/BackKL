@@ -192,10 +192,19 @@ class Despliegue(unittest.TestCase):
         self.assertIn(api, subred)
         self.assertTrue(rango.subnet_of(subred))
         self.assertNotIn(api, rango)
-        for nombre, s in self.svc.items():
+        en_default = [n for n, s in self.svc.items() if 'default' in (s.get('networks') or {'default': None})]
+        self.assertEqual(set(en_default), {'api', 'db', 'valkey', 'demo-accounts'})
+        for nombre in en_default:
             if nombre != 'api':
+                s = self.svc[nombre]
                 self.assertNotIn('ipv4_address', (s.get('networks') or {}).get('default') or {}, nombre)
+                # R4 de la ronda 2: sin sockets crudos no envenenan el ARP para quedarse con la IP de la API.
+                self.assertIn('NET_RAW', s.get('cap_drop') or [], nombre)
         doc = (RAIZ / 'docs' / 'despliegue.md').read_text(encoding='utf-8')
+        # R3 de la ronda 2: sin la regla Docker no arranca, y se vuelve a poner al reiniciar Docker.
+        unidad = doc[doc.index('[Unit]'):doc.index('EOF', doc.index('[Unit]'))]
+        for linea in ('Before=docker.service', 'PartOf=docker.service', 'RequiredBy=docker.service'):
+            self.assertIn('\n' + linea + '\n', unidad)
         regla = '-d 169.254.169.254/32 ! -s %s/32 -j DROP' % api
         self.assertEqual(doc.count('iptables -C DOCKER-USER ' + regla), 1)
         self.assertEqual(doc.count('iptables -I DOCKER-USER ' + regla), 1)

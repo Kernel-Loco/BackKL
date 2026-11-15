@@ -23,8 +23,10 @@ TIMEOUT = 5
 # Toda la lectura, IMDS y Key Vault juntos. IMDS puede responder 410 hasta unos 70 s mientras se actualiza. El
 # HEALTHCHECK del Dockerfile da más margen que esto (pruebas/test_despliegue.py lo revisa).
 PLAZO = 90
-# IMDS pide reintentar con 404 (la identidad aún no está lista al arrancar la VM), 410, 429 y 5xx.
-REINTENTAR = {404, 410, 429, 500, 502, 503, 504}
+# IMDS pide reintentar con 404 (la identidad aún no está lista al arrancar la VM), 410, 429 y 5xx. En la bóveda un 404
+# es permanente (SecretNotFound: nombre o versión mal copiados) y sale en seco, sin gastar el plazo.
+REINTENTAR = frozenset({404, 410, 429, 500, 502, 503, 504})
+REINTENTAR_VAULT = REINTENTAR - {404}
 ESPERAS = (1, 2, 4, 8, 16, 16, 16, 16)
 MAXIMO = 64 * 1024  # bytes de una respuesta: un token o un secreto caben de sobra
 
@@ -86,9 +88,9 @@ def validar_url(url):
     return url
 
 
-def _con_reintentos(req, que, fin):
-    """El JSON de `req`, con reintentos hasta `fin` (de `_reloj`). El RuntimeError sale fuera del `except`, sin el
-    error de urllib en __context__."""
+def _con_reintentos(req, que, fin, reintentar):
+    """El JSON de `req`, con reintentos hasta `fin` (de `_reloj`) para los códigos HTTP de `reintentar`. El
+    RuntimeError sale fuera del `except`, sin el error de urllib en __context__."""
     fallo = 'no respondió a tiempo'
     for espera in (0,) + ESPERAS:
         if espera:
@@ -104,7 +106,7 @@ def _con_reintentos(req, que, fin):
             codigo = e.code
             e.close()
             fallo = 'respondió HTTP %s' % codigo
-            if codigo not in REINTENTAR:
+            if codigo not in reintentar:
                 break
         except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
             fallo = 'no respondió (%s)' % type(e).__name__
@@ -116,7 +118,7 @@ def leer_secreto(url):
     url = validar_url(url)
     fin = _reloj() + PLAZO
     req = urllib.request.Request(IMDS_TOKEN, headers={'Metadata': 'true'})
-    token = _con_reintentos(req, 'La identidad administrada (IMDS)', fin)
+    token = _con_reintentos(req, 'La identidad administrada (IMDS)', fin, REINTENTAR)
     token = token.get('access_token') if isinstance(token, dict) else None
     if not isinstance(token, str) or not token:
         raise RuntimeError('La identidad administrada (IMDS) no devolvió un token')
@@ -125,7 +127,7 @@ def leer_secreto(url):
     req.add_unredirected_header('Authorization', 'Bearer ' + token)
     del token
     try:
-        datos = _con_reintentos(req, 'Key Vault', fin)
+        datos = _con_reintentos(req, 'Key Vault', fin, REINTENTAR_VAULT)
     finally:
         # Los frames de un traceback guardan `req`: sin esto el token seguiría ahí.
         req.unredirected_hdrs.pop('Authorization', None)

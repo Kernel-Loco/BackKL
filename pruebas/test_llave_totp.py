@@ -224,6 +224,16 @@ class Peticiones(Base):
         self.assertEqual(len(f.peticiones), 2)
         self.assertIsNone(totp._llave_vault)
 
+    def test_secreto_inexistente_no_reintenta(self):
+        # R1 de la ronda 2: un 404 de la bóveda (versión mal copiada) es permanente y sale en seco. El de IMDS sí se
+        # reintenta (test_reintenta_imds_al_arrancar).
+        self.env(TOTP_KEY_VAULT_SECRET_URL=URL)
+        f = self.falso(vault=[_error(404)])
+        with self.assertRaisesRegex(RuntimeError, 'Key Vault respondió HTTP 404'):
+            totp._key()
+        self.assertEqual(len(f.peticiones), 2)
+        self.sleep.assert_not_called()
+
     def test_imds_caido_se_rinde(self):
         self.env(TOTP_KEY_VAULT_SECRET_URL=URL)
         f = self.falso(imds=[urllib.error.URLError('x')])

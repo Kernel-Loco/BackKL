@@ -44,7 +44,9 @@ Ningún .env le gana a estos valores:
 - Sin `ports` en ningún servicio. Para entrar a la base de la VM se usa `docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d cirdan'`: `POSTGRES_USER` es la del contenedor, que sale del `.env` (`postgres` si no se puso).
 - Rotación del registro de Docker en todos los servicios: 3 archivos de 10 MB.
 
-Las redes `interna` (10.249.91.0/28), `borde` (10.249.92.0/28) y `default` (10.249.93.0/27, para la regla de IMDS de 'Solo la API llega a IMDS') tienen subred fija, fuera de los rangos que Docker reparte solo (172.16.0.0/12 y 192.168.0.0/16) y de la VPC por omisión de AWS. Si otra red de la máquina ya usa esas subredes, `up` falla con un aviso de Docker. Las dos son `internal` (no salen a internet) e `isolated` (el host no tiene IP en ellas), así que un proceso de la VM no llega al portal sin pasar por el túnel. La API sí queda al alcance del host por su IP en la red `default`, pero ahí su X-Forwarded-For no cuenta: la API lo ve con la IP de la puerta de enlace de Docker. cloudflared sale a Cloudflare por su propia red, `salida`, que no comparte con nadie.
+Las redes `interna` (10.249.91.0/28), `borde` (10.249.92.0/28) y `default` (10.249.93.0/27, para la regla de IMDS de 'Solo la API llega a IMDS') tienen subred fija, fuera de los rangos que Docker reparte solo (172.16.0.0/12 y 192.168.0.0/16) y de la VPC por omisión de AWS. Si otra red de la máquina ya usa esas subredes, `up` falla con un aviso de Docker. `interna` y `borde` son `internal` (no salen a internet) e `isolated` (el host no tiene IP en ellas), así que un proceso de la VM no llega al portal sin pasar por el túnel. La API sí queda al alcance del host por su IP en la red `default`, pero ahí su X-Forwarded-For no cuenta: la API lo ve con la IP de la puerta de enlace de Docker. `default` no es ninguna de las dos: sale a internet y el host tiene IP en ella. cloudflared sale a Cloudflare por su propia red, `salida`, que no comparte con nadie.
+
+La API tiene IP fija en `default` (10.249.93.20). Por eso en la VM los comandos de la API van con `docker compose exec api`, no con `docker compose run --rm api` como en el README: `run` pide la misma IP y, con la API arriba, falla con 'Address already in use'.
 
 `portal` y `cloudflared` no llevan `container_name`: su nombre sale del proyecto. `db`, `valkey` y `api` siguen con los nombres fijos de `docker-compose.yml` (`cirdan-pg16`, `cirdan-valkey` y `cirdan-api`).
 
@@ -55,21 +57,22 @@ Las redes `interna` (10.249.91.0/28), `borde` (10.249.92.0/28) y `default` (10.2
 - Desde la migración la llave no se escribe en el disco de la VM ni aparece en `docker inspect`, que sí muestra las variables de entorno: queda solo en la memoria del proceso. La migración no la cambia, así que los respaldos y snapshots de la VM de antes, los bloques del `.env` borrado y cualquier copia vieja del `.env` la siguen trayendo mientras no se rote. La copia del gestor de contraseñas también.
 - La API pide el token al servicio de metadatos de Azure (169.254.169.254), sin proxy. Solo manda el token a una URL `https://<bóveda>.vault.azure.net/secrets/<nombre>/<versión>` y no sigue redirecciones.
 - La URL lleva la versión del secreto, y la API no acepta una sin versión. Así cargar otro valor en la bóveda, por error o pensando que es una rotación, no cambia la llave que lee la API en el siguiente reinicio: hace falta editar el `.env`. La API solo revisa que la llave mida 32 bytes, no que descifre los secretos de la base. Con otra llave arranca `healthy` y nadie pasa la verificación en dos pasos.
-- Si Key Vault o la identidad fallan, la API no arranca y `docker compose logs api` dice por qué (HTTP 403 es que falta el rol). Ningún mensaje lleva el token ni la llave. Reintenta hasta 90 s en total, para aguantar un IMDS que se está actualizando, y el HEALTHCHECK del Dockerfile le da 120 s antes de contar fallos. Si se rinde, uvicorn sale y `restart: unless-stopped` la vuelve a levantar.
+- Si Key Vault o la identidad fallan, la API no arranca y `docker compose logs api` dice por qué (HTTP 403 es que falta el rol y HTTP 404, que el nombre o la versión de la URL no existen, y ese no se reintenta). Ningún mensaje lleva el token ni la llave. Reintenta hasta 90 s en total, para aguantar un IMDS que se está actualizando, y el HEALTHCHECK del Dockerfile le da 120 s antes de contar fallos. Si se rinde, uvicorn sale y `restart: unless-stopped` la vuelve a levantar.
 - Lo que no cambia: quien sea root en la VM puede pedir el mismo token. Un contenedor que no sea la API no puede, por la regla de 'Solo la API llega a IMDS'. Lo que se gana es que cada lectura queda en el registro de la bóveda y que quitar el rol corta el acceso.
 - Costo: Key Vault Standard cobra 0.03 USD por cada 10 mil operaciones, sin cuota por bóveda. La API hace dos peticiones por arranque, una a la identidad y otra a la bóveda, y solo la de la bóveda cuenta como operación.
 
 ### Solo la API llega a IMDS
 
-Cualquier contenedor con salida a internet llega a 169.254.169.254 y, en cuanto la VM tiene identidad, puede pedir su token y leer la llave: cloudflared, que es una imagen de terceros expuesta al túnel, por la red `salida`, y la base, Valkey y demo-accounts por `default`. Una regla en `DOCKER-USER`, la cadena de iptables que Docker deja para reglas propias y no borra, tira todo lo que va de un contenedor a 169.254.169.254, salvo lo que sale de la IP fija de la API (10.249.93.20, red `default` de `docker-compose.despliegue.yml`). Ningún otro contenedor puede recibir esa IP: Docker reparte solo 10.249.93.0/28. Lo que corre en el host no pasa por esa cadena y la base, Valkey, demo-accounts y cloudflared no usan IMDS.
+Cualquier contenedor con salida a internet llega a 169.254.169.254 y, en cuanto la VM tiene identidad, puede pedir su token y leer la llave: cloudflared, que es una imagen de terceros expuesta al túnel, por la red `salida`, y la base, Valkey y demo-accounts por `default`. Una regla en `DOCKER-USER`, la cadena de iptables que Docker deja para reglas propias y no borra, tira todo lo que va de un contenedor a 169.254.169.254, salvo lo que sale de la IP fija de la API (10.249.93.20, red `default` de `docker-compose.despliegue.yml`). Ningún otro contenedor puede recibir esa IP: Docker reparte solo 10.249.93.0/28. La base, Valkey y demo-accounts van sin `NET_RAW` (`cap_drop`), así que tampoco pueden quitársela a la API envenenando el ARP de `default`. Lo que corre en el host no pasa por esa cadena y la base, Valkey, demo-accounts y cloudflared no usan IMDS.
 
-Va como servicio de systemd, para que quede puesta antes de que Docker levante los contenedores en cada arranque de la VM:
+Va como servicio de systemd, para que quede puesta antes de que Docker levante los contenedores en cada arranque de la VM. `RequiredBy=docker.service` hace que Docker no arranque si la regla no se pudo poner, en vez de arrancar sin ella. `PartOf=docker.service` la vuelve a poner cada vez que se reinicia Docker. Al revés también: detener `lowtide-imds` detiene Docker.
 
 ```bash
 sudo tee /etc/systemd/system/lowtide-imds.service >/dev/null <<'EOF'
 [Unit]
 Description=Solo la API de LowTide llega a IMDS (BackKL docs/despliegue.md)
 Before=docker.service
+PartOf=docker.service
 
 [Service]
 Type=oneshot
@@ -78,13 +81,15 @@ ExecStart=/bin/sh -c 'iptables -N DOCKER-USER 2>/dev/null; iptables -C DOCKER-US
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=docker.service
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now lowtide-imds.service
+systemctl list-dependencies docker.service | grep lowtide-imds
 sudo iptables -S DOCKER-USER
 ```
 
-`iptables -S DOCKER-USER` muestra la regla `-A DOCKER-USER ! -s 10.249.93.20/32 -d 169.254.169.254/32 -j DROP` antes que cualquier otra. Docker usa iptables por omisión. Si `/etc/docker/daemon.json` trae `"firewall-backend": "nftables"`, la cadena no existe y esta regla no protege nada.
+`list-dependencies` muestra `lowtide-imds.service` entre las dependencias de Docker. `iptables -S DOCKER-USER` muestra la regla `-A DOCKER-USER ! -s 10.249.93.20/32 -d 169.254.169.254/32 -j DROP` antes que cualquier otra. Algo que vacíe las reglas sin reiniciar Docker (un `iptables-restore` o firewalld) la quita y systemd no se entera, así que `iptables -S DOCKER-USER` se repite en el paso 11 y después de cada actualización de la VM o de Docker. Docker usa iptables por omisión. Si `/etc/docker/daemon.json` trae `"firewall-backend": "nftables"`, la cadena no existe y esta regla no protege nada.
 
 Comprobación, con la pila arriba: desde la API, el paso 8 de abajo lee el secreto. Desde otro contenedor de la misma red, esto tiene que fallar por tiempo (`TimeoutError` o `URLError`), no responder:
 
@@ -123,7 +128,7 @@ Los pasos marcados (Azure) van en la terminal de quien administra Azure y los ma
    Tiene que imprimir `igual`. Un 403 puede tardar unos minutos en irse después de asignar el rol. Después, la comprobación de 'Solo la API llega a IMDS' tiene que fallar por tiempo.
 9. (VM) En el `.env`, agregar `TOTP_KEY_VAULT_SECRET_URL=<URL con versión del paso 3>` y borrar la línea de `TOTP_ENCRYPTION_KEY`.
 10. (VM) `docker compose --dry-run up -d --build` para ver qué contenedores recrea y luego `docker compose up -d --build`, que recrea la API con el `.env` nuevo.
-11. (VM) `docker compose ps api` dice `healthy`. Además, `docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' cirdan-api | grep -c '^TOTP_ENCRYPTION_KEY=.'` da 0, y una cuenta real entra con contraseña y MFA.
+11. (VM) `docker compose ps api` dice `healthy`. Además, `docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' cirdan-api | grep -c '^TOTP_ENCRYPTION_KEY=.'` da 0, `sudo iptables -S DOCKER-USER` sigue mostrando la regla de IMDS y una cuenta real entra con contraseña y MFA.
 
 Para regresar, se pone otra vez `TOTP_ENCRYPTION_KEY` en el `.env` con la copia del gestor de contraseñas, se borra `TOTP_KEY_VAULT_SECRET_URL` y se repite el paso 10. La copia del gestor se queda siempre: el plan B la usa y, sin ella o sin la bóveda, los secretos TOTP de la base ya no se descifran. Rotar la llave pide volver a cifrar los secretos TOTP de todas las cuentas, y no hay herramienta para eso: una versión nueva en la bóveda no se usa hasta que alguien cambie la URL del `.env`.
 

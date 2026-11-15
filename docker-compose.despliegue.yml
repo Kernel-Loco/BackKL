@@ -32,13 +32,20 @@ x-registro: &registro
       max-size: "10m"
       max-file: "3"
 
+# Sin sockets crudos en la red default, salvo la API: con NET_RAW, que Docker da por omisión, un contenedor tomado
+# podría envenenar el ARP del puente para quedarse con la IP de la API (.20) y recibir la respuesta de IMDS. Ninguno
+# de estos servicios lo usa.
+x-sin-raw: &sin-raw
+  cap_drop:
+    - NET_RAW
+
 services:
   db:
-    <<: *registro
+    <<: [*registro, *sin-raw]
     ports: !reset []
 
   valkey:
-    <<: *registro
+    <<: [*registro, *sin-raw]
     ports: !reset []
 
   api:
@@ -58,12 +65,13 @@ services:
       UVICORN_TIMEOUT_KEEP_ALIVE: "65"
     networks:
       default:
-        # La única IP que la regla de IMDS deja pasar (docs/despliegue.md).
+        # La única IP que la regla de IMDS deja pasar (docs/despliegue.md). Por eso en la VM se usa
+        # `docker compose exec api`: un `run --rm api` pide la misma IP y falla con 'Address already in use'.
         ipv4_address: 10.249.93.20
       interna:
 
   demo-accounts:
-    <<: *registro
+    <<: [*registro, *sin-raw]
     environment:
       # Las contraseñas y los secretos MFA de las cuentas de demo son públicos (regla 10 de AGENTS.md y
       # comentario 10420 de RC-91). Con false el script además las apaga, aunque el volumen de la base ya trajera
