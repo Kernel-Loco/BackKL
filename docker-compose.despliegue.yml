@@ -9,6 +9,9 @@
 # - borde: cloudflared y el portal. cloudflared no ve la API, la base ni Valkey.
 # - interna: el portal y la API.
 # - salida: solo cloudflared, para llegar a Cloudflare. La API sale a internet por la red default.
+# - default: la API, la base, Valkey y demo-accounts. Subred fija y la API con IP fija fuera del rango que Docker
+#   reparte solo, para que la regla de DOCKER-USER de docs/despliegue.md ('Solo la API llega a IMDS') deje pedir el
+#   token de la identidad de la VM a la API y a nadie más.
 # borde e interna no salen a internet (internal) y el host no tiene IP en ellas (gateway_mode_ipv4=isolated, pide un
 # Docker Engine reciente: uno viejo rechaza la opción y `up` falla). Así un proceso de la máquina no llega al portal
 # sin pasar por el túnel, ni elige su IP con X-Forwarded-For (hallazgo 8 de la revisión de RC-91).
@@ -55,6 +58,8 @@ services:
       UVICORN_TIMEOUT_KEEP_ALIVE: "65"
     networks:
       default:
+        # La única IP que la regla de IMDS deja pasar (docs/despliegue.md).
+        ipv4_address: 10.249.93.20
       interna:
 
   demo-accounts:
@@ -106,6 +111,13 @@ services:
     restart: unless-stopped
 
 networks:
+  default:
+    ipam:
+      config:
+        # Docker reparte solo 10.249.93.0/28 (puerta de enlace en .1). La IP fija de la API (.20) queda fuera, así
+        # que ningún otro contenedor la puede recibir.
+        - subnet: 10.249.93.0/27
+          ip_range: 10.249.93.0/28
   interna:
     internal: true
     driver_opts:

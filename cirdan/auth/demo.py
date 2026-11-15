@@ -125,6 +125,13 @@ def origenes_publicados():
 
 
 def main(argv):
+    # Sin la llave del MFA la API no arranca. En desarrollo nadie espera a la API, así que sin esto `docker compose
+    # up -d` terminaría bien y la API se quedaría reiniciándose. Como la API espera a este script, aquí sí se detiene
+    # el `up` (#49, RC-91). No lee Key Vault: apagar las cuentas no usa la llave.
+    try:
+        totp.revisar_variables()
+    except RuntimeError as e:
+        sys.exit(str(e))
     if len(argv) == 3 and argv[1] == 'codigo':
         print(codigo(argv[2]))
         return

@@ -9,9 +9,11 @@ FORWARDED_ALLOW_IPS con las IP fijas del portal y de cloudflared, y lo que arreg
 
     python -m unittest -v pruebas/test_despliegue.py
 """
+import ast
 import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -124,7 +126,7 @@ class Despliegue(unittest.TestCase):
         # Los que Docker reparte solo (172.16.0.0/12 y 192.168.0.0/16), que incluyen la VPC por omisión de AWS
         # (172.31.0.0/16) (hallazgo 14).
         comunes = [ipaddress.ip_network(r) for r in ('172.16.0.0/12', '192.168.0.0/16')]
-        for red in ('interna', 'borde'):
+        for red in ('interna', 'borde', 'default'):
             subred = ipaddress.ip_network(self.cfg['networks'][red]['ipam']['config'][0]['subnet'])
             for comun in comunes:
                 self.assertFalse(subred.overlaps(comun), '%s %s choca con %s' % (red, subred, comun))
@@ -168,7 +170,7 @@ class Despliegue(unittest.TestCase):
         # En la VM la llave del MFA no va en el .env: solo la URL de su secreto en Key Vault (opción 4 de RC-91). La
         # pila tiene que armarse sin TOTP_ENCRYPTION_KEY y la API y el script de demo reciben la URL. Que no vengan
         # las dos lo revisa la API al arrancar (pruebas/test_llave_totp.py).
-        url = 'https://kv-lowtide.vault.azure.net/secrets/totp-encryption-key'
+        url = 'https://kv-lowtide.vault.azure.net/secrets/totp-encryption-key/0123456789abcdef0123456789abcdef'
         env = {k: v for k, v in ENV_FALSO.items() if k != 'TOTP_ENCRYPTION_KEY'}
         rc, salida = _config(dict(env, TOTP_KEY_VAULT_SECRET_URL=url))
         self.assertEqual(rc, 0, salida[-500:])
@@ -179,6 +181,35 @@ class Despliegue(unittest.TestCase):
         # Con la llave en el .env (desarrollo, CI y plan B) la URL llega vacía.
         self.assertEqual(self.svc['api']['environment']['TOTP_KEY_VAULT_SECRET_URL'], '')
         self.assertEqual(self.svc['api']['environment']['TOTP_ENCRYPTION_KEY'], 'CIRDAN_FAKE_totp')
+
+    def test_14_solo_la_api_llega_a_imds(self):
+        # Hallazgo 0 de la revisión de la opción 4 de RC-91: la regla de DOCKER-USER de docs/despliegue.md deja pasar
+        # a 169.254.169.254 solo la IP fija de la API. Esa IP cae en la subred de default, fuera del rango que Docker
+        # reparte solo, y ningún otro servicio la tiene. La regla misma se prueba en vivo en la VM.
+        api = ipaddress.ip_address(self.svc['api']['networks']['default']['ipv4_address'])
+        ipam = self.cfg['networks']['default']['ipam']['config'][0]
+        subred, rango = ipaddress.ip_network(ipam['subnet']), ipaddress.ip_network(ipam['ip_range'])
+        self.assertIn(api, subred)
+        self.assertTrue(rango.subnet_of(subred))
+        self.assertNotIn(api, rango)
+        for nombre, s in self.svc.items():
+            if nombre != 'api':
+                self.assertNotIn('ipv4_address', (s.get('networks') or {}).get('default') or {}, nombre)
+        doc = (RAIZ / 'docs' / 'despliegue.md').read_text(encoding='utf-8')
+        regla = '-d 169.254.169.254/32 ! -s %s/32 -j DROP' % api
+        self.assertEqual(doc.count('iptables -C DOCKER-USER ' + regla), 1)
+        self.assertEqual(doc.count('iptables -I DOCKER-USER ' + regla), 1)
+        self.assertEqual(set(re.findall(r'! -s ([0-9.]+)/32', doc)), {str(api)})
+
+    def test_15_el_healthcheck_espera_a_la_llave_de_key_vault(self):
+        # Hallazgos 8, 11 y 12: la API puede tardar hasta keyvault.PLAZO en leer la llave antes de rendirse. El
+        # periodo de arranque del HEALTHCHECK tiene que ser mayor, para que no la marque unhealthy antes.
+        fuente = (RAIZ / 'cirdan' / 'auth' / 'keyvault.py').read_text(encoding='utf-8')
+        plazo = next(ast.literal_eval(n.value) for n in ast.parse(fuente).body
+                     if isinstance(n, ast.Assign) and [getattr(x, 'id', None) for x in n.targets] == ['PLAZO'])
+        dockerfile = (RAIZ / 'Dockerfile').read_text(encoding='utf-8')
+        inicio = int(re.search(r'HEALTHCHECK .*--start-period=(\d+)s', dockerfile).group(1))
+        self.assertGreater(inicio, plazo + 10)
 
 
 if __name__ == '__main__':

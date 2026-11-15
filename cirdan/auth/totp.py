@@ -38,17 +38,29 @@ def _decodificar(valor, origen):
     return key
 
 
-def _key():
+def _variables():
+    """(url, llave directa), con una sola de las dos puesta, o RuntimeError. Vacía cuenta como sin poner."""
     url = config('TOTP_KEY_VAULT_SECRET_URL')
     directa = config('TOTP_ENCRYPTION_KEY')
     if url and directa:
         raise RuntimeError('TOTP_KEY_VAULT_SECRET_URL y TOTP_ENCRYPTION_KEY están puestas: con Key Vault, '
                            'quita TOTP_ENCRYPTION_KEY del .env')
-    if directa:
-        return _decodificar(directa, 'TOTP_ENCRYPTION_KEY')
-    if not url:
+    if not url and not directa:
         raise RuntimeError('Falta TOTP_ENCRYPTION_KEY o TOTP_KEY_VAULT_SECRET_URL: copia .env.example como .env y '
                            'llena sus valores')
+    return url, directa
+
+
+def revisar_variables():
+    """Sin red ni Key Vault: que venga una sola de las dos variables. La usa el script de demo, que corre antes que la
+    API, para que `docker compose up` falle con este mensaje en vez de dejar la API reiniciándose."""
+    _variables()
+
+
+def _key():
+    url, directa = _variables()
+    if directa:
+        return _decodificar(directa, 'TOTP_ENCRYPTION_KEY')
     global _llave_vault
     with _candado:
         if _llave_vault is None or _llave_vault[0] != url:
