@@ -8,6 +8,13 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    # Los cambios menores y de parche van juntos en un PR, porque dos PR sueltos chocan
+    # en líneas vecinas de requirements.txt (scikit-learn y pandas, 14 nov). Los mayores
+    # siguen en su propio PR.
+    groups:
+      pip:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: docker
     directory: /
     target-branch: dev
@@ -18,6 +25,9 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    groups:
+      docker-compose:
+        patterns: ["*"]
     ignore:
       # Un salto mayor de postgres no abre el volumen de la base y valkey se queda en la 8.
       # Eso se decide aparte, no con un PR de Dependabot.
@@ -30,3 +40,6 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
