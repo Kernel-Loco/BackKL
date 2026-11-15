@@ -1,6 +1,6 @@
 # Cuentas de prueba y cómo pasar el MFA
 
-Cuentas para entrar al portal LowTide en tu PC mientras desarrollamos. Son **solo de demostración**: la contraseña y los secretos de MFA son públicos a propósito y nunca deben usarse fuera de desarrollo.
+Cuentas para entrar al portal LowTide en tu PC mientras desarrollamos. Son **solo para desarrollo, el CI y las pruebas de roles y aislamiento**: la contraseña y los secretos de MFA son públicos a propósito y nunca deben usarse fuera de desarrollo. No se usan en las demos con el socio formador ni en la VM. Ahí se entra con cuentas reales de Grupo Olmardo, que no se documentan.
 
 ## Antes de entrar
 
@@ -18,7 +18,7 @@ La contraseña es la misma para las cinco: **`Lowtide-Demo-2026`**
 | `maya.reed@acme-demo.mx` | Gerente | Acme Demo | Dashboard, Dominios, Detalle de dominio y Reportes e histórico, solo lectura |
 | `alex.morgan@acme-demo.mx` | Administrador | Acme Demo | Todo lo anterior, más registrar dominios, verificar el TXT, Políticas de alerta y la sección Administración |
 | `dana.cruz@beta-corp.mx` | Administrador | Beta Corp | Solo los datos de Beta Corp. Sirve para comprobar que una empresa no ve los datos de otra |
-| `admin@olmardo.com` | Administrador | Grupo Olmardo | El dominio de prueba del equipo, olmardo.com: el único que el orquestador escanea en vivo (#22) |
+| `admin@olmardo.com` | Administrador | Grupo Olmardo | Cuenta de demo con contraseña pública. Sirve para probar el escaneo de olmardo.com en tu PC. No es la de las demos con el socio |
 
 ## Cómo pasar el MFA (verificación en dos pasos)
 
