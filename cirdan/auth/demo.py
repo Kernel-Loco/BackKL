@@ -73,7 +73,7 @@ def apagar_credenciales():
             print('cuenta de demo apagada:', email)
         elif fila is None:
             print('cuenta de demo que no puede iniciar sesión, nada que apagar:', email)
-        elif passwords.verify_password(fila[0], PASSWORD):
+        elif passwords.verify_password(fila['password_hash'], PASSWORD):
             sin_apagar.append(email)
         else:
             print('cuenta de demo con otro id y sin la contraseña de demo, no se toca:', email)

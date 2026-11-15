@@ -27,7 +27,8 @@ class BaseFalsa:
     """Hace de cirdan.db.transaction: no abre conexión y guarda cada consulta.
 
     Los UPDATE cambian una fila, salvo los de los id de `sin_fila`. login_lookup() devuelve una fila para los correos
-    de `pueden_entrar`, un dict de correo a su hash de contraseña."""
+    de `pueden_entrar`, un dict de correo a su hash de contraseña. Las filas son dicts, como con el dict_row de
+    cirdan/db.py."""
 
     def __init__(self, sin_fila=(), pueden_entrar=None):
         self.consultas = []
@@ -43,7 +44,8 @@ class BaseFalsa:
         if sql.startswith('UPDATE'):
             return mock.Mock(rowcount=0 if parametros[-1] in self.sin_fila else 1)
         if 'login_lookup' in sql:
-            fila = (self.pueden_entrar[parametros[0]],) if parametros[0] in self.pueden_entrar else None
+            fila = ({'password_hash': self.pueden_entrar[parametros[0]]} if parametros[0] in self.pueden_entrar
+                    else None)
             return mock.Mock(**{'fetchone.return_value': fila})
         raise AssertionError('consulta no esperada: %s' % sql)
 
