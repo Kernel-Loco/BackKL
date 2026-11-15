@@ -27,12 +27,12 @@ class BaseFalsa:
     """Hace de cirdan.db.transaction: no abre conexión y guarda cada consulta.
 
     Los UPDATE cambian una fila, salvo los de los id de `sin_fila`. login_lookup() devuelve una fila para los correos
-    de `pueden_entrar`."""
+    de `pueden_entrar`, un dict de correo a su hash de contraseña."""
 
-    def __init__(self, sin_fila=(), pueden_entrar=()):
+    def __init__(self, sin_fila=(), pueden_entrar=None):
         self.consultas = []
         self.sin_fila = set(sin_fila)
-        self.pueden_entrar = set(pueden_entrar)
+        self.pueden_entrar = dict(pueden_entrar or {})
 
     @contextmanager
     def transaction(self, org=None):
@@ -43,7 +43,8 @@ class BaseFalsa:
         if sql.startswith('UPDATE'):
             return mock.Mock(rowcount=0 if parametros[-1] in self.sin_fila else 1)
         if 'login_lookup' in sql:
-            return mock.Mock(**{'fetchone.return_value': (1,) if parametros[0] in self.pueden_entrar else None})
+            fila = (self.pueden_entrar[parametros[0]],) if parametros[0] in self.pueden_entrar else None
+            return mock.Mock(**{'fetchone.return_value': fila})
         raise AssertionError('consulta no esperada: %s' % sql)
 
 
@@ -190,7 +191,8 @@ class Script(unittest.TestCase):
 
     def test_9e_una_cuenta_que_puede_entrar_y_no_cambio_termina_con_error(self):
         alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
-        base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx'})
+        base = BaseFalsa(sin_fila={alex},
+                         pueden_entrar={'alex.morgan@acme-demo.mx': passwords.hash_password(demo.PASSWORD)})
         salida = io.StringIO()
         with self.assertRaises(SystemExit) as error, entorno(DEMO_ACCOUNTS='true', ALLOWED_ORIGINS=PUBLICADO), \
                 mock.patch.object(demo, 'transaction', base.transaction), redirect_stdout(salida):
@@ -200,6 +202,23 @@ class Script(unittest.TestCase):
         # Las otras cuatro sí se apagan antes del error.
         self.assertEqual(salida.getvalue().count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
         self.assertNotIn('apagada: alex.morgan@acme-demo.mx', salida.getvalue())
+
+    def test_9f_un_correo_con_otro_id_que_puede_entrar_sin_la_contrasena_de_demo_solo_avisa(self):
+        # N2 de la ronda 3 de RC-91: esa fila nunca tuvo las credenciales públicas, la API sí arranca.
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        base = BaseFalsa(sin_fila={alex},
+                         pueden_entrar={'alex.morgan@acme-demo.mx': passwords.hash_password('Otra-Clave-De-Prueba-1')})
+        consultas, salida = correr(base, DEMO_ACCOUNTS='false')
+        self.assertEqual(salida.count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
+        self.assertIn('con otro id y sin la contraseña de demo, no se toca: alex.morgan@acme-demo.mx', salida)
+        self.assertNotIn('nada que apagar', salida)
+        self.assertEqual([p for sql, p in consultas if 'login_lookup' in sql], [('alex.morgan@acme-demo.mx',)])
+
+    def test_9g_el_hash_de_relleno_en_otro_id_tampoco_frena(self):
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': demo.HASH_DE_RELLENO})
+        _, salida = correr(base, DEMO_ACCOUNTS='false')
+        self.assertIn('no se toca: alex.morgan@acme-demo.mx', salida)
 
     def test_10_el_codigo_totp_sigue_saliendo_y_no_toca_la_base(self):
         base, salida = BaseFalsa(), io.StringIO()

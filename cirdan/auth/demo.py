@@ -52,10 +52,14 @@ HASH_DE_RELLENO = '$argon2id$v=19$m=65536,t=3,p=4$ZGVtby1zYWx0$ZGVtby1vbmx5'
 def apagar_credenciales():
     """Les quita a las cuentas de demo la contraseña y el MFA públicos. Idempotente.
 
-    Si el UPDATE no cambia la fila de una cuenta, se pregunta a login_lookup() (migración 004) si ese correo todavía
-    puede iniciar sesión. Si no puede (no existe, está inactiva o su empresa no está activa), no hay nada que apagar y
-    solo se avisa. Si puede, el script apaga las demás y termina con error: esa cuenta sigue con lo que tuviera y la
-    API, que espera a demo-accounts, no arranca (R3 de la revisión de RC-91)."""
+    El UPDATE va por el id, así que una cuenta inactiva o de una empresa que no está activa también se apaga. Si no
+    cambia ninguna fila (no hay fila con ese id en esa empresa), se pregunta a login_lookup() (migración 004) si ese
+    correo todavía puede iniciar sesión:
+    - si no puede, no hay nada que apagar y solo se avisa;
+    - si puede, pero su hash no acepta la contraseña pública, es otra fila que este script nunca tocó (con otro id) y
+      no se toca: solo se avisa (N2 de la ronda 3 de RC-91);
+    - si entra con la contraseña pública, el script apaga las demás y termina con error: esa cuenta sigue con las
+      credenciales públicas y la API, que espera a demo-accounts, no arranca (R3 de la revisión de RC-91)."""
     sin_apagar = []
     for email, (org, user_id, _) in CUENTAS.items():
         with transaction(org) as conn:
@@ -63,17 +67,19 @@ def apagar_credenciales():
                 'UPDATE users SET password_hash = %s, totp_secret_enc = NULL, last_totp_step = NULL, '
                 'mfa_enabled_at = NULL WHERE id = %s',
                 (HASH_DE_RELLENO, user_id)).rowcount
-            puede_entrar = not cambiadas and conn.execute(
-                'SELECT 1 FROM login_lookup(%s)', (email,)).fetchone() is not None
+            fila = None if cambiadas else conn.execute(
+                'SELECT password_hash FROM login_lookup(%s)', (email,)).fetchone()
         if cambiadas:
             print('cuenta de demo apagada:', email)
-        elif puede_entrar:
+        elif fila is None:
+            print('cuenta de demo que no puede iniciar sesión, nada que apagar:', email)
+        elif passwords.verify_password(fila[0], PASSWORD):
             sin_apagar.append(email)
         else:
-            print('cuenta de demo que no puede iniciar sesión, nada que apagar:', email)
+            print('cuenta de demo con otro id y sin la contraseña de demo, no se toca:', email)
     if sin_apagar:
-        raise SystemExit('ERROR: estas cuentas de demo pueden iniciar sesión, pero el UPDATE no cambió su fila '
-                         '(¿otro id o empresa que los de CUENTAS?). No se apagaron: %s' % ', '.join(sin_apagar))
+        raise SystemExit('ERROR: estas cuentas de demo entran con la contraseña pública, pero el UPDATE no cambió su '
+                         'fila (¿otro id o empresa que los de CUENTAS?). No se apagaron: %s' % ', '.join(sin_apagar))
 
 
 def poner_credenciales():

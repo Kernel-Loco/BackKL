@@ -30,7 +30,7 @@ docker compose up -d --build
 docker compose logs demo-accounts
 ```
 
-La segunda línea tiene que decir 'DEMO_ACCOUNTS no es true: se apagan las cuentas de demo.' y luego 'cuenta de demo apagada:' con cada una de las 5 cuentas de `CUENTAS` de `cirdan/auth/demo.py`. El script les vuelve a poner el hash de relleno de la semilla y les quita el secreto TOTP en cada `up`. Así, aunque el volumen de la base ya trajera la contraseña y el MFA públicos (por ejemplo el de una PC de desarrollo), esas cuentas dejan de entrar (comentario 10420 de RC-91). Una cuenta que ya no puede iniciar sesión (borrada, inactiva o de una empresa que no está activa) sale como 'cuenta de demo que no puede iniciar sesión, nada que apagar:'. Si no llega a la base, o si una cuenta que sí puede iniciar sesión no cambió, el servicio termina con error y la API, que lo espera, no arranca.
+La segunda línea tiene que decir 'DEMO_ACCOUNTS no es true: se apagan las cuentas de demo.' y luego 'cuenta de demo apagada:' con cada una de las 5 cuentas de `CUENTAS` de `cirdan/auth/demo.py`. El script les vuelve a poner el hash de relleno de la semilla y les quita el secreto TOTP en cada `up`. Así, aunque el volumen de la base ya trajera la contraseña y el MFA públicos (por ejemplo el de una PC de desarrollo), esas cuentas dejan de entrar (comentario 10420 de RC-91). Una cuenta inactiva o de una empresa que no está activa también sale 'apagada', porque el cambio va por su id. Si no hay fila con ese id en esa empresa (borrada o con otro id), sale 'cuenta de demo que no puede iniciar sesión, nada que apagar:' cuando ese correo no puede iniciar sesión, y 'cuenta de demo con otro id y sin la contraseña de demo, no se toca:' cuando puede, pero no con la contraseña pública. Si no llega a la base, o si ese correo todavía entra con la contraseña pública, el servicio termina con error y la API, que lo espera, no arranca.
 
 ## Lo que fija el archivo del despliegue
 
@@ -92,7 +92,7 @@ Lo que se escriba durante el plan B (escaneos, usuarios, cambios de contraseña)
 
 Si el plan B dura poco y no se copia de vuelta, se avisa a los usuarios que lo que hagan ahí se pierde.
 
-Al terminar, en la carpeta del plan B, `docker volume ls` confirma que el volumen es `lowtide-planb_cirdan-pg16-data` y luego `docker compose down -v` lo borra, porque trae los datos reales. En la carpeta de desarrollo, `docker compose up -d` levanta otra vez la pila local con su base de siempre.
+Al terminar, en la carpeta del plan B, la primera línea de `docker compose config` tiene que ser otra vez `name: lowtide-planb`, porque una `COMPOSE_PROJECT_NAME` puesta en la terminal le gana al `.env` y `docker volume ls` lista todos los volúmenes, no dice cuál borra esa carpeta. Con ese nombre, `docker compose down -v` borra `lowtide-planb_cirdan-pg16-data`, que trae los datos reales. Con otro nombre no se corre. En la carpeta de desarrollo, `docker compose up -d` levanta otra vez la pila local con su base de siempre.
 
 ## Pruebas
 
