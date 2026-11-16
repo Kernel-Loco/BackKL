@@ -46,10 +46,20 @@ class AislamientoPorCliente(unittest.TestCase):
         self.assertEqual(scalar("SELECT rolsuper || ',' || rolbypassrls FROM pg_roles WHERE rolname = current_user;"),
                          'false,false')
 
-    def test_2_rls_forzado_en_las_20_tablas_por_cliente_y_configuracion(self):
-        n = scalar("SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace"
-                   " AND relkind = 'r' AND relrowsecurity AND relforcerowsecurity;", user='postgres')
-        self.assertEqual(n, '20')
+    def test_2_rls_forzado_y_con_politica_en_toda_tabla_con_organization_id(self):
+        """Sin un número fijo (comentario 10056 de RC-43): toda tabla de public con la columna organization_id lleva
+        RLS con ENABLE, FORCE y al menos una política. Una tabla por cliente nueva entra sola en la prueba.
+        organizations (su política compara id) y scoring_rules (va por rule_set_id) no tienen esa columna y se
+        nombran aparte, para no perder lo que cubría el conteo de antes (revisión del 8 nov)."""
+        con_org = ("FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') "
+                   "AND (c.relname IN ('organizations', 'scoring_rules') "
+                   "OR EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid "
+                   "AND a.attname = 'organization_id' AND a.attnum > 0 AND NOT a.attisdropped))")
+        self.assertGreaterEqual(int(scalar('SELECT count(*) ' + con_org + ';', user='postgres')), 20)
+        faltan = scalar("SELECT coalesce(string_agg(c.relname, ',' ORDER BY c.relname), 'ninguna') " + con_org +
+                        " AND NOT (c.relrowsecurity AND c.relforcerowsecurity"
+                        " AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid));", user='postgres')
+        self.assertEqual(faltan, 'ninguna', 'tablas con organization_id sin RLS forzado o sin política')
 
     def test_3_acme_ve_solo_sus_datos(self):
         self.assertEqual(scalar(COUNTS, org=ACME), '5,4,3')
