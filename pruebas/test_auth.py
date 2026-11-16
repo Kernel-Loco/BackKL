@@ -483,6 +483,28 @@ class CambioContrasena(unittest.TestCase):
         self.assertEqual(cambiar(client, PASSWORD, NUEVA)[:2], (204, None))
         self.addCleanup(self.restaurar, client)
 
+    def test_6_dos_cambios_a_la_vez_con_la_actual_solo_uno_gana(self):
+        # Sin FOR UPDATE los dos leían el hash viejo, daban 204 y ganaba el último: el de quien tuviera la vieja.
+        nuevas = (NUEVA, 'Marea-Alta-Prueba-2026')
+        clientes = [entrar(DANA), entrar(DANA)]
+        salida = threading.Barrier(len(clientes))
+
+        def intento(par):
+            salida.wait()
+            return cambiar(par[0], PASSWORD, par[1])[:2]
+
+        with ThreadPoolExecutor(len(clientes)) as pool:
+            respuestas = list(pool.map(intento, zip(clientes, nuevas)))
+        ganadoras = [i for i, r in enumerate(respuestas) if r == (204, None)]
+        if len(ganadoras) == 1:
+            ganadora = ganadoras[0]
+            self.addCleanup(lambda: self.assertEqual(cambiar(clientes[ganadora], nuevas[ganadora], PASSWORD)[:2],
+                                                     (204, None), 'no se pudo volver a la contraseña de demo'))
+        self.assertEqual(sorted(r[0] for r in respuestas), [204, 400], respuestas)
+        self.assertEqual(respuestas[1 - ganadora], (400, WRONG), respuestas)
+        self.assertEqual(sesion.post_login(Client(), DANA, nuevas[ganadora])[0], 200, 'la que ganó entra')
+        self.assertEqual(sesion.post_login(Client(), DANA, nuevas[1 - ganadora])[0], 401, 'la otra no')
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
