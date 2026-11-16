@@ -5,7 +5,7 @@
 --    público (id de la credencial, llave pública COSE, contador, transports,
 --    aaguid y si el proveedor la respalda). La llave privada nunca sale del
 --    autenticador. RLS ENABLE, FORCE y la política tenant_isolation, como las
---    17 tablas por cliente de la 001.
+--    tablas por cliente de la 001.
 -- 2. passkey_lookup(p_credential_id): busca la credencial al iniciar sesión.
 --    Es SECURITY DEFINER, igual que login_lookup() de la 004, porque antes de
 --    entrar no hay app.current_org. Solo devuelve la credencial de un usuario

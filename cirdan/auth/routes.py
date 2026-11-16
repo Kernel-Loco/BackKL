@@ -172,12 +172,17 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
             sessions.delete_mfa(body.mfa_token)
             raise HTTPException(401, MFA_EXPIRED)
         step = totp.verify_code(totp.decrypt_secret(row['totp_secret_enc'], user_id), body.code, row['last_totp_step'])
+        # La fila se leyó sin bloquearla: el UPDATE solo guarda el paso si ninguna otra petición (otro /mfa/verify o el
+        # registro de una passkey) gastó ese código o uno posterior desde la lectura. Si no cambia nada, es un código usado.
+        if step is not None and not conn.execute(
+                'UPDATE users SET last_totp_step = %s WHERE id = %s AND (last_totp_step IS NULL OR last_totp_step < %s)',
+                (step, user_id, step)).rowcount:
+            step = None
         if step is None:
             audit(conn, org, 'auth.mfa_failed', user_id, ip, 'user', user_id)
             fail = True
         else:
             fail = False
-            conn.execute('UPDATE users SET last_totp_step = %s WHERE id = %s', (step, user_id))
             sessions.delete_mfa(body.mfa_token)
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, 'totp')
     if fail:
@@ -244,6 +249,7 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
         raise HTTPException(400, MFA_SETUP_EXPIRED)
     ip = client_ip(request)
     secret = totp.decrypt_secret(base64.b64decode(pending['secret_enc']), session.user_id)
+    removed = []
     with transaction(session.org_id) as conn:
         # FOR UPDATE: dos códigos válidos a la vez no guardan dos secretos; el segundo ve la cuenta ya activa.
         row = conn.execute('SELECT %s AS mfa_enabled FROM users WHERE id = %%s AND is_active FOR UPDATE' % MFA_ENABLED_SQL,
@@ -264,6 +270,13 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
                          'updated_at = now() WHERE id = %s',
                          (totp.encrypt_secret(secret, session.user_id), step, session.user_id))
             audit(conn, session.org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
+            # Las passkeys de la cuenta se registraron sin TOTP, solo con la contraseña (RC-331): quien la tenía pudo dar
+            # de alta la suya y seguiría entrando sin el código. Se borran y se vuelven a registrar con el código.
+            removed = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s RETURNING id::text, name',
+                                   (session.user_id,)).fetchall()
+            for passkey in removed:
+                audit(conn, session.org_id, 'auth.passkey_deleted', session.user_id, ip, 'passkey', passkey['id'],
+                      {'name': passkey['name'], 'reason': 'mfa_enabled'})
             # Las demás sesiones de la cuenta entraron sin el segundo factor: se cierran y solo queda la que activó.
             # Va antes del commit y con la fila bloqueada: si Valkey falla, el alta no se guarda y se puede repetir.
             sessions.delete_others(session.user_id, session.token)
@@ -271,7 +284,7 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
         sessions.register_mfa_fail(ip)
         raise HTTPException(400, MFA_INVALID)
     sessions.delete_mfa_setup(session.user_id)
-    return {'mfa_enabled': True}
+    return {'mfa_enabled': True, 'passkeys_removed': len(removed)}
 
 
 @router.post('/logout', status_code=204, summary='Cierra la sesión y la borra del servidor')
@@ -318,6 +331,8 @@ PASSKEY_REG_EXPIRED = 'La solicitud venció o ya se usó. Empieza de nuevo.'
 PASSKEY_CODE_REQUIRED = 'Escribe el código de 6 dígitos de tu app autenticadora.'
 PASSKEY_DUPLICATE = 'Esa passkey ya está registrada.'
 PASSKEY_NOT_FOUND = 'No existe esa passkey.'
+PASSKEY_OPTIONS_LIMIT = ('Se pidieron demasiadas passkeys desde tu red. Espera 15 minutos o entra con tu correo y '
+                         'contraseña.')
 MAX_PASSKEYS = 10
 PASSKEY_LIMIT = 'Ya tienes %d passkeys. Borra una para registrar otra.' % MAX_PASSKEYS
 PASSKEY_COLUMNS = 'id::text, name, created_at, last_used_at, backed_up, transports'
@@ -364,15 +379,25 @@ def passkey_register_options(body: PasskeyRegisterOptionsIn, request: Request, r
         raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
     fail = None
     with transaction(session.org_id) as conn:
-        # FOR NO KEY UPDATE, como en /login: el código TOTP que se gasta aquí no se usa a la vez en otra petición.
+        # FOR NO KEY UPDATE, como en /login: otra petición que gaste un código de esta cuenta espera a esta. /mfa/verify
+        # no bloquea la fila al leer, pero su UPDATE solo guarda un paso posterior al guardado.
         row = conn.execute('SELECT email::text, full_name, password_hash, totp_secret_enc, last_totp_step, %s AS mfa_enabled '
                            'FROM users WHERE id = %%s AND is_active FOR NO KEY UPDATE' % MFA_ENABLED_SQL,
                            (session.user_id,)).fetchone()
         if not row:
             sessions.delete(session.token)
             raise HTTPException(401, SESSION_ENDED)
+        existing = []
         if not passwords.verify_password(row['password_hash'], body.current_password, session.user_id):
             fail = 'password'
+        else:
+            existing = [r['credential_id'] for r in conn.execute(
+                'SELECT credential_id FROM webauthn_credentials WHERE user_id = %s', (session.user_id,)).fetchall()]
+            # Antes del código: con 10 passkeys no se gasta el código ni se cuenta un intento.
+            if len(existing) >= MAX_PASSKEYS:
+                raise HTTPException(409, PASSKEY_LIMIT)
+        if fail:
+            pass
         elif row['mfa_enabled'] and not body.code:
             raise HTTPException(400, PASSKEY_CODE_REQUIRED)
         elif row['mfa_enabled']:
@@ -381,18 +406,14 @@ def passkey_register_options(body: PasskeyRegisterOptionsIn, request: Request, r
                 raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
             step = totp.verify_code(totp.decrypt_secret(row['totp_secret_enc'], session.user_id), body.code,
                                     row['last_totp_step'])
-            if step is None:
+            if step is None or not conn.execute(
+                    'UPDATE users SET last_totp_step = %s WHERE id = %s AND (last_totp_step IS NULL OR last_totp_step < %s)',
+                    (step, session.user_id, step)).rowcount:
                 fail = 'code'
-            else:
-                conn.execute('UPDATE users SET last_totp_step = %s WHERE id = %s', (step, session.user_id))
         if fail:
             audit(conn, session.org_id, 'auth.passkey_registration_failed', session.user_id, ip, 'user',
                   session.user_id, {'reason': fail})
         else:
-            existing = [r['credential_id'] for r in conn.execute(
-                'SELECT credential_id FROM webauthn_credentials WHERE user_id = %s', (session.user_id,)).fetchall()]
-            if len(existing) >= MAX_PASSKEYS:
-                raise HTTPException(409, PASSKEY_LIMIT)
             audit(conn, session.org_id, 'auth.passkey_registration_started', session.user_id, ip, 'user',
                   session.user_id)
     if fail == 'password':
@@ -458,9 +479,12 @@ def passkey_register_verify(body: PasskeyRegisterVerifyIn, request: Request, ses
 def passkey_login_options(request: Request, response: Response):
     _passkeys_on()
     ip = client_ip(request)
-    # Una IP bloqueada por fallos no pide retos, y cada IP pide como máximo 60 cada 15 min.
-    if sessions.is_ip_locked(ip) or not sessions.take_passkey_options(ip):
+    # Una IP bloqueada por fallos no pide retos. Aparte, cada IP pide como máximo MAX_PASSKEY_OPTIONS_IP cada 15 min:
+    # el autollenado pide uno en cada carga del login, así que pasarse no es un fallo y lleva su propio mensaje.
+    if sessions.is_ip_locked(ip):
         raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    if not sessions.take_passkey_options(ip):
+        raise HTTPException(429, PASSKEY_OPTIONS_LIMIT, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
     options, challenge = webauthn.authentication_options()
     response.headers.update(NO_STORE)
     return {'options': options, 'login_token': sessions.create_passkey_login(challenge),
@@ -487,9 +511,14 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
         raise HTTPException(401, PASSKEY_INVALID)
     org, user_id, email = str(found['organization_id']), str(found['user_id']), found['email'].lower()
     if sessions.is_locked(email, ip):
-        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+        # Igual que una passkey que no existe (401 y un fallo de la IP): un 429 diría que la credencial es de un correo
+        # bloqueado. El motivo queda solo en la bitácora.
+        sessions.register_ip_fail(ip)
+        return JSONResponse({'detail': PASSKEY_INVALID}, status_code=401,
+                            background=BackgroundTask(_audit_passkey_login_failed, org, user_id, ip, 'locked'))
     reason = None
-    # El user handle que firma el autenticador debe ser el de la cuenta dueña de la credencial.
+    # El userHandle no entra en la firma: se compara para que la respuesta sea coherente con la credencial. Lo que ata la
+    # respuesta a la cuenta es la firma con la llave pública guardada que devolvió passkey_lookup().
     if webauthn.user_handle_of(body.credential) != webauthn.user_handle(user_id):
         reason = 'user_handle'
     else:
@@ -507,14 +536,20 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
         row = conn.execute('SELECT role, email::text FROM users WHERE id = %s AND is_active FOR NO KEY UPDATE',
                            (user_id,)).fetchone()
         if not row:  # se desactivó la cuenta entre la búsqueda y aquí
-            raise HTTPException(401, PASSKEY_INVALID)
-        # Solo si nadie la borró ni la usó con otro contador desde la búsqueda.
-        if not conn.execute('UPDATE webauthn_credentials SET sign_count = %s, backed_up = %s, last_used_at = now() '
-                            'WHERE id = %s AND user_id = %s AND sign_count = %s',
-                            (new_count, backed_up, found['passkey_id'], user_id, found['sign_count'])).rowcount:
-            raise HTTPException(401, PASSKEY_INVALID)
-        user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
-                                               'email': row['email']}, ip, 'passkey')
+            reason = 'inactive'
+        # Solo si nadie la borró ni la usó con otro contador desde la búsqueda: si no, puede ser una respuesta repetida
+        # o un autenticador clonado, y queda en la bitácora.
+        elif not conn.execute('UPDATE webauthn_credentials SET sign_count = %s, backed_up = %s, last_used_at = now() '
+                              'WHERE id = %s AND user_id = %s AND sign_count = %s',
+                              (new_count, backed_up, found['passkey_id'], user_id, found['sign_count'])).rowcount:
+            reason = 'sign_count_race'
+        else:
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
+                                                   'email': row['email']}, ip, 'passkey')
+    if reason:
+        sessions.register_fail(email, ip)
+        return JSONResponse({'detail': PASSKEY_INVALID}, status_code=401,
+                            background=BackgroundTask(_audit_passkey_login_failed, org, user_id, ip, reason))
     _clear_fails(email)
     return {'user': user}
 

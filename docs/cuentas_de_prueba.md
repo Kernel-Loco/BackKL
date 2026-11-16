@@ -76,12 +76,14 @@ Ojo con lo siguiente:
 - En tu PC las passkeys quedan amarradas a `localhost` (`WEBAUTHN_RP_ID`, que en `docker-compose.yml` va por omisión en `localhost`) y solo sirven en http://localhost:3000. En http://127.0.0.1:3000 no aparecen. En la VM van amarradas a `lowtidesec.com` (`docker-compose.despliegue.yml`), así que una passkey de tu PC no sirve en la VM ni al revés.
 - Una cuenta tiene como máximo 10 passkeys. Se borran desde la misma sección del perfil.
 - La passkey queda en tu dispositivo o en tu gestor de contraseñas, no en la base: la base solo guarda la llave pública, el contador, el nombre y cuándo se usó por última vez. Al rehacer Docker con `down -v` la base pierde la llave pública y la passkey de tu dispositivo deja de servir. Bórrala también de tu dispositivo o gestor.
-- **Con `DEMO_ACCOUNTS=false` las cuentas de demo se apagan, pero sus passkeys siguen en la base.** Borra las passkeys que registraste antes de apagar las cuentas de demo, desde el perfil.
+- Con `DEMO_ACCOUNTS=false` (o con un origen publicado) el script de demo apaga las cuentas y también borra sus passkeys de la base, porque se registraron con la contraseña y el código públicos. Bórralas también de tu dispositivo o gestor.
+- Si una cuenta sin TOTP activa la verificación en dos pasos, sus passkeys se borran: se registraron solo con la contraseña. Vuelve a registrarlas con el código.
 
 | Mensaje en el portal | Qué pasa y qué hacer |
 |---|---|
 | «No se pudo entrar con esa passkey…» | La passkey no es de este servidor (otra base, otro RP ID), se borró del perfil, la cuenta está desactivada o el dispositivo no pidió tu huella, rostro o PIN. Cada intento cuenta para el bloqueo por IP, y si la passkey existe, también para el del correo. Entra con contraseña y código |
 | «La solicitud de la passkey venció…» | Pasaron más de 5 minutos o la solicitud ya se usó. Vuelve a dar clic en «Entrar con passkey» |
+| «Se pidieron demasiadas passkeys desde tu red…» | Desde tu IP se pidieron más de 300 entradas con passkey en 15 minutos (el login pide una en cada carga). No es un bloqueo por fallos: entra con correo, contraseña y código, o espera 15 minutos |
 | «Las passkeys no están disponibles en este servidor.» | `WEBAUTHN_RP_ID` no coincide con ningún origen de `ALLOWED_ORIGINS`. En tu PC deja las dos por omisión |
 
 Para desbloquear todos los correos bloqueados, desde BackKL:

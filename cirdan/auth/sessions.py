@@ -6,9 +6,9 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
 - Verificación en dos pasos pendiente: 5 min y 5 intentos.
 - Alta de la verificación en dos pasos (RC-154): el secreto nuevo espera aquí 10 min y 5 códigos, cifrado.
 - Captcha del login (RC-154): la llave HMAC de los retos y los retos ya usados, hasta que vencen.
-- Passkeys (RC-331): el reto de registro (por usuario y amarrado a la sesión que lo pidió) y el de entrada (por un
+- Passkeys (RC-331): el reto de registro (por usuario y por la sesión que lo pidió) y el de entrada (por un
   token al azar), 5 min y de un solo uso: se leen y se borran en el mismo paso. /passkeys/login/options cuenta
-  60 por IP en 15 min, y los fallos de /passkeys/login/verify cuentan para la IP y el correo como en /login.
+  300 por IP en 15 min, y los fallos de /passkeys/login/verify cuentan para la IP y el correo como en /login.
 - Bloqueo por intentos: 5 fallos por correo o 20 por IP en 15 min. Un código equivocado también
   cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Una IPv6
   cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
@@ -32,7 +32,7 @@ MFA_MAX_ATTEMPTS = 5
 MFA_SETUP_SECONDS = 10 * 60
 LOCK_SECONDS = 15 * 60
 PASSKEY_SECONDS = 5 * 60
-MAX_PASSKEY_OPTIONS_IP = 60
+MAX_PASSKEY_OPTIONS_IP = 300  # el autollenado pide uno en cada carga del login: alcanza para una oficina tras un NAT
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
 
@@ -199,26 +199,23 @@ def spend_captcha(nonce, seconds):
 
 # ------------------------------------------------------------------ passkeys (RC-331)
 
-def _passkey_reg_key(user_id):
-    return 'webauthn:reg:' + _digest(str(user_id))
+def _passkey_reg_key(user_id, session_token):
+    # Por usuario y por sesión: otra sesión de la misma cuenta no puede usar ni borrar el reto de esta.
+    return 'webauthn:reg:%s:%s' % (_digest(str(user_id)), _digest(session_token))
 
 
 def create_passkey_registration(user_id, session_token, challenge):
-    """Guarda el reto de un registro de passkey por PASSKEY_SECONDS. Pedir otro reemplaza al anterior. Queda amarrado a
-    la sesión que lo pidió: otra sesión de la misma cuenta no lo puede usar."""
-    _valkey().set(_passkey_reg_key(user_id), json.dumps({'challenge': base64.b64encode(challenge).decode(),
-                                                         'session': _digest(session_token)}), ex=PASSKEY_SECONDS)
+    """Guarda el reto de un registro de passkey por PASSKEY_SECONDS. Pedir otro desde la misma sesión reemplaza al
+    anterior. Queda amarrado a la sesión que lo pidió: otra sesión de la misma cuenta no lo puede usar ni borrar."""
+    _valkey().set(_passkey_reg_key(user_id, session_token), base64.b64encode(challenge).decode(), ex=PASSKEY_SECONDS)
 
 
 def take_passkey_registration(user_id, session_token):
-    """El reto del registro, una sola vez (GETDEL); None si no hay, venció o lo pidió otra sesión."""
-    raw = _valkey().getdel(_passkey_reg_key(user_id))
-    if not raw:
+    """El reto del registro de esta sesión, una sola vez (GETDEL); None si no hay o venció."""
+    if not session_token:
         return None
-    data = json.loads(raw)
-    if not secrets.compare_digest(data.get('session', ''), _digest(session_token)):
-        return None
-    return base64.b64decode(data['challenge'])
+    raw = _valkey().getdel(_passkey_reg_key(user_id, session_token))
+    return base64.b64decode(raw) if raw else None
 
 
 def create_passkey_login(challenge):

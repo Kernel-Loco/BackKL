@@ -9,12 +9,13 @@ de alta una passkey directo en la base lo hacen como postgres, con la llave púb
 import os
 import subprocess
 import threading
+import time
 import unittest
 import uuid
 
 from pruebas import sesion
 from pruebas.sesion import AUTH, PASSWORD, Client
-from pruebas.test_aislamiento import ACME, BETA, psql, scalar
+from pruebas.test_aislamiento import ACME, BETA, CONTAINER, psql, scalar
 from pruebas.webauthn_falso import AT, UP, UV, Autenticador, b64url
 
 PK = AUTH + '/passkeys'
@@ -25,6 +26,10 @@ DANA, DANA_ID = 'dana.cruz@beta-corp.mx', '30000000-0000-4000-8000-000000000004'
 PASSKEY_INVALID = 'No se pudo entrar con esa passkey. Inténtalo de nuevo o entra con tu correo y contraseña.'
 PASSKEY_EXPIRED = 'La solicitud de la passkey venció. Inténtalo de nuevo.'
 LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
+OPTIONS_LIMIT = ('Se pidieron demasiadas passkeys desde tu red. Espera 15 minutos o entra con tu correo y '
+                 'contraseña.')
+MAX_PASSKEY_OPTIONS_IP = 300
+PASSKEY_LIMIT = 'Ya tienes 10 passkeys. Borra una para registrar otra.'
 
 
 def _valkey(*args):
@@ -92,6 +97,13 @@ class Base(unittest.TestCase):
                           "VALUES ('%s', '%s', '\\x01', '\\x01', 'x');" % (ACME, JORDAN_ID), org=BETA)
         self.assertFalse(ok)
         self.assertIn('row-level security', err)
+        # Desde otra empresa, UPDATE y DELETE no ven la fila: afectan 0 filas y la de Acme no cambia.
+        for sql in ('UPDATE webauthn_credentials SET sign_count = 77 RETURNING 1',
+                    'DELETE FROM webauthn_credentials RETURNING 1'):
+            with self.subTest(sql):
+                self.assertEqual(scalar('WITH x AS (%s) SELECT count(*) FROM x;' % sql, org=BETA), '0')
+        self.assertEqual(scalar('SELECT count(*) || \',\' || max(sign_count) FROM webauthn_credentials;',
+                                user='postgres'), '1,0')
 
     def test_2_la_funcion_de_busqueda_sigue_el_patron_de_login_lookup(self):
         config = scalar("SELECT prosecdef || ',' || array_to_string(proconfig, ';') || ','"
@@ -120,6 +132,15 @@ class Base(unittest.TestCase):
                         'created_at = now()'):
             with self.subTest(columna):
                 ok, _, err = psql('UPDATE webauthn_credentials SET %s;' % columna, org=ACME)
+                self.assertFalse(ok)
+                self.assertIn('permission denied', err)
+        # El INSERT es por columnas: id, created_at y last_used_at los pone la base.
+        for columna, valor in (('id', "'%s'" % uuid.uuid4()), ('created_at', "'2020-01-01'"),
+                               ('last_used_at', "'2020-01-01'")):
+            with self.subTest('INSERT con ' + columna):
+                ok, _, err = psql("INSERT INTO webauthn_credentials (organization_id, user_id, credential_id, public_key, "
+                                  "name, %s) VALUES ('%s', '%s', '\\x0a', '\\x01', 'x', %s);"
+                                  % (columna, ACME, JORDAN_ID, valor), org=ACME)
                 self.assertFalse(ok)
                 self.assertIn('permission denied', err)
 
@@ -202,12 +223,16 @@ class Entrar(unittest.TestCase):
 
     def test_8_los_fallos_cuentan_para_el_correo_y_bloquean(self):
         antes = _bitacora('auth.login_failed', extra="AND details->>'reason' = 'passkey'")
+        bloqueadas = _bitacora('auth.login_failed', extra="AND details->>'detail' = 'locked'")
         for _ in range(5):
             self.assertEqual(_entrar(self.a, firma_mala=True)[1][0], 401)
-        # Bloqueado el correo, ni la passkey buena entra, y el login con contraseña tampoco.
-        self.assertEqual(_entrar(self.a)[1], (429, {'detail': LOCKED}))
+        # Bloqueado el correo, ni la passkey buena entra, y el login con contraseña tampoco. La passkey responde el
+        # mismo 401 que una que no existe: un 429 diría que la credencial es de un correo bloqueado (H8 de RC-331).
+        self.assertEqual(_entrar(self.a)[1], (401, {'detail': PASSKEY_INVALID}))
+        self.assertEqual(_entrar(Autenticador())[1], (401, {'detail': PASSKEY_INVALID}))
         self.assertEqual(sesion.post_login(Client(), JORDAN, PASSWORD)[0], 429)
-        self.assertEqual(_bitacora('auth.login_failed', extra="AND details->>'reason' = 'passkey'"), antes + 5)
+        self.assertEqual(_bitacora('auth.login_failed', extra="AND details->>'reason' = 'passkey'"), antes + 6)
+        self.assertEqual(_bitacora('auth.login_failed', extra="AND details->>'detail' = 'locked'"), bloqueadas + 1)
 
     def test_8b_una_passkey_que_no_existe_cuenta_para_la_ip(self):
         for _ in range(20):
@@ -215,10 +240,12 @@ class Entrar(unittest.TestCase):
         self.assertEqual(Client().post(PK + '/login/options')[0], 429)
         self.assertEqual(sesion.post_login(Client(), JORDAN, PASSWORD)[0], 429)
 
-    def test_8c_las_opciones_tienen_limite_por_ip(self):
-        for _ in range(60):
+    def test_8c_las_opciones_tienen_limite_por_ip_con_su_propio_mensaje(self):
+        for _ in range(MAX_PASSKEY_OPTIONS_IP):
             self.assertEqual(Client().post(PK + '/login/options')[0], 200)
-        self.assertEqual(Client().post(PK + '/login/options'), (429, {'detail': LOCKED}))
+        self.assertEqual(Client().post(PK + '/login/options'), (429, {'detail': OPTIONS_LIMIT}))
+        # Pasarse de opciones no es un fallo: el login con contraseña sigue igual.
+        self.assertEqual(sesion.login(JORDAN).get(AUTH + '/me')[0], 200)
 
     def test_9_el_contador_debe_subir(self):
         b = Autenticador(sign_count=5)
@@ -232,6 +259,43 @@ class Entrar(unittest.TestCase):
         scalar("UPDATE users SET is_active = false WHERE id = '%s' RETURNING 1;" % JORDAN_ID, user='postgres')
         try:
             self.assertEqual(_entrar(self.a)[1], (401, {'detail': PASSKEY_INVALID}))
+        finally:
+            scalar("UPDATE users SET is_active = true WHERE id = '%s' RETURNING 1;" % JORDAN_ID, user='postgres')
+
+    def _con_la_fila_bloqueada(self, cambio, kw):
+        """Como postgres, bloquea la fila de Jordan 3 s y luego aplica `cambio`, mientras la API ya buscó la passkey y
+        espera ese bloqueo: así llega al FOR NO KEY UPDATE y al UPDATE del contador con la fila ya cambiada."""
+        sql = ("BEGIN; SELECT 1 FROM users WHERE id = '%s' FOR UPDATE; SELECT pg_sleep(3); %s; COMMIT;"
+               % (JORDAN_ID, cambio))
+        bloqueo = subprocess.Popen(['docker', 'exec', '-i', CONTAINER, 'psql', '-U', 'postgres', '-d', 'cirdan', '-X',
+                                    '-q', '-v', 'ON_ERROR_STOP=1'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, text=True)
+        bloqueo.stdin.write(sql)
+        bloqueo.stdin.close()
+        time.sleep(1)
+        try:
+            return _entrar(self.a, **kw)[1]
+        finally:
+            self.assertEqual(bloqueo.wait(timeout=30), 0, bloqueo.stderr.read())
+
+    def test_9b2_los_fallos_de_dentro_de_la_transaccion_dejan_bitacora(self):
+        # H9 de RC-331: la cuenta se desactiva, o el contador cambia, entre passkey_lookup() y la entrada.
+        casos = (('inactive', "UPDATE users SET is_active = false WHERE id = '%s'" % JORDAN_ID, 6),
+                 ('sign_count_race', "UPDATE webauthn_credentials SET sign_count = 50 WHERE id = '%s'"
+                  % self.passkey_id, 7))
+        try:
+            for motivo, cambio, contador in casos:
+                with self.subTest(motivo):
+                    sesion.reset()
+                    scalar("UPDATE webauthn_credentials SET sign_count = 5 WHERE id = '%s' RETURNING 1;"
+                           % self.passkey_id, user='postgres')
+                    antes = _bitacora('auth.login_failed', extra="AND details->>'detail' = '%s'" % motivo)
+                    self.assertEqual(self._con_la_fila_bloqueada(cambio, {'sign_count': contador}),
+                                     (401, {'detail': PASSKEY_INVALID}))
+                    self.assertEqual(_bitacora('auth.login_failed', extra="AND details->>'detail' = '%s'" % motivo),
+                                     antes + 1)
+                    scalar("UPDATE users SET is_active = true WHERE id = '%s' RETURNING 1;" % JORDAN_ID,
+                           user='postgres')
         finally:
             scalar("UPDATE users SET is_active = true WHERE id = '%s' RETURNING 1;" % JORDAN_ID, user='postgres')
 
@@ -310,6 +374,42 @@ class Registrar(unittest.TestCase):
         opciones = self._opciones(client=otra)[1]['options']
         self.assertEqual(self.client.post(PK + '/register/verify',
                                           {'credential': Autenticador().registro(opciones), 'name': 'x'})[0], 400)
+
+    def test_14b_otra_sesion_no_borra_el_reto_de_esta(self):
+        # H15 de RC-331: el reto va por cuenta y por sesión. Otra sesión de la cuenta, aun sin contraseña, no lo gasta.
+        opciones = self._opciones()[1]['options']
+        otra = sesion.login(JORDAN)
+        for _ in range(3):
+            self.assertEqual(otra.post(PK + '/register/verify', {'credential': {}, 'name': 'x'}),
+                             (400, {'detail': 'La solicitud venció o ya se usó. Empieza de nuevo.'}))
+        # Y su propio registro no reemplaza el de esta sesión.
+        opciones_otra = self._opciones(client=otra)[1]['options']
+        code, fila = self.client.post(PK + '/register/verify', {'credential': Autenticador().registro(opciones),
+                                                               'name': 'Esta'})
+        self.assertEqual(code, 201, fila)
+        code, fila = otra.post(PK + '/register/verify', {'credential': Autenticador().registro(opciones_otra),
+                                                         'name': 'Otra'})
+        self.assertEqual(code, 201, fila)
+
+    def test_14c_con_10_passkeys_no_se_gasta_el_codigo_ni_cuenta_fallo(self):
+        # H7 de RC-331: el 409 sale antes de revisar el código.
+        ids = [_alta_directa(Autenticador(), name='P%d' % n) for n in range(10)]
+        codigo = sesion.next_code(JORDAN)
+        for _ in range(6):  # con fallos contados, el sexto ya daría 429
+            self.assertEqual(self._opciones(code=codigo), (409, {'detail': PASSKEY_LIMIT}))
+        scalar("DELETE FROM webauthn_credentials WHERE id = '%s'; SELECT 1;" % ids[0], user='postgres')
+        self.assertEqual(self._opciones(code=codigo)[0], 200, 'el mismo código sigue sin gastar')
+
+    def test_15b_las_de_otra_persona_de_la_misma_empresa_no_se_ven_ni_se_borran_ni_cuentan(self):
+        # H2 de RC-331: el filtro por user_id, no solo RLS. Maya es de Acme, como Jordan.
+        ajenas = [_alta_directa(Autenticador(), user_id=MAYA_ID, name='De Maya %d' % n) for n in range(10)]
+        self.assertEqual(self.client.request('DELETE', PK + '/' + ajenas[0])[0], 404)
+        self.assertEqual(scalar("SELECT count(*) FROM webauthn_credentials WHERE user_id = '%s';" % MAYA_ID,
+                                user='postgres'), '10')
+        self.assertEqual(self.client.get(PK)[1]['passkeys'], [])
+        code, body = self._opciones()
+        self.assertEqual(code, 200, 'las 10 de Maya no cuentan para el límite de Jordan')
+        self.assertEqual(body['options'].get('excludeCredentials', []), [])
 
     def test_15_borrar_solo_las_propias(self):
         a = Autenticador()

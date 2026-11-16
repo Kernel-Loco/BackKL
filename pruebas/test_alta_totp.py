@@ -117,7 +117,7 @@ class AltaTotp(unittest.TestCase):
         antes = _bitacora('auth.mfa_enabled')
         codigo = _codigo(body['secret'])
         code, resp = self.client.post(AUTH + '/mfa/enable', {'code': codigo})
-        self.assertEqual((code, resp), (200, {'mfa_enabled': True}))
+        self.assertEqual((code, resp), (200, {'mfa_enabled': True, 'passkeys_removed': 0}))
         self.assertNotEqual(_db('totp_secret_enc'), 'nulo')
         self.assertNotIn(body['secret'].encode().hex(), _db('totp_secret_enc'), 'se guarda cifrado')
         self.assertEqual(_bitacora('auth.mfa_enabled'), antes + 1)
@@ -173,7 +173,7 @@ class AltaTotp(unittest.TestCase):
         body = self._setup()
         self.assertEqual(otra.get(AUTH + '/me')[0], 200, 'pedir el QR todavía no cierra nada')
         code, resp = self.client.post(AUTH + '/mfa/enable', {'code': _codigo(body['secret'])})
-        self.assertEqual((code, resp), (200, {'mfa_enabled': True}))
+        self.assertEqual((code, resp), (200, {'mfa_enabled': True, 'passkeys_removed': 0}))
         self.assertEqual(otra.get(AUTH + '/me')[0], 401, 'la sesión de antes del alta ya no sirve')
         code, resp = self.client.get(AUTH + '/me')
         self.assertEqual(code, 200, 'la sesión que activó sigue')
@@ -185,6 +185,38 @@ class AltaTotp(unittest.TestCase):
                                    'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning scard ' + indice],
                                   check=True, capture_output=True, text=True).stdout.strip()
         self.assertEqual(miembros, '1')
+
+    def test_11_al_activar_se_borran_las_passkeys_registradas_sin_totp(self):
+        # H5 de RC-331: quien tuvo la contraseña pudo registrar su passkey sin código, y seguiría entrando como MFA.
+        maya_id = scalar("SELECT id FROM users WHERE email = '%s';" % MAYA, user='postgres')
+        org = scalar("SELECT organization_id FROM users WHERE email = '%s';" % MAYA, user='postgres')
+        self.addCleanup(scalar, "DELETE FROM webauthn_credentials WHERE user_id = '%s'; SELECT 1;" % maya_id,
+                        user='postgres')
+        ids = [scalar("INSERT INTO webauthn_credentials (organization_id, user_id, credential_id, public_key, name) "
+                      "VALUES ('%s', '%s', '\\x%s', '\\x01', 'Antes del TOTP %d') RETURNING id;"
+                      % (org, maya_id, os.urandom(16).hex(), n), user='postgres') for n in range(2)]
+        body = self._setup()
+        code, resp = self.client.post(AUTH + '/mfa/enable', {'code': _codigo(body['secret'])})
+        self.assertEqual((code, resp), (200, {'mfa_enabled': True, 'passkeys_removed': 2}))
+        self.assertEqual(scalar("SELECT count(*) FROM webauthn_credentials WHERE user_id = '%s';" % maya_id,
+                                user='postgres'), '0')
+        for passkey_id in ids:
+            self.assertEqual(scalar("SELECT count(*) FROM audit_log WHERE action = 'auth.passkey_deleted' AND "
+                                    "entity_id = '%s' AND details->>'reason' = 'mfa_enabled';" % passkey_id,
+                                    user='postgres'), '1')
+
+    def test_11b_un_codigo_malo_no_borra_las_passkeys(self):
+        maya_id = scalar("SELECT id FROM users WHERE email = '%s';" % MAYA, user='postgres')
+        org = scalar("SELECT organization_id FROM users WHERE email = '%s';" % MAYA, user='postgres')
+        self.addCleanup(scalar, "DELETE FROM webauthn_credentials WHERE user_id = '%s'; SELECT 1;" % maya_id,
+                        user='postgres')
+        scalar("INSERT INTO webauthn_credentials (organization_id, user_id, credential_id, public_key, name) "
+               "VALUES ('%s', '%s', '\\x%s', '\\x01', 'Se queda') RETURNING id;"
+               % (org, maya_id, os.urandom(16).hex()), user='postgres')
+        body = self._setup()
+        self.assertEqual(self.client.post(AUTH + '/mfa/enable', {'code': _malos(body['secret'], 1)[0]})[0], 400)
+        self.assertEqual(scalar("SELECT count(*) FROM webauthn_credentials WHERE user_id = '%s';" % maya_id,
+                                user='postgres'), '1')
 
     def test_8_el_formato_del_codigo_se_revisa(self):
         self._setup()
