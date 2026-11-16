@@ -135,7 +135,7 @@ Para regresar, se pone otra vez `TOTP_ENCRYPTION_KEY` en el `.env` con la copia 
 
 ## Llave de las huellas de contraseña (RC-330)
 
-La huella argon2id de cada contraseña se guarda cifrada con AES-256-GCM (`cirdan/auth/passwords.py`): `lt1$` más la cadena PHC cifrada, con el id del usuario como dato asociado. Con un volcado de la base, sin la llave, no se pueden probar contraseñas fuera de línea, y la huella de una cuenta copiada a otra no abre. La llave es otra que la del MFA y la API rechaza que sean iguales. Sigue la misma regla que la del MFA: en la VM, la URL de su secreto de Key Vault en `PASSWORD_HASH_KEY_VAULT_SECRET_URL`, y en desarrollo, el CI y el plan B, la llave misma en `PASSWORD_HASH_ENCRYPTION_KEY`. Una de las dos, y sin llave la API no arranca, igual que el script de demo.
+La huella argon2id de cada contraseña se guarda cifrada con AES-256-GCM (`cirdan/auth/passwords.py`): `lt1$` más la cadena PHC cifrada, con el id del usuario como dato asociado. Con un volcado de la base, sin la llave, no se pueden probar contraseñas fuera de línea, y la huella de una cuenta copiada a otra no abre. La llave es otra que la del MFA: la API compara los bytes de las dos al arrancar y no arranca si son la misma, aunque una venga del `.env` y la otra de Key Vault, y tampoco acepta dos versiones del mismo secreto. Sigue la misma regla que la del MFA: en la VM, la URL de su secreto de Key Vault en `PASSWORD_HASH_KEY_VAULT_SECRET_URL`, y en desarrollo, el CI y el plan B, la llave misma en `PASSWORD_HASH_ENCRYPTION_KEY`. Una de las dos, y sin llave la API no arranca, igual que el script de demo.
 
 - Las huellas de antes, sin cifrar, entran todavía y quedan cifradas en ese mismo inicio de sesión. No hace falta restablecer contraseñas. El hash de relleno de las semillas y de `cirdan/auth/demo.py` no cambia y sigue sin abrir nada.
 - Si la llave se pierde, ninguna contraseña guardada vuelve a abrir y cada cuenta se restablece con su script de alta. Por eso la copia del gestor de contraseñas se queda siempre, como la del MFA.
@@ -162,10 +162,10 @@ Cada paso va con el OK de quien administra la VM. La llave nunca va en un archiv
 2. (Azure) Lectura solo de ese secreto para la identidad de la VM: `az role assignment create --assignee-object-id <principalId> --assignee-principal-type ServicePrincipal --role 'Key Vault Secrets User' --scope <id de la bóveda>/secrets/password-hash-key`.
 3. (VM) En el `.env`, agregar `PASSWORD_HASH_KEY_VAULT_SECRET_URL=<el $r.id del paso 1>`, sin `PASSWORD_HASH_ENCRYPTION_KEY`.
 4. (VM) Desplegar este commit: `git pull`, `docker compose --dry-run up -d --build` y `docker compose up -d --build`. `docker compose ps api` dice `healthy`. Un 403 en `docker compose logs api` es que falta el rol del paso 2.
-5. (VM) Cada cuenta real entra una vez con contraseña y MFA. Después, como postgres y solo lectura, esta consulta tiene que quedar vacía:
+5. (VM) Cada cuenta real entra una vez con contraseña y MFA. Después, como postgres y solo lectura, esta consulta tiene que quedar vacía. Cuenta solo las cuentas que pueden iniciar sesión, las mismas que deja entrar `login_lookup()` (migración 004): una cuenta apagada o de una empresa que no está en `trial` ni `active` nunca entra y su huella vieja se queda sin cifrar hasta que se reactive y entre:
 
    ```bash
-   docker exec cirdan-pg16 psql -U postgres -d cirdan -Atc "SELECT email FROM users WHERE password_hash NOT LIKE 'lt1\$%' AND password_hash <> '\$argon2id\$v=19\$m=65536,t=3,p=4\$ZGVtby1zYWx0\$ZGVtby1vbmx5'"
+   docker exec cirdan-pg16 psql -U postgres -d cirdan -Atc "SELECT u.email FROM users u JOIN organizations o ON o.id = u.organization_id WHERE u.is_active AND o.status IN ('trial', 'active') AND u.password_hash NOT LIKE 'lt1\$%' AND u.password_hash <> '\$argon2id\$v=19\$m=65536,t=3,p=4\$ZGVtby1zYWx0\$ZGVtby1vbmx5'"
    ```
 
 En el plan B la misma llave va en `PASSWORD_HASH_ENCRYPTION_KEY`, tomada del gestor o con `az keyvault secret show --id <URL con versión> --query value -o tsv`, y se borra del `.env` al terminar. Con otra llave ninguna contraseña de la VM abre.
