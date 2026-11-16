@@ -319,9 +319,12 @@ def change_password(body: PasswordIn, request: Request, session: Session = Depen
     ip = client_ip(request)
     last = attempt == sessions.MAX_PASSWORD_ATTEMPTS
     with transaction(session.org_id) as conn:
-        # FOR UPDATE: dos cambios a la vez con la contraseña actual ya no dan 204 los dos. El segundo espera el commit
-        # del primero y revisa contra el hash nuevo (si no, ganaba el último, que podía ser el de una cookie robada).
-        row = conn.execute('SELECT password_hash FROM users WHERE id = %s FOR UPDATE', (session.user_id,)).fetchone()
+        # FOR NO KEY UPDATE: dos cambios a la vez con la contraseña actual ya no dan 204 los dos. El segundo espera el
+        # commit del primero y revisa contra el hash nuevo (si no, ganaba el último, que podía ser el de una cookie
+        # robada). No FOR UPDATE: chocaría con el FOR KEY SHARE de la llave de audit_log a users y un login fallido a la
+        # vez daría deadlock con el lock de la cadena. Es el mismo lock que toma el login.
+        row = conn.execute('SELECT password_hash FROM users WHERE id = %s FOR NO KEY UPDATE',
+                           (session.user_id,)).fetchone()
         ok = bool(row) and passwords.verify_password(row['password_hash'], body.current_password, session.user_id)
         if not ok and last:
             audit(conn, session.org_id, 'auth.password_change_locked', session.user_id, ip, 'user', session.user_id,

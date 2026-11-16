@@ -484,7 +484,7 @@ class CambioContrasena(unittest.TestCase):
         self.addCleanup(self.restaurar, client)
 
     def test_6_dos_cambios_a_la_vez_con_la_actual_solo_uno_gana(self):
-        # Sin FOR UPDATE los dos leían el hash viejo, daban 204 y ganaba el último: el de quien tuviera la vieja.
+        # Sin el lock de la fila los dos leían el hash viejo, daban 204 y ganaba el último: el de quien tuviera la vieja.
         nuevas = (NUEVA, 'Marea-Alta-Prueba-2026')
         clientes = [entrar(DANA), entrar(DANA)]
         salida = threading.Barrier(len(clientes))
