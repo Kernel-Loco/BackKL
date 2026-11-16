@@ -60,6 +60,8 @@ services:
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
       PASSWORD_HASH_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_KEY_VAULT_SECRET_URL:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Dominio al que quedan amarradas las passkeys (RC-331). localhost en tu PC; los orígenes salen de ALLOWED_ORIGINS.
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
       # De quién se acepta X-Forwarded-For, que da la IP del bloqueo por intentos del login.
       # Por omisión de nadie de fuera del contenedor. El portal (Next) no agrega ese encabezado:
       # pasa tal cual el que mande el navegador, así que con "*" quien llama elige su IP y se

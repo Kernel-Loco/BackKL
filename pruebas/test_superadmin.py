@@ -27,6 +27,7 @@ import uuid
 from pruebas import sesion
 from pruebas.sesion import Client
 from pruebas.test_aislamiento import ACME, BETA, psql, scalar
+from pruebas.webauthn_falso import Autenticador
 
 OLMARDO = '20000000-0000-4000-8000-000000000003'
 LOWTIDE = '20000000-0000-4000-8000-000000000004'
@@ -41,6 +42,7 @@ JORDAN = 'jordan.tate@acme-demo.mx'   # analista de Acme
 
 LISTA = '/api/v1/platform/organizations'
 CAMBIO = '/api/v1/platform/organization'
+PASSKEYS = '/api/v1/auth/passkeys'
 SOLO_SUPERADMIN = 'Solo el superadmin de la plataforma puede hacer esto.'
 SIN_SESION = 'Tu sesión terminó. Vuelve a iniciar sesión.'
 NOMBRE_LLAVE = 'CIRDAN_FAKE_superadmin'
@@ -228,13 +230,41 @@ class Superadmin(unittest.TestCase):
         self.assertEqual(self.dana.get('/api/v1/auth/me')[0], 200)
         # La misma contraseña como nueva: la fila de Dana solo se ve con RLS de Beta, y aquí se encuentra.
         self.assertEqual(self.dana.post('/api/v1/auth/password', {'current_password': sesion.PASSWORD,
-                                                                  'new_password': sesion.PASSWORD}), (204, None))
+                                                                  'new_password': sesion.PASSWORD}), (200, {'passkeys_removed': 0}))
         # Con MFA ya activo, el alta responde 409. Si no se viera la fila, respondería 401 y cerraría la sesión.
         code, body = self.dana.post('/api/v1/auth/mfa/setup', {'current_password': sesion.PASSWORD})
         self.assertEqual(code, 409, body)
         self.assertEqual(ultima(BETA, 'auth.password_changed'), 'user,%s,-' % DANA_ID)
         self.assertEqual(self.dana.post('/api/v1/auth/logout'), (204, None))
         self.assertEqual(ultima(BETA, 'auth.logout'), 'user,%s,-' % DANA_ID)
+
+    def test_14b_passkeys_propias_con_la_empresa_ajena_activa(self):
+        # R3-14 de RC-331: las rutas de passkeys usan la empresa de la cuenta. Con la ajena, register/options no veía la
+        # fila de Dana, cerraba la sesión y respondía 401, y la lista salía vacía.
+        self.addCleanup(postgres, "DELETE FROM webauthn_credentials WHERE user_id = '%s';" % DANA_ID)
+        self.assertEqual(self.cambiar(OLMARDO)[0], 200)
+        code, body = self.dana.post(PASSKEYS + '/register/options', {'current_password': sesion.PASSWORD,
+                                                                     'code': sesion.next_code(DANA)})
+        self.assertEqual(code, 200, body)
+        code, fila = self.dana.post(PASSKEYS + '/register/verify',
+                                    {'credential': Autenticador().registro(body['options']), 'name': 'Llave de Dana'})
+        self.assertEqual(code, 201, fila)
+        self.assertEqual(scalar("SELECT organization_id FROM webauthn_credentials WHERE id = '%s';" % fila['id'],
+                                user='postgres'), BETA)
+        self.assertEqual(ultima(BETA, 'auth.passkey_registered'), 'user,%s,-' % DANA_ID)
+        code, lista = self.dana.get(PASSKEYS)
+        self.assertEqual((code, [p['id'] for p in lista['passkeys']]), (200, [fila['id']]))
+        self.assertEqual(self.dana.request('DELETE', PASSKEYS + '/' + fila['id']), (204, None))
+        self.assertEqual(ultima(BETA, 'auth.passkey_deleted'), 'user,%s,-' % DANA_ID)
+        # Y cambiar la contraseña con la ajena activa borra la suya, con la bitácora en Beta.
+        body = self.dana.post(PASSKEYS + '/register/options', {'current_password': sesion.PASSWORD,
+                                                               'code': sesion.next_code(DANA)})[1]
+        self.assertEqual(self.dana.post(PASSKEYS + '/register/verify',
+                                        {'credential': Autenticador().registro(body['options']), 'name': 'Otra'})[0], 201)
+        self.assertEqual(self.dana.post('/api/v1/auth/password', {'current_password': sesion.PASSWORD,
+                                                                  'new_password': sesion.PASSWORD}),
+                         (200, {'passkeys_removed': 1}))
+        self.assertEqual(self.dana.get('/api/v1/auth/me')[0], 200)
 
     def test_15_bitacora_en_las_dos_empresas_y_cadena_intacta(self):
         self.assertEqual(self.cambiar(ACME)[0], 200)
@@ -274,7 +304,7 @@ class Superadmin(unittest.TestCase):
     def test_18_cambiar_la_contrasena_cierra_las_demas_sesiones(self):
         otra = sesion.login(DANA)
         self.assertEqual(otra.post('/api/v1/auth/password', {'current_password': sesion.PASSWORD,
-                                                             'new_password': sesion.PASSWORD}), (204, None))
+                                                             'new_password': sesion.PASSWORD}), (200, {'passkeys_removed': 0}))
         self.assertEqual(self.dana.get('/api/v1/auth/me'), (401, {'detail': SIN_SESION}))
         self.assertEqual(otra.get('/api/v1/auth/me')[0], 200)
         Superadmin.dana = otra
