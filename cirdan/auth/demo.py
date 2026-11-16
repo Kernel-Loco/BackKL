@@ -140,8 +140,10 @@ def origenes_publicados():
 def main(argv):
     # Sin la llave del MFA la API no arranca. En desarrollo nadie espera a la API, así que sin esto `docker compose
     # up -d` terminaría bien y la API se quedaría reiniciándose. Como la API espera a este script, aquí sí se detiene
-    # el `up` (#49, RC-91). Lo mismo con la llave de las huellas de contraseña (RC-330). Nunca lee Key Vault: apagar
-    # las cuentas solo usa la llave de las huellas cuando va directa en el .env (apagar_credenciales).
+    # el `up` (#49, RC-91). Lo mismo con la llave de las huellas de contraseña (RC-330). Revisar las variables y
+    # apagar las cuentas nunca leen Key Vault: apagar solo usa la llave de las huellas cuando va directa en el .env
+    # (apagar_credenciales). poner_credenciales (DEMO_ACCOUNTS=true) sí lee de Key Vault las llaves que estén ahí, la de
+    # las huellas, la del MFA o las dos. En la VM no corre, porque el archivo del despliegue fija DEMO_ACCOUNTS=false.
     try:
         totp.revisar_variables()
         passwords.revisar_variables()
