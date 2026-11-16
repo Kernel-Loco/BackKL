@@ -13,3 +13,8 @@ datos/geo/*
 !datos/geo/.gitkeep
 !datos/geo/dbip-asn-lite-*.mmdb
 !datos/geo/dbip-country-lite-*.mmdb
+
+# Respaldos de la base (db/respaldo, RC-233)
+respaldos
+**/*.dump
+**/*.dump.age

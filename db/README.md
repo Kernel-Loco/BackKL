@@ -9,6 +9,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/` | Cambios de esquema numerados (`NNN_descripcion.sql`), en orden. Una migración que ya entró a dev no se edita, se agrega otra |
 | `semillas/` | Datos de demo y de prueba, que se cargan después de las migraciones |
 | `consultas/` | Scripts de psql que se corren a mano sobre la base cargada |
+| `respaldo/` | Respaldo diario cifrado y restauración en una base nueva (RC-233). Ver «Respaldar y restaurar» |
 
 | Archivo | Qué hace |
 |---|---|
@@ -327,6 +328,12 @@ Para las llaves de API (RC-129, #87) va la migración 016, antes de reconstruir 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/016_api_key_lookup.sql
 ```
+
+## Respaldar y restaurar
+
+`respaldo/respaldar.sh` saca `pg_dump -Fc` de `cirdan` como postgres dentro del contenedor, lo cifra con age y una llave pública, lo deja con permisos 600 en una carpeta fuera del repo con los de los últimos 7 días y, en la VM, lo sube a Azure Blob (también los que un día no se pudieron subir). `respaldo/restaurar.sh` lo descifra y lo restaura siempre en una base nueva: nunca hace DROP DATABASE ni escribe sobre `cirdan`, no crea la base si no puede descifrar y le quita TEMPORARY a PUBLIC como la migración 004. `respaldo/conteos.sql` da filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base, y `respaldo/comparar.sh` compara esa salida entre dos bases del mismo contenedor. Contra la base de la VM se corre `conteos.sql` en las dos. Cómo se arma el timer en la VM, dónde queda la llave privada y cómo se baja un respaldo, en `docs/despliegue.md`, sección 'Respaldo diario'. Los respaldos traen datos personales: nunca van a git ni a la imagen (`.gitignore` y `.dockerignore` ignoran `respaldos/`, `*.dump` y `*.dump.age`). Valkey no se respalda.
+
+Para revisar un respaldo sin tocar ninguna base: `age -d -i <archivo de la llave> <respaldo>.dump.age | docker exec -i <contenedor> pg_restore --list`, que lista lo que trae.
 
 ## Huellas de db/
 
