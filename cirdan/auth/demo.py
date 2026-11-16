@@ -77,7 +77,10 @@ def apagar_credenciales():
                 'mfa_enabled_at = NULL WHERE id = %s',
                 (HASH_DE_RELLENO, user_id)).rowcount
             # Una passkey registrada con la contraseña y el TOTP públicos seguiría entrando como MFA (RC-331).
-            passkeys = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s', (user_id,)).rowcount
+            # Con un volumen anterior a la 017 la tabla no existe: no hay passkeys que borrar y la API debe arrancar (R2).
+            passkeys = 0
+            if conn.execute("SELECT to_regclass('public.webauthn_credentials') IS NOT NULL AS hay").fetchone()['hay']:
+                passkeys = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s', (user_id,)).rowcount
             fila = None if cambiadas else conn.execute(
                 'SELECT user_id::text, password_hash FROM login_lookup(%s)', (email,)).fetchone()
         if passkeys:

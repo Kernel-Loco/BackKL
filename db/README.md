@@ -268,8 +268,7 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT column_name FROM
 
 Debe devolver ambas columnas. En una base nueva, `cargar_cirdan.sh` aplica 009 junto con las migraciones anteriores.
 
-
-Para que el score guardado de los dominios de Acme sea el que dan sus hallazgos (RC-72) van la migración 010 y las semillas 009 y 010. No cambian la API, así que el orden con la API no importa. La 013 agrega `correction` a los motivos de `domain_scores.reason`. La 009 agrega el score que da el motor con `reason = correction`, porque `domain_scores` y `score_contributions` no aceptan UPDATE. La semilla 010 corrige las filas de la primera versión de la 009, que decían `rules_change`, `artefacto_ml_no_disponible` y una hora del 28 oct que no eran ciertos. Apaga el trigger de solo inserción de toda la tabla dentro de su transacción, y su UPDATE solo toca esas tres filas, con los valores viejos exactos en el WHERE. Deja en `audit_log` una fila `score.corrected` por cada una con lo que decía antes y falla si alguna queda sin corregir (desviación 16):
+Para que el score guardado de los dominios de Acme sea el que dan sus hallazgos (RC-72) van la migración 010 y las semillas 009 y 010. No cambian la API, así que el orden con la API no importa. La 013 agrega `correction` a los motivos de `domain_scores.reason`. La 009 agrega el score que da el motor con `reason = correction`, porque `domain_scores` y `score_contributions` no aceptan UPDATE. La semilla 010 corrige las filas de la primera versión de la 009, que decían `rules_change`, `artefacto_ml_no_disponible` y una hora del 28 oct que no eran ciertos. Apaga el trigger de solo inserción de toda la tabla dentro de su transacción, y su UPDATE solo toca esas tres filas, con los valores viejos exactos en el WHERE. Deja en `audit_log` una fila `score.corrected` por cada una con lo que decía antes y falla si alguna queda sin corregir (desviación 16):
 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/010_motivo_correccion_score.sql
@@ -332,7 +331,7 @@ Para las llaves de API (RC-129, #87) va la migración 016, antes de reconstruir 
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/016_api_key_lookup.sql
 ```
 
-Para las passkeys (RC-331) va la migración 017, antes de reconstruir la API. Sin la tabla, la API nueva responde 500 en `GET /api/v1/auth/passkeys`, en el registro y en `/passkeys/login/verify`. El login con contraseña y TOTP no la usa. La API anterior no conoce la tabla ni la función, así que con la 017 ya aplicada sigue igual. La 017 solo crea, no toca filas que ya existen, y se puede correr otra vez sin error.
+Para las passkeys (RC-331) va la migración 017, antes de reconstruir la API. Sin la tabla, la API nueva responde 500 en `GET /api/v1/auth/passkeys`, en el registro, en `/passkeys/login/verify` y en `/mfa/enable`, que al activar TOTP borra las passkeys de la cuenta. El login con contraseña y TOTP no la usa, y `demo-accounts` se salta el borrado de las passkeys de demo mientras la tabla no exista, así que la API arranca. La API anterior no conoce la tabla ni la función, así que con la 017 ya aplicada sigue igual. La 017 solo crea, no toca filas que ya existen, y se puede correr otra vez sin error.
 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/017_passkeys.sql

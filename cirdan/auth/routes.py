@@ -456,6 +456,10 @@ def passkey_register_verify(body: PasskeyRegisterVerifyIn, request: Request, ses
                             (session.user_id,)).fetchone():
             sessions.delete(session.token)
             raise HTTPException(401, SESSION_ENDED)
+        # Con la fila bloqueada, la sesión debe seguir viva: /mfa/enable borra las passkeys y cierra las demás sesiones
+        # con la fila bloqueada. Una de esas sesiones que ya pasó current_session no guarda la suya después (R4).
+        if not sessions.get(session.token):
+            raise HTTPException(401, SESSION_ENDED)
         count = conn.execute('SELECT count(*) AS n FROM webauthn_credentials WHERE user_id = %s',
                              (session.user_id,)).fetchone()['n']
         if count >= MAX_PASSKEYS:

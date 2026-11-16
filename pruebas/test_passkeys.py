@@ -272,7 +272,12 @@ class Entrar(unittest.TestCase):
                                    stderr=subprocess.PIPE, text=True)
         bloqueo.stdin.write(sql)
         bloqueo.stdin.close()
-        time.sleep(1)
+        # Espera a que psql ya tenga la fila bloqueada: su sesión está en pg_sleep (R5 de RC-331).
+        limite = time.monotonic() + 10
+        while scalar("SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%pg_sleep(3)%' "
+                     "AND pid <> pg_backend_pid();", user='postgres') == '0':
+            self.assertLess(time.monotonic(), limite, 'psql no tomó el bloqueo')
+            time.sleep(0.05)
         try:
             return _entrar(self.a, **kw)[1]
         finally:
@@ -410,6 +415,9 @@ class Registrar(unittest.TestCase):
         code, body = self._opciones()
         self.assertEqual(code, 200, 'las 10 de Maya no cuentan para el límite de Jordan')
         self.assertEqual(body['options'].get('excludeCredentials', []), [])
+        code, fila = self.client.post(PK + '/register/verify', {'credential': Autenticador().registro(body['options']),
+                                                               'name': 'De Jordan'})
+        self.assertEqual(code, 201, 'register/verify tampoco cuenta las de Maya: %s' % fila)
 
     def test_15_borrar_solo_las_propias(self):
         a = Autenticador()
