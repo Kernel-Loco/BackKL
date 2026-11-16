@@ -333,18 +333,20 @@ class Orquestador(unittest.TestCase):
     def test_2a3_si_lo_dieron_por_caido_antes_del_cierre_no_corre_el_modelo(self):
         """RC-62: el modelo corre antes del candado, pero no si el escaneo ya no está en 'running'."""
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
-        llamadas = []
+        llamadas, abandonados = [], []
+        guardar = orquestador._guardar_resultado
 
-        def corre_y_lo_abandonan(*a, **k):  # la última fuente terminó y otra petición lo dio por caído
-            res = contrato.ejecutar(*a, **k)
+        def guarda_y_lo_abandonan(*a, **k):  # la última fuente ya pasó su latido y otra petición lo da por caído
+            cambios = guardar(*a, **k)
             self.conn.execute("UPDATE scans SET updated_at = now() - interval '31 minutes' WHERE id = %s", (s.scan_id,))
-            orquestador.abandonar_vencidos(self.conn, ACME, scan_id=s.scan_id)
-            return res
+            abandonados.extend(orquestador.abandonar_vencidos(self.conn, ACME, scan_id=s.scan_id))
+            return cambios
 
-        with mock.patch.object(orquestador, 'ejecutar', corre_y_lo_abandonan), \
+        with mock.patch.object(orquestador, '_guardar_resultado', guarda_y_lo_abandonan), \
                 mock.patch.object(orquestador, '_preparar_score', lambda *a, **k: llamadas.append(a)):
             resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
                                          conn=self.conn)
+        self.assertEqual(abandonados, [s.scan_id])  # se abandonó después del último latido, no antes
         self.assertEqual(resumen['status'], 'failed')
         self.assertEqual(llamadas, [])
         self.assertIsNone(self.uno('SELECT 1 FROM domain_scores WHERE scan_id = %s', s.scan_id))
