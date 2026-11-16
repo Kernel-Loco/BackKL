@@ -39,7 +39,7 @@ from pruebas.test_certspotter import AHORA, EMISIONES, RespaldoSimulado, emision
 from pruebas.test_certspotter import recolectar as recolectar_ct
 from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado, cert
 from pruebas.test_registros_dns import DnsSimulado as DnsRegistros, zona
-from pruebas.test_shodan import bases_por_defecto
+from pruebas.test_geoip import bases as bases_geo
 
 ACME = '20000000-0000-4000-8000-000000000001'
 BETA = '20000000-0000-4000-8000-000000000002'
@@ -956,7 +956,7 @@ class Orquestador(unittest.TestCase):
                 mock.patch.object(registros_dns, 'CARPETA_GRABADAS', Path(d) / 'dns'), \
                 mock.patch.object(crtsh, '_descargar', CrtshSimulado()), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
                 mock.patch.object(registros_dns, '_consultar', dns), \
-                mock.patch.object(geoip, 'bases_por_omision', return_value=bases_por_defecto()), \
+                mock.patch.object(geoip, 'bases_por_omision', return_value=bases_geo()), \
                 mock.patch.object(geoip, '_POR_OMISION', []), \
                 mock.patch.object(orquestador, 'fuentes_activas', solo_dos), \
                 mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
