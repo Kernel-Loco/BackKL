@@ -636,10 +636,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         rule_set = configuracion.juego_activo(c, org)
         if not rule_set:
             raise RuntimeError('no hay un juego de reglas activo')
-        reglas = {r['code']: r for r in c.execute(
-            'SELECT id::text, code, category, base_severity, weight, max_penalty FROM scoring_rules '
-            'WHERE rule_set_id = %s', (rule_set['id'],)).fetchall()}
-        pesos = {k: float(v) for k, v in rule_set['category_weights'].items()}
+        reglas = configuracion.reglas_del_juego(c, rule_set['id'])
+        pesos = configuracion.pesos_del_juego(rule_set)
 
     if modo == 'vivo' and not en_vivo_permitido(fqdn):
         modo = 'reproducir'  # nunca consultar en vivo un dominio fuera de DOMINIOS_EN_VIVO
@@ -729,6 +727,15 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                             "WHERE id = %s AND status = 'running' RETURNING id", (estado, Jsonb(stats), scan_id)).fetchone()
         if cerrado:  # si lo dieron por caído entre la última fuente y aquí, se queda como está
             c.execute('UPDATE domains SET last_scan_at = now(), updated_at = now() WHERE fqdn = %s', (fqdn,))
+            # Si cambiaron los pesos mientras corría (PUT /scoring/weights), el score sale con el juego activo de
+            # ahora, no con el del inicio. El candado es el del PUT: si el PUT va primero, aquí ya se ve su juego, y
+            # si va después, su recálculo ve este score y lo copia con los pesos nuevos (RC-62).
+            configuracion.bloquear_pesos(c, org)
+            vigente = configuracion.juego_activo(c, org)
+            if vigente and vigente['id'] != rule_set['id']:
+                rule_set = vigente
+                reglas = configuracion.reglas_del_juego(c, rule_set['id'])
+                pesos = configuracion.pesos_del_juego(rule_set)
             _guardar_score(c, org, domain['id'], scan_id, rule_set['id'], reglas, pesos, estado != 'completed')
             audit(c, org, 'scan.finished', None, None, 'scan', scan_id, {'fqdn': fqdn, 'status': estado, **stats})
     if not cerrado:

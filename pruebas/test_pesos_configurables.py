@@ -68,9 +68,10 @@ class JuegoActivo(unittest.TestCase):
 
 class Recalculo:
 
-    def __init__(self):
+    def __init__(self, severidad_congelada='high'):
         self.consultas = []
         self.aportes = []
+        self.severidad_congelada = severidad_congelada
 
     def execute(self, sql, parametros=()):
         self.consultas.append((sql, parametros))
@@ -88,8 +89,9 @@ class Recalculo:
         if sql.startswith('SELECT f.id::text AS id'):
             return ResultadoSimulado(filas=[{
                 'id': 'finding-1', 'rule_code': 'spf_missing', 'severity': 'medium', 'status': 'open',
-                'score_severity': 'high',
-                'previous_factors': {'confidence': .91, 'shap': [{'feature': 'sensibilidad'}]},
+                'score_severity': self.severidad_congelada,
+                'previous_factors': ({'confidence': .91, 'shap': [{'feature': 'sensibilidad'}]}
+                                     if self.severidad_congelada else None),
             }])
         if sql.startswith('INSERT INTO domain_scores'):
             return ResultadoSimulado(fila={'id': 'score-nuevo'})
@@ -119,6 +121,15 @@ class RecalculoScores(unittest.TestCase):
         self.assertEqual(factores['shap'][0]['feature'], 'sensibilidad')
         self.assertFalse(any('UPDATE domain_scores' in sql for sql, _ in conn.consultas))
 
+
+    def test_hallazgo_sin_aporte_en_el_score_ml_no_detiene_el_recalculo(self):
+        """RC-62: un escaneo caído dejó un hallazgo vigente sin aporte en el último score ML. Ya no hay 409."""
+        conn = Recalculo(severidad_congelada=None)
+        pesos = {categoria: .25 for categoria in criterio.CATEGORIAS}
+        self.assertEqual(configuracion.recalcular_scores(conn, 'org-1', 'ruleset-v2', pesos), 1)
+        aporte = conn.aportes[0][1]
+        self.assertEqual(aporte[5], 'medium')  # f.severity del hallazgo
+        self.assertNotIn('confidence', aporte[6].obj)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

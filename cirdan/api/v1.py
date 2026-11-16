@@ -894,7 +894,7 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
         raise HTTPException(422, str(error)) from error
 
     with transaction(session.org_id) as conn:
-        conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 32))', (str(session.org_id),))
+        configuracion.bloquear_pesos(conn, session.org_id)  # el mismo que toma el orquestador al guardar un score
         anterior = configuracion.juego_activo(conn, session.org_id)
         if not anterior:
             raise HTTPException(409, 'No hay un juego de reglas global para usar como plantilla')

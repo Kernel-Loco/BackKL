@@ -26,6 +26,7 @@ from unittest import mock
 import psycopg
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from cirdan import orquestador
 from cirdan.api import v1 as api_v1
@@ -34,7 +35,9 @@ from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
 from cirdan.recolectores import api_docs, certspotter, crtsh, ejemplo, github, shodan
+from cirdan.recolectores import contrato
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado
+from cirdan.score import configuracion, criterio
 from pruebas.test_certspotter import AHORA, EMISIONES, RespaldoSimulado, emision
 from pruebas.test_certspotter import recolectar as recolectar_ct
 from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado, cert
@@ -257,6 +260,38 @@ class Orquestador(unittest.TestCase):
 
     def estado(self, finding_id):
         return self.uno('SELECT status, resolved_at, last_scan_id::text FROM findings WHERE id = %s', finding_id)
+
+    def test_2a_si_los_pesos_cambian_a_mitad_del_escaneo_el_score_sale_con_los_nuevos(self):
+        """RC-62: un PUT /scoring/weights mientras corre la fuente. El score del escaneo usa el juego activo al guardar."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        inicial = configuracion.juego_activo(self.conn, ACME)
+        pesos = {categoria: 0.25 for categoria in criterio.CATEGORIAS}
+        nuevo = {}
+
+        def cambia_pesos_y_corre(*a, **k):  # lo que deja el PUT, en la misma transacción de la prueba
+            self.conn.execute('UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = %s AND is_active',
+                              (ACME,))
+            nuevo['id'] = self.uno(
+                'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, '
+                "activated_at) VALUES (%s, %s, %s, true, 'prueba', now()) RETURNING id::text",
+                ACME, int(inicial['version']) + 50, Jsonb(pesos))['id']
+            self.conn.execute(
+                'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
+                'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
+                (nuevo['id'], inicial['id']))
+            return contrato.ejecutar(*a, **k)
+
+        with mock.patch.object(orquestador, 'ejecutar', cambia_pesos_y_corre):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        self.assertEqual(resumen['status'], 'completed')
+        score = self.uno('SELECT id::text, rule_set_id::text FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertNotEqual(nuevo['id'], inicial['id'])
+        self.assertEqual(score['rule_set_id'], nuevo['id'])
+        reglas_del_aporte = self.uno('SELECT count(*) AS n FROM score_contributions sc JOIN scoring_rules r '
+                                     'ON r.id = sc.rule_id WHERE sc.score_id = %s AND r.rule_set_id = %s',
+                                     score['id'], nuevo['id'])['n']
+        self.assertGreater(reglas_del_aporte, 0)
 
     def test_2b_lo_que_la_fuente_ya_no_encuentra_queda_resuelto_y_deja_de_sumar(self):
         _, f = self.escanear_ejemplo()
