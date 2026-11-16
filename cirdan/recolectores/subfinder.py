@@ -15,12 +15,17 @@ Qué pide, sin tocar los servidores del dominio:
   La pausa y el turno (Ritmo) son de todo el proceso: dos escaneos a la vez en la API no le pegan más rápido.
 De cada captura solo se guarda el nombre del host, nunca la URL.
 
-Un 404 con 'No Captures found' es un índice sin capturas del dominio y no corta la búsqueda: se revisan todos. Cualquier
-otra respuesta (un 503, un 429, un 404 sin ese texto, una red caída, una redirección, una respuesta de más de
-MAX_BYTES_CDX o un 200 sin ninguna captura legible) deja la corrida en FuenteNoResponde, sin grabar, porque faltaría un
-índice. Así una corrida que sí termina revisó los índices completos, y 0 nombres es un resultado de verdad: se graba,
-con el aviso SIN_CAPTURAS si ningún índice tenía capturas. Toda la corrida tiene MAX_SEGUNDOS, y cada petición a lo más
-TIMEOUT_PETICION.
+Un 404 con 'No Captures found' es un índice sin capturas del dominio y no corta la búsqueda: se revisan todos. Un
+índice cuyo CDX da 500, 502 o 504 o no termina en TIMEOUT_PETICION (el 16 nov CC-MAIN-2026-43 dio 504 dos veces en una
+hora) se salta y se sigue con los demás: el resultado lleva el aviso SALTADOS con cuáles y por qué, revisados con los
+que sí se revisaron y sin_revisar con los saltados, así el escaneo termina 'partial' (stats.sources_partial), como
+ct_logs cuando falta una variante de dominios parecidos. Si no se revisó ninguno, FuenteNoResponde. Cualquier otra
+respuesta (un 503 o un 429, que son la señal de Common Crawl de bajar el ritmo, un 404 sin ese texto, una red caída, una
+redirección, una respuesta de más de MAX_BYTES_CDX, un 200 sin ninguna captura legible o cualquier falla de
+collinfo.json) deja la corrida en FuenteNoResponde, sin grabar. Así una corrida que termina dice qué índices revisó
+completos, y 0 nombres en ellos es un resultado de verdad: se graba, con el aviso SIN_CAPTURAS si ninguno tenía
+capturas. Toda la corrida tiene MAX_SEGUNDOS, y cada petición a lo más TIMEOUT_PETICION. Una corrida con índices
+saltados también se graba (con su aviso) y reemplaza la grabación anterior del dominio, como cualquier --grabar.
 
 Modos: 'vivo' consulta; 'grabar' además guarda el resultado ya leído (líneas, avisos e índices) en
 cirdan/recolectores/respuestas_grabadas/subfinder/<dominio>/ con la Grabadora del contrato (#13); 'reproducir' solo lee
@@ -72,6 +77,8 @@ CONSULTA = 'subfinder:'      # consulta de la grabadora: subfinder_<dominio>.jso
 SIN_CAPTURAS = 'subfinder: Common Crawl no tiene capturas de este dominio en sus últimos %d índices'
 SIN_GRABACION_DOMINIO = 'subfinder: no hay grabación de Common Crawl de este dominio, no se revisó Common Crawl'
 RECORTADO = 'subfinder: %s al tope de %d capturas, la lista puede estar incompleta'
+SALTADOS = 'subfinder: Common Crawl no respondió en %s, se revisaron los demás índices'
+SALTABLES = (500, 502, 504)   # el servidor de ese índice falló o no contestó a tiempo: se salta (no 503 ni 429)
 NO_CAPTURAS = b'No Captures found'   # el cuerpo del 404 del CDX cuando el índice no tiene capturas del dominio
 NOMBRE_FUENTE = re.compile(r'[a-z0-9_-]{1,40}')
 FALLAS = (OSError, ValueError, http.client.HTTPException, transporte.PlazoVencido, transporte.Redirigida)
@@ -79,6 +86,13 @@ FALLAS = (OSError, ValueError, http.client.HTTPException, transporte.PlazoVencid
 
 class SinCapturas(Exception):
     """El 404 'No Captures found' del CDX: el índice no tiene capturas del dominio."""
+
+
+def _saltable(error):
+    """Un 500, 502 o 504 o el plazo de la petición vencido: una falla de ese índice, no la señal de bajar el ritmo
+    (503 o 429) ni una respuesta rara."""
+    return isinstance(error, transporte.PlazoVencido) or (isinstance(error, urllib.error.HTTPError) and
+                                                           error.code in SALTABLES)
 
 
 class Ritmo:
@@ -206,7 +220,9 @@ class ClienteSubfinder:
             try:
                 return self.descargar(url, min(ahora + TIMEOUT_PETICION, fin), tope, self.cronometro)
             except FALLAS as e:
-                raise FuenteNoResponde('subfinder: Common Crawl no respondió en %s (%s)' % (que, _motivo(e))) from None
+                error = FuenteNoResponde('subfinder: Common Crawl no respondió en %s (%s)' % (que, _motivo(e)))
+                error.motivo, error.saltable = _motivo(e), _saltable(e)   # _consultar decide si salta el índice
+                raise error from None
             finally:
                 self.ritmo.ultima = self.cronometro()
         finally:
@@ -218,23 +234,36 @@ class ClienteSubfinder:
             ids = indices(self._pedir(COLLINFO, MAX_BYTES_COLLINFO, fin, 'collinfo.json'))
         except SinCapturas:
             raise FuenteNoResponde('subfinder: Common Crawl no respondió en collinfo.json (HTTP 404)') from None
-        nombres, recortados, raras, con_capturas = set(), [], 0, 0
+        nombres, recortados, raras, con_capturas, revisados, saltados = set(), [], 0, 0, [], []
         for indice in ids:
             try:
                 cuerpo = self._pedir(url_cdx(indice, dominio), MAX_BYTES_CDX, fin, indice)
             except SinCapturas:
+                revisados.append(indice)
+                continue
+            except FuenteNoResponde as e:
+                # Sin tiempo no se salta: ese índice faltó porque la corrida no terminó.
+                if not getattr(e, 'saltable', False) or self.cronometro() >= fin:
+                    raise
+                saltados.append('%s (%s)' % (indice, e.motivo))
                 continue
             encontrados, filas, malas = hosts(cuerpo)
             if malas == filas:   # un 200 vacío o sin ninguna captura legible: no se sabe qué hay, no se graba
                 raise FuenteNoResponde('subfinder: Common Crawl no dio ninguna captura legible en %s' % indice)
             con_capturas += 1
+            revisados.append(indice)
             nombres |= encontrados
             raras += malas
             if filas >= LIMITE_FILAS:
                 recortados.append(indice)
+        if not revisados:
+            raise FuenteNoResponde('subfinder: Common Crawl no respondió en ninguno de sus %d índices (%s)' % (
+                len(ids), ', '.join(saltados)))
         avisos = []
+        if saltados:
+            avisos.append(SALTADOS % ', '.join(saltados))
         if not con_capturas:
-            avisos.append(SIN_CAPTURAS % len(ids))
+            avisos.append(SIN_CAPTURAS % len(revisados))
         if recortados:
             avisos.append(RECORTADO % ('el índice %s llegó' % recortados[0] if len(recortados) == 1 else
                                        '%d índices llegaron' % len(recortados), LIMITE_FILAS))
@@ -243,22 +272,35 @@ class ClienteSubfinder:
                 'saltó' if raras == 1 else 'saltaron', _cuantos(raras, 'captura', 'capturas'),
                 'pudo' if raras == 1 else 'pudieron'))
         lineas = [{'host': h, 'input': dominio, 'sources': [ORIGEN]} for h in sorted(nombres)]
-        return {'lineas': lineas, 'avisos': avisos, 'indices': ids}
+        datos = {'lineas': lineas, 'avisos': avisos, 'indices': ids}
+        if saltados:
+            datos['revisados'] = revisados
+        return datos
 
     def enumerar(self, dominio):
-        """{'lineas', 'avisos', 'indices'} de Common Crawl para el dominio. Sale del disco al reproducir (SinGrabacion
-        si no hay grabación) y se graba al grabar. Si Common Crawl no responde bien en alguna petición no se graba
-        nada, así la grabación anterior queda intacta."""
+        """{'lineas', 'avisos', 'indices'} de Common Crawl para el dominio, más 'revisados' si se saltó algún índice.
+        Sale del disco al reproducir (SinGrabacion si no hay grabación) y se graba al grabar. Si la corrida queda en
+        FuenteNoResponde no se graba nada, así la grabación anterior queda intacta. Un índice saltado no la deja así."""
         consulta = CONSULTA + dominio
         del_disco, datos = self.grabadora.de_disco(consulta)
         if del_disco:
             if not (isinstance(datos, dict) and isinstance(datos.get('lineas'), list) and
-                    isinstance(datos.get('avisos'), list)):
+                    isinstance(datos.get('avisos'), list) and _revisados_validos(datos)):
                 raise FuenteNoResponde('la grabación de subfinder de %s no se puede leer' % dominio)
             return datos
         datos = self._consultar(dominio)
         self.grabadora.guardar(consulta, datos)
         return datos
+
+
+def _revisados_validos(datos):
+    """'revisados' de una grabación: falta, o es una parte sin repetir de sus 'indices', con al menos uno."""
+    if 'revisados' not in datos:
+        return True
+    rev, ids = datos['revisados'], datos.get('indices')
+    return (isinstance(rev, list) and isinstance(ids, list) and rev and len(set(map(str, rev))) == len(rev) and
+            all(isinstance(i, str) and ID_INDICE.fullmatch(i) and i in ids for i in rev) and
+            all(isinstance(i, str) and ID_INDICE.fullmatch(i) for i in ids) and len(rev) < len(ids))
 
 
 def _normalizar(nombre):
@@ -321,6 +363,9 @@ def recolectar(dominio, cliente=None, ahora=None, propios=()):
     finally:
         res.consultas = cliente.consultas
     res.avisos += [a for a in datos['avisos'] if isinstance(a, str)]
+    if 'revisados' in datos:   # se saltó algún índice: el escaneo termina 'partial' (contrato, #23)
+        res.revisados = list(datos['revisados'])
+        res.sin_revisar = [i for i in datos['indices'] if i not in datos['revisados']]
     res.activos, fuera, invalidos = subdominios(dominio, datos['lineas'])
     if fuera:  # cuántos, no cuáles: pueden ser de terceros
         res.avisos.append('subfinder: %s fuera del dominio' % _descartados(fuera))

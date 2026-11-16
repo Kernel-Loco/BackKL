@@ -249,8 +249,7 @@ class Fallas(unittest.TestCase):
 
     def test_1_un_indice_que_no_responde_deja_la_corrida_failed_sin_el_cuerpo_ni_la_url(self):
         for falla, motivo in ((503, 'HTTP 503'), (429, 'HTTP 429'), (403, 'HTTP 403'),
-                              (ConnectionResetError(), 'ConnectionResetError'),
-                              (transporte.PlazoVencido('x'), 'PlazoVencido'),
+                              (501, 'HTTP 501'), (ConnectionResetError(), 'ConnectionResetError'),
                               (transporte.Redirigida(301, 'index.commoncrawl.org'), 'Redirigida'),
                               (ValueError('respuesta de más de 4194304 bytes'), 'ValueError')):
             with self.subTest(falla=falla):
@@ -300,6 +299,108 @@ class Fallas(unittest.TestCase):
         res = contrato.ejecutar(cargar('subfinder'), '../acme-demo.mx', modo='grabar')  # ni crea el cliente
         self.assertEqual(res.estado, 'failed')
         self.assertIn('dominio inválido', res.error)
+
+
+class Reloj:
+    """Hace las veces de time.monotonic con una hora que solo cambia a mano."""
+
+    def __init__(self):
+        self.ahora = 1000.0
+
+    def __call__(self):
+        return self.ahora
+
+
+class IndiceSaltado(unittest.TestCase):
+    """El 16 nov CC-MAIN-2026-43 dio 504 dos veces en una hora y la corrida entera quedaba failed sin grabar."""
+
+    def test_1_un_500_502_504_o_plazo_vencido_se_salta_y_sigue_con_los_demas(self):
+        for falla, motivo in ((504, 'HTTP 504'), (502, 'HTTP 502'), (500, 'HTTP 500'),
+                              (transporte.PlazoVencido('x'), 'PlazoVencido')):
+            with self.subTest(falla=falla):
+                simulado = CdxSimulado(fallas={RECIENTES[3]: falla})   # el índice con api.acme-demo.mx
+                res = por_ejecutar(simulado)
+                self.assertEqual((res.estado, res.error, res.consultas), ('succeeded', '', 13))
+                self.assertEqual(simulado.indices(), RECIENTES)
+                self.assertEqual([a.valor for a in res.activos], ['dev.acme-demo.mx', 'www.acme-demo.mx'])
+                self.assertEqual(res.avisos, [subfinder.SALTADOS % ('%s (%s)' % (RECIENTES[3], motivo))])
+                self.assertEqual(res.avisos, ['subfinder: Common Crawl no respondió en %s (%s), se revisaron los '
+                                              'demás índices' % (RECIENTES[3], motivo)])
+                self.assertEqual(res.revisados, RECIENTES[:3] + RECIENTES[4:])
+                self.assertEqual(res.sin_revisar, [RECIENTES[3]])
+
+    def test_2_sin_capturas_cuenta_solo_los_indices_revisados(self):
+        res = por_ejecutar(CdxSimulado({}, fallas={RECIENTES[0]: 504, RECIENTES[7]: 502}))
+        self.assertEqual((res.estado, res.activos), ('succeeded', []))
+        saltados = '%s (HTTP 504), %s (HTTP 502)' % (RECIENTES[0], RECIENTES[7])
+        self.assertEqual(res.avisos, [subfinder.SALTADOS % saltados, subfinder.SIN_CAPTURAS % 10])
+        self.assertEqual(res.sin_revisar, [RECIENTES[0], RECIENTES[7]])
+
+    def test_3_sin_ningun_indice_revisado_es_failed(self):
+        simulado = CdxSimulado(fallas={i: 504 for i in RECIENTES})
+        res = por_ejecutar(simulado)
+        self.assertEqual((res.estado, res.consultas, res.activos), ('failed', 13, []))
+        self.assertIn('Common Crawl no respondió en ninguno de sus 12 índices (%s (HTTP 504), ' % RECIENTES[0],
+                      res.error)
+
+    def test_4_una_falla_que_no_se_salta_sigue_cortando_aunque_antes_se_saltara_otro(self):
+        simulado = CdxSimulado(fallas={RECIENTES[1]: 504, RECIENTES[5]: 503})
+        res = por_ejecutar(simulado)
+        self.assertEqual((res.estado, res.consultas), ('failed', 7))
+        self.assertIn('no respondió en %s (HTTP 503)' % RECIENTES[5], res.error)
+        self.assertEqual(simulado.indices(), RECIENTES[:6])
+
+    def test_5_un_plazo_vencido_al_final_de_la_corrida_no_se_salta(self):
+        """Si se acabaron los 300 s, ese índice no se revisó por falta de tiempo y la corrida no terminó."""
+        reloj = Reloj()
+
+        def lento(url, plazo, tope, cronometro):
+            if RECIENTES[11] in url:   # el último índice se come lo que quedaba de la corrida
+                reloj.ahora = 1000.0 + subfinder.MAX_SEGUNDOS
+                raise transporte.PlazoVencido('x')
+            return subfinder._descargar(url, plazo, tope, cronometro)
+
+        c = cliente(cronometro=reloj)
+        c.descargar = lento
+        with con_cdx(CdxSimulado()), self.assertRaises(contrato.FuenteNoResponde) as error:
+            c.enumerar('acme-demo.mx')
+        self.assertIn('no respondió en %s (PlazoVencido)' % RECIENTES[11], str(error.exception))
+        self.assertEqual(c.consultas, 13)
+
+    def test_6_collinfo_con_504_no_se_salta(self):
+        res = por_ejecutar(CdxSimulado(fallas={'collinfo': 504}))
+        self.assertEqual((res.estado, res.consultas), ('failed', 1))
+        self.assertIn('collinfo.json (HTTP 504)', res.error)
+
+    def test_7_se_graba_y_reproduce_con_los_mismos_revisados(self):
+        with tempfile.TemporaryDirectory() as d:
+            grabado = por_ejecutar(CdxSimulado(fallas={RECIENTES[3]: 504}), 'grabar', d)
+            archivo = json.loads((Path(d) / 'acme-demo.mx' / 'subfinder_acme-demo.mx.json').read_text(encoding='utf-8'))
+            self.assertEqual(set(archivo['datos']), {'lineas', 'avisos', 'indices', 'revisados'})
+            otra = por_ejecutar(sin_red, 'reproducir', d)
+        self.assertEqual((otra.estado, otra.consultas), ('succeeded', 0))
+        self.assertEqual((otra.activos, otra.avisos, otra.revisados, otra.sin_revisar),
+                         (grabado.activos, grabado.avisos, grabado.revisados, grabado.sin_revisar))
+        self.assertEqual(otra.sin_revisar, [RECIENTES[3]])
+
+    def test_8_sin_saltos_no_lleva_revisados(self):
+        res = por_ejecutar(CdxSimulado())
+        self.assertEqual((res.revisados, res.sin_revisar), (None, None))
+
+    def test_9_revisados_de_una_grabacion_que_no_cuadran_es_failed(self):
+        bien = {'lineas': [], 'avisos': [], 'indices': RECIENTES[:3]}
+        for revisados in ('CC-MAIN-2026-47', [], [RECIENTES[0], RECIENTES[0]], ['CC-MAIN-2019-01'], RECIENTES[:3],
+                          [5], ['../x']):
+            with self.subTest(revisados=revisados), tempfile.TemporaryDirectory() as d:
+                contrato.Grabadora(Path(d) / 'acme-demo.mx', 'grabar').guardar(
+                    'subfinder:acme-demo.mx', dict(bien, revisados=revisados))
+                res = por_ejecutar(sin_red, 'reproducir', d)
+                self.assertEqual(res.estado, 'failed')
+                self.assertIn('no se puede leer', res.error)
+        with tempfile.TemporaryDirectory() as d:   # sin 'indices' tampoco
+            contrato.Grabadora(Path(d) / 'acme-demo.mx', 'grabar').guardar(
+                'subfinder:acme-demo.mx', {'lineas': [], 'avisos': [], 'revisados': [RECIENTES[0]]})
+            self.assertEqual(por_ejecutar(sin_red, 'reproducir', d).estado, 'failed')
 
 
 class RitmoDelProceso(unittest.TestCase):
