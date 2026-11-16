@@ -46,7 +46,8 @@ class CdxSimulado:
     """Hace las veces de transporte.descargar: anota cada petición y responde collinfo.json y el CDX de cada índice.
 
     `capturas` da las URLs de cada índice (sin capturas responde el 404 'No Captures found') y `fallas` lo que lanza
-    un índice o 'collinfo': un código HTTP o una excepción."""
+    un índice o 'collinfo': un código HTTP o una excepción, o una lista de ellos, uno por petición, que al acabarse
+    deja responder al índice."""
 
     def __init__(self, capturas=None, fallas=None, collinfo=COLLINFO, crudo=None):
         self.capturas = capturas if capturas is not None else {
@@ -64,6 +65,8 @@ class CdxSimulado:
         else:
             indice = urllib.parse.urlsplit(url).path[1:-len('-index')]
         falla = self.fallas.get(indice)
+        if isinstance(falla, list):
+            falla = falla.pop(0) if falla else None
         if isinstance(falla, int):
             raise http(url, falla, b'Server busy')
         if falla is not None:
@@ -281,10 +284,14 @@ class Fallas(unittest.TestCase):
     def test_4_toda_la_corrida_tiene_su_tiempo_maximo(self):
         simulado = CdxSimulado()
         c = cliente(cronometro=Cronometro(40))   # cada lectura del cronómetro avanza 40 s
-        with con_cdx(simulado), self.assertRaises(contrato.FuenteNoResponde) as error:
-            c.enumerar('acme-demo.mx')
-        self.assertIn('no terminó en 300 s', str(error.exception))
-        self.assertLess(c.consultas, subfinder.MAX_CONSULTAS)
+        with con_cdx(simulado):
+            datos = c.enumerar('acme-demo.mx')
+        # Corta antes de pedir los 12 índices, y lo revisado no se pierde: los que faltan quedan sin revisar.
+        self.assertLess(c.consultas, 1 + subfinder.INDICES)
+        faltan = datos['indices'][len(datos['revisados']):]
+        self.assertEqual(datos['revisados'], RECIENTES[:len(datos['revisados'])])
+        self.assertTrue(datos['revisados'] and faltan)
+        self.assertIn(subfinder.SIN_TIEMPO % (subfinder.MAX_SEGUNDOS, ', '.join(faltan)), datos['avisos'])
         for p in simulado.pedidas:   # cada plazo es a lo más 30 s y nunca pasa del fin de la corrida
             self.assertLessEqual(p.plazo, 1000.0 + subfinder.MAX_SEGUNDOS)
 
@@ -314,14 +321,15 @@ class Reloj:
 class IndiceSaltado(unittest.TestCase):
     """El 16 nov CC-MAIN-2026-43 dio 504 dos veces en una hora y la corrida entera quedaba failed sin grabar."""
 
-    def test_1_un_500_502_504_o_plazo_vencido_se_salta_y_sigue_con_los_demas(self):
-        for falla, motivo in ((504, 'HTTP 504'), (502, 'HTTP 502'), (500, 'HTTP 500'),
-                              (transporte.PlazoVencido('x'), 'PlazoVencido')):
+    def test_1_un_500_502_504_sin_intentos_o_plazo_vencido_se_salta_y_sigue_con_los_demas(self):
+        for falla, motivo, intentos in ((504, 'HTTP 504 tras 3 intentos', 3), (502, 'HTTP 502 tras 3 intentos', 3),
+                                        (500, 'HTTP 500 tras 3 intentos', 3),
+                                        (transporte.PlazoVencido('x'), 'PlazoVencido', 1)):
             with self.subTest(falla=falla):
                 simulado = CdxSimulado(fallas={RECIENTES[3]: falla})   # el índice con api.acme-demo.mx
                 res = por_ejecutar(simulado)
-                self.assertEqual((res.estado, res.error, res.consultas), ('succeeded', '', 13))
-                self.assertEqual(simulado.indices(), RECIENTES)
+                self.assertEqual((res.estado, res.error, res.consultas), ('succeeded', '', 12 + intentos))
+                self.assertEqual(simulado.indices(), RECIENTES[:3] + [RECIENTES[3]] * intentos + RECIENTES[4:])
                 self.assertEqual([a.valor for a in res.activos], ['dev.acme-demo.mx', 'www.acme-demo.mx'])
                 self.assertEqual(res.avisos, [subfinder.SALTADOS % ('%s (%s)' % (RECIENTES[3], motivo))])
                 self.assertEqual(res.avisos, ['subfinder: Common Crawl no respondió en %s (%s), se revisaron los '
@@ -332,26 +340,38 @@ class IndiceSaltado(unittest.TestCase):
     def test_2_sin_capturas_cuenta_solo_los_indices_revisados(self):
         res = por_ejecutar(CdxSimulado({}, fallas={RECIENTES[0]: 504, RECIENTES[7]: 502}))
         self.assertEqual((res.estado, res.activos), ('succeeded', []))
-        saltados = '%s (HTTP 504), %s (HTTP 502)' % (RECIENTES[0], RECIENTES[7])
+        saltados = '%s (HTTP 504 tras 3 intentos), %s (HTTP 502 tras 3 intentos)' % (RECIENTES[0], RECIENTES[7])
         self.assertEqual(res.avisos, [subfinder.SALTADOS % saltados, subfinder.SIN_CAPTURAS % 10])
         self.assertEqual(res.sin_revisar, [RECIENTES[0], RECIENTES[7]])
 
     def test_3_sin_ningun_indice_revisado_es_failed(self):
+        """Con todo caído, los 12 reintentos de la corrida se van en los 6 primeros índices y los demás se piden una
+        vez: 25 peticiones y no 37 (ni 148 con los 4 intentos del orquestador)."""
         simulado = CdxSimulado(fallas={i: 504 for i in RECIENTES})
-        res = por_ejecutar(simulado)
-        self.assertEqual((res.estado, res.consultas, res.activos), ('failed', 13, []))
-        self.assertIn('Common Crawl no respondió en ninguno de sus 12 índices (%s (HTTP 504), ' % RECIENTES[0],
-                      res.error)
+        c = cliente(cronometro=Cronometro(0))
+        with con_cdx(simulado), self.assertRaises(contrato.FuenteNoResponde) as error:
+            c.enumerar('acme-demo.mx')
+        self.assertEqual(c.consultas, subfinder.MAX_CONSULTAS)
+        self.assertEqual(c.consultas, 25)   # collinfo.json, los 3 intentos de 6 índices y 1 de los otros 6
+        self.assertEqual(simulado.indices(), [i for i in RECIENTES[:6] for _ in range(3)] + RECIENTES[6:])
+        self.assertEqual([d for d in c.dormidas if d != subfinder.PAUSA], [15, 30] * 6)
+        self.assertIn('Common Crawl no respondió en ninguno de sus 12 índices (%s (HTTP 504 tras 3 intentos), '
+                      % RECIENTES[0], str(error.exception))
+        self.assertIn('%s (HTTP 504 tras 3 intentos), %s (HTTP 504, sin reintentos en la corrida), '
+                      % (RECIENTES[5], RECIENTES[6]), str(error.exception))
+        res = por_ejecutar(CdxSimulado(fallas={i: 504 for i in RECIENTES}))
+        self.assertEqual((res.estado, res.consultas, res.activos), ('failed', 25, []))
 
     def test_4_una_falla_que_no_se_salta_sigue_cortando_aunque_antes_se_saltara_otro(self):
         simulado = CdxSimulado(fallas={RECIENTES[1]: 504, RECIENTES[5]: 503})
         res = por_ejecutar(simulado)
-        self.assertEqual((res.estado, res.consultas), ('failed', 7))
+        self.assertEqual((res.estado, res.consultas), ('failed', 9))
         self.assertIn('no respondió en %s (HTTP 503)' % RECIENTES[5], res.error)
-        self.assertEqual(simulado.indices(), RECIENTES[:6])
+        self.assertEqual(simulado.indices(), RECIENTES[:1] + [RECIENTES[1]] * 3 + RECIENTES[2:6])
 
-    def test_5_un_plazo_vencido_al_final_de_la_corrida_no_se_salta(self):
-        """Si se acabaron los 300 s, ese índice no se revisó por falta de tiempo y la corrida no terminó."""
+    def test_5_un_plazo_vencido_al_final_de_la_corrida_queda_sin_revisar_por_tiempo(self):
+        """Si se acabó MAX_SEGUNDOS, ese índice no se revisó por falta de tiempo (SIN_TIEMPO, no SALTADOS) y los 11
+        revisados no se pierden."""
         reloj = Reloj()
 
         def lento(url, plazo, tope, cronometro):
@@ -362,10 +382,41 @@ class IndiceSaltado(unittest.TestCase):
 
         c = cliente(cronometro=reloj)
         c.descargar = lento
-        with con_cdx(CdxSimulado()), self.assertRaises(contrato.FuenteNoResponde) as error:
-            c.enumerar('acme-demo.mx')
-        self.assertIn('no respondió en %s (PlazoVencido)' % RECIENTES[11], str(error.exception))
+        with con_cdx(CdxSimulado()):
+            res = subfinder.recolectar('acme-demo.mx', c, AHORA)
+        self.assertEqual(res.avisos, [subfinder.SIN_TIEMPO % (subfinder.MAX_SEGUNDOS, RECIENTES[11])])
+        self.assertEqual((res.revisados, res.sin_revisar), (RECIENTES[:11], [RECIENTES[11]]))
+        self.assertEqual([a.valor for a in res.activos], ['api.acme-demo.mx', 'www.acme-demo.mx'])
         self.assertEqual(c.consultas, 13)
+
+    def test_5b_sin_tiempo_y_sin_ningun_revisado_es_failed(self):
+        """Sin tiempo antes del primer índice, o con el único intento saltado, nada revisado: FuenteNoResponde."""
+        # (segundos que deja collinfo.json, segundos que deja el 504 del primer índice, error, consultas)
+        casos = ((0, None, 'subfinder: Common Crawl no terminó en %d s (faltó %s)' % (subfinder.MAX_SEGUNDOS,
+                                                                                      RECIENTES[0]), 1),
+                 (30, 10, 'subfinder: Common Crawl no respondió en ninguno de sus 12 índices (%s (HTTP 504, sin tiempo '
+                          'para reintentar), sin tiempo para %s)' % (RECIENTES[0], ', '.join(RECIENTES[1:])), 2))
+        for tras_collinfo, tras_504, texto, consultas in casos:
+            with self.subTest(tras_collinfo=tras_collinfo):
+                reloj = Reloj()
+                fin = 1000.0 + subfinder.MAX_SEGUNDOS
+
+                def falla(url, plazo, tope, cronometro):
+                    if url == subfinder.COLLINFO:
+                        reloj.ahora = fin - tras_collinfo
+                        return COLLINFO.encode('utf-8')
+                    if tras_504 is not None and RECIENTES[0] in url:
+                        reloj.ahora = fin - tras_504
+                        raise http(url, 504)
+                    raise AssertionError('pidió %s sin tiempo' % url)
+
+                c = cliente(cronometro=reloj)
+                c.descargar = falla
+                with self.assertRaises(contrato.FuenteNoResponde) as error:
+                    c.enumerar('acme-demo.mx')
+                self.assertEqual(str(error.exception), texto)
+                self.assertEqual(c.consultas, consultas)
+                self.assertEqual([d for d in c.dormidas if d != subfinder.PAUSA], [])
 
     def test_6_collinfo_con_504_no_se_salta(self):
         res = por_ejecutar(CdxSimulado(fallas={'collinfo': 504}))
@@ -401,6 +452,133 @@ class IndiceSaltado(unittest.TestCase):
             contrato.Grabadora(Path(d) / 'acme-demo.mx', 'grabar').guardar(
                 'subfinder:acme-demo.mx', {'lineas': [], 'avisos': [], 'revisados': [RECIENTES[0]]})
             self.assertEqual(por_ejecutar(sin_red, 'reproducir', d).estado, 'failed')
+
+
+class Reintento(unittest.TestCase):
+    """El 16 nov el nginx del índice cortó a los ~10 s con 504 o 502 y la misma consulta respondió 15 s después: un
+    500, 502 o 504 se pide otra vez tras 15 s y tras 30 s antes de saltar el índice."""
+
+    def test_1_un_504_que_luego_responde_revisa_el_indice(self):
+        for fallas, esperas in (([504], [15]), ([502, 500], [15, 30])):
+            with self.subTest(fallas=fallas):
+                simulado = CdxSimulado(fallas={RECIENTES[3]: list(fallas)})   # el índice con api.acme-demo.mx
+                res, c = recolectar(simulado, cronometro=Cronometro(0))
+                self.assertEqual((res.estado, res.error, res.avisos), ('succeeded', '', []))
+                self.assertEqual([a.valor for a in res.activos], ['api.acme-demo.mx', 'dev.acme-demo.mx',
+                                                                  'www.acme-demo.mx'])
+                self.assertEqual((res.revisados, res.sin_revisar), (None, None))
+                self.assertEqual(simulado.indices(), RECIENTES[:3] + [RECIENTES[3]] * (1 + len(fallas)) +
+                                 RECIENTES[4:])
+                self.assertEqual(res.consultas, 13 + len(fallas))
+                # la PAUSA antes de cada petición y, entre los intentos, la espera creciente
+                self.assertEqual([d for d in c.dormidas if d != subfinder.PAUSA], esperas)
+                self.assertEqual(c.dormidas[:5], [subfinder.PAUSA] * 4 + [15])
+
+    def test_2_reintentos_que_se_acaban_saltan_el_indice(self):
+        simulado = CdxSimulado(fallas={RECIENTES[3]: [504, 504, 502]})
+        res, c = recolectar(simulado, cronometro=Cronometro(0))
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertEqual(res.avisos, ['subfinder: Common Crawl no respondió en %s (HTTP 502 tras 3 intentos), se '
+                                      'revisaron los demás índices' % RECIENTES[3]])
+        self.assertEqual(res.sin_revisar, [RECIENTES[3]])
+        self.assertEqual(res.consultas, 15)
+        self.assertEqual([d for d in c.dormidas if d != subfinder.PAUSA], [15, 30])   # no hay un cuarto intento
+
+    def test_3_503_429_y_los_demas_codigos_no_se_reintentan(self):
+        for codigo in (503, 429, 501, 403):
+            with self.subTest(codigo=codigo):
+                simulado = CdxSimulado(fallas={RECIENTES[3]: [codigo]})   # el segundo intento sí respondería
+                c = cliente(cronometro=Cronometro(0))
+                with con_cdx(simulado), self.assertRaises(contrato.FuenteNoResponde) as error:
+                    c.enumerar('acme-demo.mx')
+                self.assertIn('no respondió en %s (HTTP %d)' % (RECIENTES[3], codigo), str(error.exception))
+                self.assertEqual(simulado.indices(), RECIENTES[:4])
+                self.assertEqual(c.consultas, 5)
+                self.assertEqual(set(c.dormidas), {subfinder.PAUSA})
+
+    def test_4_un_plazo_vencido_no_se_reintenta(self):
+        simulado = CdxSimulado(fallas={RECIENTES[3]: [transporte.PlazoVencido('x')]})
+        res, c = recolectar(simulado, cronometro=Cronometro(0))
+        self.assertEqual(res.sin_revisar, [RECIENTES[3]])
+        self.assertEqual((res.consultas, set(c.dormidas)), (13, {subfinder.PAUSA}))
+
+    def test_5_un_reintento_que_no_cabe_salta_el_indice_sin_perder_los_revisados(self):
+        """El reintento solo va si caben su espera, la PAUSA y MINIMO_INTENTO (20 s) antes del fin. Si no cabe, el
+        índice se salta. Con menos de 20 s tampoco se pide el índice siguiente: los que faltan quedan sin revisar."""
+        minimo = subfinder.ESPERAS[0] + subfinder.PAUSA + subfinder.MINIMO_INTENTO   # 36 s
+        # (segundos que deja el primer 504, esperas, consultas, motivo del saltado, los que quedan sin tiempo)
+        casos = ((10, [], 5, 'HTTP 504, sin tiempo para reintentar', RECIENTES[4:]),
+                 (minimo - 1, [], 13, 'HTTP 504, sin tiempo para reintentar', []),
+                 (minimo, [15], 14, 'HTTP 504 tras 2 intentos, sin tiempo para reintentar', []))
+        for queda, esperas, consultas, motivo, faltan in casos:
+            with self.subTest(queda=queda):
+                reloj = Reloj()
+
+                def falla(url, plazo, tope, cronometro):
+                    if RECIENTES[3] in url:
+                        if reloj.ahora == 1000.0:   # el primer 504 llega cuando quedan `queda` segundos
+                            reloj.ahora = 1000.0 + subfinder.MAX_SEGUNDOS - queda
+                        raise http(url, 504)
+                    return subfinder._descargar(url, plazo, tope, cronometro)
+
+                c = cliente(cronometro=reloj)
+                c.descargar = falla
+                with con_cdx(CdxSimulado()):
+                    res = subfinder.recolectar('acme-demo.mx', c, AHORA)
+                avisos = [subfinder.SALTADOS % ('%s (%s)' % (RECIENTES[3], motivo))]
+                if faltan:
+                    avisos.append(subfinder.SIN_TIEMPO % (subfinder.MAX_SEGUNDOS, ', '.join(faltan)))
+                self.assertEqual(res.avisos, avisos)
+                self.assertEqual(res.sin_revisar, [RECIENTES[3]] + faltan)
+                self.assertEqual([d for d in c.dormidas if d != subfinder.PAUSA], esperas)
+                self.assertEqual(c.consultas, consultas)
+
+    def test_6_la_espera_va_fuera_del_turno_del_proceso(self):
+        ritmo = subfinder.Ritmo()
+        en_turno = []
+
+        def dormir(segundos):
+            if segundos in subfinder.ESPERAS:
+                en_turno.append(ritmo.candado.locked())
+
+        c = subfinder.ClienteSubfinder(cronometro=Cronometro(0), dormir=dormir, ritmo=ritmo)
+        with con_cdx(CdxSimulado(fallas={RECIENTES[3]: [504, 504]})):
+            c.enumerar('acme-demo.mx')
+        self.assertEqual(en_turno, [False, False])
+
+    def test_7_el_tiempo_de_la_corrida_cabe_en_el_peor_caso_y_en_el_tope_del_orquestador(self):
+        """Peor caso de una corrida sola: las MAX_CONSULTAS peticiones llegan a TIMEOUT_PETICION (un 500, 502 o 504
+        puede llegar hasta ahí), cada una con su PAUSA, y la bolsa de reintentos se gasta en pares con las 2 esperas."""
+        # el orquestador pide la base al importarse: su TOPE_CORRIDA se lee del código
+        texto = (RAIZ / 'cirdan' / 'orquestador' / '__init__.py').read_text(encoding='utf-8')
+        tope = re.search(r'^TOPE_CORRIDA = timedelta\(minutes=(\d+)\)', texto, re.MULTILINE)
+        self.assertIsNotNone(tope)
+        self.assertEqual((subfinder.ESPERAS, subfinder.REINTENTOS), ((15, 30), 12))
+        esperas = (subfinder.REINTENTOS // 2) * sum(subfinder.ESPERAS) + (subfinder.REINTENTOS % 2) * 15   # 270 s
+        peor = subfinder.MAX_CONSULTAS * (subfinder.TIMEOUT_PETICION + subfinder.PAUSA) + esperas
+        self.assertEqual(peor, 1045)
+        self.assertLessEqual(peor, subfinder.MAX_SEGUNDOS)
+        observado = subfinder.MAX_CONSULTAS * (10.5 + subfinder.PAUSA) + esperas   # el 504 a ~10.5 s del 16 nov
+        self.assertLess(observado, 600)
+        self.assertLess(subfinder.MAX_SEGUNDOS, 60 * int(tope.group(1)))
+
+    def test_8_una_falla_distinta_en_el_reintento(self):
+        """Un 503 o un 429 en el reintento cortan la corrida, como en el primer intento. Un plazo vencido en el
+        reintento salta el índice con cuántos intentos llevaba."""
+        for segunda in (503, 429):
+            with self.subTest(segunda=segunda):
+                simulado = CdxSimulado(fallas={RECIENTES[3]: [504, segunda]})
+                c = cliente(cronometro=Cronometro(0))
+                with con_cdx(simulado), self.assertRaises(contrato.FuenteNoResponde) as error:
+                    c.enumerar('acme-demo.mx')
+                self.assertIn('no respondió en %s (HTTP %d)' % (RECIENTES[3], segunda), str(error.exception))
+                self.assertEqual(simulado.indices(), RECIENTES[:4] + [RECIENTES[3]])
+                self.assertEqual(c.consultas, 6)
+        simulado = CdxSimulado(fallas={RECIENTES[3]: [504, transporte.PlazoVencido('x')]})
+        res, c = recolectar(simulado, cronometro=Cronometro(0))
+        self.assertEqual(res.avisos, [subfinder.SALTADOS % ('%s (PlazoVencido tras 2 intentos)' % RECIENTES[3])])
+        self.assertEqual((res.sin_revisar, res.consultas), ([RECIENTES[3]], 14))
+        self.assertEqual([d for d in c.dormidas if d != subfinder.PAUSA], [15])
 
 
 class RitmoDelProceso(unittest.TestCase):
@@ -444,23 +622,72 @@ class RitmoDelProceso(unittest.TestCase):
             h.start()
         for h in hilos:
             h.join(10)
-        self.assertEqual((estado['maximo'], estado['pedidas']), (1, 3 * subfinder.MAX_CONSULTAS))
-        self.assertEqual([c.consultas for c in clientes], [subfinder.MAX_CONSULTAS] * 3)
+        self.assertEqual((estado['maximo'], estado['pedidas']), (1, 3 * (1 + subfinder.INDICES)))
+        self.assertEqual([c.consultas for c in clientes], [1 + subfinder.INDICES] * 3)
 
     def test_4_sin_turno_antes_del_fin_de_la_corrida_es_falla_sin_pedir(self):
         ritmo = subfinder.Ritmo()
         ritmo.candado.acquire()   # otra corrida tiene el turno
         try:
-            # fin a 1300 s. Al pedir el turno quedan 0.05 s (de espera real) y después el reloj vuelve a 1000: si
-            # no esperara el turno, pediría collinfo.json (sin_red)
-            lecturas = iter([1000.0, 1299.95] + [1000.0] * 10)
+            # fin a 1000 + MAX_SEGUNDOS. Al pedir el turno quedan 0.05 s (de espera real) y después el reloj vuelve
+            # a 1000: si no esperara el turno, pediría collinfo.json (sin_red)
+            lecturas = iter([1000.0, 1000.0 + subfinder.MAX_SEGUNDOS - 0.05] + [1000.0] * 10)
             c = cliente(cronometro=lambda: next(lecturas), ritmo=ritmo)
             with con_cdx(sin_red), self.assertRaises(contrato.FuenteNoResponde) as error:
                 c.enumerar('acme-demo.mx')
         finally:
             ritmo.candado.release()
-        self.assertIn('no terminó en 300 s (faltó collinfo.json)', str(error.exception))
+        self.assertIn('no terminó en %d s (faltó collinfo.json)' % subfinder.MAX_SEGUNDOS, str(error.exception))
         self.assertEqual(c.consultas, 0)
+
+    def test_4b_sin_turno_para_un_indice_deja_los_que_faltan_sin_revisar(self):
+        """Otras corridas ocupan el turno hasta que solo quedan MINIMO_INTENTO segundos: los índices que faltan quedan
+        sin revisar (SIN_TIEMPO) y los ya revisados no se pierden."""
+
+        class Candado:
+            def __init__(self):
+                self.ocupado, self.plazos = False, []
+
+            def acquire(self, timeout):
+                self.plazos.append(timeout)
+                return not self.ocupado
+
+            def release(self):
+                pass
+
+        ritmo = SimpleNamespace(candado=Candado(), ultima=None)
+
+        def ocupa(url, plazo, tope, cronometro):
+            if RECIENTES[2] in url:   # después de este índice, el turno ya no llega a tiempo
+                ritmo.candado.ocupado = True
+            return subfinder._descargar(url, plazo, tope, cronometro)
+
+        c = cliente(cronometro=Reloj(), ritmo=ritmo)
+        c.descargar = ocupa
+        with con_cdx(CdxSimulado()):
+            res = subfinder.recolectar('acme-demo.mx', c, AHORA)
+        self.assertEqual(res.avisos, [subfinder.SIN_TIEMPO % (subfinder.MAX_SEGUNDOS, ', '.join(RECIENTES[3:]))])
+        self.assertEqual((res.revisados, res.sin_revisar), (RECIENTES[:3], RECIENTES[3:]))
+        self.assertEqual([a.valor for a in res.activos], ['www.acme-demo.mx'])
+        self.assertEqual(c.consultas, 4)
+        # el turno de un CDX se espera solo hasta que queden MINIMO_INTENTO segundos
+        self.assertEqual(ritmo.candado.plazos[-1], subfinder.MAX_SEGUNDOS - subfinder.MINIMO_INTENTO)
+
+    def test_4c_un_503_que_llega_en_el_fin_de_la_corrida_corta(self):
+        """Solo una falla que se salta pasa a SIN_TIEMPO al llegar en `fin`: un 503 sigue cortando la corrida."""
+        reloj = Reloj()
+
+        def tarde(url, plazo, tope, cronometro):
+            if RECIENTES[3] in url:
+                reloj.ahora = 1000.0 + subfinder.MAX_SEGUNDOS
+                raise http(url, 503)
+            return subfinder._descargar(url, plazo, tope, cronometro)
+
+        c = cliente(cronometro=reloj)
+        c.descargar = tarde
+        with con_cdx(CdxSimulado()), self.assertRaises(contrato.FuenteNoResponde) as error:
+            c.enumerar('acme-demo.mx')
+        self.assertIn('no respondió en %s (HTTP 503)' % RECIENTES[3], str(error.exception))
 
     def test_5_una_falla_tambien_suelta_el_turno_y_marca_la_hora(self):
         ritmo = subfinder.Ritmo()
@@ -509,7 +736,7 @@ class GrabarYReproducir(unittest.TestCase):
             carpeta.mkdir()
             (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')  # de una grabación anterior
             grabado, c = recolectar(CdxSimulado(), 'grabar', carpeta, nueva=True)
-            self.assertEqual(c.consultas, subfinder.MAX_CONSULTAS)
+            self.assertEqual(c.consultas, 1 + subfinder.INDICES)
             self.assertFalse((carpeta / 'viejo.json').exists())
             self.assertIsNotNone(contrato.Grabadora.inicio(carpeta))
             archivo = json.loads((carpeta / 'subfinder_acme-demo.mx.json').read_text(encoding='utf-8'))
@@ -558,7 +785,7 @@ class GrabarYReproducir(unittest.TestCase):
     def test_5_por_ejecutar_graba_y_reproduce(self):
         with tempfile.TemporaryDirectory() as d:
             res = por_ejecutar(CdxSimulado(), 'grabar', d)
-            self.assertEqual((res.estado, res.consultas), ('succeeded', subfinder.MAX_CONSULTAS))
+            self.assertEqual((res.estado, res.consultas), ('succeeded', 1 + subfinder.INDICES))
             otra = por_ejecutar(sin_red, 'reproducir', d)
         self.assertEqual((otra.estado, otra.consultas), ('succeeded', 0))
         self.assertEqual(otra.activos, res.activos)
@@ -574,9 +801,16 @@ class GrabarYReproducir(unittest.TestCase):
 class Consultas(unittest.TestCase):
 
     def test_1_collinfo_mas_12_indices_en_vivo_y_ninguna_al_reproducir(self):
-        self.assertEqual(subfinder.MAX_CONSULTAS, 13)
         self.assertEqual(por_ejecutar(CdxSimulado()).consultas, 13)
         self.assertEqual(por_ejecutar(CdxSimulado({})).consultas, 13)   # un 404 también es una petición
+        self.assertEqual(por_ejecutar(sin_red, 'reproducir').consultas, 0)
+
+    def test_2_max_consultas_cuenta_un_cdx_por_indice_y_los_reintentos_de_la_corrida(self):
+        self.assertEqual(subfinder.MAX_CONSULTAS, 1 + 12 + subfinder.REINTENTOS)
+        self.assertEqual(subfinder.MAX_CONSULTAS, 25)
+        # cada intento es una consulta, también los que dan 504
+        self.assertEqual(por_ejecutar(CdxSimulado(fallas={RECIENTES[0]: [504], RECIENTES[5]: [502, 504]})).consultas,
+                         16)
 
 
 def fila_de_la_semilla(code):
@@ -604,13 +838,18 @@ class Semilla(unittest.TestCase):
         self.assertEqual(fila['enabled'].lower(), 'false')
         self.assertEqual(int(fila['daily_limit']), 400)  # 50 corridas de las 8 fuentes de entonces
 
-    def test_2_la_016_lo_prende_con_30_corridas_por_dia_sin_pisar_un_limite_puesto_a_mano(self):
+    def test_2_la_016_lo_prende_con_390_por_dia_sin_pisar_un_limite_puesto_a_mano(self):
         texto = re.sub(r'--[^\n]*', '', SEMILLA_016.read_text(encoding='utf-8'))
         cambios = re.findall(r"UPDATE\s+data_sources\s+SET\s+(\w+)\s*=\s*(\w+)\s+WHERE\s+code\s*=\s*'subfinder'"
                              r"\s+AND\s+(\w+)\s*=\s*(\w+)\s*;", texto, re.IGNORECASE)
-        self.assertEqual(sorted(cambios), [('daily_limit', str(30 * subfinder.MAX_CONSULTAS), 'daily_limit', '400'),
+        self.assertEqual(sorted(cambios), [('daily_limit', '390', 'daily_limit', '400'),
                                            ('enabled', 'true', 'enabled', 'false')])
-        self.assertEqual(30 * subfinder.MAX_CONSULTAS, 390)
+        # El orquestador reserva MAX_CONSULTAS (25) antes de cada corrida y luego ajusta a las 13 de una sin fallas:
+        # la corrida k reserva si 13 (k - 1) + 25 <= 390, o sea 29 por día (la 30 queda sin cupo). 15 reservas a la vez.
+        limpia = 1 + subfinder.INDICES
+        sin_fallas = (390 - subfinder.MAX_CONSULTAS) // limpia + 1
+        self.assertEqual((sin_fallas, 390 // subfinder.MAX_CONSULTAS), (29, 15))
+        self.assertGreater(limpia * sin_fallas + subfinder.MAX_CONSULTAS, 390)   # la 30: 377 + 25 = 402
         self.assertIn("RAISE EXCEPTION", texto)   # sin la fila de la 005 falla
         self.assertRegex(texto, r'daily_limit\s*<\s*%d\b' % subfinder.MAX_CONSULTAS)
         self.assertTrue(texto.lstrip().startswith("SET client_encoding = 'UTF8';"))

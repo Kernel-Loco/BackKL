@@ -19,12 +19,17 @@
 --   (c) que el contenedor escriba en respuestas_grabadas/subfinder/: el
 --       Dockerfile le da esa carpeta, y solo esa, al usuario cirdan.
 --
--- subfinder: 390 consultas por día, o sea 30 corridas por día. Desde esta
--- semilla una consulta es una petición HTTP, como en las demás fuentes:
--- subfinder.py pide collinfo.json y el CDX de cada uno de los 12 índices
--- más recientes de Common Crawl, así que una corrida hace a lo más 13
--- (MAX_CONSULTAS de subfinder.py) y el orquestador reserva 13. Un índice
--- sin capturas del dominio también es una petición.
+-- subfinder: 390 consultas por día. Desde esta semilla una consulta es una
+-- petición HTTP, como en las demás fuentes: subfinder.py pide
+-- collinfo.json y el CDX de cada uno de los 12 índices más recientes de
+-- Common Crawl, y pide otra vez, hasta 2 veces, el CDX que da 500, 502 o
+-- 504, con 12 reintentos en toda la corrida. Una corrida sin fallas hace
+-- 13 y una de peor caso 25 (MAX_CONSULTAS de subfinder.py). El
+-- orquestador reserva 25 antes de cada corrida y al terminar ajusta a las
+-- que se hicieron: caben 29 corridas por día sin fallas (la 30 pide
+-- 377 + 25 = 402 y queda sin cupo), 15 a la vez y 15 de peor caso. Un
+-- escaneo con Common Crawl caído gasta a lo más 100 (4 corridas de 25).
+-- Un índice sin capturas del dominio también es una petición.
 --
 -- Orden: primero se reconstruye la API con este código y después se
 -- aplica la semilla. La imagen anterior corre el binario con las 8
@@ -36,7 +41,7 @@
 --
 -- Se puede correr otra vez sin error: solo cambia el límite si tiene el
 -- 400 de la 005, así no pisa uno puesto a mano. Si ese límite es menor
--- que 13 no cabe ninguna corrida: la semilla lo avisa con un WARNING y no
+-- que 25 no cabe ninguna corrida: la semilla lo avisa con un WARNING y no
 -- lo cambia.
 -- =====================================================================
 
@@ -61,8 +66,8 @@ UPDATE data_sources SET daily_limit = 390
 
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM data_sources WHERE code = 'subfinder' AND daily_limit < 13) THEN
-        RAISE WARNING 'subfinder tiene un límite diario menor que 13, lo que reserva una corrida: no le cabe ninguna';
+    IF EXISTS (SELECT 1 FROM data_sources WHERE code = 'subfinder' AND daily_limit < 25) THEN
+        RAISE WARNING 'subfinder tiene un límite diario menor que 25, lo que reserva una corrida: no le cabe ninguna';
     END IF;
 END $$;
 

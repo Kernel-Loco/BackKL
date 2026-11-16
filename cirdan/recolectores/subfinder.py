@@ -16,10 +16,17 @@ Qué pide, sin tocar los servidores del dominio:
 De cada captura solo se guarda el nombre del host, nunca la URL.
 
 Un 404 con 'No Captures found' es un índice sin capturas del dominio y no corta la búsqueda: se revisan todos. Un
-índice cuyo CDX da 500, 502 o 504 o no termina en TIMEOUT_PETICION (el 16 nov CC-MAIN-2026-43 dio 504 dos veces en una
-hora) se salta y se sigue con los demás: el resultado lleva el aviso SALTADOS con cuáles y por qué, revisados con los
-que sí se revisaron y sin_revisar con los saltados, así el escaneo termina 'partial' (stats.sources_partial), como
-ct_logs cuando falta una variante de dominios parecidos. Si no se revisó ninguno, FuenteNoResponde. Cualquier otra
+índice cuyo CDX da 500, 502 o 504 se pide otra vez tras ESPERAS (15 s y luego 30 s). El 16 nov el nginx de
+index.commoncrawl.org cortó a los ~10 s con 504 o 502 porque los procesos del índice estaban llenos, incluso en una
+consulta que no lee S3, y la misma consulta respondió 15 s después: la falla va y viene y no depende de la consulta.
+Toda la corrida tiene a lo más REINTENTOS reintentos del CDX, así una caída total no pide 3 veces cada índice ni gasta
+el cupo diario sin datos. Si se acaban los intentos del índice o la bolsa de la corrida, si el reintento ya no cabe en
+MAX_SEGUNDOS con MINIMO_INTENTO por delante, o si el CDX no termina en TIMEOUT_PETICION (eso no se reintenta: ya gastó
+su plazo), el índice se salta y se sigue con los demás: el resultado lleva el aviso SALTADOS con cuáles y por qué,
+revisados con los que sí se revisaron y sin_revisar con los saltados, así el escaneo termina 'partial'
+(stats.sources_partial), como ct_logs cuando falta una variante de dominios parecidos. Si ya no caben MINIMO_INTENTO
+segundos para el índice siguiente, o su turno en Ritmo no llega a tiempo, los que faltan quedan en sin_revisar con el
+aviso SIN_TIEMPO: lo ya revisado no se pierde. Si no se revisó ninguno, FuenteNoResponde. Cualquier otra
 respuesta (un 503 o un 429, que son la señal de Common Crawl de bajar el ritmo, un 404 sin ese texto, una red caída, una
 redirección, una respuesta de más de MAX_BYTES_CDX, un 200 sin ninguna captura legible o cualquier falla de
 collinfo.json) deja la corrida en FuenteNoResponde, sin grabar. Así una corrida que termina dice qué índices revisó
@@ -34,9 +41,11 @@ como github.py: no es una fuente caída y el escaneo de una demo no queda partia
 que no se puede leer sí es FuenteNoResponde. No tiene línea de comandos propia. En la imagen, el usuario cirdan es dueño
 de respuestas_grabadas/subfinder/ y de nada más (Dockerfile), así que puede grabar dentro del contenedor.
 
-Consultas del límite diario (#13b): peticiones HTTP, como en las demás fuentes. MAX_CONSULTAS es collinfo.json más un
-CDX por índice, sin reintentos dentro de la corrida (el orquestador la reintenta a 1, 5 y 25 minutos).
-`consultas` cuenta las que sí se hicieron, y 0 al reproducir.
+Consultas del límite diario (#13b): peticiones HTTP, como en las demás fuentes. MAX_CONSULTAS es collinfo.json, un
+CDX por índice y los REINTENTOS de la corrida (25). collinfo.json no se reintenta dentro de la corrida: si falla, la
+corrida queda en FuenteNoResponde y el orquestador la reintenta a 1, 5 y 25 minutos, y cada una de esas corridas
+reserva MAX_CONSULTAS: un escaneo con Common Crawl caído gasta a lo más 4 x 25 = 100. `consultas` cuenta las que sí se
+hicieron (13 si ningún índice falla), y 0 al reproducir.
 """
 import http.client
 import json
@@ -69,16 +78,30 @@ INDICES = 12                 # los índices más recientes que se revisan: unos 
 LIMITE_FILAS = 5000          # capturas por índice (limit del CDX). Si llega, el aviso RECORTADO
 PAUSA = 1.0                  # segundos entre petición y petición
 TIMEOUT_PETICION = 30        # segundos de cada petición, de getaddrinfo al último bloque (transporte.descargar)
-MAX_SEGUNDOS = 300           # segundos de toda la corrida, pausas incluidas
+ESPERAS = (15, 30)           # segundos antes del 2.º y del 3.er intento del CDX de un índice con 500, 502 o 504
+# Reintentos del CDX en toda la corrida, uno por índice en promedio. El 16 nov el 504 iba y venía: con la mitad de los
+# intentos fallando, 12 índices piden unos 10. Con todo caído corta en 25 peticiones y no en 37.
+REINTENTOS = 12
+MINIMO_INTENTO = 20          # segundos que tienen que quedar para pedir un CDX o esperar su reintento, como crt.sh
+# Segundos de toda la corrida, pausas y esperas incluidas. El peor caso de una corrida sola son unos 1045 s: 25
+# peticiones de TIMEOUT_PETICION (un 500, 502 o 504 puede llegar hasta ahí), 6 índices con sus 2 esperas (la bolsa en
+# pares, 6 x 45 s) y la PAUSA antes de cada petición. Con el 504 a los ~10.5 s del 16 nov y todo caído son unos 560 s.
+# Queda debajo de TOPE_CORRIDA (20 min) del orquestador. Con otras corridas en Ritmo puede no alcanzar: los índices que
+# falten quedan sin revisar (SIN_TIEMPO), sin tirar los revisados. Con los reintentos del orquestador (1, 5 y 25 min) un
+# escaneo tiene a subfinder en curso a lo más unos 101 min (4 x 1050 s + 31 min), unos 68 min en la caída del 16 nov.
+MAX_SEGUNDOS = 1050
 MAX_BYTES_COLLINFO = 1 << 20
 MAX_BYTES_CDX = 4 << 20      # 5000 capturas de solo la URL caben con holgura
-MAX_CONSULTAS = 1 + INDICES  # collinfo.json más un CDX por índice: peticiones HTTP de una corrida (#13b)
+# collinfo.json, un CDX por índice y los reintentos de la corrida: peticiones HTTP de una corrida (#13b), 25
+MAX_CONSULTAS = 1 + INDICES + REINTENTOS
 CONSULTA = 'subfinder:'      # consulta de la grabadora: subfinder_<dominio>.json
 SIN_CAPTURAS = 'subfinder: Common Crawl no tiene capturas de este dominio en sus últimos %d índices'
 SIN_GRABACION_DOMINIO = 'subfinder: no hay grabación de Common Crawl de este dominio, no se revisó Common Crawl'
 RECORTADO = 'subfinder: %s al tope de %d capturas, la lista puede estar incompleta'
 SALTADOS = 'subfinder: Common Crawl no respondió en %s, se revisaron los demás índices'
-SALTABLES = (500, 502, 504)   # el servidor de ese índice falló o no contestó a tiempo: se salta (no 503 ni 429)
+SIN_TIEMPO = 'subfinder: la corrida llegó a su tope de %d s sin revisar %s'
+REINTENTABLES = (500, 502, 504)   # el servidor de ese índice falló o no contestó a tiempo: se reintenta y, si se
+                                  # acaban los intentos, se salta (no 503 ni 429, que cortan la corrida)
 NO_CAPTURAS = b'No Captures found'   # el cuerpo del 404 del CDX cuando el índice no tiene capturas del dominio
 NOMBRE_FUENTE = re.compile(r'[a-z0-9_-]{1,40}')
 FALLAS = (OSError, ValueError, http.client.HTTPException, transporte.PlazoVencido, transporte.Redirigida)
@@ -88,11 +111,15 @@ class SinCapturas(Exception):
     """El 404 'No Captures found' del CDX: el índice no tiene capturas del dominio."""
 
 
+def _reintentable(error):
+    """Un 500, 502 o 504: el servidor del índice falló o nginx cortó a los ~10 s. No la señal de bajar el ritmo (503
+    o 429) ni una respuesta rara."""
+    return isinstance(error, urllib.error.HTTPError) and error.code in REINTENTABLES
+
+
 def _saltable(error):
-    """Un 500, 502 o 504 o el plazo de la petición vencido: una falla de ese índice, no la señal de bajar el ritmo
-    (503 o 429) ni una respuesta rara."""
-    return isinstance(error, transporte.PlazoVencido) or (isinstance(error, urllib.error.HTTPError) and
-                                                           error.code in SALTABLES)
+    """Un 500, 502 o 504 (ya sin reintentos) o el plazo de la petición vencido: una falla de ese índice."""
+    return isinstance(error, transporte.PlazoVencido) or _reintentable(error)
 
 
 class Ritmo:
@@ -175,6 +202,19 @@ def _motivo(error):
     return type(error).__name__
 
 
+def _sin_tiempo(que):
+    error = FuenteNoResponde('subfinder: Common Crawl no terminó en %d s (faltó %s)' % (MAX_SEGUNDOS, que))
+    error.sin_tiempo = True   # _consultar deja sin revisar los índices que faltan
+    return error
+
+
+def _saltado(indice, error):
+    """El texto de un índice saltado en el aviso SALTADOS: su falla, cuántos intentos y por qué no hubo otro."""
+    detalle = error.motivo if error.intentos == 1 else '%s tras %d intentos' % (error.motivo, error.intentos)
+    por_que = getattr(error, 'sin_otro', None)
+    return '%s (%s)' % (indice, detalle if por_que is None else '%s, %s' % (detalle, por_que))
+
+
 def _cuantos(n, singular, plural):
     return '%d %s' % (n, singular if n == 1 else plural)
 
@@ -195,18 +235,20 @@ class ClienteSubfinder:
         self.dormir = dormir or time.sleep
         self.ritmo = ritmo or RITMO
         self.consultas = 0
+        self.reintentos = REINTENTOS   # los que le quedan a la corrida: _consultar la llena al empezar
 
     @property
     def leidas(self):
         """(archivo, fecha de grabación) de cada respuesta tomada del disco."""
         return self.grabadora.leidas
 
-    def _pedir(self, url, tope, fin, que):
+    def _pedir(self, url, tope, fin, que, minimo=0):
         """El cuerpo de una petición, con lo que quede de la corrida como plazo. `que` nombra la petición en el error.
-        Espera su turno en `ritmo` (a lo más hasta `fin`) y, si la última petición del proceso terminó hace menos de
-        PAUSA, lo que falte para completarla."""
-        sin_tiempo = FuenteNoResponde('subfinder: Common Crawl no terminó en %d s (faltó %s)' % (MAX_SEGUNDOS, que))
-        if not self.ritmo.candado.acquire(timeout=max(0.0, fin - self.cronometro())):
+        Espera su turno en `ritmo` (a lo más hasta que solo queden `minimo` segundos) y, si la última petición del
+        proceso terminó hace menos de PAUSA, lo que falte para completarla. No pide si después quedan menos de
+        `minimo` segundos: eso es la corrida sin tiempo (el error lleva sin_tiempo)."""
+        sin_tiempo = _sin_tiempo(que)
+        if not self.ritmo.candado.acquire(timeout=max(0.0, fin - minimo - self.cronometro())):
             raise sin_tiempo
         try:
             if self.ritmo.ultima is not None:
@@ -214,38 +256,68 @@ class ClienteSubfinder:
                 if falta > 0:
                     self.dormir(min(falta, PAUSA))
             ahora = self.cronometro()
-            if ahora >= fin:
+            if ahora >= fin or fin - ahora < minimo:
                 raise sin_tiempo
             self.consultas += 1
             try:
                 return self.descargar(url, min(ahora + TIMEOUT_PETICION, fin), tope, self.cronometro)
             except FALLAS as e:
                 error = FuenteNoResponde('subfinder: Common Crawl no respondió en %s (%s)' % (que, _motivo(e)))
-                error.motivo, error.saltable = _motivo(e), _saltable(e)   # _consultar decide si salta el índice
+                # _cdx decide si reintenta y _consultar si salta el índice
+                error.motivo, error.saltable, error.reintentable = _motivo(e), _saltable(e), _reintentable(e)
                 raise error from None
             finally:
                 self.ritmo.ultima = self.cronometro()
         finally:
             self.ritmo.candado.release()
 
+    def _cdx(self, indice, dominio, fin):
+        """El CDX de un índice, con un intento más tras cada una de ESPERAS si da 500, 502 o 504, mientras quede bolsa
+        (self.reintentos) y el reintento quepa: la espera, la PAUSA y MINIMO_INTENTO antes de `fin`. La espera va fuera
+        del turno de `ritmo`, así las demás corridas siguen con su PAUSA. El último error sale con 'intentos' y, si
+        quedaban intentos del índice, 'sin_otro' con el porqué, para el aviso SALTADOS."""
+        intentos = 0
+        for espera in ESPERAS + (None,):
+            intentos += 1
+            try:
+                return self._pedir(url_cdx(indice, dominio), MAX_BYTES_CDX, fin, indice, MINIMO_INTENTO)
+            except FuenteNoResponde as e:
+                e.intentos = intentos
+                if espera is None or not getattr(e, 'reintentable', False):
+                    raise
+                if self.reintentos <= 0:
+                    e.sin_otro = 'sin reintentos en la corrida'
+                    raise
+                if self.cronometro() + espera + PAUSA + MINIMO_INTENTO > fin:
+                    e.sin_otro = 'sin tiempo para reintentar'
+                    raise
+            self.reintentos -= 1
+            self.dormir(espera)
+
     def _consultar(self, dominio):
         fin = self.cronometro() + MAX_SEGUNDOS
+        self.reintentos = REINTENTOS
         try:
             ids = indices(self._pedir(COLLINFO, MAX_BYTES_COLLINFO, fin, 'collinfo.json'))
         except SinCapturas:
             raise FuenteNoResponde('subfinder: Common Crawl no respondió en collinfo.json (HTTP 404)') from None
         nombres, recortados, raras, con_capturas, revisados, saltados = set(), [], 0, 0, [], []
-        for indice in ids:
+        faltan = []   # los que ya no cupieron en MAX_SEGUNDOS
+        for n, indice in enumerate(ids):
             try:
-                cuerpo = self._pedir(url_cdx(indice, dominio), MAX_BYTES_CDX, fin, indice)
+                cuerpo = self._cdx(indice, dominio, fin)
             except SinCapturas:
                 revisados.append(indice)
                 continue
             except FuenteNoResponde as e:
-                # Sin tiempo no se salta: ese índice faltó porque la corrida no terminó.
-                if not getattr(e, 'saltable', False) or self.cronometro() >= fin:
+                # Sin tiempo (también un plazo vencido o un 5xx en `fin`), ni este ni los que siguen caben: quedan sin
+                # revisar. Un 503, un 429 o cualquier falla que no se salta corta aunque llegue en `fin`.
+                if getattr(e, 'sin_tiempo', False) or (getattr(e, 'saltable', False) and self.cronometro() >= fin):
+                    faltan = ids[n:]
+                    break
+                if not getattr(e, 'saltable', False):
                     raise
-                saltados.append('%s (%s)' % (indice, e.motivo))
+                saltados.append(_saltado(indice, e))
                 continue
             encontrados, filas, malas = hosts(cuerpo)
             if malas == filas:   # un 200 vacío o sin ninguna captura legible: no se sabe qué hay, no se graba
@@ -257,11 +329,15 @@ class ClienteSubfinder:
             if filas >= LIMITE_FILAS:
                 recortados.append(indice)
         if not revisados:
+            if not saltados:
+                raise _sin_tiempo(faltan[0])
             raise FuenteNoResponde('subfinder: Common Crawl no respondió en ninguno de sus %d índices (%s)' % (
-                len(ids), ', '.join(saltados)))
+                len(ids), ', '.join(saltados + (['sin tiempo para %s' % ', '.join(faltan)] if faltan else []))))
         avisos = []
         if saltados:
             avisos.append(SALTADOS % ', '.join(saltados))
+        if faltan:
+            avisos.append(SIN_TIEMPO % (MAX_SEGUNDOS, ', '.join(faltan)))
         if not con_capturas:
             avisos.append(SIN_CAPTURAS % len(revisados))
         if recortados:
@@ -273,14 +349,15 @@ class ClienteSubfinder:
                 'pudo' if raras == 1 else 'pudieron'))
         lineas = [{'host': h, 'input': dominio, 'sources': [ORIGEN]} for h in sorted(nombres)]
         datos = {'lineas': lineas, 'avisos': avisos, 'indices': ids}
-        if saltados:
+        if saltados or faltan:
             datos['revisados'] = revisados
         return datos
 
     def enumerar(self, dominio):
-        """{'lineas', 'avisos', 'indices'} de Common Crawl para el dominio, más 'revisados' si se saltó algún índice.
-        Sale del disco al reproducir (SinGrabacion si no hay grabación) y se graba al grabar. Si la corrida queda en
-        FuenteNoResponde no se graba nada, así la grabación anterior queda intacta. Un índice saltado no la deja así."""
+        """{'lineas', 'avisos', 'indices'} de Common Crawl para el dominio, más 'revisados' si se saltó algún índice o
+        faltaron por tiempo. Sale del disco al reproducir (SinGrabacion si no hay grabación) y se graba al grabar. Si la
+        corrida queda en FuenteNoResponde no se graba nada, así la grabación anterior queda intacta. Un índice saltado
+        o sin tiempo no la deja así."""
         consulta = CONSULTA + dominio
         del_disco, datos = self.grabadora.de_disco(consulta)
         if del_disco:
