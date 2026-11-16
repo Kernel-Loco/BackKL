@@ -16,6 +16,7 @@ import threading
 import time
 
 import pyotp
+import segno
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from cirdan.auth import keyvault
@@ -84,6 +85,25 @@ def encrypt_secret(secret, user_id):
 def decrypt_secret(blob, user_id):
     blob = bytes(blob)
     return AESGCM(_key()).decrypt(blob[:12], blob[12:], str(user_id).encode()).decode()
+
+
+ISSUER = 'LowTide'
+
+
+def new_secret():
+    """Secreto nuevo de 160 bits en base32 (el tamaño que recomienda el RFC 4226 para HMAC-SHA1)."""
+    return pyotp.random_base32(32)
+
+
+def provisioning_uri(secret, email):
+    """URI otpauth://totp/ que leen las apps autenticadoras: SHA1, 6 dígitos y 30 s, lo mismo que verify_code."""
+    return pyotp.TOTP(secret, interval=STEP_SECONDS).provisioning_uri(name=email, issuer_name=ISSUER)
+
+
+def qr_svg_data_uri(uri):
+    """El QR de la URI como imagen SVG en un data: URI. Se dibuja aquí para que el secreto no pase por
+    ningún servicio ni paquete de terceros en el navegador."""
+    return segno.make(uri, error='m').svg_data_uri(scale=6, border=4, dark='#000', light='#fff')
 
 
 def verify_code(secret, code, last_step=None, now=None):

@@ -4,6 +4,8 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
 - Inactividad: 15 min (OWASP ASVS V3.3, igual que el aviso del portal).
 - Duración máxima: 8 h aunque haya actividad.
 - Verificación en dos pasos pendiente: 5 min y 5 intentos.
+- Alta de la verificación en dos pasos (RC-154): el secreto nuevo espera aquí 10 min y 5 códigos, cifrado.
+- Captcha del login (RC-154): la llave HMAC de los retos y los retos ya usados, hasta que vencen.
 - Bloqueo por intentos: 5 fallos por correo o 20 por IP en 15 min. Un código equivocado también
   cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Una IPv6
   cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
@@ -23,6 +25,7 @@ IDLE_SECONDS = 15 * 60
 ABSOLUTE_SECONDS = 8 * 60 * 60
 MFA_SECONDS = 5 * 60
 MFA_MAX_ATTEMPTS = 5
+MFA_SETUP_SECONDS = 10 * 60
 LOCK_SECONDS = 15 * 60
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
@@ -43,11 +46,22 @@ def _digest(token):
 
 # ------------------------------------------------------------------ sesiones
 
+def _user_sessions_key(user_id):
+    return 'sess-user:' + _digest(str(user_id))
+
+
 def create(data):
-    """Crea una sesión y devuelve el token que va en la cookie."""
+    """Crea una sesión y devuelve el token que va en la cookie. La anota también en el índice de sesiones de su
+    usuario (RC-154), que vive lo mismo que la más nueva: 8 h desde la última creada."""
     token = secrets.token_urlsafe(32)
+    digest = _digest(token)
     payload = dict(data, created_at=int(time.time()))
-    _valkey().set('sess:' + _digest(token), json.dumps(payload), ex=IDLE_SECONDS)
+    pipe = _valkey().pipeline()
+    pipe.set('sess:' + digest, json.dumps(payload), ex=IDLE_SECONDS)
+    if data.get('user_id'):
+        pipe.sadd(_user_sessions_key(data['user_id']), digest)
+        pipe.expire(_user_sessions_key(data['user_id']), ABSOLUTE_SECONDS)
+    pipe.execute()
     return token
 
 
@@ -67,9 +81,41 @@ def get(token):
     return data
 
 
+def limits(created_at=None):
+    """Lo que le queda a la sesión, para el aviso del portal (RC-328): la inactividad que renueva cada petición y
+    los segundos hasta el tope de 8 h, contados desde que se creó en Valkey. Sin created_at es una sesión nueva."""
+    if created_at is None:
+        left = ABSOLUTE_SECONDS
+    else:
+        left = max(0, int(created_at + ABSOLUTE_SECONDS - time.time()))
+    return {'idle_timeout_seconds': IDLE_SECONDS, 'absolute_expires_in_seconds': left}
+
+
 def delete(token):
     if token:
         _valkey().delete('sess:' + _digest(token))
+
+
+# Corre entera dentro de Valkey: una sesión creada a la vez entra al índice antes (y se borra) o después. Que no
+# entre después sin el segundo factor lo asegura el FOR NO KEY UPDATE del login contra el FOR UPDATE del alta.
+_DELETE_OTHERS = '''
+local keep = ARGV[1]
+for _, digest in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+  if digest ~= keep then redis.call('DEL', 'sess:' .. digest) end
+end
+redis.call('DEL', KEYS[1])
+if keep ~= '' and redis.call('EXISTS', 'sess:' .. keep) == 1 then
+  redis.call('SADD', KEYS[1], keep)
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+'''
+
+
+def delete_others(user_id, keep_token):
+    """Cierra todas las sesiones del usuario menos la de `keep_token` (RC-154, al activar la verificación en dos
+    pasos). Las sesiones creadas antes de que existiera el índice no están en él y vencen solas en 8 h."""
+    keep = _digest(keep_token) if keep_token else ''
+    _valkey().eval(_DELETE_OTHERS, 1, _user_sessions_key(user_id), keep, ABSOLUTE_SECONDS)
 
 
 # ------------------------------------------------------------------ verificación en dos pasos pendiente
@@ -107,6 +153,42 @@ def take_mfa(token):
 
 def delete_mfa(token):
     _valkey().delete('mfa:' + _digest(token))
+
+
+# ------------------------------------------------------------------ alta de la verificación en dos pasos (RC-154)
+
+def _setup_key(user_id):
+    return 'mfa:setup:' + _digest(str(user_id))
+
+
+def create_mfa_setup(user_id, secret_enc):
+    """Guarda el secreto pendiente de un alta (ya cifrado, en base64) por MFA_SETUP_SECONDS. Pedir otro QR reemplaza
+    al anterior y reinicia sus intentos. En la base no se escribe nada hasta que llega un código válido."""
+    _valkey().set(_setup_key(user_id), json.dumps({'secret_enc': secret_enc, 'attempts': 0}), ex=MFA_SETUP_SECONDS)
+
+
+def take_mfa_setup(user_id):
+    """Gasta un intento del alta pendiente antes de revisar el código, como take_mfa(); None si no hay o venció."""
+    raw = _valkey().eval(_TAKE_MFA, 1, _setup_key(user_id), MFA_MAX_ATTEMPTS)
+    return json.loads(raw) if raw else None
+
+
+def delete_mfa_setup(user_id):
+    _valkey().delete(_setup_key(user_id))
+
+
+# ------------------------------------------------------------------ captcha del login (RC-154)
+
+def captcha_hmac_key(candidate):
+    """La llave HMAC de los retos: la que ya está en Valkey o, si no hay, `candidate`. SET NX GET la deja en un solo
+    paso, así que dos procesos que arrancan a la vez terminan con la misma."""
+    old = _valkey().set('captcha:hmac', candidate, nx=True, get=True)
+    return old or candidate
+
+
+def spend_captcha(nonce, seconds):
+    """Gasta el reto una sola vez: True la primera vez que llega su nonce, False las demás."""
+    return bool(_valkey().set('captcha:used:' + _digest(nonce), '1', nx=True, ex=seconds))
 
 
 # ------------------------------------------------------------------ bloqueo por intentos

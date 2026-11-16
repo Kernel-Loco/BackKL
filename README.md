@@ -56,7 +56,7 @@ Para trabajar en la API sin reconstruir la imagen: `docker compose stop api`, cr
 
 ## Pruebas de la base
 
-`pruebas/test_aislamiento.py` corre 15 pruebas con la biblioteca estándar de Python (sin instalar paquetes) contra la base `cirdan` del contenedor `cirdan-pg16`, que debe estar encendido (`docker compose up -d` si se apagó, por ejemplo al reiniciar la PC). No usa el `.env`: entra con `docker exec` y el `psql` del contenedor, como `cirdan_app` y, en 6 pruebas, como `postgres`. Revisa el rol sin privilegios, RLS forzado en 18 tablas, Acme ve solo lo suyo (5 dominios, 4 hallazgos, 3 usuarios), Beta Corp ve 1, 1 y 1, sin cliente se ve 0, no se puede escribir a nombre de otro cliente, no se puede escanear con la autorización vencida y la bitácora no se modifica. También revisa `login_lookup()` (migración 004): su `search_path` termina en `pg_temp`, devuelve solo 4 columnas y una vista temporal `users` no la engaña ni vuelve superusuario a `cirdan_app`. Cada escritura va en una transacción que se deshace. Si tu base se creó antes de la migración 004, esas 3 pruebas fallan hasta que la apliques a mano, como dice [`db/README.md`](db/README.md#aplicar-una-migración-nueva-a-una-base-que-ya-existe). La prueba 12 revisa las funciones del límite diario (migración 008): `reserve_source_quota()` y `adjust_source_quota()` son SECURITY DEFINER, su `search_path` termina en `pg_temp` y PUBLIC no las ejecuta. Sin la 008 falla hasta que la apliques igual. La prueba 13 revisa que el score de Acme quedó corregido con `reason = correction` (migración 010 y semillas 009 y 010) y que el trigger de solo inserción de `domain_scores` sigue encendido después de la semilla 010. Sin la 010 falla igual. La prueba 14 revisa que un texto de regla no entra sin su mapeo a marcos ni su mapeo se borra (FK diferida de la migración 012). La prueba 15 revisa el mapeo que quedó en la base: 30 textos y 30 mapeos con los mismos códigos, toda regla con su mapeo, las versiones de los marcos de cada fila, los CHECK y los NOT NULL de la 011, los NOT NULL de `created_at` y `updated_at`, la FK diferida de la 012 y que el texto de las 25 reglas OSINT (#14 a #20) lo firmó ErnestoDL. Sin la 012 las dos fallan igual.
+`pruebas/test_aislamiento.py` corre 15 pruebas con la biblioteca estándar de Python (sin instalar paquetes) contra la base `cirdan` del contenedor `cirdan-pg16`, que debe estar encendido (`docker compose up -d` si se apagó, por ejemplo al reiniciar la PC). No usa el `.env`: entra con `docker exec` y el `psql` del contenedor, como `cirdan_app` y, en 6 pruebas, como `postgres`. Revisa el rol sin privilegios, RLS forzado y con política en toda tabla con `organization_id` (sin un número fijo: una tabla nueva entra sola), Acme ve solo lo suyo (5 dominios, 4 hallazgos, 3 usuarios), Beta Corp ve 1, 1 y 1, sin cliente se ve 0, no se puede escribir a nombre de otro cliente, no se puede escanear con la autorización vencida y la bitácora no se modifica. También revisa `login_lookup()` (migración 004): su `search_path` termina en `pg_temp`, devuelve solo 4 columnas y una vista temporal `users` no la engaña ni vuelve superusuario a `cirdan_app`. Cada escritura va en una transacción que se deshace. Si tu base se creó antes de la migración 004, esas 3 pruebas fallan hasta que la apliques a mano, como dice [`db/README.md`](db/README.md#aplicar-una-migración-nueva-a-una-base-que-ya-existe). La prueba 12 revisa las funciones del límite diario (migración 008): `reserve_source_quota()` y `adjust_source_quota()` son SECURITY DEFINER, su `search_path` termina en `pg_temp` y PUBLIC no las ejecuta. Sin la 008 falla hasta que la apliques igual. La prueba 13 revisa que el score de Acme quedó corregido con `reason = correction` (migración 010 y semillas 009 y 010) y que el trigger de solo inserción de `domain_scores` sigue encendido después de la semilla 010. Sin la 010 falla igual. La prueba 14 revisa que un texto de regla no entra sin su mapeo a marcos ni su mapeo se borra (FK diferida de la migración 012). La prueba 15 revisa el mapeo que quedó en la base: 30 textos y 30 mapeos con los mismos códigos, toda regla con su mapeo, las versiones de los marcos de cada fila, los CHECK y los NOT NULL de la 011, los NOT NULL de `created_at` y `updated_at`, la FK diferida de la 012 y que el texto de las 25 reglas OSINT (#14 a #20) lo firmó ErnestoDL. Sin la 012 las dos fallan igual.
 
 ```bash
 python -m unittest -v pruebas/test_aislamiento.py
@@ -80,20 +80,24 @@ El 19 oct 2026 pasaron las 16 (8 de aislamiento y 8 del dominio de prueba) con l
 
 ## Inicio de sesión (#25)
 
-Correo y contraseña, y después el código de 6 dígitos de una app autenticadora (TOTP). Al verificar el código, la API entrega una cookie `lt_session` (httpOnly, SameSite=Lax, Secure en producción con `COOKIE_SECURE=true`) que solo lleva un token aleatorio. La sesión vive en Valkey, guardada bajo el SHA-256 del token: expira a los 15 min sin actividad y a las 8 h aunque haya actividad, y al cerrar sesión se borra del servidor.
+Correo, contraseña y captcha, y después el código de 6 dígitos de una app autenticadora (TOTP). Al verificar el código, la API entrega una cookie `lt_session` (httpOnly, SameSite=Lax, Secure en producción con `COOKIE_SECURE=true`) que solo lleva un token aleatorio. La sesión vive en Valkey, guardada bajo el SHA-256 del token: expira a los 15 min sin actividad y a las 8 h aunque haya actividad, y al cerrar sesión se borra del servidor.
 
 | Endpoint | Qué hace |
 |---|---|
-| `POST /api/v1/auth/login` | Correo y contraseña. Con MFA activo responde `{mfa_required: true, mfa_token}` (válido 5 min y 5 intentos) |
+| `GET /api/v1/auth/captcha` | Reto ALTCHA firmado para el siguiente login (vence en 10 min, `Cache-Control: no-store`) |
+| `POST /api/v1/auth/login` | Correo, contraseña y `captcha` (el reto resuelto). Con MFA activo responde `{mfa_required: true, mfa_token}` (válido 5 min y 5 intentos) |
 | `POST /api/v1/auth/mfa/verify` | `mfa_token` y código. Crea la sesión y pone la cookie |
 | `POST /api/v1/auth/logout` | Borra la sesión en Valkey y la cookie |
 | `GET /api/v1/auth/me` | Usuario de la sesión (nunca el hash ni el secreto TOTP) |
 | `POST /api/v1/auth/password` | Cambia la contraseña (mínimo 12 caracteres) |
+| `POST /api/v1/auth/mfa/setup` | Alta de TOTP desde el perfil: con la contraseña actual da un secreto nuevo con su QR (espera 10 min y 5 códigos en Valkey, cifrado) |
+| `POST /api/v1/auth/mfa/enable` | Guarda el secreto del alta solo si llega un código válido de la app |
 
 Seguridad:
 - **Contraseñas con argon2id** (t=3, 64 MiB, p=4, fijos con `profiles.RFC_9106_LOW_MEMORY`). La huella se guarda cifrada con AES-256-GCM (pepper, RC-330): `lt1$` más la cadena PHC cifrada, con el id del usuario como dato asociado, así que con un volcado de la base no se pueden probar contraseñas y la huella de una cuenta no abre otra. La llave es `PASSWORD_HASH_ENCRYPTION_KEY`, otra que la del MFA, o en la VM `PASSWORD_HASH_KEY_VAULT_SECRET_URL`, nunca las dos. Sin llave la API no arranca. Una huella de antes, sin cifrar, entra una vez y queda cifrada en ese inicio de sesión. Si el correo no existe, el mensaje y el tiempo son los mismos que con una contraseña equivocada, así que no se puede saber qué correos existen. Por eso el fallo se escribe en la bitácora después de mandar el 401.
 - **Bloqueo:** 5 fallos por correo o 20 por IP en 15 min responden 429. Un código equivocado también cuenta como fallo, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Cada código gasta su intento antes de revisarse, así que las peticiones en paralelo tampoco pasan de 5.
 - **El secreto TOTP** se guarda cifrado con AES-256-GCM (llave `TOTP_ENCRYPTION_KEY`, fuera de la base). En la VM la llave vive en Azure Key Vault y la API la lee con la identidad administrada (`TOTP_KEY_VAULT_SECRET_URL`, docs/despliegue.md). `last_totp_step` impide usar dos veces el mismo código.
+- **Captcha (RC-154):** ALTCHA autohospedado, una prueba de trabajo (PBKDF2-SHA256) que el navegador resuelve sin terceros ni cookies. La API firma el reto con HMAC, lo revisa sin red con la librería `altcha` y lo gasta una sola vez en Valkey. Sin captcha válido responde 400 antes de buscar el correo, y eso no cuenta como fallo para el bloqueo. La llave HMAC no va en el `.env`: es una al azar que se guarda en Valkey la primera vez.
 - **Contra CSRF:** las escrituras con un `Origin` que no esté en `ALLOWED_ORIGINS` responden 403.
 - Cada inicio, fallo, código equivocado, cierre de sesión y cambio de contraseña queda en la bitácora (`auth.*`).
 - **La búsqueda del correo al iniciar sesión** usa `login_lookup()` (migraciones 002 y 004), porque antes del login no hay empresa para RLS. Solo devuelve el id, la empresa, el hash y si la cuenta tiene MFA. Su `search_path` termina en `pg_temp` y `cirdan_app` no puede crear objetos temporales, así que nadie puede cambiarle la tabla `users` por una vista temporal. El rol y el secreto TOTP se leen después, ya con RLS.
@@ -543,6 +547,12 @@ python -m unittest -v pruebas/test_contrato_api.py   # 26 pruebas, sin base ni r
 
 ```bash
 python -m unittest -v pruebas/test_politica_seguridad.py   # 10 pruebas, sin base ni red
+```
+
+`pruebas/test_pesos_configurables.py` revisa la validación y la resolución de los pesos de `PUT /scoring/weights` (#32), y `pruebas/test_ci.py` revisa que `.github/workflows/pruebas.yml` corra cada archivo `pruebas/test_*.py` completo.
+
+```bash
+python -m unittest -v pruebas/test_pesos_configurables.py pruebas/test_ci.py   # 8 pruebas, sin base ni red
 ```
 
 ## Contrato de plugin (#13)
