@@ -123,10 +123,16 @@ def login(body: LoginIn, request: Request, response: Response):
             # Los fallos del correo se borran hasta que el código sea correcto. Borrados aquí, quien
             # tiene la contraseña repetiría el login y 5 códigos sin llegar nunca al bloqueo.
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
-        # login_lookup() no devuelve el rol (migración 004): se lee aquí con RLS, como en /mfa/verify
-        row = conn.execute('SELECT role FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
+        # login_lookup() no devuelve el rol (migración 004): se lee aquí con RLS, como en /mfa/verify.
+        # FOR NO KEY UPDATE (RC-154), como el UPDATE de last_login_at que viene: un alta de TOTP a la vez espera
+        # a que esta sesión entre al índice y la cierra, o esta lectura espera al alta y la ve ya activa. Con FOR
+        # SHARE dos logins a la vez de la misma cuenta chocaban en un deadlock al subir al lock del UPDATE.
+        row = conn.execute('SELECT role, %s AS mfa_enabled FROM users WHERE id = %%s AND is_active FOR NO KEY UPDATE'
+                           % MFA_ENABLED_SQL, (user_id,)).fetchone()
         if not row:  # se desactivó la cuenta entre la búsqueda y aquí
             raise HTTPException(401, INVALID)
+        if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
+            return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
         user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': email}, ip, 'password')
     _clear_fails(email)
     return {'mfa_required': False, 'user': user}
@@ -245,6 +251,9 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
                          'updated_at = now() WHERE id = %s',
                          (totp.encrypt_secret(secret, session.user_id), step, session.user_id))
             audit(conn, session.org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
+            # Las demás sesiones de la cuenta entraron sin el segundo factor: se cierran y solo queda la que activó.
+            # Va antes del commit y con la fila bloqueada: si Valkey falla, el alta no se guarda y se puede repetir.
+            sessions.delete_others(session.user_id, session.token)
     if step is None:
         sessions.register_mfa_fail(ip)
         raise HTTPException(400, MFA_INVALID)

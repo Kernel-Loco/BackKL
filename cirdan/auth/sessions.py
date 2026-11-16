@@ -46,11 +46,22 @@ def _digest(token):
 
 # ------------------------------------------------------------------ sesiones
 
+def _user_sessions_key(user_id):
+    return 'sess-user:' + _digest(str(user_id))
+
+
 def create(data):
-    """Crea una sesión y devuelve el token que va en la cookie."""
+    """Crea una sesión y devuelve el token que va en la cookie. La anota también en el índice de sesiones de su
+    usuario (RC-154), que vive lo mismo que la más nueva: 8 h desde la última creada."""
     token = secrets.token_urlsafe(32)
+    digest = _digest(token)
     payload = dict(data, created_at=int(time.time()))
-    _valkey().set('sess:' + _digest(token), json.dumps(payload), ex=IDLE_SECONDS)
+    pipe = _valkey().pipeline()
+    pipe.set('sess:' + digest, json.dumps(payload), ex=IDLE_SECONDS)
+    if data.get('user_id'):
+        pipe.sadd(_user_sessions_key(data['user_id']), digest)
+        pipe.expire(_user_sessions_key(data['user_id']), ABSOLUTE_SECONDS)
+    pipe.execute()
     return token
 
 
@@ -73,6 +84,28 @@ def get(token):
 def delete(token):
     if token:
         _valkey().delete('sess:' + _digest(token))
+
+
+# Corre entera dentro de Valkey: una sesión creada a la vez entra al índice antes (y se borra) o después. Que no
+# entre después sin el segundo factor lo asegura el FOR NO KEY UPDATE del login contra el FOR UPDATE del alta.
+_DELETE_OTHERS = '''
+local keep = ARGV[1]
+for _, digest in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+  if digest ~= keep then redis.call('DEL', 'sess:' .. digest) end
+end
+redis.call('DEL', KEYS[1])
+if keep ~= '' and redis.call('EXISTS', 'sess:' .. keep) == 1 then
+  redis.call('SADD', KEYS[1], keep)
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+'''
+
+
+def delete_others(user_id, keep_token):
+    """Cierra todas las sesiones del usuario menos la de `keep_token` (RC-154, al activar la verificación en dos
+    pasos). Las sesiones creadas antes de que existiera el índice no están en él y vencen solas en 8 h."""
+    keep = _digest(keep_token) if keep_token else ''
+    _valkey().eval(_DELETE_OTHERS, 1, _user_sessions_key(user_id), keep, ABSOLUTE_SECONDS)
 
 
 # ------------------------------------------------------------------ verificación en dos pasos pendiente

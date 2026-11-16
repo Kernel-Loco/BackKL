@@ -5,6 +5,7 @@
 Usan a maya.reed@acme-demo.mx sin MFA durante la prueba y al final le devuelven su secreto, su fecha y su paso.
 """
 import base64
+import hashlib
 import os
 import subprocess
 import time
@@ -162,6 +163,28 @@ class AltaTotp(unittest.TestCase):
         self.assertNotIn(body['secret'], valores)
         ttl = int(valores.split()[0])
         self.assertTrue(0 < ttl <= 600, ttl)
+
+    def test_10_al_activar_se_cierran_las_demas_sesiones(self):
+        # Otra sesión abierta antes del alta, solo con contraseña: después del alta da 401 y la que activó sigue.
+        otra = Client()
+        code, body = sesion.post_login(otra, MAYA, PASSWORD)
+        self.assertEqual((code, body['mfa_required']), (200, False), body)
+        self.assertEqual(otra.get(AUTH + '/me')[0], 200)
+        body = self._setup()
+        self.assertEqual(otra.get(AUTH + '/me')[0], 200, 'pedir el QR todavía no cierra nada')
+        code, resp = self.client.post(AUTH + '/mfa/enable', {'code': _codigo(body['secret'])})
+        self.assertEqual((code, resp), (200, {'mfa_enabled': True}))
+        self.assertEqual(otra.get(AUTH + '/me')[0], 401, 'la sesión de antes del alta ya no sirve')
+        code, resp = self.client.get(AUTH + '/me')
+        self.assertEqual(code, 200, 'la sesión que activó sigue')
+        self.assertTrue(resp['mfa_enabled'])
+        # En el índice de la cuenta solo queda la que activó, para que un cierre después tampoco se salte a esa.
+        user_id = scalar("SELECT id FROM users WHERE email = '%s';" % MAYA, user='postgres')
+        indice = 'sess-user:' + hashlib.sha256(user_id.encode()).hexdigest()
+        miembros = subprocess.run(['docker', 'exec', VALKEY, 'sh', '-c',
+                                   'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning scard ' + indice],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(miembros, '1')
 
     def test_8_el_formato_del_codigo_se_revisa(self):
         self._setup()
