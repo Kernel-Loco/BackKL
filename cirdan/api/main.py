@@ -39,8 +39,15 @@ async def _arranque(app):
     yield
 
 
+# Documentación de la API (/openapi.json, /docs y /redoc). En desarrollo queda puesta. En el despliegue va en false
+# (docker-compose.despliegue.yml) y las tres rutas no existen: LowTide escanea su propio dominio y no debe darse
+# exposed_api_docs a sí mismo (comentario 10063 de RC-91).
+API_DOCS = config('API_DOCS', 'true').lower() == 'true'
+
 app = FastAPI(
     lifespan=_arranque,
+    # Con openapi_url en None, FastAPI tampoco registra /docs ni /redoc.
+    openapi_url='/openapi.json' if API_DOCS else None,
     title='LowTide API',
     version='0.2.0',
     description='Inicio de sesión con MFA y endpoints de solo lectura sobre la base cirdan (PostgreSQL 16). '

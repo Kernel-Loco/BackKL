@@ -60,6 +60,8 @@ services:
       FORWARDED_ALLOW_IPS: "10.249.91.10,10.249.92.11"
       # Nunca en el despliegue, aunque el .env diga otra cosa.
       DEMO_EXPLORER: "false"
+      # Sin /openapi.json, /docs ni /redoc: LowTide escanea su propio dominio (comentario 10063 de RC-91).
+      API_DOCS: "false"
       # uvicorn cierra una conexión ociosa a los 5 s por omisión, lo mismo que tarda el proxy de Next (agente de Node)
       # en soltarla: un POST que sale justo entonces termina en 500. Con 65 s siempre la suelta Next primero.
       UVICORN_TIMEOUT_KEEP_ALIVE: "65"
