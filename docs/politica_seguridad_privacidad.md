@@ -56,7 +56,7 @@ Es la declaración de aplicabilidad de LowTide. Estado: Existe, En parte, Falta 
 |---|---|---|
 | 5.1 Políticas de seguridad | Esta política y la de #6, que solo cambian por PR (sección 10) | Existe |
 | 5.2 Papeles y responsabilidades | La tabla de la cláusula 5 y los responsables por rol del backlog | Existe |
-| 5.3 Separación de funciones | Cada PR lo revisa otra persona según el backlog, y uno con migración o que toque RLS lo revisa Ernesto. Excepción: los PR de Ernesto no piden revisión desde el 27 oct, y los cubren el CI y CodeQL. La excepción vale también para los cambios a esta política y a la de #6, aunque la sección 11 de #6 pida la revisión de quien lleve seguridad | En parte |
+| 5.3 Separación de funciones | Cada PR lo revisa otra persona según el backlog, y uno con migración o que toque RLS lo revisa Ernesto. Excepción: los PR de Ernesto no piden revisión desde el 27 oct, y los cubren el CI de pruebas de BackKL y de FrontKL (`pruebas.yml` en los dos), el CI de seguridad de BackKL (`seguridad.yml`, RC-254) y CodeQL en los dos. La excepción vale también para los cambios a esta política y a la de #6, aunque la sección 11 de #6 pida la revisión de quien lleve seguridad | En parte. Ningún check es obligatorio todavía en `dev` ni en `main` (lo prende un owner del repo), así que un PR en rojo se puede fusionar. FrontKL no tiene CI de seguridad |
 | 5.7 Inteligencia de amenazas | CVSS de NVD, EPSS de FIRST y CISA KEV en la tabla `cves`, con cargador diario | Falta. La tabla existe sin filas (#69, RC-127) |
 | 5.9 Inventario de activos | [`servicios_externos.md`](servicios_externos.md) lista cada servicio, cuenta, costo, llave y respaldo | Existe. Desde el 8 nov trae lowtidesec.com, el correo de Resend, Email Routing de Cloudflare y el buzón de Microsoft 365 del Tec, cada uno con su dueño. El 2FA de cada cuenta sigue en el control 5.23 |
 | 5.10 Uso aceptable | Secciones 2 y 7 de #6 y sección 4 de la carta | Existe |
@@ -115,7 +115,7 @@ Los controles 7.1 a 7.6, 7.11 y 7.12 (perímetro, entradas, oficinas, vigilancia
 | 8.9 Configuración | Todo en `docker-compose.yml`, con imágenes fijadas y puertos solo en 127.0.0.1 | Existe |
 | 8.10 Borrado de información | Los plazos de la sección 5.6 | Falta. El rol de retención no tiene tarjeta todavía |
 | 8.11 Enmascaramiento | De un secreto solo se guarda tipo, repo, ruta y huella. gitleaks corre con `--redact`. Excepción: antes de cada análisis se copian todos los TXT del dominio raíz, sin filtrar, a `dns_txt_verifications.observed_values`, que es de solo inserción (sección 5.5, punto 5) | En parte. La excepción, en la sección 9 |
-| 8.12 Prevención de fugas | gitleaks como pre-commit, `.gitignore` de `.env` y de las grabaciones, y tokens falsos con prefijo `CIRDAN_FAKE_` | En parte. El CI no revisa secretos en el repo |
+| 8.12 Prevención de fugas | gitleaks como pre-commit y en el CI de seguridad sobre todo el historial (RC-254), `.gitignore` de `.env` y de las grabaciones, y tokens falsos con prefijo `CIRDAN_FAKE_`, que solo pueden vivir en `pruebas/fixtures/` | Existe |
 | 8.13 Respaldos | Respaldos manuales de la base antes de algunas sesiones, como las del 29 y 30 oct | En parte. Falta respaldo automático en la VM |
 | 8.15 Registros | `audit_log` con quién, qué, cuándo y desde qué IP, y `scan_source_runs` por fuente. Hoy, sin un proxy que pase la IP real, la API ve una sola IP para todo lo que entra (la puerta de enlace de Docker o el portal), así que la bitácora no dice desde dónde entró cada persona | En parte. La IP real llega con el despliegue de RC-91 (sección 9) |
 | 8.16 Monitoreo | Alertas de presupuesto de Azure | Falta un monitoreo de la VM y de la API |
@@ -127,7 +127,7 @@ Los controles 7.1 a 7.6, 7.11 y 7.12 (perímetro, entradas, oficinas, vigilancia
 | 8.27 Arquitectura segura | RLS con FORCE en las tablas por cliente, rol de la API sin privilegios y base y Valkey sin puertos públicos | Existe |
 | 8.28 Codificación segura | CodeQL y revisión de PR | Existe |
 | 8.29 Pruebas de seguridad | ZAP activo, pentest y reto de hackeo solo contra el propio despliegue | Falta. Llegan con #51, #58b y #85 |
-| 8.31 Separación de entornos | El CI corre las pruebas de base y API en una base desechable. En local corren contra la base del contenedor `cirdan-pg16`. `dev` y `main` separados | En parte |
+| 8.31 Separación de entornos | El CI corre las pruebas de base y API en una base desechable. En local, el paso 5 del README las manda al compose desechable de `docker-compose.pruebas.yml` con `CIRDAN_TEST_API`, `CIRDAN_TEST_PG` y `CIRDAN_TEST_VALKEY` (RC-254). `dev` y `main` separados | En parte. Sin esas variables las pruebas usan la pila local (`cirdan-pg16`, `cirdan-valkey` y el puerto 8000) sin avisar: ningún candado lo impide |
 | 8.32 Gestión de cambios | Migraciones numeradas que no se editan, PR con la clave de Jira y congelamiento desde el 25 nov | Existe |
 | 8.33 Información de prueba | Empresas ficticias (Acme Demo, Beta Corp y Grupo Olmardo) y tokens `CIRDAN_FAKE_` | Existe |
 | 8.34 Protección durante pruebas | Las pruebas que atacan nunca tocan a un cliente ni a terceros (sección 3 de #6) | Existe |
