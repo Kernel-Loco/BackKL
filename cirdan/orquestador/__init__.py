@@ -24,6 +24,7 @@ escribir en sus fuentes.
 """
 import ipaddress
 import logging
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -206,6 +207,20 @@ def abandonar_vencidos(conn, org, domain_id=None, scan_id=None):
     return ids
 
 
+# Lo que se escribe en la ruta solo pasa a la bitácora, que no se borra, si tiene forma de nombre de dominio (RC-321).
+FQDN_BITACORA = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,63}|xn--[a-z0-9-]{1,59})$')
+
+
+def _rechazo_sin_dominio(c, org, fqdn, user_id, ip, platform=None):
+    """scan.rejected de un dominio que no es de la organización. Un texto que no es nombre de dominio queda solo
+    con su largo, y una organización que no existe (línea de comandos con otro uuid) no deja registro."""
+    if not c.execute('SELECT 1 FROM organizations WHERE id = %s', (org,)).fetchone():
+        return
+    detalle = {'fqdn': fqdn} if FQDN_BITACORA.fullmatch(fqdn) else {'fqdn_invalid': True, 'fqdn_length': len(fqdn)}
+    audit(c, org, 'scan.rejected', user_id, ip, 'domain', None, {**detalle, 'reasons': ['domain_not_found']},
+          platform=platform)
+
+
 def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None, platform=None):
     """Revisa autorización y TXT y, si todo cumple, crea el escaneo. Nunca escanea sin los dos.
 
@@ -218,7 +233,8 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
     fqdn = fqdn.strip().lower().rstrip('.')
     with _tx(org, conn) as c:
         domain = c.execute('SELECT id::text, fqdn::text, status, txt_token FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
-        if not domain:
+        if not domain:  # otro dominio o uno de otra organización: el rechazo también queda en la bitácora (RC-321)
+            _rechazo_sin_dominio(c, org, fqdn, user_id, ip, platform=platform)
             return Solicitud(fqdn, False, ['domain_not_found'], _texto(['domain_not_found']))
 
         motivos, authorization_id = _motivos_previos(c, domain)
@@ -744,7 +760,10 @@ def marcar_fallido(org, scan_id, error):
     """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando."""
     texto = (str(error) or type(error).__name__)[:300]  # Ctrl+C (KeyboardInterrupt) no trae texto
     with transaction(org) as c:
-        c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
-                  "WHERE id = %s AND status = 'running'", (Jsonb({'error': texto}), scan_id))
+        cerrado = c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
+                            "WHERE id = %s AND status = 'running' RETURNING id", (Jsonb({'error': texto}), scan_id)).fetchone()
+        if cerrado:  # si ya lo habían dado por caído, scan.abandoned ya quedó en la bitácora (RC-321)
+            # Solo el tipo de error: el texto puede traer datos y la bitácora no se borra. El texto queda en stats.
+            audit(c, org, 'scan.failed', None, None, 'scan', scan_id, {'error': type(error).__name__})
         # también si ya no estaba en 'running' (lo dieron por caído antes): ninguna fuente se queda esperando
         _cerrar_corridas(c, [scan_id], texto)
