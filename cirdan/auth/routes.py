@@ -213,7 +213,7 @@ def mfa_setup(body: MfaSetupIn, request: Request, response: Response, session: S
         if not row:
             sessions.delete(session.token)
             raise HTTPException(401, SESSION_ENDED)
-        bad_password = not passwords.verify_password(row['password_hash'], body.current_password)
+        bad_password = not passwords.verify_password(row['password_hash'], body.current_password, session.user_id)
         if bad_password:
             audit(conn, session.org_id, 'auth.mfa_setup_failed', session.user_id, ip, 'user', session.user_id,
                   {'reason': 'password'})
