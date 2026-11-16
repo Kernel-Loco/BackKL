@@ -36,14 +36,15 @@ def transaction(org=None, isolation=None):
 def audit(conn, org, action, user_id=None, ip=None, entity_type=None, entity_id=None, details=None, platform=None):
     """Agrega un registro a la bitácora; el trigger calcula la cadena de hashes.
 
-    `platform` ({'user_id', 'email'}) es un superadmin que actúa en una empresa ajena (RC-332): queda con actor
-    'platform', sin actor_user_id (la FK compuesta pide un usuario de esa empresa) y con su id y correo en details.
+    `platform` ({'user_id'}) es un superadmin que actúa en una empresa ajena (RC-332): queda con actor 'platform',
+    sin actor_user_id (la FK compuesta pide un usuario de esa empresa) y solo con su id en details. El correo no va:
+    la bitácora de la empresa ajena es de solo inserción y su hash no deja quitar un dato personal después.
     Va con Session.audit_user_id y Session.audit_platform."""
     if platform:
         if user_id:
             raise ValueError('audit(): user_id y platform no van juntos')
         actor = 'platform'
-        details = dict(details or {}, platform_user_id=str(platform['user_id']), platform_email=platform['email'])
+        details = dict(details or {}, platform_user_id=str(platform['user_id']))
     else:
         actor = 'user' if user_id else 'system'
     conn.execute(

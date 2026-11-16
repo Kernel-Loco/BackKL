@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from cirdan.auth import captcha, passwords, sessions, totp
-from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session
+from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session, is_platform_admin
 from cirdan.db import audit, transaction
 
 router = APIRouter(prefix='/api/v1/auth', tags=['sesión'])
@@ -56,9 +56,12 @@ def _user(conn, user_id):
 
 def platform_view(session, user):
     """Lo que /me agrega para el superadmin (RC-332). `user` es la fila de USER_SQL, leída con la empresa de la cuenta.
-    En una empresa ajena, organization_id y organization_name son los de la empresa activa y role el de la sesión."""
-    out = {'platform_admin': session.platform_admin}
-    if session.platform_admin:
+    En una empresa ajena, organization_id y organization_name son los de la empresa activa y role el de la sesión.
+    platform_admin pide la bandera de la sesión y también la base: si se le quitó el permiso o el TOTP con la sesión
+    en su empresa, el portal deja de mostrar el selector. Un permiso nuevo sigue pidiendo volver a iniciar sesión."""
+    admin = session.platform_admin and is_platform_admin(session.user_id)
+    out = {'platform_admin': admin}
+    if admin:
         out.update(home_organization_id=user['organization_id'], home_organization_name=user['organization_name'])
     if session.acting_elsewhere:
         with transaction(session.org_id) as conn:
@@ -324,3 +327,6 @@ def change_password(body: PasswordIn, request: Request, session: Session = Depen
         conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
                      (passwords.hash_password(body.new_password, session.user_id), session.user_id))
         audit(conn, session.own_org_id, 'auth.password_changed', session.user_id, client_ip(request), 'user', session.user_id)
+        # Una sesión robada no sobrevive al cambio de contraseña: se cierran todas menos la que la cambió. Va antes
+        # del commit, como en mfa_enable: si Valkey falla, la contraseña no cambia y se puede repetir.
+        sessions.delete_others(session.user_id, session.token)

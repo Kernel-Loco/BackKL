@@ -6,6 +6,9 @@
 -- cambia su contraseña, su MFA ni su rol. Va por correo y no por id para que
 -- sirva igual en una base donde la cuenta se dio de alta con otro id. Si la
 -- cuenta no existe, no hace nada. Se puede correr otra vez sin error.
+-- Mientras la cuenta no tenga TOTP activo, is_platform_admin() de la 017 da
+-- false: entra solo como Admin de LowTide hasta que active la verificación en
+-- dos pasos y vuelva a iniciar sesión.
 -- pruebas/test_superadmin.py revisa esta carga.
 -- =====================================================================
 

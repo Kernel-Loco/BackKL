@@ -921,7 +921,7 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
         nuevo = conn.execute(
             'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, activated_at) '
             'VALUES (%s, %s, %s, true, %s, now()) RETURNING id::text',
-            (session.org_id, version, Jsonb(pesos), session.email),
+            (session.org_id, version, Jsonb(pesos), session.author),
         ).fetchone()['id']
         conn.execute(
             'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '

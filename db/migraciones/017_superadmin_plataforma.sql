@@ -12,7 +12,10 @@
 --    de users (001): con una columna, un error de la app bastaría para
 --    nombrar a otro superadmin.
 -- 2. is_platform_admin(p_user): si la cuenta está en platform_admins, sigue
---    activa y su empresa está en 'trial' o 'active'.
+--    activa, tiene la verificación en dos pasos activa y su empresa está en
+--    'trial' o 'active'. Sin TOTP no hay superadmin: con solo la contraseña la
+--    sesión nace con platform_admin false, y si se le quita el TOTP la sesión
+--    abierta en una empresa ajena se cierra en la siguiente petición.
 -- 3. platform_organizations(p_user): id, nombre y estado de todas las
 --    empresas, solo si p_user es superadmin. Es el único cruce entre
 --    empresas y no devuelve ningún dato de sus tablas.
@@ -20,9 +23,13 @@
 --    (organization_id, actor_user_id) -> users no dejan poner como autor a
 --    una cuenta de otra empresa. En la empresa ajena la acción queda con
 --    actor 'platform', actor_user_id NULL y el id de la cuenta en
---    details->>'platform_user_id' (lo exige un CHECK).
+--    details->>'platform_user_id' (lo exige un CHECK, con forma de uuid).
 -- Las dos funciones son SECURITY DEFINER de postgres con search_path fijo y
--- EXECUTE solo para cirdan_app, como login_lookup() de la 004.
+-- EXECUTE solo para cirdan_app, como login_lookup() de la 004. Igual que
+-- login_lookup(), confían en el p_user que les pasa la API: la API solo les
+-- pasa el user_id de la sesión, nunca un id que mande el cliente. El uuid de
+-- equipo@lowtidesec.com es público (semilla 015), así que un endpoint que les
+-- pasara un id del cliente expondría la lista de empresas.
 -- Corre en una sola transacción y se puede correr otra vez sin error.
 -- En una base que ya existe se aplica a mano (ver db/README.md).
 -- =====================================================================
@@ -30,6 +37,10 @@
 SET client_encoding = 'UTF8';
 
 BEGIN;
+
+-- Los ALTER de audit_log toman ACCESS EXCLUSIVE: si la API la tiene ocupada, falla en 5 s sin cambiar nada y se
+-- vuelve a correr, en vez de dejar esperando a cada login y escaneo (como la 012 y la 015).
+SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE IF NOT EXISTS public.platform_admins (
   user_id    uuid PRIMARY KEY REFERENCES public.users (id),
@@ -59,11 +70,13 @@ AS $$
       JOIN public.organizations o ON o.id = u.organization_id
      WHERE pa.user_id = p_user
        AND u.is_active
+       AND u.mfa_enabled_at IS NOT NULL
+       AND u.totp_secret_enc IS NOT NULL
        AND o.status IN ('trial', 'active'))
 $$;
 
 COMMENT ON FUNCTION public.is_platform_admin(uuid) IS
-  'Superadmin (RC-332): true si la cuenta está en platform_admins, sigue activa y su empresa está en trial o active. SECURITY DEFINER porque cirdan_app no puede leer platform_admins. Su search_path termina en pg_temp, como login_lookup().';
+  'Superadmin (RC-332): true si la cuenta está en platform_admins, sigue activa, tiene TOTP activo y su empresa está en trial o active. SECURITY DEFINER porque cirdan_app no puede leer platform_admins. Su search_path termina en pg_temp, como login_lookup().';
 
 REVOKE ALL ON FUNCTION public.is_platform_admin(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.is_platform_admin(uuid) TO cirdan_app;
@@ -94,6 +107,9 @@ ALTER TABLE public.audit_log ADD CONSTRAINT audit_log_actor_type_check
 ALTER TABLE public.audit_log DROP CONSTRAINT IF EXISTS audit_log_platform_actor_check;
 ALTER TABLE public.audit_log ADD CONSTRAINT audit_log_platform_actor_check
   CHECK (actor_type <> 'platform' OR (organization_id IS NOT NULL AND actor_user_id IS NULL
-                                      AND actor_api_key_id IS NULL AND details ? 'platform_user_id'));
+                                      AND actor_api_key_id IS NULL
+                                      -- coalesce: sin la clave el ~ da NULL, y un CHECK con NULL deja pasar la fila.
+                                      AND coalesce(details->>'platform_user_id'
+                                          ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', false)));
 
 COMMIT;

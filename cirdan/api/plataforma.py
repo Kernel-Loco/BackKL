@@ -4,6 +4,7 @@ El superadmin (tabla platform_admins, migración 017) ve la lista de empresas y 
 de empresa activa y, en una ajena, el rol es Admin. Todo lo demás de la API sigue igual: cada transacción fija
 app.current_org con una sola empresa y RLS hace el resto. No hay vistas que mezclen empresas.
 """
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -14,10 +15,12 @@ from cirdan.auth.deps import SESION_TERMINADA, Session, client_ip, current_sessi
 from cirdan.db import audit, transaction
 
 router = APIRouter(prefix='/api/v1/platform', tags=['plataforma'])
+log = logging.getLogger(__name__)
 
 SOLO_SUPERADMIN = 'Solo el superadmin de la plataforma puede hacer esto.'
 NO_ENCONTRADA = 'Organización no encontrada'
 INACTIVA = 'La organización está suspendida o cancelada: no se puede trabajar en ella.'
+CAMBIO_A_LA_VEZ = 'Otro cambio de empresa de esta sesión llegó antes. Recarga para ver la empresa activa.'
 ACTIVAS = ('trial', 'active')
 ROL_AJENO = 'admin'  # rol del superadmin en una empresa que no es la suya
 
@@ -60,7 +63,8 @@ def switch_organization(body: OrganizacionIn, request: Request, session: Session
     if org['status'] not in ACTIVAS:
         raise HTTPException(409, INACTIVA)
     ip = client_ip(request)
-    home = session.own_org_id
+    home, origen = session.own_org_id, session.org_id
+    cambia = destino != origen
     with transaction(home) as conn:
         # En su empresa vuelve a su rol de la base, que pudo cambiar después de iniciar sesión.
         fila = conn.execute('SELECT role FROM users WHERE id = %s AND is_active', (session.user_id,)).fetchone()
@@ -68,17 +72,45 @@ def switch_organization(body: OrganizacionIn, request: Request, session: Session
             sessions.delete(session.token)
             raise HTTPException(401, SESION_TERMINADA)
         rol = fila['role'] if destino == home else ROL_AJENO
-        if destino != session.org_id:
+        if cambia:
             audit(conn, home, 'platform.organization_switched', session.user_id, ip, 'organization', destino,
-                  {'from_organization_id': session.org_id, 'to_organization_id': destino, 'to_name': org['name']})
-            if destino != home:
-                # También en la bitácora de la empresa a la que entra, para que su Admin lo vea.
-                with transaction(destino) as ajena:
-                    audit(ajena, destino, 'platform.organization_entered', None, ip, 'organization', destino,
-                          {'home_organization_id': home},
-                          platform={'user_id': session.user_id, 'email': session.email})
-    # La sesión cambia hasta que las dos bitácoras ya se guardaron: un cambio nunca queda sin registro. Si Valkey
-    # falla aquí, queda el registro de un intento que no cambió nada.
-    if not sessions.switch_org(session.token, destino, rol):
+                  {'from_organization_id': origen, 'to_organization_id': destino, 'to_name': org['name']})
+    # La bitácora de la empresa a la que entra va en su propia transacción, ya cerrada la de casa: con las dos abiertas
+    # a la vez, la de casa retenía el candado de su cadena mientras la otra esperaba el suyo, y dos superadmins que se
+    # cruzaban quedaban colgados sin que PostgreSQL lo viera.
+    # La sesión cambia hasta que las bitácoras ya se guardaron: un cambio nunca queda sin registro. Si no se aplica
+    # (falló la bitácora de destino, la sesión se cerró, otro cambio ganó o Valkey falló), cada bitácora que ya lo
+    # anotó recibe el fallo.
+    resultado, entro = None, False
+    try:
+        if cambia and destino != home:
+            with transaction(destino) as ajena:
+                audit(ajena, destino, 'platform.organization_entered', None, ip, 'organization', destino,
+                      {'home_organization_id': home}, platform={'user_id': session.user_id})
+            entro = True
+        # También sin cambio de empresa: así la sesión toma el rol que la base tiene hoy.
+        resultado = sessions.switch_org(session.token, origen, destino, rol)
+    finally:
+        if cambia and resultado != sessions.SWITCHED:
+            _anotar_fallo(session, home, destino, entro, ip, resultado or 'error')
+    if resultado == sessions.SWITCH_CONFLICT:
+        raise HTTPException(409, CAMBIO_A_LA_VEZ)
+    if resultado != sessions.SWITCHED:
         raise HTTPException(401, SESION_TERMINADA)
     return {'organization_id': destino, 'organization_name': org['name'], 'role': rol, 'home': destino == home}
+
+
+def _anotar_fallo(session, home, destino, entro, ip, motivo):
+    """'platform.organization_switch_failed' en casa y, si ya se anotó la entrada, también en la empresa destino. Si
+    esto también falla, queda en el log: no tapa el error original."""
+    try:
+        detalles = {'to_organization_id': destino, 'reason': motivo}
+        with transaction(home) as conn:
+            audit(conn, home, 'platform.organization_switch_failed', session.user_id, ip, 'organization', destino,
+                  detalles)
+        if entro:
+            with transaction(destino) as ajena:
+                audit(ajena, destino, 'platform.organization_switch_failed', None, ip, 'organization', destino,
+                      detalles, platform={'user_id': session.user_id})
+    except Exception:
+        log.exception('No se pudo anotar el cambio de empresa fallido de %s', session.user_id)

@@ -46,7 +46,13 @@ class Session:
     @property
     def audit_platform(self) -> dict | None:
         """El superadmin que actúa en una empresa ajena, para audit(..., platform=...). None en su propia empresa."""
-        return {'user_id': self.user_id, 'email': self.email} if self.acting_elsewhere else None
+        return {'user_id': self.user_id} if self.acting_elsewhere else None
+
+    @property
+    def author(self) -> str:
+        """Quién firma un registro que guarda texto libre (validated_by de los pesos): el correo en su empresa y
+        'platform:<id>' en una ajena, donde el correo del personal de LowTide no debe quedar."""
+        return 'platform:%s' % self.user_id if self.acting_elsewhere else self.email
 
 
 def current_session(request: Request) -> Session:
@@ -58,9 +64,10 @@ def current_session(request: Request) -> Session:
     session = Session(token=token, user_id=data['user_id'], org_id=data['org_id'], role=data['role'], email=data['email'],
                       created_at=data.get('created_at'), home_org_id=data.get('home_org_id'),
                       platform_admin=bool(data.get('platform_admin')))
-    if session.acting_elsewhere and not is_platform_admin(session.user_id):
-        # Se le quitó el permiso, se desactivó la cuenta o se suspendió su empresa con la sesión abierta en una empresa
-        # ajena: la sesión se cierra en la siguiente petición y no espera a las 8 h.
+    if session.acting_elsewhere and not can_work_in(session.user_id, session.org_id):
+        # Se le quitó el permiso o el TOTP, se desactivó la cuenta, se suspendió su empresa o se suspendió o canceló
+        # la empresa ajena con la sesión abierta en ella: la sesión se cierra en la siguiente petición y no espera a
+        # las 8 h.
         sessions.delete(token)
         raise HTTPException(401, SESION_TERMINADA)
     return session
@@ -70,6 +77,15 @@ def is_platform_admin(user_id) -> bool:
     """Lo dice la base en cada llamada (migración 017), no la sesión: cirdan_app no puede leer platform_admins."""
     with transaction() as conn:
         return bool(conn.execute('SELECT public.is_platform_admin(%s) AS ok', (user_id,)).fetchone()['ok'])
+
+
+def can_work_in(user_id, org_id) -> bool:
+    """Si el superadmin puede seguir trabajando en la empresa ajena `org_id`: sigue siendo superadmin y esa empresa
+    sigue en trial o active. La empresa se lee con su propia RLS, en la misma transacción."""
+    with transaction(org_id) as conn:
+        return bool(conn.execute("SELECT public.is_platform_admin(%s) AND EXISTS (SELECT 1 FROM organizations"
+                                 " WHERE id = %s AND status IN ('trial', 'active')) AS ok",
+                                 (user_id, org_id)).fetchone()['ok'])
 
 
 def session_or_api_key(request: Request) -> Session:

@@ -96,18 +96,29 @@ def delete(token):
         _valkey().delete('sess:' + _digest(token))
 
 
-def switch_org(token, org_id, role):
-    """Cambia la empresa activa y el rol de una sesión que ya existe (superadmin, RC-332). Conserva su inactividad,
-    su tope de 8 h y su lugar en el índice del usuario. XX: una sesión que se cerró mientras tanto no revive.
-    Devuelve False si la sesión ya no existe."""
+SWITCHED, SESSION_GONE, SWITCH_CONFLICT = 'switched', 'gone', 'conflict'
+
+# Corre entera dentro de Valkey: entre leer la empresa activa y escribir la nueva no se mete otro cambio. Si la
+# sesión ya no está en la empresa de la que partió la petición, otro cambio llegó antes y este no se aplica.
+_SWITCH_ORG = '''
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 'gone' end
+local data = cjson.decode(raw)
+if data.org_id ~= ARGV[1] then return 'conflict' end
+data.org_id = ARGV[2]
+data.role = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(data), 'KEEPTTL')
+return 'switched'
+'''
+
+
+def switch_org(token, expected_org_id, org_id, role):
+    """Cambia la empresa activa y el rol de una sesión que ya existe (superadmin, RC-332), solo si sigue en
+    `expected_org_id`. Conserva su inactividad, su tope de 8 h y su lugar en el índice del usuario, y una sesión que
+    se cerró mientras tanto no revive. Devuelve SWITCHED, SESSION_GONE o SWITCH_CONFLICT (otro cambio ganó)."""
     if not token or len(token) > 100:
-        return False
-    key = 'sess:' + _digest(token)
-    raw = _valkey().get(key)
-    if raw is None:
-        return False
-    data = dict(json.loads(raw), org_id=str(org_id), role=role)
-    return bool(_valkey().set(key, json.dumps(data), xx=True, keepttl=True))
+        return SESSION_GONE
+    return _valkey().eval(_SWITCH_ORG, 1, 'sess:' + _digest(token), str(expected_org_id), str(org_id), role)
 
 
 # Corre entera dentro de Valkey: una sesión creada a la vez entra al índice antes (y se borra) o después. Que no

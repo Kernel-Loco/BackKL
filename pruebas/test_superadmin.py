@@ -13,6 +13,10 @@ Hecho cuando de RC-332, punto por punto:
    (test_3, test_15 y test_16).
 6. Crear una llave de API en una empresa ajena responde 403 (test_13).
 
+Además, de la revisión de riesgo: sin TOTP activo nadie es superadmin (test_2), cambiar la contraseña cierra las
+demás sesiones (test_18), la sesión en una empresa ajena se cierra si esa empresa se suspende (test_19) y /auth/me
+deja de decir platform_admin en cuanto se quita el permiso (test_20).
+
 equipo@lowtidesec.com no es cuenta de demo y su contraseña no está en el repo, así que las pruebas de la API hacen
 superadmin por un rato a Dana Cruz (Admin de Beta Corp) y la quitan al terminar. Ninguna pide un escaneo. Lo que
 escriben como postgres lo deshacen en tearDown, salvo la bitácora, que es de solo inserción.
@@ -93,10 +97,16 @@ class Base(unittest.TestCase):
     def test_2_solo_equipo_es_superadmin_y_solo_el_ve_la_lista(self):
         self.assertEqual(scalar("SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM platform_admins"
                                 " WHERE note NOT LIKE 'CIRDAN_FAKE_%%';", user='postgres'), EQUIPO)
-        self.assertEqual(scalar("SELECT public.is_platform_admin('%s') || ',' || public.is_platform_admin('%s');"
-                                % (EQUIPO, OLMARDO_DEMO)), 'true,false')
+        self.assertEqual(scalar("SELECT public.is_platform_admin('%s')::text;" % OLMARDO_DEMO), 'false')
         self.assertEqual(scalar("SELECT count(*) FROM public.platform_organizations('%s');" % OLMARDO_DEMO), '0')
-        nombres = scalar("SELECT string_agg(name, ',' ORDER BY name) FROM public.platform_organizations('%s');" % EQUIPO)
+        # Con y sin TOTP, puestos en transacciones que se deshacen: no depende de si equipo ya lo activó en esta base.
+        con_y_sin = ("BEGIN; UPDATE users SET totp_secret_enc = %s, mfa_enabled_at = %s WHERE id = '{0}';"
+                     " SELECT public.is_platform_admin('{0}') || '|' || coalesce((SELECT string_agg(name, ','"
+                     " ORDER BY name) FROM public.platform_organizations('{0}')), ''); ROLLBACK;")
+        admin, nombres = scalar((con_y_sin % ('NULL', 'NULL')).format(EQUIPO), user='postgres').split('|')
+        self.assertEqual((admin, nombres), ('false', ''))
+        admin, nombres = scalar((con_y_sin % ("'\\x00'::bytea", 'now()')).format(EQUIPO), user='postgres').split('|')
+        self.assertEqual(admin, 'true')
         for nombre in ('Acme Demo', 'Beta Corp', 'Grupo Olmardo', 'LowTide'):
             self.assertIn(nombre, nombres.split(','))
         # Las dos funciones son SECURITY DEFINER con search_path fijo, como login_lookup().
@@ -115,6 +125,11 @@ class Base(unittest.TestCase):
         ok, _, err = psql(base % (ACME, "'%s'" % ALEX_ID, '{"platform_user_id": "%s"}' % DANA_ID), org=ACME)
         self.assertFalse(ok)
         self.assertIn('audit_log_platform_actor_check', err)
+        for malo in ('"x"', 'null', '7'):
+            with self.subTest(platform_user_id=malo):
+                ok, _, err = psql(base % (ACME, 'NULL', '{"platform_user_id": %s}' % malo), org=ACME)
+                self.assertFalse(ok)
+                self.assertIn('audit_log_platform_actor_check', err)
         ok, _, err = psql(base % (ACME, 'NULL', '{"platform_user_id": "%s"}' % DANA_ID), org=ACME)
         self.assertTrue(ok, err)
 
@@ -124,16 +139,15 @@ class Superadmin(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # Las limpiezas se registran antes de nombrar a Dana: corren aunque falle un login de aquí abajo, y Dana, con
+        # credenciales de demo públicas, nunca se queda en platform_admins.
+        cls.addClassCleanup(postgres, "DELETE FROM api_keys WHERE name LIKE 'CIRDAN\\_FAKE\\_%';")
+        cls.addClassCleanup(quitar_superadmin, DANA_ID)
         sesion.reset()
         hacer_superadmin(DANA_ID)
         cls.alex = sesion.login(ALEX)
         cls.maya = sesion.login(MAYA)
         cls.jordan = sesion.login(JORDAN)
-
-    @classmethod
-    def tearDownClass(cls):
-        quitar_superadmin(DANA_ID)
-        postgres("DELETE FROM api_keys WHERE name LIKE 'CIRDAN\\_FAKE\\_%';")
 
     dana = None
 
@@ -226,6 +240,12 @@ class Superadmin(unittest.TestCase):
         self.assertEqual(self.cambiar(ACME)[0], 200)
         self.assertEqual(ultima(BETA, 'platform.organization_switched'), 'user,%s,-' % DANA_ID)
         self.assertEqual(ultima(ACME, 'platform.organization_entered'), 'platform,-,%s' % DANA_ID)
+        # En la empresa ajena solo queda el id del superadmin, no su correo.
+        detalles = scalar("SELECT details::text FROM audit_log WHERE organization_id = '%s' AND action ="
+                          " 'platform.organization_entered' ORDER BY chain_seq DESC LIMIT 1;" % ACME, user='postgres')
+        self.assertIn(DANA_ID, detalles)
+        self.assertNotIn('email', detalles)
+        self.assertNotIn(DANA, detalles)
         # Revocar una llave de Acme queda a nombre del superadmin con actor 'platform'.
         llave = postgres("INSERT INTO api_keys (organization_id, name, key_prefix, key_hash, scopes, created_by, expires_at)"
                          " VALUES ('%s', '%s', 'ffff0332', sha256('CIRDAN_FAKE_332'::bytea), '{read}', '%s',"
@@ -250,6 +270,31 @@ class Superadmin(unittest.TestCase):
             postgres("UPDATE organizations SET status = 'active' WHERE id = '%s';" % OLMARDO)
         self.assertEqual(code, 409, body)
         self.assertEqual(self.dana.get('/api/v1/auth/me')[1]['organization_id'], BETA)
+
+    def test_18_cambiar_la_contrasena_cierra_las_demas_sesiones(self):
+        otra = sesion.login(DANA)
+        self.assertEqual(otra.post('/api/v1/auth/password', {'current_password': sesion.PASSWORD,
+                                                             'new_password': sesion.PASSWORD}), (204, None))
+        self.assertEqual(self.dana.get('/api/v1/auth/me'), (401, {'detail': SIN_SESION}))
+        self.assertEqual(otra.get('/api/v1/auth/me')[0], 200)
+        Superadmin.dana = otra
+
+    def test_19_si_suspenden_la_empresa_ajena_se_cierra_su_sesion_en_ella(self):
+        self.assertEqual(self.cambiar(OLMARDO)[0], 200)
+        postgres("UPDATE organizations SET status = 'suspended' WHERE id = '%s';" % OLMARDO)
+        try:
+            self.assertEqual(self.dana.get('/api/v1/domains'), (401, {'detail': SIN_SESION}))
+        finally:
+            postgres("UPDATE organizations SET status = 'active' WHERE id = '%s';" % OLMARDO)
+        self.assertEqual(self.dana.get('/api/v1/auth/me')[0], 401)  # la sesión ya se borró
+
+    def test_20_me_deja_de_decir_superadmin_al_quitarle_el_permiso_en_casa(self):
+        self.assertEqual(self.dana.get('/api/v1/auth/me')[1]['platform_admin'], True)
+        quitar_superadmin(DANA_ID)
+        code, me = self.dana.get('/api/v1/auth/me')
+        self.assertEqual((code, me['platform_admin'], me['organization_id']), (200, False, BETA))
+        self.assertNotIn('home_organization_id', me)
+        self.assertEqual(self.dana.get(LISTA), (403, {'detail': SOLO_SUPERADMIN}))
 
 
 if __name__ == '__main__':
