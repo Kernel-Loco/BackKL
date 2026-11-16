@@ -30,6 +30,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/014_cves_desde_recolectores.sql` | Da a `cirdan_app` INSERT sobre `description`, `cvss_base_score`, `cvss_vector` y `published_at` de `cves`, solo al crear la fila (sin UPDATE), para que el orquestador guarde las CVE que la fuente `web` trae de la NVD (#18, RC-46). Va antes que la semilla 012: sin ella, un escaneo de `web` que trae CVE falla al insertarlas y queda `failed` |
 | `migraciones/015_tipo_activo_api_doc.sql` | Agrega `api_doc` al CHECK de `assets.asset_type`: la documentación de un servicio web (Swagger u OpenAPI, o la página de Swagger UI o de ReDoc) que un sitio del dominio deja a la vista, con su URL en `value` y su sitio como activo padre (#63, RC-118). En una transacción, pone en el CHECK la lista fija de los 7 tipos y vuelve a escribir los comentarios de `assets`. Se puede correr otra vez mientras ninguna migración posterior cambie ese CHECK o esos comentarios: después ya no, porque los regresaría a como los deja la 015. Va antes que la semilla 013 |
 | `migraciones/016_api_key_lookup.sql` | Llaves de API (#87, RC-129): función `api_key_lookup(hash)` para que la API encuentre una llave vigente antes de conocer la empresa, sin abrir RLS. A `cirdan_app` le deja UPDATE solo sobre `last_used_at`, `revoked_at` y `updated_at` de `api_keys` e INSERT sin `id`, `created_at`, `last_used_at`, `revoked_at` ni `updated_at`, para que la vigencia de 90 días se mida siempre desde la fecha real de alta, y un trigger impide reactivar una llave revocada |
+| `migraciones/017_superadmin_plataforma.sql` | Superadmin de la plataforma (RC-332): tabla `platform_admins` con RLS forzado, una política que niega todo y sin ningún permiso para `cirdan_app`, funciones `is_platform_admin(user)` (pide cuenta activa, TOTP activo y empresa en trial o active) y `platform_organizations(user)`, y actor `platform` en `audit_log`, con el id del superadmin en `details->>'platform_user_id'`. RLS no cambia. Va antes de reconstruir la API |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -45,6 +46,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `semillas/013_api_docs.sql` | Fuente `api_docs` (la actividad 9 del Anexo A: hasta 10 rutas fijas de documentación de APIs por sitio, solo GET), sembrada apagada, con `keep_raw_payload` = true y límite diario de 2640 consultas, 10 corridas de 264 (#63, RC-118). Necesita la migración 008 y la 015. Se enciende con otra semilla cuando el aviso de la actividad nueva esté dado a cada cliente |
 | `semillas/014_cupo_ct_logs.sql` | Sube el límite diario de `ct_logs` de 200 a 400 consultas, 11 corridas de 36, porque cada escaneo ya busca dominios parecidos en crt.sh (RC-226, #109). Solo cambia la fila si tiene el 200 de la 005 |
 | `semillas/015_organizacion_lowtide.sql` | Organización LowTide (plan Business) con lowtidesec.com, el dominio del producto, con su TXT verificado por DoH, su carta firmada por el titular y un solo admin, `equipo@lowtidesec.com`, con el hash de relleno que no abre nada (RC-329, #210). La contraseña y el MFA se ponen fuera del repo |
+| `semillas/016_superadmin_lowtide.sql` | `equipo@lowtidesec.com` pasa a superadmin de la plataforma (RC-332). Necesita la 017 y la semilla 015. Sin TOTP activo la cuenta no es superadmin |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 25 tablas con filas y RLS, más el resumen de objetos |
@@ -102,6 +104,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/014_cves_desde_recolectores.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/015_tipo_activo_api_doc.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/016_api_key_lookup.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/017_superadmin_plataforma.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -118,6 +121,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/013_api_docs.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/014_cupo_ct_logs.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/015_organizacion_lowtide.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/016_superadmin_lowtide.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -328,6 +332,16 @@ Para las llaves de API (RC-129, #87) va la migración 016, antes de reconstruir 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/016_api_key_lookup.sql
 ```
+
+Para el superadmin de la plataforma (RC-332) van la migración 017 y la semilla 016, en ese orden, y las dos antes de reconstruir la API. La API nueva llama a `is_platform_admin()` en cada inicio de sesión, dentro de la transacción del login: sin la 017, todo login con contraseña o con MFA responde 500. La API anterior no llama a las funciones nuevas ni escribe el actor `platform`, así que la base puede ir antes sin romperla. La 017 toma ACCESS EXCLUSIVE sobre `audit_log` para cambiar sus CHECK; si en 5 s no lo consigue, falla sin cambiar nada y se vuelve a correr. Las dos se pueden correr otra vez sin error. La semilla 016 necesita la 015; sin ella no hace nada. `equipo@lowtidesec.com` es superadmin solo con TOTP activo: hasta entonces entra como Admin de LowTide, y después de activarlo vuelve a iniciar sesión:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/017_superadmin_plataforma.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/016_superadmin_lowtide.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT u.email, public.is_platform_admin(u.id) FROM platform_admins p JOIN users u ON u.id = p.user_id"
+```
+
+Da `equipo@lowtidesec.com|f` mientras la cuenta no tenga TOTP y `equipo@lowtidesec.com|t` cuando ya lo tenga.
 
 ## Respaldar y restaurar
 

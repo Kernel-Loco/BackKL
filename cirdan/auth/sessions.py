@@ -99,6 +99,31 @@ def delete(token):
         _valkey().delete('sess:' + _digest(token))
 
 
+SWITCHED, SESSION_GONE, SWITCH_CONFLICT = 'switched', 'gone', 'conflict'
+
+# Corre entera dentro de Valkey: entre leer la empresa activa y escribir la nueva no se mete otro cambio. Si la
+# sesión ya no está en la empresa de la que partió la petición, otro cambio llegó antes y este no se aplica.
+_SWITCH_ORG = '''
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 'gone' end
+local data = cjson.decode(raw)
+if data.org_id ~= ARGV[1] then return 'conflict' end
+data.org_id = ARGV[2]
+data.role = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(data), 'KEEPTTL')
+return 'switched'
+'''
+
+
+def switch_org(token, expected_org_id, org_id, role):
+    """Cambia la empresa activa y el rol de una sesión que ya existe (superadmin, RC-332), solo si sigue en
+    `expected_org_id`. Conserva su inactividad, su tope de 8 h y su lugar en el índice del usuario, y una sesión que
+    se cerró mientras tanto no revive. Devuelve SWITCHED, SESSION_GONE o SWITCH_CONFLICT (otro cambio ganó)."""
+    if not token or len(token) > 100:
+        return SESSION_GONE
+    return _valkey().eval(_SWITCH_ORG, 1, 'sess:' + _digest(token), str(expected_org_id), str(org_id), role)
+
+
 # Corre entera dentro de Valkey: una sesión creada a la vez entra al índice antes (y se borra) o después. Que no
 # entre después sin el segundo factor lo asegura el FOR NO KEY UPDATE del login contra el FOR UPDATE del alta.
 _DELETE_OTHERS = '''
