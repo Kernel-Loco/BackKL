@@ -269,6 +269,7 @@ class Peticion(unittest.TestCase):
                  (urllib.error.URLError(ssl.SSLEOFError(8, 'EOF occurred in violation of protocol')),
                   {'sin_respuesta': 'red'}),
                  (transporte.PlazoVencido('x'), {'sin_respuesta': 'tiempo'}),
+                 (transporte.SinConexion('x'), {'sin_respuesta': 'tiempo', 'al_conectar': True}),
                  (transporte.Redirigida(302, DOMINIO, 'https://%s/x' % WWW),
                   {'redirige': 'https://%s/x' % WWW, 'codigo': 302}))
         for error, esperado in casos:
@@ -395,10 +396,10 @@ def pagina_reservas():
 class Http(unittest.TestCase):
     """El 80 por http cuando el 443 no da la página (RC-46, RC-165), y server_version_disclosed (HX1)."""
     RAIZ_HTTPS, RAIZ_HTTP = 'https://%s/' % DOMINIO, 'http://%s/' % DOMINIO
+    NO_CONECTA = dict(sin_respuesta='tiempo', al_conectar=True)   # transporte.SinConexion
 
-    def test_1_443_cerrado_o_sin_respuesta_y_pagina_en_el_80(self):
-        for nombre, https in (('rechazada', {'rechazada': True}), ('tiempo', {'sin_respuesta': 'tiempo'}),
-                              ('red', {'sin_respuesta': 'red'})):
+    def test_1_443_cerrado_o_sin_conectar_y_pagina_en_el_80(self):
+        for nombre, https in (('rechazada', {'rechazada': True}), ('no conecta', self.NO_CONECTA)):
             with self.subTest(nombre), tempfile.TemporaryDirectory() as d:
                 res, cliente, _ = correr({self.RAIZ_HTTPS: https, self.RAIZ_HTTP: pagina_reservas()},
                                          apis=Apis(eol=404, nvd={'totalResults': 0, 'vulnerabilities': []}),
@@ -425,8 +426,9 @@ class Http(unittest.TestCase):
                 ('los dos cerrados', {'rechazada': True}, {'rechazada': True}, 'sin_https', 0),
                 ('80 redirige al 443', {'rechazada': True}, {'redirige': self.RAIZ_HTTPS, 'codigo': 301},
                  'sin_https', 0),
-                ('443 sin respuesta y 80 cerrado', {'sin_respuesta': 'tiempo'}, {'rechazada': True},
-                 'sin_respuesta', 1)):
+                ('443 rechazado y 80 que no conecta', {'rechazada': True}, self.NO_CONECTA, 'sin_https', 0),
+                ('443 que no conecta y 80 cerrado', self.NO_CONECTA, {'rechazada': True}, 'sin_respuesta', 1),
+                ('ninguno conecta', self.NO_CONECTA, self.NO_CONECTA, 'sin_respuesta', 1)):
             with self.subTest(nombre):
                 res, cliente, _ = correr({self.RAIZ_HTTPS: https, self.RAIZ_HTTP: http})
                 # La redirección del 80 no se sigue: solo esas dos peticiones
@@ -519,6 +521,152 @@ class Http(unittest.TestCase):
                 else:
                     conexion._conectar((WWW, 80))
             self.assertEqual(conectadas, [] if lanza else [IP])
+
+    def test_9_una_falla_pasajera_del_443_no_prueba_el_80(self):
+        """Un 443 que conectó y no terminó, o una falla de la red, es una falla de la corrida aunque el 80 tenga una
+        página: la grabación no se escribe y el sitio no cambia por el del 80 (conexiones-1, tiempos_y_datos-2)."""
+        for nombre, https in (('tiempo', {'sin_respuesta': 'tiempo'}), ('red', {'sin_respuesta': 'red'})):
+            with self.subTest(nombre), tempfile.TemporaryDirectory() as d:
+                res, cliente, _ = correr({self.RAIZ_HTTPS: https, self.RAIZ_HTTP: pagina_reservas()},
+                                         modo='grabar', carpeta=Path(d) / DOMINIO)
+                self.assertEqual(cliente.visitar.urls, [self.RAIZ_HTTPS])
+                self.assertEqual(cliente.fallas, 1)
+                self.assertIn(visita.NO_SE_GRABO, res.avisos)
+                self.assertEqual(activo(res, DOMINIO).atributos['web']['estado'], 'sin_respuesta')
+                self.assertEqual(res.hallazgos, [])
+
+    def test_10_443_rechazado_y_80_con_falla_pasajera(self):
+        """Con el 443 cerrado, un 80 que conectó y no terminó (o una falla de la red) no prueba que no haya sitio: es
+        una falla y el sitio queda sin revisar, no 'sin_https' (tiempos_y_datos-1)."""
+        for nombre, http in (('tiempo', {'sin_respuesta': 'tiempo'}), ('red', {'sin_respuesta': 'red'})):
+            with self.subTest(nombre), tempfile.TemporaryDirectory() as d:
+                res, cliente, _ = correr({self.RAIZ_HTTPS: {'rechazada': True}, self.RAIZ_HTTP: http},
+                                         modo='grabar', carpeta=Path(d) / DOMINIO)
+                self.assertEqual(cliente.visitar.urls, [self.RAIZ_HTTPS, self.RAIZ_HTTP])
+                self.assertEqual(cliente.fallas, 1)
+                self.assertIn(visita.NO_SE_GRABO, res.avisos)
+                web = activo(res, DOMINIO).atributos['web']
+                self.assertEqual(web['estado'], 'sin_respuesta')
+                self.assertNotEqual(web['estado'], 'sin_https')
+
+    def test_11_sin_tiempo_para_el_80_deja_lo_del_443(self):
+        """Si a la corrida ya no le alcanza para el 80, queda 'sin_https' del 443, que ya se sabía, sin cobertura
+        parcial por tiempo (conexiones-2)."""
+        original = visita.ClienteWeb.sitio
+
+        def sitio(cliente, url, *args, **kw):
+            if url.startswith('http://'):
+                raise visita.SinTiempo('web: se acabó el tiempo de la corrida antes de visitar %s' % url)
+            return original(cliente, url, *args, **kw)
+        with mock.patch.object(visita.ClienteWeb, 'sitio', sitio):
+            res, cliente, _ = correr({self.RAIZ_HTTPS: {'rechazada': True}})
+        self.assertEqual(res.estado, 'succeeded', res.error)
+        self.assertEqual(activo(res, DOMINIO).atributos['web']['estado'], 'sin_https')
+        self.assertEqual((res.revisados, res.sin_revisar, res.sin_cobertura), (None, None, []))
+        self.assertEqual(cliente.fallas, 0)
+
+    def test_12_el_80_tiene_su_propio_plazo(self):
+        """La petición al 80 usa TIMEOUT_HTTP, y 20 sitios con el 443 y el 80 sin conectar caben en la corrida con
+        100 s de sobra para Cert Spotter y las A (tiempos_y_datos-3)."""
+        plazos = []
+
+        class ConPlazos(Sitios):
+            def __call__(self, url, timeout):
+                plazos.append(timeout)
+                return super().__call__(url, timeout)
+        cliente = visita.ClienteWeb(modo='vivo', carpeta=visita.carpeta_de(DOMINIO), cronometro=lambda: 0.0,
+                                    dormir=lambda _: None,
+                                    descargar=Apis(), resolver=ResolvedorSimulado({DOMINIO: a(IP)}),
+                                    visitar=ConPlazos({self.RAIZ_HTTPS: self.NO_CONECTA,
+                                                       self.RAIZ_HTTP: pagina_reservas()}))
+        _, url, pagina, _ = visita._recorrer(cliente, DOMINIO, DOMINIO)
+        self.assertEqual((url, pagina['estado']), (self.RAIZ_HTTP, 200))
+        self.assertEqual(plazos, [visita.TIMEOUT_SITIO, visita.TIMEOUT_HTTP])
+        peor = 2 * visita.PAUSA_SITIO + visita.TIMEOUT_SITIO + visita.TIMEOUT_HTTP
+        self.assertLessEqual(visita.MAX_SITIOS * peor, visita.TIEMPO_CORRIDA - visita.RESERVA_APIS - 100)
+
+    def test_13_sin_conexion_solo_si_ninguna_ip_conecto_a_tiempo(self):
+        """transporte: SinConexion cuando cada dirección agotó su plazo al conectar (un puerto que descarta los
+        paquetes). Un rechazo en alguna dirección es un rechazo. _visitar lo guarda con al_conectar."""
+        def conectar(errores):
+            fallas = iter(errores)
+
+            class Socket(Conectar.Socket):
+                def connect(self, destino):
+                    raise next(fallas)
+            conexion = transporte._Conexion(WWW, plazo=time.monotonic() + 30, cronometro=time.monotonic)
+            info = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('104.21.48.%d' % i, 443)) for i in range(len(errores))]
+            with mock.patch.object(transporte, 'resolver', lambda host, puerto, espera: info), \
+                    mock.patch.object(transporte.socket, 'socket', Socket):
+                return conexion._conectar((WWW, 443))
+        for errores in ([TimeoutError()], [socket.timeout(), TimeoutError()]):
+            with self.subTest(errores), self.assertRaises(transporte.SinConexion) as e:
+                conectar(errores)
+            self.assertIsInstance(e.exception, transporte.PlazoVencido)
+        for errores in ([ConnectionRefusedError()], [TimeoutError(), ConnectionRefusedError()],
+                        [ConnectionRefusedError(), TimeoutError()], [OSError('red')]):
+            with self.subTest(errores), self.assertRaises(OSError) as e:
+                conectar(errores)
+            self.assertNotIsInstance(e.exception, transporte.SinConexion)
+        # La grabación conserva al_conectar solo con tiempo y en True
+        self.assertEqual(visita.limpiar_visita(self.NO_CONECTA), self.NO_CONECTA)
+        self.assertEqual(visita.limpiar_visita({'sin_respuesta': 'red', 'al_conectar': True}), {'sin_respuesta': 'red'})
+        self.assertEqual(visita.limpiar_visita({'sin_respuesta': 'tiempo', 'al_conectar': 'si'}),
+                         {'sin_respuesta': 'tiempo'})
+
+    def test_14_cabeceras_con_tope_en_la_grabacion(self):
+        """limpiar_visita guarda a lo más MAX_PARES cabeceras de borde.MAX_VALOR + 1 caracteres: borde y huellas no
+        leen más, así el análisis no cambia y la grabación no crece a megas (conexiones-4)."""
+        corta = 'nginx/1.24.0 (Ubuntu)'
+        pagina = dict(pagina_reservas(), cabeceras=[['Server', corta]] + [['X-Relleno-%d' % i, 'x' * 70000]
+                                                                         for i in range(150)])
+        limpia = visita.limpiar_visita(pagina)
+        self.assertEqual(len(limpia['cabeceras']), visita.MAX_PARES)
+        self.assertEqual(limpia['cabeceras'][0], ['Server', corta])
+        self.assertTrue(all(len(v) == visita.borde.MAX_VALOR + 1 for _, v in limpia['cabeceras'][1:]))
+        self.assertEqual(visita.MAX_LARGO_CABECERA, visita.borde.MAX_VALOR + 1)
+        # Lo que huellas lee de una cabecera recortada es lo mismo que de la entera: nada de más de MAX_VALOR
+        valor = 'Apache/2.4.58 ' + 'y' * 70000
+        entera = dict(pagina_reservas(), cabeceras=[['Server', valor]])
+        self.assertEqual(visita.limpiar_visita(entera)['cabeceras'][0][1], valor[:visita.borde.MAX_VALOR + 1])
+
+    def test_15_el_socket_plano_acota_cada_lectura_por_el_plazo(self):
+        """_SocketPlano: un 80 que manda las cabeceras de a un byte no estira la visita más allá de su plazo
+        (conexiones-3). Sin red: socket.socketpair()."""
+        import threading
+
+        cliente_sock, servidor_sock = socket.socketpair()
+
+        class Plano(transporte._SocketPlano):
+            def setsockopt(self, *_):   # http.client pide TCP_NODELAY, que AF_UNIX no tiene
+                pass
+        plano = Plano(fileno=cliente_sock.detach())
+        alto = threading.Event()
+
+        def goteo():
+            try:
+                servidor_sock.recv(65536)
+                servidor_sock.sendall(b'HTTP/1.1 200 OK\r\nX-Lento: ')
+                for _ in range(80):   # 4 s de goteo si nadie corta
+                    if alto.wait(0.05):
+                        break
+                    servidor_sock.sendall(b'a')
+            except OSError:
+                pass
+            finally:
+                servidor_sock.close()
+        hilo = threading.Thread(target=goteo, daemon=True)
+        hilo.start()
+        inicio = time.monotonic()
+        try:
+            with mock.patch.object(transporte._ConexionHttp, '_conectar', lambda self, *a: plano), \
+                    self.assertRaises(transporte.PlazoVencido):
+                transporte.visitar(urllib.request.Request('http://%s/' % WWW), time.monotonic() + 0.5, 1000)
+        finally:
+            alto.set()
+            plano.close()
+            hilo.join(5)
+        self.assertLess(time.monotonic() - inicio, 2.0)
 
 
 class Contrato(unittest.TestCase):

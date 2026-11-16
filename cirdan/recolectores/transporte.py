@@ -72,6 +72,12 @@ class PlazoVencido(Exception):
     """La petición no terminó dentro de su plazo."""
 
 
+class SinConexion(PlazoVencido):
+    """El plazo se acabó sin que ninguna dirección aceptara la conexión TCP: el puerto descarta los paquetes (un
+    firewall o una nube que no contesta el SYN de un puerto cerrado), no un servidor que conectó y no terminó. Es un
+    PlazoVencido: quien no distingue lo trata igual (RC-46)."""
+
+
 class Redirigida(Exception):
     """El servidor respondió con una redirección, que no se sigue. `destino` es la URL absoluta a la que manda (la de
     urllib, ya unida con la de la petición), o None."""
@@ -221,11 +227,12 @@ class _ConPlazo:
         if todas and not direcciones:
             raise NoPublica('%s resolvió solo a direcciones que no son públicas' % host)
         ultimo = OSError('%s no resolvió a ninguna dirección' % host)
+        solo_tiempo = bool(direcciones)   # cada dirección que se probó agotó su parte del plazo al conectar
         for i, (familia, tipo, protocolo, _, destino) in enumerate(direcciones):
             try:
                 s = (self.clase_socket or socket.socket)(familia, tipo, protocolo)
             except OSError as e:   # EAFNOSUPPORT: la siguiente dirección, que puede ser de otra familia
-                ultimo = e
+                ultimo, solo_tiempo = e, False
                 continue
             try:
                 s.settimeout(self.queda() / (len(direcciones) - i))   # las que faltan también tienen su parte
@@ -234,11 +241,14 @@ class _ConPlazo:
             except OSError as e:   # la siguiente dirección, con lo que queda del plazo
                 s.close()
                 ultimo = e
+                solo_tiempo = solo_tiempo and isinstance(e, (TimeoutError, socket.timeout))
                 continue
             except BaseException:
                 s.close()
                 raise
             return s
+        if solo_tiempo:
+            raise SinConexion('%s no aceptó la conexión dentro de su plazo' % host) from ultimo
         raise ultimo
 
     def connect(self):
