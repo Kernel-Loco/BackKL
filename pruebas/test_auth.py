@@ -10,6 +10,7 @@ import secrets
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
@@ -366,6 +367,143 @@ class Captcha(unittest.TestCase):
             self.assertRechazado(client, self._login(client, email, 'x', 'basura'), 'sin captcha válido')
         code, body = sesion.post_login(client, email, 'x')
         self.assertEqual((code, body['detail']), (401, INVALID), 'el correo no debe quedar bloqueado')
+
+
+PASSWORD_URL = AUTH + '/password'
+NUEVA = 'Marea-Baja-Prueba-2026'
+MALA = 'no-es-la-contrasena-actual'
+WRONG = 'La contraseña actual no es correcta.'
+WRONG_LAST = 'La contraseña actual no es correcta. Por seguridad cerramos tu sesión: vuelve a iniciarla.'
+COMUN = 'Esa contraseña es muy común. Elige otra.'
+LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
+MAX_INTENTOS = 5  # MAX_PASSWORD_ATTEMPTS de cirdan/auth/sessions.py
+
+
+def entrar(email):
+    """Sesión nueva sin esperar 30 s por código: sin último código usado, el mismo vuelve a servir (como test_15)."""
+    scalar("UPDATE users SET last_totp_step = NULL WHERE email = '%s' RETURNING 1;" % email, user='postgres')
+    sesion._last_step.pop(email, None)
+    return sesion.login(email)
+
+
+def cambiar(client, actual, nueva):
+    """POST /auth/password. Devuelve (código, detail, cabeceras)."""
+    req = urllib.request.Request(PASSWORD_URL, json.dumps({'current_password': actual, 'new_password': nueva}).encode(),
+                                 {'Content-Type': 'application/json'}, method='POST')
+    try:
+        with client.opener.open(req, timeout=15) as r:
+            return r.status, None, r.headers
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        return e.code, (json.loads(raw) if raw else {}).get('detail'), e.headers
+
+
+def contar_eventos(email, action):
+    return int(scalar("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                      "AND a.action = '%s';" % (email, action), user='postgres'))
+
+
+class CambioContrasena(unittest.TestCase):
+    """RC-290 (límite de intentos y cierre de las demás sesiones) y RC-281 (contraseñas comunes)."""
+
+    def setUp(self):
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+
+    def restaurar(self, client):
+        # La sesión que cambió sigue abierta: con ella se vuelve a la contraseña de demo.
+        self.assertEqual(cambiar(client, NUEVA, PASSWORD)[:2], (200, {'passkeys_removed': 0}), 'no se pudo volver a la contraseña de demo')
+
+    def test_1_cinco_malas_dan_400_y_la_sexta_429_sin_revisar(self):
+        antes = contar_eventos(DANA, 'auth.password_change_locked')
+        client = entrar(DANA)
+        token = client.cookie().value
+        for i in range(MAX_INTENTOS - 1):
+            self.assertEqual(cambiar(client, MALA, NUEVA)[:2], (400, WRONG), 'intento %d' % (i + 1))
+        self.assertEqual(cambiar(client, MALA, NUEVA)[:2], (400, WRONG_LAST), 'el quinto avisa que cierra la sesión')
+        self.assertIsNone(client.cookie(), 'la respuesta del quinto borra la cookie')
+        self.assertEqual(Client().get(AUTH + '/me', {'Cookie': 'lt_session=' + token})[0], 401,
+                         'la sesión del quinto fallo ya no sirve en el servidor')
+        self.assertEqual(contar_eventos(DANA, 'auth.password_change_locked') - antes, 1)
+        # El login no quedó bloqueado: el contador es otro. Desde una sesión nueva, ni con la contraseña actual buena
+        # se revisa: 429 con Retry-After, y la contraseña no cambió.
+        otra = entrar(DANA)
+        code, detail, headers = cambiar(otra, PASSWORD, NUEVA)
+        self.assertEqual((code, detail, headers.get('Retry-After')), (429, LOCKED, '900'))
+        self.assertEqual(sesion.post_login(Client(), DANA, NUEVA)[0], 401, 'la contraseña no debe haber cambiado')
+        self.assertEqual(sesion.post_login(Client(), DANA, PASSWORD)[0], 200)
+        self.assertEqual(otra.get(AUTH + '/me')[0], 200, 'el 429 no cierra la sesión')
+        self.assertEqual(int(scalar("SELECT count(*) FROM audit_log WHERE details::text LIKE '%%%s%%';" % MALA,
+                                    user='postgres')), 0, 'la bitácora no guarda la contraseña')
+
+    def test_2_con_la_buena_antes_del_limite_se_cambia_como_hoy(self):
+        client = entrar(DANA)
+        for i in range(MAX_INTENTOS - 1):
+            self.assertEqual(cambiar(client, MALA, NUEVA)[:2], (400, WRONG), 'intento %d' % (i + 1))
+        self.assertEqual(cambiar(client, PASSWORD, NUEVA)[:2], (200, {'passkeys_removed': 0}))
+        self.addCleanup(self.restaurar, client)
+        self.assertEqual(sesion.post_login(Client(), DANA, PASSWORD)[0], 401, 'la anterior ya no entra')
+        self.assertEqual(sesion.post_login(Client(), DANA, NUEVA)[0], 200, 'la nueva entra')
+        self.assertEqual(client.get(AUTH + '/me')[0], 200, 'la sesión que cambió sigue abierta')
+        # El cambio correcto borra los intentos: 4 malas más vuelven a ser 400 sin cerrar la sesión.
+        for i in range(MAX_INTENTOS - 1):
+            self.assertEqual(cambiar(client, MALA, PASSWORD)[:2], (400, WRONG), 'intento %d tras el cambio' % (i + 1))
+
+    def test_3_seis_en_paralelo_no_revisan_mas_de_cinco(self):
+        # Una sesión por petición: así el cierre de la sesión del quinto no frena a las demás antes del contador.
+        antes = contar_eventos(DANA, 'auth.password_change_locked')
+        clientes = [entrar(DANA) for _ in range(MAX_INTENTOS + 1)]
+        salida = threading.Barrier(len(clientes))
+
+        def intento(client):
+            salida.wait()
+            return cambiar(client, MALA, NUEVA)[:2]
+
+        with ThreadPoolExecutor(len(clientes)) as pool:
+            respuestas = list(pool.map(intento, clientes))
+        codigos = [r[0] for r in respuestas]
+        self.assertEqual((codigos.count(400), codigos.count(429)), (5, 1), respuestas)
+        self.assertEqual(respuestas.count((400, WRONG_LAST)), 1, respuestas)
+        self.assertEqual(contar_eventos(DANA, 'auth.password_change_locked') - antes, 1)
+        self.assertEqual(sum(c.get(AUTH + '/me')[0] == 401 for c in clientes), 1, 'solo se cierra la sesión del quinto')
+
+    def test_4_cambiar_cierra_las_demas_sesiones(self):
+        primera, segunda = entrar(DANA), entrar(DANA)
+        self.assertEqual(segunda.get(AUTH + '/me')[0], 200)
+        self.assertEqual(cambiar(primera, PASSWORD, NUEVA)[:2], (200, {'passkeys_removed': 0}))
+        self.addCleanup(self.restaurar, primera)
+        self.assertEqual(segunda.get(AUTH + '/me')[0], 401, 'la otra sesión se cierra')
+        self.assertEqual(primera.get(AUTH + '/me')[0], 200, 'la que cambió sigue abierta')
+
+    def test_5_una_comun_con_otras_mayusculas_da_400_y_una_que_no_esta_200(self):
+        client = entrar(DANA)
+        for comun in ('1Q2W3E4R5T6Y', '123QWEasdZXC'):
+            self.assertEqual(cambiar(client, PASSWORD, comun)[:2], (400, COMUN), comun)
+        self.assertEqual(sesion.post_login(Client(), DANA, PASSWORD)[0], 200, 'la contraseña no cambió')
+        self.assertEqual(cambiar(client, PASSWORD, NUEVA)[:2], (200, {'passkeys_removed': 0}))
+        self.addCleanup(self.restaurar, client)
+
+    def test_6_dos_cambios_a_la_vez_con_la_actual_solo_uno_gana(self):
+        # Sin el lock de la fila los dos leían el hash viejo, daban 204 y ganaba el último: el de quien tuviera la vieja.
+        nuevas = (NUEVA, 'Marea-Alta-Prueba-2026')
+        clientes = [entrar(DANA), entrar(DANA)]
+        salida = threading.Barrier(len(clientes))
+
+        def intento(par):
+            salida.wait()
+            return cambiar(par[0], PASSWORD, par[1])[:2]
+
+        with ThreadPoolExecutor(len(clientes)) as pool:
+            respuestas = list(pool.map(intento, zip(clientes, nuevas)))
+        ganadoras = [i for i, r in enumerate(respuestas) if r == (200, {'passkeys_removed': 0})]
+        if len(ganadoras) == 1:
+            ganadora = ganadoras[0]
+            self.addCleanup(lambda: self.assertEqual(cambiar(clientes[ganadora], nuevas[ganadora], PASSWORD)[:2],
+                                                     (200, {'passkeys_removed': 0}), 'no se pudo volver a la contraseña de demo'))
+        self.assertEqual(sorted(r[0] for r in respuestas), [200, 400], respuestas)
+        self.assertEqual(respuestas[1 - ganadora], (400, WRONG), respuestas)
+        self.assertEqual(sesion.post_login(Client(), DANA, nuevas[ganadora])[0], 200, 'la que ganó entra')
+        self.assertEqual(sesion.post_login(Client(), DANA, nuevas[1 - ganadora])[0], 401, 'la otra no')
 
 
 if __name__ == '__main__':

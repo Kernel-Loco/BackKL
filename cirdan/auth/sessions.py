@@ -12,6 +12,8 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
 - Bloqueo por intentos: 5 fallos por correo o 20 por IP en 15 min. Un código equivocado también
   cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Una IPv6
   cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
+- Cambio de contraseña (RC-290): 5 intentos por usuario en 15 min, contados antes de revisar la contraseña actual.
+  El quinto fallo cierra la sesión que lo hizo.
 """
 import base64
 import hashlib
@@ -35,6 +37,7 @@ PASSKEY_SECONDS = 5 * 60
 MAX_PASSKEY_OPTIONS_IP = 300  # el autollenado pide uno en cada carga del login: alcanza para una oficina tras un NAT
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
+MAX_PASSWORD_ATTEMPTS = 5  # cambio de contraseña: intentos por usuario en LOCK_SECONDS (RC-290)
 
 
 @cache
@@ -100,6 +103,31 @@ def limits(created_at=None):
 def delete(token):
     if token:
         _valkey().delete('sess:' + _digest(token))
+
+
+SWITCHED, SESSION_GONE, SWITCH_CONFLICT = 'switched', 'gone', 'conflict'
+
+# Corre entera dentro de Valkey: entre leer la empresa activa y escribir la nueva no se mete otro cambio. Si la
+# sesión ya no está en la empresa de la que partió la petición, otro cambio llegó antes y este no se aplica.
+_SWITCH_ORG = '''
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 'gone' end
+local data = cjson.decode(raw)
+if data.org_id ~= ARGV[1] then return 'conflict' end
+data.org_id = ARGV[2]
+data.role = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(data), 'KEEPTTL')
+return 'switched'
+'''
+
+
+def switch_org(token, expected_org_id, org_id, role):
+    """Cambia la empresa activa y el rol de una sesión que ya existe (superadmin, RC-332), solo si sigue en
+    `expected_org_id`. Conserva su inactividad, su tope de 8 h y su lugar en el índice del usuario, y una sesión que
+    se cerró mientras tanto no revive. Devuelve SWITCHED, SESSION_GONE o SWITCH_CONFLICT (otro cambio ganó)."""
+    if not token or len(token) > 100:
+        return SESSION_GONE
+    return _valkey().eval(_SWITCH_ORG, 1, 'sess:' + _digest(token), str(expected_org_id), str(org_id), role)
 
 
 # Corre entera dentro de Valkey: una sesión creada a la vez entra al índice antes (y se borra) o después. Que no
@@ -318,3 +346,22 @@ def register_mfa_fail(ip):
 
 def clear_fails(email):
     _valkey().delete(_email_key(email))
+
+
+# ------------------------------------------------------------------ cambio de contraseña (RC-290)
+
+def _password_key(user_id):
+    return 'pw:fail:user:' + _digest(str(user_id))
+
+
+def take_password_attempt(user_id):
+    """Cuenta el intento de cambio de contraseña del usuario antes de revisar la contraseña actual y devuelve su
+    número: 1 a MAX_PASSWORD_ATTEMPTS se revisan, uno mayor ya no. Es un contador aparte del login, para que quien tiene
+    una cookie robada no bloquee el inicio de sesión del dueño. Contado después, las peticiones en paralelo pasarían
+    todas con el contador en 0, como en take_mfa_attempt."""
+    attempt, = _count(_password_key(user_id))
+    return attempt
+
+
+def clear_password_attempts(user_id):
+    _valkey().delete(_password_key(user_id))

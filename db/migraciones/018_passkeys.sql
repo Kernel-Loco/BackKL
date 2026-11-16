@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/017_passkeys.sql (RC-331)
+-- Cirdan · db/migraciones/018_passkeys.sql (RC-331)
 -- Passkeys (WebAuthn) como otra forma de entrar, junto a contraseña y TOTP.
 -- 1. webauthn_credentials: una fila por passkey registrada. Guarda solo lo
 --    público (id de la credencial, llave pública COSE, contador, transports,

@@ -39,7 +39,7 @@ class BaseFalsa:
 
     def __init__(self, sin_fila=(), pueden_entrar=None, passkeys=None, tabla_passkeys=True):
         self.consultas = []
-        self.tabla_passkeys = tabla_passkeys  # False: un volumen anterior a la 017, sin webauthn_credentials
+        self.tabla_passkeys = tabla_passkeys  # False: un volumen anterior a la 018, sin webauthn_credentials
         self.sin_fila = set(sin_fila)
         self.pueden_entrar = dict(pueden_entrar or {})
         self.passkeys = dict(passkeys or {})  # id del usuario: cuántas passkeys tiene en la base
@@ -219,7 +219,7 @@ class Script(unittest.TestCase):
         self.assertFalse([sql for sql, _ in consultas if sql.startswith('DELETE')])
 
     def test_9c4_sin_la_017_apaga_las_cuentas_sin_borrar_passkeys(self):
-        # R2 de RC-331: con un volumen anterior a la 017 no hay tabla de passkeys y la API debe arrancar igual.
+        # R2 de RC-331: con un volumen anterior a la 018 no hay tabla de passkeys y la API debe arrancar igual.
         consultas, salida = correr(BaseFalsa(tabla_passkeys=False), DEMO_ACCOUNTS='false')
         self.assertFalse([sql for sql, _ in consultas if sql.startswith('DELETE')])
         self.assertEqual(len([sql for sql, _ in consultas if sql.startswith('UPDATE users')]), len(demo.CUENTAS))

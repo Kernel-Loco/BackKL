@@ -98,6 +98,7 @@ jobs:
         run: >-
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
           pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_llaves_api.py
+          pruebas/test_superadmin.py
           pruebas/test_respaldo.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
@@ -123,6 +124,7 @@ jobs:
           pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py
           pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py pruebas/test_borde.py
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
+          pruebas/test_contrasenas_comunes.py
           pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_siem.py pruebas/test_despliegue.py
           pruebas/test_ci.py
 

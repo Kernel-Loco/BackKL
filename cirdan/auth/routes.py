@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from cirdan.auth import captcha, passwords, sessions, totp, webauthn
-from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session
+from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session, is_platform_admin
 from cirdan.db import audit, transaction
 
 router = APIRouter(prefix='/api/v1/auth', tags=['sesión'])
@@ -57,13 +57,37 @@ def _user(conn, user_id):
     return conn.execute(USER_SQL, (user_id,)).fetchone()
 
 
+def platform_view(session, user):
+    """Lo que /me agrega para el superadmin (RC-332). `user` es la fila de USER_SQL, leída con la empresa de la cuenta.
+    En una empresa ajena, organization_id y organization_name son los de la empresa activa y role el de la sesión.
+    platform_admin pide la bandera de la sesión y también la base: si se le quitó el permiso o el TOTP con la sesión
+    en su empresa, el portal deja de mostrar el selector. Un permiso nuevo sigue pidiendo volver a iniciar sesión."""
+    admin = session.platform_admin and is_platform_admin(session.user_id)
+    out = {'platform_admin': admin}
+    if admin:
+        out.update(home_organization_id=user['organization_id'], home_organization_name=user['organization_name'])
+    if session.acting_elsewhere:
+        with transaction(session.org_id) as conn:
+            org = conn.execute('SELECT id::text, name FROM organizations').fetchone()
+        if not org:
+            sessions.delete(session.token)
+            raise HTTPException(401, SESSION_ENDED)
+        out.update(organization_id=org['id'], organization_name=org['name'], role=session.role)
+    return out
+
+
 def _start_session(response, conn, user, ip, via):
-    """Crea la sesión, pone la cookie y lo deja en la bitácora."""
+    """Crea la sesión, pone la cookie y lo deja en la bitácora. Siempre empieza en la empresa de la cuenta."""
     conn.execute('UPDATE users SET last_login_at = now() WHERE id = %s', (user['id'],))
     audit(conn, user['organization_id'], 'auth.login_succeeded', user['id'], ip, 'user', user['id'], {'via': via})
-    token = sessions.create({'user_id': user['id'], 'org_id': user['organization_id'], 'role': user['role'], 'email': user['email']})
+    platform = bool(conn.execute('SELECT public.is_platform_admin(%s) AS ok', (user['id'],)).fetchone()['ok'])
+    token = sessions.create({'user_id': user['id'], 'org_id': user['organization_id'], 'role': user['role'],
+                             'email': user['email'], 'home_org_id': user['organization_id'], 'platform_admin': platform})
     response.set_cookie(COOKIE, token, httponly=True, secure=COOKIE_SECURE, samesite='lax', path='/')
-    return dict(_user(conn, user['id']), **sessions.limits())
+    row = _user(conn, user['id'])
+    session = Session(token=token, user_id=user['id'], org_id=user['organization_id'], role=user['role'],
+                      email=user['email'], home_org_id=user['organization_id'], platform_admin=platform)
+    return dict(row, **platform_view(session, row), **sessions.limits())
 
 
 def _clear_fails(email):
@@ -215,7 +239,7 @@ def mfa_setup(body: MfaSetupIn, request: Request, response: Response, session: S
     ip = client_ip(request)
     if sessions.is_locked(session.email, ip):
         raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         row = conn.execute('SELECT email::text, password_hash, %s AS mfa_enabled FROM users WHERE id = %%s AND is_active'
                            % MFA_ENABLED_SQL, (session.user_id,)).fetchone()
         if not row:
@@ -223,12 +247,12 @@ def mfa_setup(body: MfaSetupIn, request: Request, response: Response, session: S
             raise HTTPException(401, SESSION_ENDED)
         bad_password = not passwords.verify_password(row['password_hash'], body.current_password, session.user_id)
         if bad_password:
-            audit(conn, session.org_id, 'auth.mfa_setup_failed', session.user_id, ip, 'user', session.user_id,
+            audit(conn, session.own_org_id, 'auth.mfa_setup_failed', session.user_id, ip, 'user', session.user_id,
                   {'reason': 'password'})
         elif row['mfa_enabled']:
             raise HTTPException(409, MFA_ALREADY)
         else:
-            audit(conn, session.org_id, 'auth.mfa_setup_started', session.user_id, ip, 'user', session.user_id)
+            audit(conn, session.own_org_id, 'auth.mfa_setup_started', session.user_id, ip, 'user', session.user_id)
     if bad_password:
         sessions.register_fail(session.email, ip)
         raise HTTPException(400, WRONG_PASSWORD)
@@ -250,7 +274,7 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
     ip = client_ip(request)
     secret = totp.decrypt_secret(base64.b64decode(pending['secret_enc']), session.user_id)
     removed = []
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         # FOR UPDATE: dos códigos válidos a la vez no guardan dos secretos; el segundo ve la cuenta ya activa.
         row = conn.execute('SELECT %s AS mfa_enabled FROM users WHERE id = %%s AND is_active FOR UPDATE' % MFA_ENABLED_SQL,
                            (session.user_id,)).fetchone()
@@ -263,13 +287,13 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
             raise HTTPException(409, MFA_ALREADY)
         step = totp.verify_code(secret, body.code)
         if step is None:
-            audit(conn, session.org_id, 'auth.mfa_enable_failed', session.user_id, ip, 'user', session.user_id)
+            audit(conn, session.own_org_id, 'auth.mfa_enable_failed', session.user_id, ip, 'user', session.user_id)
         else:
             # last_totp_step con el paso de este código: el mismo código no sirve después para iniciar sesión.
             conn.execute('UPDATE users SET totp_secret_enc = %s, mfa_enabled_at = now(), last_totp_step = %s, '
                          'updated_at = now() WHERE id = %s',
                          (totp.encrypt_secret(secret, session.user_id), step, session.user_id))
-            audit(conn, session.org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
+            audit(conn, session.own_org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
             # Las passkeys de la cuenta se registraron sin TOTP, solo con la contraseña (RC-331): quien la tenía pudo dar
             # de alta la suya y seguiría entrando sin el código. Se borran y se vuelven a registrar con el código.
             removed = _delete_passkeys(conn, session, ip, 'mfa_enabled')
@@ -288,39 +312,82 @@ def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
     data = sessions.get(token)
     if data:
-        with transaction(data['org_id']) as conn:
-            audit(conn, data['org_id'], 'auth.logout', data['user_id'], client_ip(request), 'user', data['user_id'])
+        # La bitácora va en la empresa de la cuenta, aunque un superadmin cierre sesión desde otra (RC-332).
+        home = data.get('home_org_id') or data['org_id']
+        with transaction(home) as conn:
+            audit(conn, home, 'auth.logout', data['user_id'], client_ip(request), 'user', data['user_id'])
     sessions.delete(token)
     response.delete_cookie(COOKIE, path='/', httponly=True, secure=COOKIE_SECURE, samesite='lax')
 
 
 @router.get('/me', summary='Usuario de la sesión')
 def me(session: Session = Depends(current_session)):
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         user = _user(conn, session.user_id)
     if not user:  # se desactivó la cuenta con la sesión abierta
         sessions.delete(session.token)
         raise HTTPException(401, 'Tu sesión terminó. Vuelve a iniciar sesión.')
-    return dict(user, **sessions.limits(session.created_at))
+    return dict(user, **platform_view(session, user), **sessions.limits(session.created_at))
+
+
+COMMON_PASSWORD = 'Esa contraseña es muy común. Elige otra.'
+WRONG_PASSWORD_LAST = 'La contraseña actual no es correcta. Por seguridad cerramos tu sesión: vuelve a iniciarla.'
+
+
+def _clear_password_attempts(user_id):
+    # Corre con la contraseña ya cambiada. Si Valkey falla aquí, el contador vence solo en 15 min: un 500 diría que no
+    # cambió cuando sí cambió.
+    try:
+        sessions.clear_password_attempts(user_id)
+    except Exception:
+        log.exception('No se pudieron borrar los intentos de cambio de contraseña del usuario %s', user_id)
 
 
 @router.post('/password', summary='Cambia la contraseña del usuario de la sesión y borra sus passkeys')
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
+    # La lista de contraseñas comunes (RC-281) va primero: no revisa la contraseña actual, así que no gasta un intento.
+    if passwords.is_common(body.new_password):
+        raise HTTPException(400, COMMON_PASSWORD)
+    # El intento se cuenta antes de revisar la contraseña actual (RC-290), como en /mfa/verify: en paralelo tampoco se
+    # revisan más de 5. Es un contador del usuario, aparte del login: quien tiene una cookie robada no bloquea el
+    # inicio de sesión del dueño, y el quinto fallo le cierra la sesión.
+    attempt = sessions.take_password_attempt(session.user_id)
+    if attempt > sessions.MAX_PASSWORD_ATTEMPTS:
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
     ip = client_ip(request)
-    with transaction(session.org_id) as conn:
-        # FOR NO KEY UPDATE, como /passkeys/register/verify: un registro a medias espera a este cambio y después ve la
-        # contraseña nueva, así que ya no guarda su passkey.
+    last = attempt == sessions.MAX_PASSWORD_ATTEMPTS
+    with transaction(session.own_org_id) as conn:
+        # FOR NO KEY UPDATE: dos cambios a la vez con la contraseña actual ya no dan 204 los dos. El segundo espera el
+        # commit del primero y revisa contra el hash nuevo (si no, ganaba el último, que podía ser el de una cookie
+        # robada). No FOR UPDATE: chocaría con el FOR KEY SHARE de la llave de audit_log a users y un login fallido a la
+        # vez daría deadlock con el lock de la cadena. Es el mismo lock que toma el login.
         row = conn.execute('SELECT password_hash FROM users WHERE id = %s FOR NO KEY UPDATE',
                            (session.user_id,)).fetchone()
-        if not row or not passwords.verify_password(row['password_hash'], body.current_password, session.user_id):
-            raise HTTPException(400, 'La contraseña actual no es correcta.')
-        conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
-                     (passwords.hash_password(body.new_password, session.user_id), session.user_id))
-        # Sin TOTP una passkey se registra solo con la contraseña (RC-331): quien tenía la anterior pudo dar de alta la
-        # suya y seguiría entrando, como MFA, después del cambio. Se borran y se vuelven a registrar con la nueva.
-        # El borrado va antes de cualquier audit(): así no se espera una fila de passkey con el candado de la bitácora.
-        removed = _delete_passkeys(conn, session, ip, 'password_changed')
-        audit(conn, session.org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
+        ok = bool(row) and passwords.verify_password(row['password_hash'], body.current_password, session.user_id)
+        if not ok and last:
+            audit(conn, session.own_org_id, 'auth.password_change_locked', session.user_id, ip, 'user', session.user_id,
+                  {'attempts': attempt})
+            # Antes del commit: si Valkey falla, el evento no queda sin que la sesión se haya cerrado.
+            sessions.delete(session.token)
+        elif ok:
+            conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
+                         (passwords.hash_password(body.new_password, session.user_id), session.user_id))
+            # Sin TOTP una passkey se registra solo con la contraseña (RC-331): quien tenía la anterior pudo dar de
+            # alta la suya y seguiría entrando, como MFA, después del cambio. Se borran y se vuelven a registrar con
+            # la nueva. El borrado va antes de cualquier audit(): así no se espera una fila de passkey con el candado
+            # de la bitácora.
+            removed = _delete_passkeys(conn, session, ip, 'password_changed')
+            audit(conn, session.own_org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
+            # Las demás sesiones de la cuenta se cierran y queda la que cambió. Va antes del commit, como en
+            # /mfa/enable: si Valkey falla, la contraseña no cambia y se puede repetir.
+            sessions.delete_others(session.user_id, session.token)
+    if not ok:
+        if last:
+            response = JSONResponse({'detail': WRONG_PASSWORD_LAST}, status_code=400)
+            response.delete_cookie(COOKIE, path='/', httponly=True, secure=COOKIE_SECURE, samesite='lax')
+            return response
+        raise HTTPException(400, WRONG_PASSWORD)
+    _clear_password_attempts(session.user_id)
     return {'passkeys_removed': len(removed)}
 
 
