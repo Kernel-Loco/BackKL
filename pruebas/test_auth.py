@@ -387,12 +387,13 @@ def entrar(email):
 
 
 def cambiar(client, actual, nueva):
-    """POST /auth/password. Devuelve (código, detail, cabeceras)."""
+    """POST /auth/password. Devuelve (código, cuerpo con 200 o detail con error, cabeceras)."""
     req = urllib.request.Request(PASSWORD_URL, json.dumps({'current_password': actual, 'new_password': nueva}).encode(),
                                  {'Content-Type': 'application/json'}, method='POST')
     try:
         with client.opener.open(req, timeout=15) as r:
-            return r.status, None, r.headers
+            raw = r.read()  # desde RC-331 responde 200 con passkeys_removed, no 204
+            return r.status, (json.loads(raw) if raw else None), r.headers
     except urllib.error.HTTPError as e:
         raw = e.read()
         return e.code, (json.loads(raw) if raw else {}).get('detail'), e.headers
