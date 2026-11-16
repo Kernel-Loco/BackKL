@@ -108,9 +108,15 @@ class ExploradorApagado(Explorador):
     def test_2_tampoco_salen_en_la_documentacion(self):
         code, body = self.api.get('/openapi.json')
         self.assertEqual(code, 200)
-        self.assertEqual([p for p in body['paths'] if p.startswith('/db')], [])
-        self.assertIn('/domains', body['paths'])
-        self.assertEqual(self.api.get('/domains', self.acme)[0], 200, 'el resto de la API sigue igual')
+        self.assertEqual([p for p in body['paths'] if p.startswith(('/db', '/domains'))], [])
+        self.assertIn('/api/v1/domains', body['paths'])
+        self.assertEqual(self.api.get('/api/v1/domains', self.acme)[0], 200, 'el resto de la API sigue igual')
+
+    def test_2b_tampoco_existen_las_rutas_de_antes_de_api_v1(self):
+        # RC-58: solo las usa demo.html, que solo existe con el explorador.
+        for ruta in ('/domains', '/domains/acme-demo.mx/findings', '/domains/acme-demo.mx/score'):
+            with self.subTest(ruta=ruta):
+                self.assertEqual(self.api.get(ruta, self.acme)[0], 404)
 
 
 class ExploradorEncendido(Explorador):
@@ -126,6 +132,30 @@ class ExploradorEncendido(Explorador):
                     self.assertEqual(code, 401, body)
                     self.assertEqual(body['detail'], SIN_SESION)
         self.assertEqual(self.api.get('/domains', org=BETA)[1]['detail'], SIN_SESION, 'la misma respuesta que /domains')
+
+    def test_3b_rutas_de_antes_de_api_v1_para_demo_html(self):
+        """Lo que antes probaba pruebas/test_api.py contra la API de siempre (RC-58): sin sesión 401, cada empresa ve
+        lo suyo, el score cuadra con los pesos y el piso, y los hallazgos van por severidad."""
+        for ruta in ('/domains', '/domains/acme-demo.mx/findings', '/domains/acme-demo.mx/score'):
+            with self.subTest(ruta=ruta):
+                self.assertEqual(self.api.get(ruta, org=ACME)[0], 401)
+        code, body = self.api.get('/domains', self.acme)
+        self.assertEqual(code, 200)
+        self.assertEqual([(d['domain'], d['score'], d['level']) for d in body[:3]],
+                         [('acme-demo.mx', 60, 'High'), ('acme-portal.mx', 0, 'Low'), ('acme-tienda.mx', 0, 'Low')])
+        self.assertEqual({d['domain']: d['authorization'] for d in body[3:]},
+                         {'partner-example.com': 'Pending TXT', 'old-example.net': 'Expired'})
+        code, body = self.api.get('/domains/acme-demo.mx/score', self.acme)
+        self.assertEqual(code, 200)
+        self.assertAlmostEqual(sum(c['score'] * c['weight'] for c in body['categories']), 27.5)
+        self.assertEqual(body['score'], 60)  # la brecha crítica abierta pone el piso en 60
+        code, body = self.api.get('/domains/acme-demo.mx/findings', self.acme)
+        self.assertEqual(code, 200)
+        self.assertEqual([f['severity'] for f in body], ['Critical', 'High', 'High', 'Medium'])
+        code, body = self.api.get('/domains', self.beta)
+        self.assertEqual(code, 200)
+        self.assertNotIn('acme-demo.mx', [d['domain'] for d in body])
+        self.assertEqual(self.api.get('/domains/acme-demo.mx/findings', self.beta)[0], 404)
 
     def test_4_acme_ve_solo_lo_suyo_aunque_el_encabezado_diga_beta(self):
         code, body = self.api.get('/db/tables', self.acme, org=BETA)
