@@ -27,6 +27,8 @@ LLAVES_VIGENTES = 20  # por empresa, sin contar las revocadas ni las vencidas
 SIN_PLAN = 'Tu plan no incluye la API. Está disponible en los planes Business y Enterprise.'
 SIN_SESION = 'Tu sesión terminó. Vuelve a iniciar sesión.'
 NO_ENCONTRADA = 'Llave no encontrada'
+EMPRESA_AJENA = ('Una llave de API la crea una cuenta de la propia empresa. Como superadmin puedes ver y revocar '
+                 'las llaves de esta organización, pero no crearlas.')
 USO_PROPIO = ('Una llave de API es solo para los sistemas de tu propia empresa. Confírmalo con own_use: true. '
               'No se da a un integrador ni a otra empresa mientras la carta no tenga dónde nombrarlo.')
 
@@ -64,6 +66,10 @@ def create_api_key(body: LlaveIn, request: Request, response: Response, session:
         raise HTTPException(422, USO_PROPIO)
     nombre = _texto(body.name, 'name')
     fqdn = _texto(body.domain, 'domain') if body.domain is not None else None
+    if session.acting_elsewhere:
+        # api_keys.created_by es NOT NULL con FK compuesta a los usuarios de la empresa (001): un superadmin de otra
+        # empresa no puede quedar como autor (RC-332).
+        raise HTTPException(403, EMPRESA_AJENA)
     with transaction(session.org_id) as conn:
         # El rol de la sesión es el del día en que se inició. Una llave dura hasta 90 días, así que aquí
         # se vuelve a leer en la base: una cuenta desactivada o que ya no es Admin no deja una llave.
@@ -131,5 +137,5 @@ def revoke_api_key(key_id: str, request: Request, session: Session = Depends(adm
             raise HTTPException(404, NO_ENCONTRADA)
         if fila['revoked_at'] is None:  # revocar dos veces no cambia la fecha ni repite la bitácora
             conn.execute('UPDATE api_keys SET revoked_at = now(), updated_at = now() WHERE id = %s', (key_id,))
-            audit(conn, session.org_id, 'api_key.revoked', session.user_id, client_ip(request), 'api_key', key_id,
-                  {'key_prefix': fila['key_prefix']})
+            audit(conn, session.org_id, 'api_key.revoked', session.audit_user_id, client_ip(request), 'api_key', key_id,
+                  {'key_prefix': fila['key_prefix']}, platform=session.audit_platform)

@@ -211,17 +211,21 @@ def abandonar_vencidos(conn, org, domain_id=None, scan_id=None):
 FQDN_BITACORA = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,63}|xn--[a-z0-9-]{1,59})$')
 
 
-def _rechazo_sin_dominio(c, org, fqdn, user_id, ip):
+def _rechazo_sin_dominio(c, org, fqdn, user_id, ip, platform=None):
     """scan.rejected de un dominio que no es de la organización. Un texto que no es nombre de dominio queda solo
     con su largo, y una organización que no existe (línea de comandos con otro uuid) no deja registro."""
     if not c.execute('SELECT 1 FROM organizations WHERE id = %s', (org,)).fetchone():
         return
     detalle = {'fqdn': fqdn} if FQDN_BITACORA.fullmatch(fqdn) else {'fqdn_invalid': True, 'fqdn_length': len(fqdn)}
-    audit(c, org, 'scan.rejected', user_id, ip, 'domain', None, {**detalle, 'reasons': ['domain_not_found']})
+    audit(c, org, 'scan.rejected', user_id, ip, 'domain', None, {**detalle, 'reasons': ['domain_not_found']},
+          platform=platform)
 
 
-def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None):
+def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None, platform=None):
     """Revisa autorización y TXT y, si todo cumple, crea el escaneo. Nunca escanea sin los dos.
+
+    `platform` es el superadmin que lo pide desde una empresa ajena (RC-332), con user_id None: va a la bitácora
+    con actor 'platform' y el escaneo queda sin requested_by.
 
     `consultar` reemplaza la consulta DNS real (pruebas). Sin él, solo se consultan en vivo los
     dominios de DOMINIOS_EN_VIVO.
@@ -230,7 +234,7 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
     with _tx(org, conn) as c:
         domain = c.execute('SELECT id::text, fqdn::text, status, txt_token FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
         if not domain:  # otro dominio o uno de otra organización: el rechazo también queda en la bitácora (RC-321)
-            _rechazo_sin_dominio(c, org, fqdn, user_id, ip)
+            _rechazo_sin_dominio(c, org, fqdn, user_id, ip, platform=platform)
             return Solicitud(fqdn, False, ['domain_not_found'], _texto(['domain_not_found']))
 
         motivos, authorization_id = _motivos_previos(c, domain)
@@ -274,10 +278,11 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
         if motivos:
             detalle = _texto(motivos, txt_resultado)
             audit(c, org, 'scan.rejected', user_id, ip, 'domain', domain['id'],
-                  {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado})
+                  {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado}, platform=platform)
             return Solicitud(fqdn, False, motivos, detalle, domain_id=domain['id'], txt=txt_resultado)
 
-        audit(c, org, 'scan.requested', user_id, ip, 'scan', scan_id, {'fqdn': fqdn, 'trigger': trigger})
+        audit(c, org, 'scan.requested', user_id, ip, 'scan', scan_id, {'fqdn': fqdn, 'trigger': trigger},
+              platform=platform)
         return Solicitud(fqdn, True, scan_id=scan_id, domain_id=domain['id'], txt=txt_resultado,
                          detalle='Escaneo de %s en curso.' % fqdn)
 

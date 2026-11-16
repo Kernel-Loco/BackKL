@@ -25,6 +25,8 @@ import os
 import threading
 import urllib.parse
 import uuid
+from functools import cache
+from pathlib import Path
 
 from argon2 import PasswordHasher, profiles
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
@@ -217,6 +219,24 @@ def verify_password(password_hash, password, user_id):
         _verificar_phc(_relleno_phc(), password)
         return False
     return _verificar_phc(phc, password)
+
+
+COMMON_FILE = Path(__file__).resolve().parent / 'datos' / 'contrasenas_comunes.txt'
+
+
+@cache
+def _common():
+    """Las contraseñas comunes de COMMON_FILE (RC-281), en minúsculas. Una por línea, sin comentarios: una contraseña
+    también puede empezar con '#'. La fuente y la licencia están en cirdan/auth/datos/README.md."""
+    with COMMON_FILE.open(encoding='utf-8') as archivo:
+        return frozenset(linea.rstrip('\r\n').casefold() for linea in archivo if linea.rstrip('\r\n'))
+
+
+def is_common(password):
+    """True si `password` está en la lista de contraseñas comunes, sin importar mayúsculas (RC-281, ASVS 5.0 nivel 1).
+    Sin red. Sirve para el cambio de contraseña y para el alta y el restablecimiento cuando existan (RC-227). La
+    revisión contra Pwned Passwords (RC-334) la usará de respaldo."""
+    return password.casefold() in _common()
 
 
 def burn_time(password):

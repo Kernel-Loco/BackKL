@@ -141,6 +141,8 @@ HUELLAS_DB = {
     'db/migraciones/012_garantia_mapeo_marcos.sql': 'e22b8ca49dd1527b54a399386197b27c7f0f73175a1e6f3c403215ebf6e856b8',
     'db/migraciones/013_pesos_por_organizacion.sql': 'db5970965485762c492907a6f29f194ef362cbc877349552a4d9098b0669f2f8',
     'db/migraciones/016_api_key_lookup.sql': '4f665442ba0e0d340f120d39baac57348cd8048e9f7051cd8a3dd4e61affa6c0',
+    'db/migraciones/017_superadmin_plataforma.sql': '4848215e21f0237565c87616256e4ebf5b79c78e498aace44f71062f5a52c04f',
+    'db/migraciones/018_passkeys.sql': 'f8c60af6e20dfdc26954be4f5dda214e9557ea65847434d9d2dd5b18634139f2',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
 }

@@ -777,7 +777,10 @@ def export_siem(fqdn: str, session: Session = Depends(current_session)):
     with transaction(session.org_id) as conn:
         # Como al crear una llave (cirdan/api/llaves.py): la sesión dura hasta 8 h, así que una cuenta desactivada
         # después de iniciarla ya no exporta. Responde 401 y la sesión se borra.
-        if not conn.execute('SELECT 1 FROM users WHERE id = %s AND is_active', (session.user_id,)).fetchone():
+        # Un superadmin en una empresa ajena no se ve con esta RLS: su cuenta ya la revisó current_session() con
+        # is_platform_admin(), que también pide que siga activa (RC-332).
+        if not session.acting_elsewhere and not conn.execute('SELECT 1 FROM users WHERE id = %s AND is_active',
+                                                             (session.user_id,)).fetchone():
             sessions.delete(session.token)
             raise HTTPException(401, SIN_SESION)
         plan = conn.execute(SIEM_PLAN_SQL).fetchone()
@@ -918,7 +921,7 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
         nuevo = conn.execute(
             'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, activated_at) '
             'VALUES (%s, %s, %s, true, %s, now()) RETURNING id::text',
-            (session.org_id, version, Jsonb(pesos), session.email),
+            (session.org_id, version, Jsonb(pesos), session.author),
         ).fetchone()['id']
         conn.execute(
             'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
@@ -929,8 +932,8 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
             recalculados = configuracion.recalcular_scores(conn, session.org_id, nuevo, pesos)
         except ValueError as error:
             raise HTTPException(409, str(error)) from error
-        audit(conn, session.org_id, 'scoring.weights_changed', user_id=session.user_id,
-              entity_type='scoring_rule_set', entity_id=nuevo,
+        audit(conn, session.org_id, 'scoring.weights_changed', user_id=session.audit_user_id,
+              platform=session.audit_platform, entity_type='scoring_rule_set', entity_id=nuevo,
               details={'version': version, 'previous_version': anterior['version'],
                        'category_weights': pesos, 'recalculated_domains': recalculados})
 
