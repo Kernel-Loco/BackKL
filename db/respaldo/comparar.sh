@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Compara dos bases del mismo contenedor con conteos.sql: filas por tabla, RLS, FORCE y políticas (#115, RC-233).
+# Compara dos bases del mismo contenedor con conteos.sql: filas por tabla, RLS, FORCE, políticas y los permisos de
+# PUBLIC sobre la base (#115, RC-233). Para comparar contra la base de la VM, corre conteos.sql en las dos.
 #   db/respaldo/comparar.sh <contenedor> <base_original> <base_restaurada>
 # Sale con 0 si son iguales. Solo lee.
 set -Eeuo pipefail
@@ -19,7 +20,7 @@ a=$(conteos "$2")
 b=$(conteos "$3")
 [ -n "$a" ] || falla "$2 no tiene tablas"
 if [ "$a" = "$b" ]; then
-  echo "comparar: iguales, $(printf '%s\n' "$a" | wc -l) tablas"
+  echo "comparar: iguales, $(printf '%s\n' "$a" | grep -vc '^~') tablas, PUBLIC en la base: $(printf '%s\n' "$a" | sed -n 's/^~base|public|//p')"
   echo "comparar: con RLS, FORCE y política: $(printf '%s\n' "$a" | grep -c '|t|t|[1-9]')"
 else
   diff <(printf '%s\n' "$a") <(printf '%s\n' "$b") || true

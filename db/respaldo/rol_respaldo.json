@@ -1,0 +1,13 @@
+{
+  "Name": "LowTide respaldo: subir y leer blobs",
+  "IsCustom": true,
+  "Description": "Para la identidad de vm-lowtide en el contenedor de respaldos (RC-233): crea y lee blobs, no los borra.",
+  "Actions": [],
+  "NotActions": [],
+  "DataActions": [
+    "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read",
+    "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write"
+  ],
+  "NotDataActions": [],
+  "AssignableScopes": ["/subscriptions/SUSCRIPCION"]
+}
