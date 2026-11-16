@@ -22,7 +22,7 @@ from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
 from cirdan.api.v1 import router as v1_router
-from cirdan.auth import totp
+from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import ORIGENES_LOCALES, config
 from cirdan.db import transaction
@@ -31,8 +31,10 @@ from cirdan.db import transaction
 @asynccontextmanager
 async def _arranque(app):
     # Sin la llave del MFA la API no arranca: con Key Vault, un error de la identidad o del rol sale aquí, en
-    # `docker compose logs api`, y no en el primer inicio de sesión (#49, RC-91).
-    totp.comprobar_llave()
+    # `docker compose logs api`, y no en el primer inicio de sesión (#49, RC-91). Igual con la llave de las huellas de
+    # contraseña (RC-330), que además tiene que ser otra que la del MFA aunque una venga del .env y la otra de Key
+    # Vault.
+    passwords.comprobar_llave(totp.comprobar_llave())
     yield
 
 
@@ -72,6 +74,9 @@ async def cabeceras_de_seguridad(request: Request, call_next):
     """Va después de same_origin_writes para envolverlo: su 403 también sale con las cabeceras."""
     response = await call_next(request)
     for nombre, valor in CABECERAS_SEGURIDAD.items():
+        # Una CSP más estricta que ya trae frame-ancestors 'none' se queda, como la del reporte en HTML (RC-70).
+        if nombre == 'Content-Security-Policy' and "frame-ancestors 'none'" in response.headers.get(nombre, ''):
+            continue
         response.headers[nombre] = valor
     return response
 

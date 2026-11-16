@@ -41,7 +41,7 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 22 | `exposed_iot_device` | infrastructure | high | 25.00 | #17 RC-49 | Planeado |
 | 23 | `exposed_service` | infrastructure | low | 8.00 | #17 RC-49 | Lo emite hoy |
 | 24 | `known_vulnerability` | infrastructure | medium | 10.00 | #17 RC-49 y #18 RC-46 | Lo emite hoy |
-| 25 | `server_version_disclosed` | configuration | low | 8.00 | #18 RC-46 | Planeado |
+| 25 | `server_version_disclosed` | configuration | low | 8.00 | #18 RC-46 | Lo emite hoy |
 | 26 | `public_bucket` | data_leaks | high | 25.00 | #62 | Previsto |
 | 27 | `subdomain_takeover_risk` | configuration | high | 25.00 | #62 | Previsto |
 | 28 | `exposed_api_docs` | infrastructure | medium | 10.00 | #63 RC-118 | Lo emite hoy |

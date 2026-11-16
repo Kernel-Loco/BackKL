@@ -18,7 +18,7 @@ from fastapi.responses import Response
 from psycopg import IsolationLevel
 from psycopg.types.json import Jsonb
 
-from cirdan import orquestador, siem
+from cirdan import orquestador, reporte, siem
 from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
 from cirdan.auth.deps import Session, current_session, in_scope, require_roles, session_or_api_key
@@ -428,6 +428,61 @@ def export_findings(fqdn: str, formato: str = Query(default='json'), session: Se
               i['frameworks']['iso_27001_2022']['control_id'], i['frameworks']['cis_controls_v8_1']['safeguard_id'],
               i['evidence']) for i in items]
     return _descarga(csv_con_bom(ENCABEZADOS_HALLAZGOS, filas), 'text/csv; charset=utf-8', '%s-hallazgos.csv' % fqdn)
+
+
+# ---------------------------------------------------------------- reporte ejecutivo (#45, RC-70)
+# Pide la misma autorización vigente que las exportaciones: 403 sin carta vigente, 404 de otra empresa.
+
+REPORTE_DOMINIO_SQL = '''
+SELECT d.last_scan_at, o.name AS organization, a.valid_from, a.valid_until
+  FROM domains d
+  JOIN organizations o ON o.id = d.organization_id
+  JOIN LATERAL (SELECT x.valid_from, x.valid_until FROM domain_authorizations x
+                 WHERE x.domain_id = d.id AND x.revoked_at IS NULL
+                   AND current_date BETWEEN x.valid_from AND x.valid_until
+                 ORDER BY x.valid_until DESC LIMIT 1) a ON true
+ WHERE d.id = %s
+'''
+
+
+def _reporte(session, fqdn):
+    domain_id = _dominio_autorizado(session, fqdn)
+    # REPEATABLE READ, como la salida a SIEM: score, hallazgos y carta salen de una sola foto de la base, así un
+    # escaneo que cierra a la mitad no mezcla el score de uno con los hallazgos del otro.
+    with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
+        dominio = conn.execute(REPORTE_DOMINIO_SQL, (domain_id,)).fetchone()
+        if dominio is None:  # la carta venció o se revocó entre las dos lecturas
+            raise HTTPException(403, 'El dominio no tiene una autorización firmada vigente')
+        scores = conn.execute(SCORES_SQL, (fqdn,)).fetchall()
+        hallazgos = [_finding(f) for f in conn.execute(FINDINGS_SQL, (fqdn,)).fetchall()]
+        codigos = sorted({h['rule_code'] for h in hallazgos})
+        recomendaciones = {r['code']: r['recommendation'] for r in conn.execute(
+            'SELECT code, recommendation FROM scoring_rule_texts WHERE code = ANY(%s)', (codigos,)).fetchall()}
+    score = None
+    if scores:
+        s = scores[-1]
+        score = {'score': s['score'], 'band': criterio.banda(s['score']), 'grade': criterio.letra(s['score']),
+                 'partial_coverage': s['partial_coverage'], 'computed_at': s['computed_at']}
+    return reporte.armar(fqdn, dominio['organization'],
+                         {'valid_from': dominio['valid_from'], 'valid_until': dominio['valid_until']},
+                         score, dominio['last_scan_at'], hallazgos, recomendaciones)
+
+
+@router.get('/domains/{fqdn}/report', summary='Reporte ejecutivo del dominio en JSON (para el PDF del portal) o en HTML')
+def executive_report(response: Response, fqdn: str, formato: str = Query(default='json'),
+                     session: Session = Depends(session_or_api_key)):
+    if formato not in ('json', 'html'):
+        raise HTTPException(422, "El formato debe ser 'json' o 'html'")
+    datos = _reporte(session, fqdn)
+    # Trae hallazgos, activos, empresa y fechas de la carta: ni el navegador ni un proxy lo guardan, como la SIEM.
+    if formato == 'json':
+        response.headers['Cache-Control'] = 'no-store'
+        return datos
+    # Sin scripts ni recursos externos. La CSP lleva frame-ancestors para que el middleware de RC-283 la conserve.
+    respuesta = _descarga(reporte.html(datos), 'text/html; charset=utf-8', '%s-resumen-ejecutivo.html' % fqdn)
+    respuesta.headers['Content-Security-Policy'] = reporte.CSP_HTML
+    respuesta.headers['Cache-Control'] = 'no-store'
+    return respuesta
 
 
 COMPARE_SCORES_SQL = '''

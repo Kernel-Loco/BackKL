@@ -29,7 +29,11 @@ petición, ni en la visita web (visita.py) ni en las consultas a las fuentes.
 
 Solo los puertos de PUERTOS (#181, RC-299): _conectar lanza PuertoNoPermitido antes de resolver el nombre si el puerto
 de la URL es otro. Así una URL que llega de fuera (el bootstrap de IANA, una redirección) nunca apunta la petición al
-6379 o al 5432 de un host público. Hoy solo se pide por https en el 443.
+6379 o al 5432 de un host público. Hoy solo se pide por https en el 443. La visita web (visitar) también pide por http,
+y solo al 80 (PUERTOS_HTTP, #18 y #10b, RC-46 y RC-165): un sitio que solo sirve en el 80, como cualquier visitante lo
+vería (actividad 6 del Anexo A). descargar() sigue solo con https. La conexión http pasa por el mismo _conectar, con la
+misma lista de direcciones públicas, y tampoco sigue redirecciones. Cada lectura y escritura de su socket también
+recibe lo que queda del plazo (_SocketPlano).
 
 visitar() es la petición de la visita web: da el estado, las cabeceras y hasta `tope` bytes del cuerpo de cualquier
 respuesta, también un 4xx o un 5xx, y corta el cuerpo en vez de fallar. Una redirección tampoco se sigue: Redirigida
@@ -60,11 +64,18 @@ IPV4_COMPATIBLE = ipaddress.ip_network('::/96')
 # IPv6 que ipaddress da como globales y no lo son: site-local (en desuso, RFC 3879) y la IPv4 traducida de SIIT
 # (RFC 2765), que lleva una IPv4 en los últimos 32 bits.
 IPV6_INTERNAS = (ipaddress.ip_network('fec0::/10'), ipaddress.ip_network('::ffff:0:0:0/96'))
-PUERTOS = frozenset({443})   # los únicos puertos a los que se conecta _conectar (#181, RC-299)
+PUERTOS = frozenset({443})   # los únicos puertos a los que se conecta _conectar por https (#181, RC-299)
+PUERTOS_HTTP = frozenset({80})   # los únicos por http, solo en visitar() (RC-46 y RC-165)
 
 
 class PlazoVencido(Exception):
     """La petición no terminó dentro de su plazo."""
+
+
+class SinConexion(PlazoVencido):
+    """El plazo se acabó sin que ninguna dirección aceptara la conexión TCP: el puerto descarta los paquetes (un
+    firewall o una nube que no contesta el SYN de un puerto cerrado), no un servidor que conectó y no terminó. Es un
+    PlazoVencido: quien no distingue lo trata igual (RC-46)."""
 
 
 class Redirigida(Exception):
@@ -81,7 +92,8 @@ class NoPublica(OSError):
 
 
 class PuertoNoPermitido(OSError):
-    """La URL pide un puerto que no está en PUERTOS: no se resuelve el nombre ni se abre un socket."""
+    """La URL pide un puerto que no está en PUERTOS (https) o en PUERTOS_HTTP (http): no se resuelve el nombre ni se
+    abre un socket."""
 
 
 def publica(ip):
@@ -141,6 +153,36 @@ class _SocketTls(ssl.SSLSocket):
         return super().send(data, flags)
 
 
+class _SocketPlano(socket.socket):
+    """El socket de una petición http: como _SocketTls, antes de cada lectura o escritura vuelve a poner settimeout con
+    lo que queda del plazo (`queda`, que pone _ConexionHttp al conectar). http.client lee con recv_into (makefile) y
+    escribe con sendall."""
+    queda = None
+
+    def _plazo(self):
+        if self.queda:
+            self.settimeout(self.queda())
+
+    def recv(self, *args):
+        self._plazo()
+        return super().recv(*args)
+
+    def recv_into(self, *args):
+        self._plazo()
+        return super().recv_into(*args)
+
+    def send(self, *args):
+        self._plazo()
+        return super().send(*args)
+
+    def sendall(self, data, *args):
+        # sendall de CPython no pasa por send: se manda por pedazos para que cada uno tenga lo que queda.
+        vista = memoryview(data)
+        while vista:
+            self._plazo()
+            vista = vista[super().send(vista, *args):]
+
+
 @functools.lru_cache(maxsize=1)
 def _contexto():
     """El contexto TLS por omisión (revisa el certificado y el nombre), con _SocketTls como clase de sus sockets."""
@@ -149,9 +191,11 @@ def _contexto():
     return contexto
 
 
-class _Conexion(http.client.HTTPSConnection):
-    """Una conexión HTTPS en la que todo pasa dentro de `plazo`: getaddrinfo, el connect, el TLS y cada lectura o
-    escritura. El `timeout` que pasa urllib no se usa."""
+class _ConPlazo:
+    """Lo común de _Conexion (https) y _ConexionHttp: el plazo, getaddrinfo con su espera y el connect solo a
+    direcciones públicas, en los puertos de `puertos`."""
+    puertos = PUERTOS
+    clase_socket = None   # None: socket.socket, buscado en cada conexión (las pruebas lo cambian con mock.patch)
 
     def __init__(self, host, plazo, cronometro, familia=socket.AF_UNSPEC, **otros):
         super().__init__(host, **otros)
@@ -168,12 +212,13 @@ class _Conexion(http.client.HTTPSConnection):
     def _conectar(self, direccion, *_):
         """El socket conectado a la primera dirección pública de `direccion` (host, puerto) que responda, con
         settimeout en lo que queda para el handshake TLS. Las que no son públicas (publica()) se saltan sin crear su
-        socket, y si no queda ninguna lanza NoPublica. Con un puerto fuera de PUERTOS lanza PuertoNoPermitido sin
-        resolver el nombre. Todo socket que falla se cierra. Con `familia` solo cuentan las
+        socket, y si no queda ninguna lanza NoPublica. Con un puerto fuera de `puertos` (PUERTOS en https,
+        PUERTOS_HTTP en http) lanza PuertoNoPermitido sin resolver el nombre. Todo socket que falla se cierra.
+        Con `familia` solo cuentan las
         direcciones de esa familia: la visita web pide AF_INET, así una AAAA que el DNS de la red arma con su propio
         prefijo de NAT64 (uno que publica() no puede conocer) nunca se usa para llegar a una IPv4 interna."""
         host, puerto = direccion
-        if puerto not in PUERTOS:   # antes de getaddrinfo: ni una consulta DNS por una URL con otro puerto
+        if puerto not in self.puertos:   # antes de getaddrinfo: ni una consulta DNS por una URL con otro puerto
             raise PuertoNoPermitido('%s pide el puerto %s, que no está permitido' % (host, puerto))
         todas = resolver(host, puerto, self.queda())
         if self.familia:
@@ -182,11 +227,12 @@ class _Conexion(http.client.HTTPSConnection):
         if todas and not direcciones:
             raise NoPublica('%s resolvió solo a direcciones que no son públicas' % host)
         ultimo = OSError('%s no resolvió a ninguna dirección' % host)
+        solo_tiempo = bool(direcciones)   # cada dirección que se probó agotó su parte del plazo al conectar
         for i, (familia, tipo, protocolo, _, destino) in enumerate(direcciones):
             try:
-                s = socket.socket(familia, tipo, protocolo)
+                s = (self.clase_socket or socket.socket)(familia, tipo, protocolo)
             except OSError as e:   # EAFNOSUPPORT: la siguiente dirección, que puede ser de otra familia
-                ultimo = e
+                ultimo, solo_tiempo = e, False
                 continue
             try:
                 s.settimeout(self.queda() / (len(direcciones) - i))   # las que faltan también tienen su parte
@@ -195,16 +241,42 @@ class _Conexion(http.client.HTTPSConnection):
             except OSError as e:   # la siguiente dirección, con lo que queda del plazo
                 s.close()
                 ultimo = e
+                solo_tiempo = solo_tiempo and isinstance(e, TimeoutError)   # socket.timeout es TimeoutError desde 3.10
                 continue
             except BaseException:
                 s.close()
                 raise
             return s
+        if solo_tiempo:
+            raise SinConexion('%s no aceptó la conexión dentro de su plazo' % host) from ultimo
         raise ultimo
 
     def connect(self):
         super().connect()
         self.sock.queda = self.queda
+
+
+class _Conexion(_ConPlazo, http.client.HTTPSConnection):
+    """Una conexión HTTPS en la que todo pasa dentro de `plazo`: getaddrinfo, el connect, el TLS y cada lectura o
+    escritura. El `timeout` que pasa urllib no se usa. Solo a los puertos de PUERTOS."""
+
+
+class _ConexionHttp(_ConPlazo, http.client.HTTPConnection):
+    """La misma conexión sin TLS, para la visita web por http: solo a los puertos de PUERTOS_HTTP, con _SocketPlano."""
+    puertos = PUERTOS_HTTP
+    clase_socket = _SocketPlano
+
+
+class _Http(urllib.request.HTTPHandler):
+    """Abre cada petición http con una _ConexionHttp. Reemplaza al HTTPHandler de urllib en abrir(): ninguna petición
+    http sale sin el plazo, sin el filtro de direcciones públicas o a otro puerto."""
+
+    def __init__(self, plazo, cronometro, familia=socket.AF_UNSPEC):
+        super().__init__()
+        self._conexion = functools.partial(_ConexionHttp, plazo=plazo, cronometro=cronometro, familia=familia)
+
+    def http_open(self, req):
+        return self.do_open(self._conexion, req)
 
 
 class _Https(urllib.request.HTTPSHandler):
@@ -232,7 +304,7 @@ def abrir(req, plazo, cronometro, familia=socket.AF_UNSPEC):
     agrega con los del entorno). Con `familia` la conexión solo va a direcciones de esa familia (_Conexion._conectar).
     Las pruebas la cambian por una respuesta simulada."""
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _SinRedirecciones,
-                                       _Https(plazo, cronometro, familia)).open(req)
+                                       _Https(plazo, cronometro, familia), _Http(plazo, cronometro, familia)).open(req)
 
 
 def descargar(req, plazo, tope, cronometro=None, tipo=None, familia=socket.AF_UNSPEC):
@@ -273,7 +345,7 @@ def descargar(req, plazo, tope, cronometro=None, tipo=None, familia=socket.AF_UN
 
 
 def visitar(req, plazo, tope, cronometro=None):
-    """(estado, cabeceras, cuerpo, cortado) de la respuesta a `req`, que tiene que ser https, todo antes de `plazo`:
+    """(estado, cabeceras, cuerpo, cortado) de la respuesta a `req`, https o http (solo al 80), todo antes de `plazo`:
     la visita web de la actividad 6 (visita.py). `cabeceras` es la lista de pares (nombre, valor) como llegaron, con
     las repetidas. Un 4xx o un 5xx es una respuesta como cualquier otra (un reto del WAF es un 403 o un 503). Del cuerpo
     se leen a lo más `tope` bytes y `cortado` dice si quedaba más: una página grande no es una falla.
@@ -286,8 +358,8 @@ def visitar(req, plazo, tope, cronometro=None):
     La conexión va solo por IPv4 (AF_INET), como el A con el que la visita decide si el nombre tiene sitio público: una
     red con NAT64 y un prefijo propio no puede llevarla a una IPv4 interna con una AAAA armada."""
     cronometro = cronometro or time.monotonic
-    if req.type != 'https':
-        raise ValueError('solo se pide por https: %s' % req.full_url)
+    if req.type not in ('https', 'http'):
+        raise ValueError('solo se pide por https o http: %s' % req.full_url)
     try:
         try:
             r = abrir(req, plazo, cronometro, socket.AF_INET)

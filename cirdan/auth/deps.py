@@ -21,6 +21,7 @@ class Session:
     email: str
     domain_id: str | None = None    # solo con una llave de API de un dominio: lo único que puede leer
     api_key_id: str | None = None   # solo con llave de API
+    created_at: int | None = None   # solo con sesión: cuándo se creó en Valkey, para el tope de 8 h
 
 
 def current_session(request: Request) -> Session:
@@ -29,7 +30,8 @@ def current_session(request: Request) -> Session:
     data = sessions.get(token)
     if not data:
         raise HTTPException(401, 'Tu sesión terminó. Vuelve a iniciar sesión.')
-    return Session(token=token, user_id=data['user_id'], org_id=data['org_id'], role=data['role'], email=data['email'])
+    return Session(token=token, user_id=data['user_id'], org_id=data['org_id'], role=data['role'], email=data['email'],
+                   created_at=data.get('created_at'))
 
 
 def session_or_api_key(request: Request) -> Session:
