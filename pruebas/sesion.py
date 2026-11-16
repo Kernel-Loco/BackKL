@@ -97,10 +97,38 @@ class Client:
         return next((c for c in self.jar if c.name == 'lt_session'), None)
 
 
+def solve_captcha(challenge):
+    """Resuelve un reto ALTCHA de GET /auth/captcha como el widget del portal (PBKDF2-SHA256, contador uint32 al final
+    del nonce) y devuelve el campo `captcha` de /login. Tarda alrededor de medio segundo."""
+    params = challenge['parameters']
+    nonce, salt = bytes.fromhex(params['nonce']), bytes.fromhex(params['salt'])
+    counter = 0
+    while True:
+        key = hashlib.pbkdf2_hmac('sha256', nonce + struct.pack('>I', counter), salt, params['cost'], params['keyLength'])
+        if key.hex().startswith(params['keyPrefix']):
+            break
+        counter += 1
+    payload = {'challenge': {'parameters': params, 'signature': challenge['signature']},
+               'solution': {'counter': counter, 'derivedKey': key.hex()}}
+    return base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+def captcha(client):
+    """Un captcha resuelto y sin usar, pedido con el cliente."""
+    code, challenge = client.get(AUTH + '/captcha')
+    assert code == 200, (code, challenge)
+    return solve_captcha(challenge)
+
+
+def post_login(client, email, password, headers=None):
+    """POST /auth/login con un captcha resuelto, como el portal. Devuelve (código, cuerpo)."""
+    return client.post(AUTH + '/login', {'email': email, 'password': password, 'captcha': captcha(client)}, headers)
+
+
 def login(email):
-    """Cliente con sesión iniciada (contraseña y código TOTP)."""
+    """Cliente con sesión iniciada (captcha, contraseña y código TOTP)."""
     client = Client()
-    code, body = client.post(AUTH + '/login', {'email': email, 'password': PASSWORD})
+    code, body = post_login(client, email, PASSWORD)
     assert code == 200 and body['mfa_required'], (code, body)
     code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': next_code(email)})
     assert code == 200, (code, body)

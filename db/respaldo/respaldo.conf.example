@@ -1,0 +1,9 @@
+# Configuración de db/respaldo/respaldar.sh. En la VM va en /etc/lowtide/respaldo.conf (root, 600).
+# Una CLAVE=valor por línea, sin comillas. No lleva secretos: la llave de age es la pública.
+CONTENEDOR_BASE=cirdan-pg16
+CARPETA=/var/backups/lowtide
+RECEPTOR_AGE=age1...
+RETENCION=7
+SUBIR=1
+CUENTA_BLOB=
+CONTENEDOR_BLOB=respaldos

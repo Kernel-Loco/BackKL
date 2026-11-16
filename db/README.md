@@ -9,6 +9,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/` | Cambios de esquema numerados (`NNN_descripcion.sql`), en orden. Una migración que ya entró a dev no se edita, se agrega otra |
 | `semillas/` | Datos de demo y de prueba, que se cargan después de las migraciones |
 | `consultas/` | Scripts de psql que se corren a mano sobre la base cargada |
+| `respaldo/` | Respaldo diario cifrado y restauración en una base nueva (RC-233). Ver «Respaldar y restaurar» |
 
 | Archivo | Qué hace |
 |---|---|
@@ -43,6 +44,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `semillas/012_visita_web.sql` | Fuente `web` (la visita de la actividad 6 del Anexo A: tecnologías, versión sin soporte con endoflife.date y CVE con la NVD), sembrada encendida, con `keep_raw_payload` = true y límite diario de 1840 consultas, 10 corridas de 184 (#18, RC-46). Necesita la migración 008 y la 014: la 014 va primero, porque con la fuente encendida el orquestador inserta las CVE con su CVSS |
 | `semillas/013_api_docs.sql` | Fuente `api_docs` (la actividad 9 del Anexo A: hasta 10 rutas fijas de documentación de APIs por sitio, solo GET), sembrada apagada, con `keep_raw_payload` = true y límite diario de 2640 consultas, 10 corridas de 264 (#63, RC-118). Necesita la migración 008 y la 015. Se enciende con otra semilla cuando el aviso de la actividad nueva esté dado a cada cliente |
 | `semillas/014_cupo_ct_logs.sql` | Sube el límite diario de `ct_logs` de 200 a 400 consultas, 11 corridas de 36, porque cada escaneo ya busca dominios parecidos en crt.sh (RC-226, #109). Solo cambia la fila si tiene el 200 de la 005 |
+| `semillas/015_organizacion_lowtide.sql` | Organización LowTide (plan Business) con lowtidesec.com, el dominio del producto, con su TXT verificado por DoH, su carta firmada por el titular y un solo admin, `equipo@lowtidesec.com`, con el hash de relleno que no abre nada (RC-329, #210). La contraseña y el MFA se ponen fuera del repo |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 25 tablas con filas y RLS, más el resumen de objetos |
@@ -115,6 +117,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/012_visita_web.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/013_api_docs.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/014_cupo_ct_logs.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/015_organizacion_lowtide.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -222,6 +225,15 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limi
 
 Da `ct_logs|400`.
 
+Para la organización LowTide con lowtidesec.com (RC-329, #210) va la semilla 015, que no necesita ninguna otra semilla nueva. No va antes ni después de la API: solo agrega una empresa, su dominio, su carta, su verificación del alta y su admin. Corre en una sola transacción y no se puede correr dos veces, porque los UUID son fijos:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/015_organizacion_lowtide.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT o.name, d.fqdn, d.status FROM domains d JOIN organizations o ON o.id = d.organization_id WHERE d.fqdn = 'lowtidesec.com'"
+```
+
+Da `LowTide|lowtidesec.com|verified`.
+
 Para el tope de 50 nombres de `shodan` (RC-55, #23) va la semilla 011, que necesita la 007. Va antes de reconstruir la API: con el tope nuevo una corrida reserva 184, y con el 640 de la 007 solo caben 3 corridas por día en el peor caso:
 
 ```bash
@@ -316,6 +328,12 @@ Para las llaves de API (RC-129, #87) va la migración 016, antes de reconstruir 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/016_api_key_lookup.sql
 ```
+
+## Respaldar y restaurar
+
+`respaldo/respaldar.sh` saca `pg_dump -Fc` de `cirdan` como postgres dentro del contenedor, lo cifra con age y una llave pública, lo deja con permisos 600 en una carpeta fuera del repo con los de los últimos 7 días y, en la VM, lo sube a Azure Blob (también los que un día no se pudieron subir). `respaldo/restaurar.sh` lo descifra y lo restaura siempre en una base nueva: nunca hace DROP DATABASE ni escribe sobre `cirdan`, no crea la base si no puede descifrar y le quita TEMPORARY a PUBLIC como la migración 004. `respaldo/conteos.sql` da filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base, y `respaldo/comparar.sh` compara esa salida entre dos bases del mismo contenedor. Contra la base de la VM se corre `conteos.sql` en las dos. Cómo se arma el timer en la VM, dónde queda la llave privada y cómo se baja un respaldo, en `docs/despliegue.md`, sección 'Respaldo diario'. Los respaldos traen datos personales: nunca van a git ni a la imagen (`.gitignore` y `.dockerignore` ignoran `respaldos/`, `*.dump` y `*.dump.age`). Valkey no se respalda.
+
+Para revisar un respaldo sin tocar ninguna base: `age -d -i <archivo de la llave> <respaldo>.dump.age | docker exec -i <contenedor> pg_restore --list`, que lista lo que trae.
 
 ## Huellas de db/
 

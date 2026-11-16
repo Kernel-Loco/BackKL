@@ -7,10 +7,15 @@ agregan una vez a la app autenticadora. NUNCA activar DEMO_ACCOUNTS en producci�
 
 Segundo candado, por si el `.env` de un despliegue se armó copiando uno de desarrollo: si
 `ALLOWED_ORIGINS` trae algún origen que no sea localhost ni 127.0.0.1, la API está publicada y
-el script no toca las cuentas aunque `DEMO_ACCOUNTS` sea true (#169, RC-287). Un origen local con barra final,
+el script no les pone credenciales aunque `DEMO_ACCOUNTS` sea true (#169, RC-287). Un origen local con barra final,
 ruta o pegado a otro sin coma tampoco cuenta como local.
 
-    python -m cirdan.auth.demo                 # pone las credenciales (idempotente)
+En esos dos casos, sin `DEMO_ACCOUNTS=true` o con un origen publicado, el script además apaga las cuentas: les vuelve
+a poner el hash de relleno de la semilla y les quita el secreto TOTP. Así un volumen de la base que ya traía las
+credenciales públicas, como el de una PC de desarrollo que se usa para el plan B del despliegue, deja de servir para
+entrar (#49, RC-91).
+
+    python -m cirdan.auth.demo                 # pone o apaga las credenciales (idempotente)
     python -m cirdan.auth.demo codigo CORREO   # código TOTP vigente de una cuenta de demo
 """
 import sys
@@ -39,14 +44,65 @@ CUENTAS = {
 }
 
 
+# El mismo marcador de db/semillas/001_datos_demo.sql: no es un hash que argon2 pueda verificar, así que ninguna
+# contraseña entra con él (passwords.verify_password da False). Va sin cifrar a propósito: con la forma de una huella
+# vieja tampoco abre nada (RC-330).
+HASH_DE_RELLENO = '$argon2id$v=19$m=65536,t=3,p=4$ZGVtby1zYWx0$ZGVtby1vbmx5'
+
+
+def apagar_credenciales():
+    """Les quita a las cuentas de demo la contraseña y el MFA públicos. Idempotente.
+
+    El UPDATE va por el id, así que una cuenta inactiva o de una empresa que no está activa también se apaga. Si no
+    cambia ninguna fila (no hay fila con ese id en esa empresa), se pregunta a login_lookup() (migración 004) si ese
+    correo todavía puede iniciar sesión:
+    - si no puede, no hay nada que apagar y solo se avisa;
+    - si puede, pero su hash no acepta la contraseña pública, es otra fila que este script nunca tocó (con otro id) y
+      no se toca: solo se avisa (N2 de la ronda 3 de RC-91);
+    - si entra con la contraseña pública, el script apaga las demás y termina con error: esa cuenta sigue con las
+      credenciales públicas y la API, que espera a demo-accounts, no arranca (R3 de la revisión de RC-91);
+    - si su huella va cifrada y la llave de las huellas está en Key Vault, este contenedor no la puede leer (en la VM
+      no llega a IMDS, docs/despliegue.md). Tampoco se da por apagada: termina con error en seco, sin esperar a IMDS
+      (RC-330)."""
+    sin_apagar, sin_revisar = [], []
+    en_key_vault = passwords.llave_en_key_vault()
+    for email, (org, user_id, _) in CUENTAS.items():
+        with transaction(org) as conn:
+            cambiadas = conn.execute(
+                'UPDATE users SET password_hash = %s, totp_secret_enc = NULL, last_totp_step = NULL, '
+                'mfa_enabled_at = NULL WHERE id = %s',
+                (HASH_DE_RELLENO, user_id)).rowcount
+            fila = None if cambiadas else conn.execute(
+                'SELECT user_id::text, password_hash FROM login_lookup(%s)', (email,)).fetchone()
+        if cambiadas:
+            print('cuenta de demo apagada:', email)
+        elif fila is None:
+            print('cuenta de demo que no puede iniciar sesión, nada que apagar:', email)
+        elif en_key_vault and str(fila['password_hash']).startswith(passwords.PREFIJO):
+            sin_revisar.append(email)
+        # Con una huella cifrada esto usa la llave directa del .env (RC-330). Si no sirve, el script termina con error
+        # y la API no arranca: no se da por apagada una cuenta que no se pudo revisar.
+        elif passwords.verify_password(fila['password_hash'], PASSWORD, fila['user_id']):
+            sin_apagar.append(email)
+        else:
+            print('cuenta de demo con otro id y sin la contraseña de demo, no se toca:', email)
+    if sin_apagar:
+        raise SystemExit('ERROR: estas cuentas de demo entran con la contraseña pública, pero el UPDATE no cambió su '
+                         'fila (¿otro id o empresa que los de CUENTAS?). No se apagaron: %s' % ', '.join(sin_apagar))
+    if sin_revisar:
+        raise SystemExit('ERROR: estas cuentas de demo pueden iniciar sesión con otro id que los de CUENTAS y su '
+                         'huella va cifrada con la llave de Key Vault, que este script no lee. No se revisó si entran '
+                         'con la contraseña pública: %s' % ', '.join(sin_revisar))
+
+
 def poner_credenciales():
-    hash_ = passwords.hash_password(PASSWORD)
     for email, (org, user_id, secreto) in CUENTAS.items():
+        # Una huella por cuenta: va cifrada con el id del usuario como dato asociado (RC-330).
         with transaction(org) as conn:
             conn.execute(
                 'UPDATE users SET password_hash = %s, totp_secret_enc = %s, last_totp_step = NULL, '
                 'mfa_enabled_at = coalesce(mfa_enabled_at, now()) WHERE id = %s',
-                (hash_, totp.encrypt_secret(secreto, user_id), user_id))
+                (passwords.hash_password(PASSWORD, user_id), totp.encrypt_secret(secreto, user_id), user_id))
         print('cuenta de demo lista:', email)
 
 
@@ -82,17 +138,30 @@ def origenes_publicados():
 
 
 def main(argv):
+    # Sin la llave del MFA la API no arranca. En desarrollo nadie espera a la API, así que sin esto `docker compose
+    # up -d` terminaría bien y la API se quedaría reiniciándose. Como la API espera a este script, aquí sí se detiene
+    # el `up` (#49, RC-91). Lo mismo con la llave de las huellas de contraseña (RC-330). Revisar las variables y
+    # apagar las cuentas nunca leen Key Vault: apagar solo usa la llave de las huellas cuando va directa en el .env
+    # (apagar_credenciales). poner_credenciales (DEMO_ACCOUNTS=true) sí lee de Key Vault las llaves que estén ahí, la de
+    # las huellas, la del MFA o las dos. En la VM no corre, porque el archivo del despliegue fija DEMO_ACCOUNTS=false.
+    try:
+        totp.revisar_variables()
+        passwords.revisar_variables()
+    except RuntimeError as e:
+        sys.exit(str(e))
     if len(argv) == 3 and argv[1] == 'codigo':
         print(codigo(argv[2]))
         return
     if config('DEMO_ACCOUNTS', 'false').lower() != 'true':
-        print('DEMO_ACCOUNTS no es true: no se tocan las cuentas.')
+        print('DEMO_ACCOUNTS no es true: se apagan las cuentas de demo.')
+        apagar_credenciales()
         return
     publicados = origenes_publicados()
     if publicados:
-        print('ALLOWED_ORIGINS trae un origen que no es localhost ni 127.0.0.1 (%s): no se tocan las cuentas de demo, '
+        print('ALLOWED_ORIGINS trae un origen que no es localhost ni 127.0.0.1 (%s): se apagan las cuentas de demo, '
               'aunque DEMO_ACCOUNTS sea true. Un origen local se escribe sin barra final ni ruta, como '
               'http://localhost:3000.' % ', '.join(publicados))
+        apagar_credenciales()
         return
     poner_credenciales()
 

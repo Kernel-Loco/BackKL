@@ -1,0 +1,23 @@
+[Unit]
+Description=Respaldo diario cifrado de la base de LowTide (BackKL db/respaldo, RC-233)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# La ruta del clon en la VM (docs/despliegue.md). El script lee /etc/lowtide/respaldo.conf.
+ExecStart=/bin/bash /opt/lowtide/BackKL/db/respaldo/respaldar.sh
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+# Peor caso: 10 min de candado, 5 de espera a la base, el pg_dump y subidas que empiezan hasta los 20 min (cada
+# una con 3 intentos de hasta 5 min).
+TimeoutStartSec=90min
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+# Con '-' la unidad arranca aunque la carpeta no exista, y respaldar.sh la crea (/var no es de solo lectura con
+# ProtectSystem=full).
+ReadWritePaths=-/var/backups/lowtide

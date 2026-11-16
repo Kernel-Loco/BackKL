@@ -1,4 +1,5 @@
-"""Pruebas de cirdan/auth/demo.py: cuándo les pone contraseña y MFA a las cuentas de demo (#169, RC-287).
+"""Pruebas de cirdan/auth/demo.py: cuándo les pone contraseña y MFA a las cuentas de demo (#169, RC-287) y cuándo
+se las quita (#49, RC-91).
 
 Sin red y sin base: la transacción es falsa y cuenta los UPDATE. Corren dentro del contenedor, porque
 cirdan.auth.demo importa psycopg, pyotp y argon2:
@@ -15,18 +16,31 @@ from contextlib import contextmanager, redirect_stdout
 from unittest import mock
 
 from cirdan import config as configuracion
-from cirdan.auth import demo
+from cirdan.auth import demo, passwords
 
 LOCALES = 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000'
 PUBLICADO = 'https://portal.ejemplo.test'
-VARIABLES = ('DEMO_ACCOUNTS', 'ALLOWED_ORIGINS')
+# La URL de Key Vault también sale: con ella y la llave al azar puestas, la llave del MFA falla por configuración.
+VARIABLES = ('DEMO_ACCOUNTS', 'ALLOWED_ORIGINS', 'TOTP_KEY_VAULT_SECRET_URL', 'PASSWORD_HASH_KEY_VAULT_SECRET_URL')
+# Llave de las huellas de contraseña (RC-330), al azar pero la misma en todo el módulo: las huellas que arma una prueba
+# antes de correr el script tienen que abrir dentro de él.
+LLAVE_HUELLAS = base64.urlsafe_b64encode(os.urandom(32)).decode()
+# Id de la fila que login_lookup() devuelve cuando el UPDATE no cambió nada: otra fila con el mismo correo.
+OTRO_ID = '30000000-0000-4000-8000-0000000000aa'
+URL_KV = 'https://kv-lowtide.vault.azure.net/secrets/password-hash-key/0123456789abcdef0123456789abcdef'
 
 
 class BaseFalsa:
-    """Hace de cirdan.db.transaction: no abre conexión y guarda cada consulta."""
+    """Hace de cirdan.db.transaction: no abre conexión y guarda cada consulta.
 
-    def __init__(self):
+    Los UPDATE cambian una fila, salvo los de los id de `sin_fila`. login_lookup() devuelve una fila para los correos
+    de `pueden_entrar`, un dict de correo a su hash de contraseña. Las filas son dicts, como con el dict_row de
+    cirdan/db.py."""
+
+    def __init__(self, sin_fila=(), pueden_entrar=None):
         self.consultas = []
+        self.sin_fila = set(sin_fila)
+        self.pueden_entrar = dict(pueden_entrar or {})
 
     @contextmanager
     def transaction(self, org=None):
@@ -34,21 +48,30 @@ class BaseFalsa:
 
     def execute(self, sql, parametros=()):
         self.consultas.append((sql, parametros))
+        if sql.startswith('UPDATE'):
+            return mock.Mock(rowcount=0 if parametros[-1] in self.sin_fila else 1)
+        if 'login_lookup' in sql:
+            fila = ({'user_id': OTRO_ID, 'password_hash': self.pueden_entrar[parametros[0]]}
+                    if parametros[0] in self.pueden_entrar else None)
+            return mock.Mock(**{'fetchone.return_value': fila})
+        raise AssertionError('consulta no esperada: %s' % sql)
 
 
 @contextmanager
 def entorno(**variables):
-    """Solo las `variables` dadas, sin las del contenedor ni las de un `.env`. La llave TOTP es al azar."""
+    """Solo las `variables` dadas, sin las del contenedor ni las de un `.env`. La llave TOTP es al azar y la de las
+    huellas, LLAVE_HUELLAS."""
     limpio = {k: v for k, v in os.environ.items() if k not in VARIABLES}
     limpio['TOTP_ENCRYPTION_KEY'] = base64.urlsafe_b64encode(os.urandom(32)).decode()
+    limpio['PASSWORD_HASH_ENCRYPTION_KEY'] = LLAVE_HUELLAS
     limpio.update(variables)
     with mock.patch.dict(os.environ, limpio, clear=True), mock.patch.object(configuracion, '_env_file', dict):
         yield
 
 
-def correr(**variables):
+def correr(base=None, **variables):
     """Corre el script como `python -m cirdan.auth.demo` con una base falsa. Da las consultas y lo que imprimió."""
-    base, salida = BaseFalsa(), io.StringIO()
+    base, salida = base or BaseFalsa(), io.StringIO()
     with entorno(**variables), mock.patch.object(demo, 'transaction', base.transaction), redirect_stdout(salida):
         demo.main(['demo'])
     return base.consultas, salida.getvalue()
@@ -102,6 +125,18 @@ class OrigenesPublicados(unittest.TestCase):
 
 
 class Script(unittest.TestCase):
+    def assertApagadas(self, consultas, salida):
+        """Un UPDATE por cuenta, con el hash de relleno y sin secreto TOTP, y un aviso por cuenta."""
+        self.assertEqual(len(consultas), len(demo.CUENTAS))
+        for sql, parametros in consultas:
+            self.assertTrue(sql.startswith('UPDATE users SET password_hash = %s, totp_secret_enc = NULL, '), sql)
+            self.assertIn('mfa_enabled_at = NULL', sql)
+            self.assertEqual(parametros[0], demo.HASH_DE_RELLENO)
+        self.assertEqual(sorted(parametros[1] for _, parametros in consultas),
+                         sorted(user_id for _, user_id, _ in demo.CUENTAS.values()))
+        self.assertEqual(salida.count('cuenta de demo apagada:'), len(demo.CUENTAS))
+        self.assertNotIn('cuenta de demo lista', salida)
+
     def test_6_con_origenes_locales_cambia_las_cinco_cuentas(self):
         for variables in ({'DEMO_ACCOUNTS': 'true'}, {'DEMO_ACCOUNTS': 'true', 'ALLOWED_ORIGINS': LOCALES},
                           {'DEMO_ACCOUNTS': 'TRUE', 'ALLOWED_ORIGINS': ''}):
@@ -113,35 +148,133 @@ class Script(unittest.TestCase):
                                  sorted(user_id for _, user_id, _ in demo.CUENTAS.values()))
                 self.assertEqual(salida.count('cuenta de demo lista:'), len(demo.CUENTAS))
 
-    def test_7_con_un_origen_publicado_no_cambia_ninguna_cuenta(self):
+    def test_7_con_un_origen_publicado_apaga_las_cinco_cuentas(self):
         for origenes in (PUBLICADO, LOCALES + ',' + PUBLICADO, 'localhost:3000',
                          'http://localhost:3000 ' + PUBLICADO, 'http://localhost:3000;' + PUBLICADO):
             with self.subTest(origenes=origenes):
                 consultas, salida = correr(DEMO_ACCOUNTS='true', ALLOWED_ORIGINS=origenes)
-                self.assertEqual(consultas, [])
+                self.assertApagadas(consultas, salida)
                 self.assertIn('ALLOWED_ORIGINS', salida)
-                self.assertIn('no se tocan las cuentas de demo', salida)
-                self.assertNotIn('cuenta de demo lista', salida)
+                self.assertIn('se apagan las cuentas de demo', salida)
 
     def test_8_el_aviso_nombra_el_origen_que_lo_freno_y_no_los_locales(self):
         _, salida = correr(DEMO_ACCOUNTS='true', ALLOWED_ORIGINS=LOCALES + ',' + PUBLICADO)
-        self.assertEqual(salida.strip(), 'ALLOWED_ORIGINS trae un origen que no es localhost ni 127.0.0.1 (%s): no se '
-                         'tocan las cuentas de demo, aunque DEMO_ACCOUNTS sea true. Un origen local se escribe sin '
-                         'barra final ni ruta, como http://localhost:3000.' % PUBLICADO)
+        self.assertEqual(salida.splitlines()[0],
+                         'ALLOWED_ORIGINS trae un origen que no es localhost ni 127.0.0.1 (%s): se apagan las cuentas '
+                         'de demo, aunque DEMO_ACCOUNTS sea true. Un origen local se escribe sin barra final ni ruta, '
+                         'como http://localhost:3000.' % PUBLICADO)
 
     def test_8b_un_origen_local_con_barra_final_tambien_frena_y_el_aviso_dice_como_escribirlo(self):
         consultas, salida = correr(DEMO_ACCOUNTS='true', ALLOWED_ORIGINS='http://localhost:3000/')
-        self.assertEqual(consultas, [])
+        self.assertApagadas(consultas, salida)
         self.assertIn('(http://localhost:3000/)', salida)
         self.assertIn('sin barra final ni ruta', salida)
 
-    def test_9_sin_demo_accounts_en_true_no_cambia_nada(self):
+    def test_9_sin_demo_accounts_en_true_apaga_las_cinco_cuentas(self):
+        # Un volumen que ya traía las credenciales públicas (plan B del despliegue en una PC de desarrollo) deja de
+        # servir para entrar (hallazgos 1 y 11 de la revisión de RC-91).
         for variables in ({}, {'DEMO_ACCOUNTS': 'false'}, {'DEMO_ACCOUNTS': ''}, {'DEMO_ACCOUNTS': '1'},
-                          {'DEMO_ACCOUNTS': 'false', 'ALLOWED_ORIGINS': PUBLICADO}):
+                          {'DEMO_ACCOUNTS': 'false', 'ALLOWED_ORIGINS': PUBLICADO},
+                          {'DEMO_ACCOUNTS': 'false', 'ALLOWED_ORIGINS': LOCALES}):
             with self.subTest(variables=variables):
                 consultas, salida = correr(**variables)
-                self.assertEqual(consultas, [])
-                self.assertEqual(salida.strip(), 'DEMO_ACCOUNTS no es true: no se tocan las cuentas.')
+                self.assertApagadas(consultas, salida)
+                self.assertEqual(salida.splitlines()[0], 'DEMO_ACCOUNTS no es true: se apagan las cuentas de demo.')
+
+    def test_9b_el_hash_de_relleno_no_deja_entrar_con_ninguna_contrasena(self):
+        for intento in (demo.PASSWORD, 'lowtide-relleno-que-nunca-coincide', '', 'demo-only'):
+            with self.subTest(intento=intento):
+                for user_id in (cuenta[1] for cuenta in demo.CUENTAS.values()):
+                    self.assertFalse(passwords.verify_password(demo.HASH_DE_RELLENO, intento, user_id))
+
+    def test_9c_poner_y_apagar_tocan_las_mismas_cuentas(self):
+        puestas, _ = correr(DEMO_ACCOUNTS='true')
+        apagadas, _ = correr(DEMO_ACCOUNTS='false')
+        self.assertEqual(sorted(p[2] for _, p in puestas), sorted(p[1] for _, p in apagadas))
+
+    def test_9c2_cada_cuenta_queda_con_su_huella_cifrada(self):
+        # RC-330: la huella va cifrada con el id de su usuario, así que la de una cuenta no abre otra.
+        puestas, _ = correr(DEMO_ACCOUNTS='true')
+        with entorno():
+            for _, (huella, _, user_id) in puestas:
+                self.assertTrue(huella.startswith('lt1$'))
+                self.assertTrue(passwords.verify_password(huella, demo.PASSWORD, user_id))
+                self.assertFalse(passwords.verify_password(huella, demo.PASSWORD, OTRO_ID))
+        self.assertEqual(len({p[0] for _, p in puestas}), len(demo.CUENTAS))
+
+    def test_9d_una_cuenta_que_no_puede_entrar_y_no_cambio_solo_avisa(self):
+        # R3 de la revisión de RC-91: sin fila que cambiar no se dice 'apagada'.
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        consultas, salida = correr(BaseFalsa(sin_fila={alex}), DEMO_ACCOUNTS='false')
+        self.assertEqual(salida.count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
+        self.assertNotIn('apagada: alex.morgan@acme-demo.mx', salida)
+        self.assertIn('nada que apagar: alex.morgan@acme-demo.mx', salida)
+        self.assertEqual([p for sql, p in consultas if 'login_lookup' in sql], [('alex.morgan@acme-demo.mx',)])
+
+    def test_9e_una_cuenta_que_puede_entrar_y_no_cambio_termina_con_error(self):
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        with entorno():
+            huella = passwords.hash_password(demo.PASSWORD, OTRO_ID)
+        base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': huella})
+        salida = io.StringIO()
+        with self.assertRaises(SystemExit) as error, entorno(DEMO_ACCOUNTS='true', ALLOWED_ORIGINS=PUBLICADO), \
+                mock.patch.object(demo, 'transaction', base.transaction), redirect_stdout(salida):
+            demo.main(['demo'])
+        self.assertTrue(str(error.exception.code).startswith('ERROR: '))
+        self.assertIn('No se apagaron: alex.morgan@acme-demo.mx', str(error.exception.code))
+        # Las otras cuatro sí se apagan antes del error.
+        self.assertEqual(salida.getvalue().count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
+        self.assertNotIn('apagada: alex.morgan@acme-demo.mx', salida.getvalue())
+
+    def test_9f_un_correo_con_otro_id_que_puede_entrar_sin_la_contrasena_de_demo_solo_avisa(self):
+        # N2 de la ronda 3 de RC-91: esa fila nunca tuvo las credenciales públicas, la API sí arranca.
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        with entorno():
+            huella = passwords.hash_password('Otra-Clave-De-Prueba-1', OTRO_ID)
+        base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': huella})
+        consultas, salida = correr(base, DEMO_ACCOUNTS='false')
+        self.assertEqual(salida.count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
+        self.assertIn('con otro id y sin la contraseña de demo, no se toca: alex.morgan@acme-demo.mx', salida)
+        self.assertNotIn('nada que apagar', salida)
+        self.assertEqual([p for sql, p in consultas if 'login_lookup' in sql], [('alex.morgan@acme-demo.mx',)])
+
+    def test_9g_el_hash_de_relleno_en_otro_id_tampoco_frena(self):
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': demo.HASH_DE_RELLENO})
+        _, salida = correr(base, DEMO_ACCOUNTS='false')
+        self.assertIn('no se toca: alex.morgan@acme-demo.mx', salida)
+
+    def test_9h_con_la_llave_en_key_vault_no_lee_key_vault_y_termina_en_seco(self):
+        # Ronda 1 de RC-330, hallazgo 1: en la VM demo-accounts no llega a IMDS. Una huella cifrada en otra fila con un
+        # correo de demo no se puede revisar: error en seco, sin pedir nada a IMDS ni a Key Vault.
+        from cirdan.auth import keyvault
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        with entorno():
+            huella = passwords.hash_password(demo.PASSWORD, OTRO_ID)
+        base, salida = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': huella}), io.StringIO()
+        red = mock.Mock(side_effect=AssertionError('no debe leer Key Vault'))
+        en_key_vault = {'PASSWORD_HASH_ENCRYPTION_KEY': '', 'PASSWORD_HASH_KEY_VAULT_SECRET_URL': URL_KV}
+        with self.assertRaises(SystemExit) as error, entorno(DEMO_ACCOUNTS='false', **en_key_vault), \
+                mock.patch.object(demo, 'transaction', base.transaction), mock.patch.object(keyvault, '_abrir', red), \
+                redirect_stdout(salida):
+            demo.main(['demo'])
+        self.assertTrue(str(error.exception.code).startswith('ERROR: '))
+        self.assertIn('No se revisó si entran con la contraseña pública: alex.morgan@acme-demo.mx',
+                      str(error.exception.code))
+        self.assertEqual(salida.getvalue().count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
+        red.assert_not_called()
+
+    def test_9i_con_la_llave_en_key_vault_una_huella_vieja_se_revisa_sin_red(self):
+        from cirdan.auth import keyvault
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        red = mock.Mock(side_effect=AssertionError('no debe leer Key Vault'))
+        for huella in (demo.HASH_DE_RELLENO, 'texto'):
+            with self.subTest(huella=huella), mock.patch.object(keyvault, '_abrir', red):
+                base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': huella})
+                _, salida = correr(base, DEMO_ACCOUNTS='false', PASSWORD_HASH_ENCRYPTION_KEY='',
+                                   PASSWORD_HASH_KEY_VAULT_SECRET_URL=URL_KV)
+                self.assertIn('no se toca: alex.morgan@acme-demo.mx', salida)
+        red.assert_not_called()
 
     def test_10_el_codigo_totp_sigue_saliendo_y_no_toca_la_base(self):
         base, salida = BaseFalsa(), io.StringIO()
@@ -151,22 +284,46 @@ class Script(unittest.TestCase):
         self.assertRegex(salida.getvalue().strip(), r'^\d{6}$')
         self.assertEqual(base.consultas, [])
 
+    def test_10b_sin_llave_del_mfa_o_con_las_dos_no_termina_bien(self):
+        # Hallazgo 9 de la revisión de la opción 4 de RC-91: la API espera a este script, así que con su error
+        # `docker compose up -d` se detiene, en vez de dejar la API reiniciándose. No toca la base ni Key Vault.
+        url = 'https://kv-lowtide.vault.azure.net/secrets/totp-encryption-key/0123456789abcdef0123456789abcdef'
+        url_huellas = url.replace('totp-encryption-key', 'password-hash-key')
+        casos = (({'TOTP_ENCRYPTION_KEY': ''}, 'TOTP_'), ({'TOTP_KEY_VAULT_SECRET_URL': url}, 'TOTP_'),
+                 ({'PASSWORD_HASH_ENCRYPTION_KEY': ''}, 'PASSWORD_HASH_'),
+                 ({'PASSWORD_HASH_KEY_VAULT_SECRET_URL': url_huellas}, 'PASSWORD_HASH_'))
+        for variables, variable in casos:
+            with self.subTest(variables=variables):
+                base = BaseFalsa()
+                with entorno(DEMO_ACCOUNTS='false', **variables), \
+                        mock.patch.object(demo, 'transaction', base.transaction), \
+                        mock.patch('cirdan.auth.keyvault._abrir', side_effect=AssertionError('sin red')), \
+                        self.assertRaises(SystemExit) as error:
+                    demo.main(['demo'])
+                self.assertIn(variable, str(error.exception.code))
+                self.assertEqual(base.consultas, [])
+
 
 class ComoProceso(unittest.TestCase):
-    """El módulo de verdad, como lo corre el compose, contra un puerto de 127.0.0.1 donde no escucha nadie: si
-    intenta tocar las cuentas, la conexión falla y sale con error."""
+    """El módulo de verdad, como lo corre el compose, contra un puerto de 127.0.0.1 donde no escucha nadie: como
+    siempre toca las cuentas (para ponerlas o para apagarlas), la conexión falla y sale con error. Así el servicio
+    demo-accounts no termina bien sin haber apagado las cuentas, y la API, que lo espera, no arranca."""
 
     def correr(self, **variables):
         limpio = {k: v for k, v in os.environ.items() if k not in VARIABLES}
         limpio.update(variables, PGHOST='127.0.0.1', PGPORT='1', CIRDAN_APP_PASSWORD='sin-uso',
-                      TOTP_ENCRYPTION_KEY=base64.urlsafe_b64encode(os.urandom(32)).decode())
+                      TOTP_ENCRYPTION_KEY=base64.urlsafe_b64encode(os.urandom(32)).decode(),
+                      PASSWORD_HASH_ENCRYPTION_KEY=LLAVE_HUELLAS)
         return subprocess.run([sys.executable, '-m', 'cirdan.auth.demo'], env=limpio, capture_output=True, text=True,
                               timeout=60)
 
-    def test_11_con_un_origen_publicado_termina_bien_sin_abrir_la_base(self):
-        proc = self.correr(DEMO_ACCOUNTS='true', ALLOWED_ORIGINS=PUBLICADO)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn('no se tocan las cuentas de demo', proc.stdout)
+    def test_11_con_un_origen_publicado_o_sin_true_va_a_la_base_a_apagarlas(self):
+        for variables in ({'DEMO_ACCOUNTS': 'true', 'ALLOWED_ORIGINS': PUBLICADO}, {'DEMO_ACCOUNTS': 'false'}):
+            with self.subTest(variables=variables):
+                proc = self.correr(**variables)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn('se apagan las cuentas de demo', proc.stdout)
+                self.assertIn('OperationalError', proc.stderr)
 
     def test_12_con_origenes_locales_si_va_a_la_base(self):
         proc = self.correr(DEMO_ACCOUNTS='true', ALLOWED_ORIGINS=LOCALES)
