@@ -28,12 +28,14 @@ se mide cuánto tardó y, si llegó a ese tiempo, el resultado lleva el aviso IN
 Modos: 'vivo' corre subfinder; 'grabar' además guarda la salida ya leída (líneas y avisos) en
 cirdan/recolectores/respuestas_grabadas/subfinder/<dominio>/ con la Grabadora del contrato (#13); 'reproducir' solo
 lee esa grabación y no ejecuta nada. No tiene línea de comandos propia. En la imagen, el usuario cirdan es dueño de
-respuestas_grabadas/ (Dockerfile), así que puede grabar dentro del contenedor.
+respuestas_grabadas/subfinder/ y de nada más (Dockerfile), así que puede grabar subfinder dentro del contenedor.
 
 commoncrawl (pkg/subscraping/sources/commoncrawl/commoncrawl.go de v2.17.0) pide collinfo.json y luego el CDX de un
 índice por cada uno de los últimos 5 años, en un orden al azar. Si un año responde 404 ('No Captures found': ese
 índice no tiene capturas del dominio) deja de buscar en los años que faltan. Ese 404 no es una fuente caída: el
-resultado sigue, con el aviso SIN_CAPTURAS. Cualquier otro error sí lo es.
+resultado sigue, con el aviso SIN_CAPTURAS. Cualquier otro error sí lo es. Al grabar, 0 nombres con SIN_CAPTURAS no
+se guarda (FuenteNoResponde): como el orden es al azar, el primer año pudo no tener capturas aunque otros sí, y esa
+corrida vacía pisaría una grabación buena.
 
 Consultas del límite diario (#13b): peticiones HTTP, como en las demás fuentes. Cada corrida en vivo o al grabar
 cuenta MAX_CONSULTAS (las 6 de commoncrawl, el máximo, porque subfinder no dice cuántas hizo), y 0 al reproducir.
@@ -214,7 +216,8 @@ class ClienteSubfinder:
 
     def enumerar(self, dominio):
         """{'lineas', 'avisos'} de subfinder para el dominio. Sale del disco al reproducir y se graba al grabar. Si
-        subfinder no responde no se graba nada, así la grabación anterior queda intacta."""
+        subfinder no responde no se graba nada, así la grabación anterior queda intacta. Tampoco se graba una corrida
+        con 0 nombres y SIN_CAPTURAS: commoncrawl pudo cortar en un año sin capturas antes de llegar a los que sí."""
         consulta = CONSULTA + dominio
         del_disco, datos = self.grabadora.de_disco(consulta)
         if del_disco:
@@ -223,6 +226,9 @@ class ClienteSubfinder:
                 raise FuenteNoResponde('la grabación de subfinder de %s no se puede leer' % dominio)
             return datos
         datos = self._correr(dominio)
+        if self.modo == 'grabar' and not datos['lineas'] and SIN_CAPTURAS in datos['avisos']:
+            raise FuenteNoResponde('subfinder: commoncrawl no dio nombres de %s y cortó en un año sin capturas, '
+                                   'así que no se graba para no pisar la grabación anterior' % dominio)
         self.grabadora.guardar(consulta, datos)
         return datos
 

@@ -14,8 +14,8 @@
 --   (b) una grabación de olmardo.com, que no va en git: se hace en cada
 --       PC o en la VM antes de aplicar esta semilla, si la demo corre en
 --       reproducir. Sin ella subfinder queda 'failed' en reproducir.
---   (c) que el contenedor escriba en respuestas_grabadas/: el Dockerfile
---       le da esa carpeta al usuario cirdan.
+--   (c) que el contenedor escriba en respuestas_grabadas/subfinder/: el
+--       Dockerfile le da esa carpeta, y solo esa, al usuario cirdan.
 --
 -- subfinder: 300 consultas por día, o sea 50 corridas por día, las mismas
 -- que daba la 005. Desde esta semilla una consulta es una petición HTTP,
@@ -24,6 +24,14 @@
 -- (MAX_CONSULTAS de subfinder.py) y el orquestador reserva 6. Si un año
 -- no tiene capturas del dominio, commoncrawl deja de buscar y hace menos,
 -- pero subfinder no dice cuántas, así que cada corrida cuenta 6.
+--
+-- Orden: primero se reconstruye la API con este código y después se
+-- aplica la semilla. La imagen anterior trae las 8 fuentes de la 005 y,
+-- con subfinder prendido, las consultaría. En una base nueva no hay paso
+-- a mano: db/init/cargar_cirdan.sh aplica todas las semillas en cuanto el
+-- volumen está vacío y lee db/ del checkout, no de la imagen. Por eso,
+-- después de un git pull, la base se levanta siempre con
+-- `docker compose up -d --build`, nunca con `up` solo.
 --
 -- Se puede correr otra vez sin error: solo cambia el límite si tiene el
 -- 400 de la 005, así no pisa uno puesto a mano. Si ese límite es menor

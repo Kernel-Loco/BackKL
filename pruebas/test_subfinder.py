@@ -386,12 +386,26 @@ class SinCapturas(unittest.TestCase):
         self.assertEqual(len(res.activos), 3)
         self.assertEqual(res.avisos, [subfinder.SIN_CAPTURAS])
 
-    def test_2_sin_capturas_de_ningun_ano_es_0_nombres_y_se_graba(self):
+    def test_2_al_grabar_0_nombres_con_el_404_no_pisa_la_grabacion_anterior(self):
         with tempfile.TemporaryDirectory() as d:
-            res = por_ejecutar(SubfinderSimulado(salida=[], stderr=cuerpo(CDX)), 'grabar', d)
-            self.assertEqual((res.estado, res.activos, res.avisos), ('succeeded', [], [subfinder.SIN_CAPTURAS]))
+            buena = por_ejecutar(SubfinderSimulado(), 'grabar', d)
+            self.assertEqual((buena.estado, len(buena.activos)), ('succeeded', 3))
+            vacia = por_ejecutar(SubfinderSimulado(salida=[], stderr=cuerpo(CDX)), 'grabar', d)
+            self.assertEqual((vacia.estado, vacia.activos), ('failed', []))
+            self.assertNotIn('http', vacia.error)
             otra = por_ejecutar(sin_proceso, 'reproducir', d, binario=None)
-        self.assertEqual((otra.estado, otra.avisos), ('succeeded', [subfinder.SIN_CAPTURAS]))
+        self.assertEqual((otra.estado, len(otra.activos), otra.avisos), ('succeeded', 3, []))
+
+    def test_2b_en_vivo_0_nombres_con_el_404_sigue_succeeded(self):
+        res = por_ejecutar(SubfinderSimulado(salida=[], stderr=cuerpo(CDX)))
+        self.assertEqual((res.estado, res.activos, res.avisos), ('succeeded', [], [subfinder.SIN_CAPTURAS]))
+
+    def test_2c_al_grabar_con_nombres_y_el_404_si_se_graba(self):
+        with tempfile.TemporaryDirectory() as d:
+            res = por_ejecutar(SubfinderSimulado(stderr=cuerpo(CDX)), 'grabar', d)
+            self.assertEqual((res.estado, len(res.activos)), ('succeeded', 3))
+            otra = por_ejecutar(sin_proceso, 'reproducir', d, binario=None)
+        self.assertEqual((otra.estado, len(otra.activos), otra.avisos), ('succeeded', 3, [subfinder.SIN_CAPTURAS]))
 
     def test_3_otro_error_de_commoncrawl_si_es_caida(self):
         for error in ('unexpected status code 503 received from %s' % CDX,
@@ -432,13 +446,13 @@ class Semilla(unittest.TestCase):
 
 @unittest.skipUnless((RAIZ / 'Dockerfile').exists(), 'sin Dockerfile: dentro de la imagen no se copia')
 class Imagen(unittest.TestCase):
-    """El Dockerfile le da respuestas_grabadas/ al usuario cirdan y nada más (lectura estática)."""
+    """El Dockerfile le da respuestas_grabadas/subfinder/ al usuario cirdan y nada más (lectura estática)."""
 
-    def test_1_chown_solo_de_respuestas_grabadas_antes_de_user_cirdan(self):
+    def test_1_chown_solo_de_la_grabacion_de_subfinder_antes_de_user_cirdan(self):
         texto = (RAIZ / 'Dockerfile').read_text(encoding='utf-8')
         chown = re.search(r'chown -R cirdan:cirdan (\S+)', texto)
-        self.assertIsNotNone(chown, 'el Dockerfile no le da respuestas_grabadas/ al usuario cirdan')
-        self.assertEqual(chown.group(1), 'cirdan/recolectores/respuestas_grabadas')
+        self.assertIsNotNone(chown, 'el Dockerfile no le da respuestas_grabadas/subfinder/ al usuario cirdan')
+        self.assertEqual(chown.group(1), 'cirdan/recolectores/respuestas_grabadas/subfinder')
         self.assertEqual(len(re.findall(r'chown', texto)), 1)
         self.assertLess(texto.index('COPY cirdan/ cirdan/'), chown.start())
         self.assertLess(chown.start(), texto.index('USER cirdan'))
@@ -461,10 +475,12 @@ class Integracion(unittest.TestCase):
             cliente.enumerar('acme-demo.mx')
         self.assertIn('commoncrawl', str(error.exception))
 
-    def test_2_el_usuario_cirdan_escribe_en_respuestas_grabadas_y_no_en_el_codigo(self):
+    def test_2_el_usuario_cirdan_escribe_en_la_grabacion_de_subfinder_y_no_en_las_demas_ni_en_el_codigo(self):
         if os.geteuid() == 0:
             self.skipTest('corre como root: no prueba los permisos del usuario cirdan')
         self.assertTrue(os.access(subfinder.CARPETA_GRABADAS, os.W_OK))
+        self.assertFalse(os.access(contrato.CARPETA_GRABADAS, os.W_OK))
+        self.assertFalse(os.access(contrato.CARPETA_GRABADAS / 'crtsh', os.W_OK))
         self.assertFalse(os.access(Path(subfinder.__file__), os.W_OK))
         self.assertFalse(os.access(Path(subfinder.__file__).parent, os.W_OK))
 
