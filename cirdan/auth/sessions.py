@@ -6,10 +6,14 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
 - Verificación en dos pasos pendiente: 5 min y 5 intentos.
 - Alta de la verificación en dos pasos (RC-154): el secreto nuevo espera aquí 10 min y 5 códigos, cifrado.
 - Captcha del login (RC-154): la llave HMAC de los retos y los retos ya usados, hasta que vencen.
+- Passkeys (RC-331): el reto de registro (por usuario y amarrado a la sesión que lo pidió) y el de entrada (por un
+  token al azar), 5 min y de un solo uso: se leen y se borran en el mismo paso. /passkeys/login/options cuenta
+  60 por IP en 15 min, y los fallos de /passkeys/login/verify cuentan para la IP y el correo como en /login.
 - Bloqueo por intentos: 5 fallos por correo o 20 por IP en 15 min. Un código equivocado también
   cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Una IPv6
   cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
 """
+import base64
 import hashlib
 import ipaddress
 import json
@@ -27,6 +31,8 @@ MFA_SECONDS = 5 * 60
 MFA_MAX_ATTEMPTS = 5
 MFA_SETUP_SECONDS = 10 * 60
 LOCK_SECONDS = 15 * 60
+PASSKEY_SECONDS = 5 * 60
+MAX_PASSKEY_OPTIONS_IP = 60
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
 
@@ -191,6 +197,51 @@ def spend_captcha(nonce, seconds):
     return bool(_valkey().set('captcha:used:' + _digest(nonce), '1', nx=True, ex=seconds))
 
 
+# ------------------------------------------------------------------ passkeys (RC-331)
+
+def _passkey_reg_key(user_id):
+    return 'webauthn:reg:' + _digest(str(user_id))
+
+
+def create_passkey_registration(user_id, session_token, challenge):
+    """Guarda el reto de un registro de passkey por PASSKEY_SECONDS. Pedir otro reemplaza al anterior. Queda amarrado a
+    la sesión que lo pidió: otra sesión de la misma cuenta no lo puede usar."""
+    _valkey().set(_passkey_reg_key(user_id), json.dumps({'challenge': base64.b64encode(challenge).decode(),
+                                                         'session': _digest(session_token)}), ex=PASSKEY_SECONDS)
+
+
+def take_passkey_registration(user_id, session_token):
+    """El reto del registro, una sola vez (GETDEL); None si no hay, venció o lo pidió otra sesión."""
+    raw = _valkey().getdel(_passkey_reg_key(user_id))
+    if not raw:
+        return None
+    data = json.loads(raw)
+    if not secrets.compare_digest(data.get('session', ''), _digest(session_token)):
+        return None
+    return base64.b64decode(data['challenge'])
+
+
+def create_passkey_login(challenge):
+    """Guarda el reto de una entrada con passkey y devuelve el token que el portal manda de vuelta con la respuesta."""
+    token = secrets.token_urlsafe(32)
+    _valkey().set('webauthn:auth:' + _digest(token), base64.b64encode(challenge).decode(), ex=PASSKEY_SECONDS)
+    return token
+
+
+def take_passkey_login(token):
+    """El reto de la entrada, una sola vez (GETDEL): aunque lleguen 100 respuestas a la vez, solo una se revisa."""
+    if not token or len(token) > 100:
+        return None
+    raw = _valkey().getdel('webauthn:auth:' + _digest(token))
+    return base64.b64decode(raw) if raw else None
+
+
+def take_passkey_options(ip):
+    """Cuenta una petición de /passkeys/login/options de la IP; False si ya pasó de MAX_PASSKEY_OPTIONS_IP en 15 min."""
+    count, = _count('webauthn:opts:ip:' + _ip_bloque(ip))
+    return count <= MAX_PASSKEY_OPTIONS_IP
+
+
 # ------------------------------------------------------------------ bloqueo por intentos
 
 def _email_key(email):
@@ -227,6 +278,16 @@ def _count(*keys):
 def is_locked(email, ip):
     fails_email, fails_ip = _valkey().mget(_email_key(email), _ip_key(ip))
     return int(fails_email or 0) >= MAX_FAILS_EMAIL or int(fails_ip or 0) >= MAX_FAILS_IP
+
+
+def is_ip_locked(ip):
+    """Solo la IP: antes de saber de qué correo es una passkey."""
+    return int(_valkey().get(_ip_key(ip)) or 0) >= MAX_FAILS_IP
+
+
+def register_ip_fail(ip):
+    """Un fallo sin correo conocido (una passkey que no existe): cuenta solo para la IP."""
+    _count(_ip_key(ip))
 
 
 def register_fail(email, ip):
