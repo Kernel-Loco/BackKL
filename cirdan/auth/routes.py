@@ -397,7 +397,7 @@ def _delete_passkeys(conn, session, ip, reason):
     removed = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s RETURNING id::text',
                            (session.user_id,)).fetchall()
     for passkey in removed:
-        audit(conn, session.org_id, 'auth.passkey_deleted', session.user_id, ip, 'passkey', passkey['id'],
+        audit(conn, session.own_org_id, 'auth.passkey_deleted', session.user_id, ip, 'passkey', passkey['id'],
               {'reason': reason})
     return removed
 
@@ -460,8 +460,14 @@ def passkey_register_options(body: PasskeyRegisterOptionsIn, request: Request, r
     ip = client_ip(request)
     if sessions.is_locked(session.email, ip):
         raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    # El intento se cuenta antes de revisar la contraseña, con el mismo contador por usuario que /password (RC-290):
+    # contado después, las peticiones en paralelo pasaban todas con el contador en 0 y se revisaban más de 5 (R3-1).
+    if sessions.take_password_attempt(session.user_id) > sessions.MAX_PASSWORD_ATTEMPTS:
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
     fail = None
-    with transaction(session.org_id) as conn:
+    # La fila del usuario solo se ve con RLS de su empresa: own_org_id, como /mfa/* y /password, para que un superadmin
+    # que trabaja en otra empresa registre, vea y borre las suyas (R3-14, RC-332).
+    with transaction(session.own_org_id) as conn:
         # FOR NO KEY UPDATE, como en /login: otra petición que gaste un código de esta cuenta espera a esta. /mfa/verify
         # no bloquea la fila al leer, pero su UPDATE solo guarda un paso posterior al guardado.
         row = conn.execute('SELECT email::text, full_name, password_hash, totp_secret_enc, last_totp_step, %s AS mfa_enabled '
@@ -474,6 +480,9 @@ def passkey_register_options(body: PasskeyRegisterOptionsIn, request: Request, r
         if not passwords.verify_password(row['password_hash'], body.current_password, session.user_id):
             fail = 'password'
         else:
+            # La contraseña es correcta: el contador vuelve a 0, como en /password. Va antes del 409 de abajo, que si
+            # no gastaría un intento por cada vez que se pide con 10 passkeys.
+            _clear_password_attempts(session.user_id)
             existing = [r['credential_id'] for r in conn.execute(
                 'SELECT credential_id FROM webauthn_credentials WHERE user_id = %s', (session.user_id,)).fetchall()]
             # Antes del código: con 10 passkeys no se gasta el código ni se cuenta un intento.
@@ -494,10 +503,10 @@ def passkey_register_options(body: PasskeyRegisterOptionsIn, request: Request, r
                     (step, session.user_id, step)).rowcount:
                 fail = 'code'
         if fail:
-            audit(conn, session.org_id, 'auth.passkey_registration_failed', session.user_id, ip, 'user',
+            audit(conn, session.own_org_id, 'auth.passkey_registration_failed', session.user_id, ip, 'user',
                   session.user_id, {'reason': fail})
         else:
-            audit(conn, session.org_id, 'auth.passkey_registration_started', session.user_id, ip, 'user',
+            audit(conn, session.own_org_id, 'auth.passkey_registration_started', session.user_id, ip, 'user',
                   session.user_id)
     if fail == 'password':
         sessions.register_fail(session.email, ip)
@@ -532,11 +541,11 @@ def passkey_register_verify(body: PasskeyRegisterVerifyIn, request: Request, ses
         data = webauthn.verify_registration(body.credential, challenge)
     except webauthn.PasskeyError as exc:
         log.info('Registro de passkey rechazado del usuario %s: %s', session.user_id, exc)
-        with transaction(session.org_id) as conn:
-            audit(conn, session.org_id, 'auth.passkey_registration_failed', session.user_id, ip, 'user',
+        with transaction(session.own_org_id) as conn:
+            audit(conn, session.own_org_id, 'auth.passkey_registration_failed', session.user_id, ip, 'user',
                   session.user_id, {'reason': 'response'})
         raise HTTPException(400, PASSKEY_REG_INVALID)
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         user = conn.execute('SELECT password_hash FROM users WHERE id = %s AND is_active FOR NO KEY UPDATE',
                             (session.user_id,)).fetchone()
         if not user:
@@ -560,12 +569,12 @@ def passkey_register_verify(body: PasskeyRegisterVerifyIn, request: Request, ses
                     'INSERT INTO webauthn_credentials (organization_id, user_id, credential_id, public_key, sign_count, '
                     'transports, aaguid, backed_up, name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) '
                     'RETURNING ' + PASSKEY_COLUMNS,
-                    (session.org_id, session.user_id, data['credential_id'], data['public_key'], data['sign_count'],
+                    (session.own_org_id, session.user_id, data['credential_id'], data['public_key'], data['sign_count'],
                      data['transports'], data['aaguid'], data['backed_up'], name)).fetchone()
         except psycopg.errors.UniqueViolation:
             raise HTTPException(409, PASSKEY_DUPLICATE)
         # Sin el nombre: es texto libre y audit_log no se puede borrar ni anonimizar.
-        audit(conn, session.org_id, 'auth.passkey_registered', session.user_id, ip, 'passkey', row['id'],
+        audit(conn, session.own_org_id, 'auth.passkey_registered', session.user_id, ip, 'passkey', row['id'],
               {'backed_up': data['backed_up']})
     return row
 
@@ -651,7 +660,7 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
 
 @router.get('/passkeys', summary='Passkeys de la cuenta de la sesión')
 def passkeys_list(response: Response, session: Session = Depends(current_session)):
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         rows = conn.execute('SELECT ' + PASSKEY_COLUMNS + ' FROM webauthn_credentials WHERE user_id = %s '
                             'ORDER BY created_at', (session.user_id,)).fetchall()
     response.headers.update(NO_STORE)
@@ -660,10 +669,10 @@ def passkeys_list(response: Response, session: Session = Depends(current_session
 
 @router.delete('/passkeys/{passkey_id}', status_code=204, summary='Borra una passkey de la cuenta de la sesión')
 def passkeys_delete(passkey_id: uuid.UUID, request: Request, session: Session = Depends(current_session)):
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         row = conn.execute('DELETE FROM webauthn_credentials WHERE id = %s AND user_id = %s RETURNING id',
                            (passkey_id, session.user_id)).fetchone()
         if not row:
             raise HTTPException(404, PASSKEY_NOT_FOUND)
-        audit(conn, session.org_id, 'auth.passkey_deleted', session.user_id, client_ip(request), 'passkey',
+        audit(conn, session.own_org_id, 'auth.passkey_deleted', session.user_id, client_ip(request), 'passkey',
               passkey_id, {'reason': 'user'})

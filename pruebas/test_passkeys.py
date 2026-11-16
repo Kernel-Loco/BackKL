@@ -473,6 +473,24 @@ class Registrar(unittest.TestCase):
                                                                'new_password': 'CIRDAN_FAKE_clave-331-c'}),
                          (200, {'passkeys_removed': 0}))
 
+    def test_17b_en_paralelo_no_se_revisan_mas_de_5_contrasenas(self):
+        # R3-1 de RC-331: el intento se cuenta antes de revisar la contraseña, con el contador de /password (RC-290).
+        # Contado después, las 12 pasaban con el contador en 0 y se revisaban todas.
+        antes = _bitacora('auth.passkey_registration_failed', extra="AND details->>'reason' = 'password'")
+        codigos = []
+        hilos = [threading.Thread(target=lambda n=n: codigos.append(
+            self._opciones(code=False, password='CIRDAN_FAKE_mala-%d' % n)[0])) for n in range(12)]
+        for h in hilos:
+            h.start()
+        for h in hilos:
+            h.join()
+        self.assertEqual(sorted(codigos), [400] * 5 + [429] * 7)
+        self.assertEqual(_bitacora('auth.passkey_registration_failed', extra="AND details->>'reason' = 'password'")
+                         - antes, 5)
+        # El contador es el de /password: tampoco deja probar ahí.
+        self.assertEqual(self.client.post(AUTH + '/password', {'current_password': PASSWORD,
+                                                               'new_password': 'CIRDAN_FAKE_clave-331-d'})[0], 429)
+
     def test_18_la_bitacora_no_guarda_el_nombre_de_la_passkey(self):
         # T4 de RC-331: el nombre es texto libre y audit_log no se puede borrar ni anonimizar.
         opciones = self._opciones()[1]['options']
