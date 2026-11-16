@@ -217,18 +217,26 @@ class Superadmin(unittest.TestCase):
         dominios = {d['fqdn'] for d in body['items']}
         self.assertIn('acme-demo.mx', dominios)
         self.assertNotIn('beta-corp.mx', dominios)
-        # Hallazgos: los de acme-demo.mx son todos de Acme y ninguno de Beta. Los de beta-corp.mx no se ven desde Acme.
-        de_acme = set(postgres("SELECT id FROM findings WHERE organization_id = '%s';" % ACME).split())
+        # Hallazgos con Acme activa: la lista de acme-demo.mx trae exactamente sus hallazgos abiertos (leídos como
+        # postgres) y ninguno de Beta. Ni la lista de beta-corp.mx ni la explicación de un hallazgo de Beta por su id
+        # se ven desde Acme. Que la RLS de findings separe empresas para cualquier sesión ya lo prueba test_aislamiento
+        # (test_2). Aquí se prueba que la empresa activa del superadmin es la que manda.
+        abiertos = set(postgres("SELECT f.id FROM findings f JOIN domains d ON d.id = f.domain_id"
+                                " WHERE d.organization_id = '%s' AND d.fqdn = 'acme-demo.mx'"
+                                " AND f.status = 'open';" % ACME).split())
         de_beta = set(postgres("SELECT id FROM findings WHERE organization_id = '%s';" % BETA).split())
-        self.assertTrue(de_beta, 'la semilla 001 trae hallazgos de Beta')
+        self.assertTrue(abiertos, 'la semilla 001 trae hallazgos abiertos de acme-demo.mx')
+        self.assertIn('80000000-0000-4000-8000-000000000011', de_beta, 'la semilla 001 trae el RDP de Beta')
         code, body = self.dana.get('/api/v1/domains/acme-demo.mx/findings')
         self.assertEqual(code, 200, body)
         vistos = {f['id'] for f in body['items']}
-        self.assertTrue(vistos)
-        self.assertLessEqual(vistos, de_acme)
+        self.assertEqual(vistos, abiertos)
+        self.assertEqual((body['domain'], body['total']), ('acme-demo.mx', len(abiertos)))
         self.assertFalse(vistos & de_beta)
         self.assertEqual(self.dana.get('/api/v1/domains/beta-corp.mx/findings'),
                          (404, {'detail': 'Dominio no encontrado para esta organización'}))
+        self.assertEqual(self.dana.get('/api/v1/findings/80000000-0000-4000-8000-000000000011/explanation'),
+                         (404, {'detail': 'Hallazgo no encontrado'}))
         self.assertEqual(self.dana.get('/api/v1/api-keys')[0], 200)
         self.assertEqual(self.dana.get('/api/v1/scoring/weights')[0], 200)
         code, body = self.dana.post('/api/v1/api-keys', {'name': NOMBRE_LLAVE, 'own_use': True})
