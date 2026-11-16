@@ -228,14 +228,18 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(set(re.findall(r'! -s ([0-9.]+)/32', doc)), {str(api)})
 
     def test_15_el_healthcheck_espera_a_la_llave_de_key_vault(self):
-        # Hallazgos 8, 11 y 12: la API puede tardar hasta keyvault.PLAZO en leer la llave antes de rendirse. El
-        # periodo de arranque del HEALTHCHECK tiene que ser mayor, para que no la marque unhealthy antes.
+        # Hallazgos 8, 11 y 12: la API puede tardar hasta keyvault.PLAZO en leer cada llave antes de rendirse, y desde
+        # RC-330 lee dos (la del MFA y la de las huellas). El periodo de arranque del HEALTHCHECK tiene que ser mayor
+        # que las dos juntas, para que no la marque unhealthy antes.
         fuente = (RAIZ / 'cirdan' / 'auth' / 'keyvault.py').read_text(encoding='utf-8')
         plazo = next(ast.literal_eval(n.value) for n in ast.parse(fuente).body
                      if isinstance(n, ast.Assign) and [getattr(x, 'id', None) for x in n.targets] == ['PLAZO'])
         dockerfile = (RAIZ / 'Dockerfile').read_text(encoding='utf-8')
         inicio = int(re.search(r'HEALTHCHECK .*--start-period=(\d+)s', dockerfile).group(1))
-        self.assertGreater(inicio, plazo + 10)
+        main = (RAIZ / 'cirdan' / 'api' / 'main.py').read_text(encoding='utf-8')
+        lecturas = len(re.findall(r'\b(?:totp|passwords)\.comprobar_llave\(', main))
+        self.assertEqual(lecturas, 2)
+        self.assertGreater(inicio, lecturas * plazo + 10)
 
 
 if __name__ == '__main__':
