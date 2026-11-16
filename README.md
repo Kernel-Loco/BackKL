@@ -127,6 +127,7 @@ docker compose exec api python -m cirdan.auth.demo codigo jordan.tate@acme-demo.
 | `GET /api/v1/domains/{fqdn}/findings` | Hallazgos abiertos con las 4 características del reto |
 | `GET /api/v1/domains/{fqdn}/score` y `/score/history` | Score con desglose, piso y alerta; y su histórico |
 | `GET /api/v1/domains/{fqdn}/score/compare` y `/findings/export` | Comparación hallazgo por hallazgo de dos puntos del histórico y descarga en CSV o JSON de los hallazgos y la comparación. Piden autorización vigente (403 sin ella). Detalle en `docs/contrato_api_v1.md` |
+| `GET /api/v1/domains/{fqdn}/report?formato=json\|html` | Reporte ejecutivo de 1 a 2 páginas: el JSON para el PDF del portal y el mismo reporte en HTML, con la atribución de HIBP. Pide autorización vigente (403 sin ella) |
 | `GET /api/v1/findings/{id}/explanation` | Por qué es crítico: factores, penalización y recomendación |
 | `GET /api/v1/scoring/weights` | Juego de reglas activo |
 | `GET /api/v1/domains/{fqdn}/assets` y `GET /api/v1/scans` | Activos y escaneos (provisionales: aún no están en el contrato) |

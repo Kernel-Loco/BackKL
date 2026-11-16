@@ -72,6 +72,9 @@ async def cabeceras_de_seguridad(request: Request, call_next):
     """Va después de same_origin_writes para envolverlo: su 403 también sale con las cabeceras."""
     response = await call_next(request)
     for nombre, valor in CABECERAS_SEGURIDAD.items():
+        # Una CSP más estricta que ya trae frame-ancestors 'none' se queda, como la del reporte en HTML (RC-70).
+        if nombre == 'Content-Security-Policy' and "frame-ancestors 'none'" in response.headers.get(nombre, ''):
+            continue
         response.headers[nombre] = valor
     return response
 

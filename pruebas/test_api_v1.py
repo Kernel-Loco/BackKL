@@ -398,6 +398,39 @@ class ApiV1(unittest.TestCase):
         self.assertEqual(self.get(self.beta, '/api/v1/domains/beta-corp.mx/findings/export')['domain'], 'beta-corp.mx')
         self.assertEqual(sesion.Client().get('/api/v1/domains/acme-demo.mx/findings/export')[0], 401)
 
+    def test_9f_reporte_ejecutivo_json_html_y_403(self):
+        # RC-70: 403 sin carta vigente (old-example.net venció el 15 ago 2026), 404 de otra empresa y 401 sin sesión.
+        for formato in ('json', 'html'):
+            url = '/api/v1/domains/old-example.net/report?formato=%s' % formato
+            self.assertEqual(self.acme.get(url)[0], 403, url)
+            self.assertEqual(self.beta.get(url)[0], 404, url)
+            self.assertEqual(sesion.Client().get(url.replace('old-example.net', 'acme-demo.mx'))[0], 401, url)
+        self.assertEqual(self.acme.get('/api/v1/domains/acme-demo.mx/report?formato=pdf')[0], 422)
+
+        datos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/report')
+        hallazgos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
+        self.assertEqual(datos['domain'], 'acme-demo.mx')
+        self.assertEqual(datos['total_open'], hallazgos['total'])
+        self.assertEqual(sum(datos['open_findings'].values()), hallazgos['total'])
+        self.assertEqual([h['title'] for h in datos['findings']], [h['title'] for h in hallazgos['items']][:8])
+        self.assertTrue(all(h['action'] for h in datos['findings']))  # toda regla tiene recomendación (003)
+        self.assertEqual(datos['score']['score'], self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')['score'])
+        self.assertIn('Have I Been Pwned', next(a['text'] for a in datos['attributions'] if a['source'] == 'hibp'))
+        self.assertLessEqual(datos['authorization']['valid_from'], datetime.now().date().isoformat())
+
+        _, headers, texto = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/report?formato=html')
+        self.assertTrue(headers['Content-Type'].startswith('text/html'))
+        self.assertIn('attachment', headers['Content-Disposition'])
+        self.assertIn("default-src 'none'", headers['Content-Security-Policy'])
+        self.assertIn("frame-ancestors 'none'", headers['Content-Security-Policy'])
+        self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+        self.assertIn('Have I Been Pwned', texto)
+        for h in datos['findings']:
+            self.assertIn(h['asset'], texto)
+        # El resto de la API conserva su CSP de RC-283.
+        _, otras, _ = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/findings/export?formato=json')
+        self.assertEqual(otras['Content-Security-Policy'], "frame-ancestors 'none'")
+
     def test_10_salida_siem_con_plan_y_sin_evidencia(self):
         url = '%s/api/v1/domains/beta-corp.mx/export/siem' % sesion.BASE
         with self.beta.opener.open(url, timeout=10) as r:
