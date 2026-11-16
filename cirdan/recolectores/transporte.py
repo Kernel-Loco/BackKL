@@ -241,7 +241,7 @@ class _ConPlazo:
             except OSError as e:   # la siguiente dirección, con lo que queda del plazo
                 s.close()
                 ultimo = e
-                solo_tiempo = solo_tiempo and isinstance(e, (TimeoutError, socket.timeout))
+                solo_tiempo = solo_tiempo and isinstance(e, TimeoutError)   # socket.timeout es TimeoutError desde 3.10
                 continue
             except BaseException:
                 s.close()
