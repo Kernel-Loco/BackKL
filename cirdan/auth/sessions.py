@@ -9,6 +9,8 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
 - Bloqueo por intentos: 5 fallos por correo o 20 por IP en 15 min. Un código equivocado también
   cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Una IPv6
   cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
+- Cambio de contraseña (RC-290): 5 intentos por usuario en 15 min, contados antes de revisar la contraseña actual.
+  El quinto fallo cierra la sesión que lo hizo.
 """
 import hashlib
 import ipaddress
@@ -29,6 +31,7 @@ MFA_SETUP_SECONDS = 10 * 60
 LOCK_SECONDS = 15 * 60
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
+MAX_PASSWORD_ATTEMPTS = 5  # cambio de contraseña: intentos por usuario en LOCK_SECONDS (RC-290)
 
 
 @cache
@@ -275,3 +278,22 @@ def register_mfa_fail(ip):
 
 def clear_fails(email):
     _valkey().delete(_email_key(email))
+
+
+# ------------------------------------------------------------------ cambio de contraseña (RC-290)
+
+def _password_key(user_id):
+    return 'pw:fail:user:' + _digest(str(user_id))
+
+
+def take_password_attempt(user_id):
+    """Cuenta el intento de cambio de contraseña del usuario antes de revisar la contraseña actual y devuelve su
+    número: 1 a MAX_PASSWORD_ATTEMPTS se revisan, uno mayor ya no. Es un contador aparte del login, para que quien tiene
+    una cookie robada no bloquee el inicio de sesión del dueño. Contado después, las peticiones en paralelo pasarían
+    todas con el contador en 0, como en take_mfa_attempt."""
+    attempt, = _count(_password_key(user_id))
+    return attempt
+
+
+def clear_password_attempts(user_id):
+    _valkey().delete(_password_key(user_id))

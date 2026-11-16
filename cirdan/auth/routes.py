@@ -318,15 +318,56 @@ def me(session: Session = Depends(current_session)):
     return dict(user, **platform_view(session, user), **sessions.limits(session.created_at))
 
 
+COMMON_PASSWORD = 'Esa contraseña es muy común. Elige otra.'
+WRONG_PASSWORD_LAST = 'La contraseña actual no es correcta. Por seguridad cerramos tu sesión: vuelve a iniciarla.'
+
+
+def _clear_password_attempts(user_id):
+    # Corre con la contraseña ya cambiada. Si Valkey falla aquí, el contador vence solo en 15 min: un 500 diría que no
+    # cambió cuando sí cambió.
+    try:
+        sessions.clear_password_attempts(user_id)
+    except Exception:
+        log.exception('No se pudieron borrar los intentos de cambio de contraseña del usuario %s', user_id)
+
+
 @router.post('/password', status_code=204, summary='Cambia la contraseña del usuario de la sesión')
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
+    # La lista de contraseñas comunes (RC-281) va primero: no revisa la contraseña actual, así que no gasta un intento.
+    if passwords.is_common(body.new_password):
+        raise HTTPException(400, COMMON_PASSWORD)
+    # El intento se cuenta antes de revisar la contraseña actual (RC-290), como en /mfa/verify: en paralelo tampoco se
+    # revisan más de 5. Es un contador del usuario, aparte del login: quien tiene una cookie robada no bloquea el
+    # inicio de sesión del dueño, y el quinto fallo le cierra la sesión.
+    attempt = sessions.take_password_attempt(session.user_id)
+    if attempt > sessions.MAX_PASSWORD_ATTEMPTS:
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    ip = client_ip(request)
+    last = attempt == sessions.MAX_PASSWORD_ATTEMPTS
     with transaction(session.own_org_id) as conn:
-        row = conn.execute('SELECT password_hash FROM users WHERE id = %s', (session.user_id,)).fetchone()
-        if not row or not passwords.verify_password(row['password_hash'], body.current_password, session.user_id):
-            raise HTTPException(400, 'La contraseña actual no es correcta.')
-        conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
-                     (passwords.hash_password(body.new_password, session.user_id), session.user_id))
-        audit(conn, session.own_org_id, 'auth.password_changed', session.user_id, client_ip(request), 'user', session.user_id)
-        # Una sesión robada no sobrevive al cambio de contraseña: se cierran todas menos la que la cambió. Va antes
-        # del commit, como en mfa_enable: si Valkey falla, la contraseña no cambia y se puede repetir.
-        sessions.delete_others(session.user_id, session.token)
+        # FOR NO KEY UPDATE: dos cambios a la vez con la contraseña actual ya no dan 204 los dos. El segundo espera el
+        # commit del primero y revisa contra el hash nuevo (si no, ganaba el último, que podía ser el de una cookie
+        # robada). No FOR UPDATE: chocaría con el FOR KEY SHARE de la llave de audit_log a users y un login fallido a la
+        # vez daría deadlock con el lock de la cadena. Es el mismo lock que toma el login.
+        row = conn.execute('SELECT password_hash FROM users WHERE id = %s FOR NO KEY UPDATE',
+                           (session.user_id,)).fetchone()
+        ok = bool(row) and passwords.verify_password(row['password_hash'], body.current_password, session.user_id)
+        if not ok and last:
+            audit(conn, session.own_org_id, 'auth.password_change_locked', session.user_id, ip, 'user', session.user_id,
+                  {'attempts': attempt})
+            # Antes del commit: si Valkey falla, el evento no queda sin que la sesión se haya cerrado.
+            sessions.delete(session.token)
+        elif ok:
+            conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
+                         (passwords.hash_password(body.new_password, session.user_id), session.user_id))
+            audit(conn, session.own_org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
+            # Las demás sesiones de la cuenta se cierran y queda la que cambió. Va antes del commit, como en
+            # /mfa/enable: si Valkey falla, la contraseña no cambia y se puede repetir.
+            sessions.delete_others(session.user_id, session.token)
+    if not ok:
+        if last:
+            response = JSONResponse({'detail': WRONG_PASSWORD_LAST}, status_code=400)
+            response.delete_cookie(COOKIE, path='/', httponly=True, secure=COOKIE_SECURE, samesite='lax')
+            return response
+        raise HTTPException(400, WRONG_PASSWORD)
+    _clear_password_attempts(session.user_id)
