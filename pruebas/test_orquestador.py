@@ -1477,6 +1477,16 @@ class Orquestador(unittest.TestCase):
         bitacora = self.uno("SELECT details FROM audit_log WHERE action = 'scan.failed' AND entity_id = %s", s.scan_id)
         self.assertEqual(bitacora['details'], {'error': 'KeyboardInterrupt'})  # RC-321
 
+    def test_9f_la_bitacora_guarda_solo_el_tipo_del_error(self):
+        """RC-321: el texto del error puede traer datos. Queda en scans.stats y no en audit_log, que no se borra."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(self.conn)):
+            orquestador.marcar_fallido(ACME, s.scan_id, ValueError('valor juan@acme-demo.mx'))
+        self.assertEqual(self.uno('SELECT stats FROM scans WHERE id = %s', s.scan_id)['stats']['error'],
+                         'valor juan@acme-demo.mx')
+        bitacora = self.uno("SELECT details FROM audit_log WHERE action = 'scan.failed' AND entity_id = %s", s.scan_id)
+        self.assertEqual(bitacora['details'], {'error': 'ValueError'})
+
     def test_10_un_dominio_de_otra_empresa_no_existe_para_mi(self):
         s = self.solicitar('olmardo.com', responde('cirdan-verification=ab439d2b39a7'))
         self.assertEqual((s.aceptada, s.motivos), (False, ['domain_not_found']))
@@ -1484,6 +1494,24 @@ class Orquestador(unittest.TestCase):
                             "AND action = 'scan.rejected' ORDER BY chain_seq DESC LIMIT 1", ACME)  # RC-321
         self.assertEqual(bitacora['details'], {'fqdn': 'olmardo.com', 'reasons': ['domain_not_found']})
         self.assertIsNone(bitacora['entity_id'])
+
+    def test_10b_lo_que_no_es_nombre_de_dominio_no_pasa_a_la_bitacora(self):
+        """RC-321: un correo o un texto largo en la ruta queda solo con su largo."""
+        for texto in ('juan@acme-demo.mx', 'a' * 4000):
+            s = self.solicitar(texto, responde(TXT_ACME))
+            self.assertEqual(s.motivos, ['domain_not_found'])
+            bitacora = self.uno("SELECT details FROM audit_log WHERE organization_id = %s "
+                                "AND action = 'scan.rejected' ORDER BY chain_seq DESC LIMIT 1", ACME)
+            self.assertEqual(bitacora['details'], {'fqdn_invalid': True, 'fqdn_length': len(texto),
+                                                   'reasons': ['domain_not_found']})
+
+    def test_10c_una_organizacion_que_no_existe_se_rechaza_sin_romper(self):
+        """RC-321: la línea de comandos con un uuid que no existe sigue diciendo RECHAZADO, sin chocar con la FK."""
+        otra = '20000000-0000-4000-8000-0000000000ff'
+        self.conn.execute("SELECT set_config('app.current_org', %s, true)", (otra,))
+        s = orquestador.solicitar(otra, 'algo.mx', consultar=responde(TXT_ACME), conn=self.conn)
+        self.assertEqual((s.aceptada, s.motivos), (False, ['domain_not_found']))
+        self.assertIsNone(self.uno('SELECT 1 AS hay FROM audit_log WHERE organization_id = %s', otra))
 
     # ---------------------------------------------------------------- línea de comandos
 
