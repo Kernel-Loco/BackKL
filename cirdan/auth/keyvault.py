@@ -1,6 +1,7 @@
 """Lectura de un secreto de Azure Key Vault con la identidad administrada de la VM (#49, RC-91).
 
-Solo la usa la llave del MFA (`TOTP_KEY_VAULT_SECRET_URL`, ver `cirdan/auth/totp.py` y docs/despliegue.md). Pide un
+La usan la llave del MFA (`TOTP_KEY_VAULT_SECRET_URL`, ver `cirdan/auth/totp.py` y docs/despliegue.md) y la de las
+huellas de contraseña (`PASSWORD_HASH_KEY_VAULT_SECRET_URL`, `cirdan/auth/passwords.py`, RC-330). Pide un
 token al servicio de metadatos de Azure (IMDS, 169.254.169.254, que solo responde dentro de la VM) y con él lee el
 secreto por la API REST de Key Vault. Sin dependencias nuevas: urllib, sin proxy y sin seguir redirecciones, para que
 el token no salga hacia otro servidor. Ningún mensaje de error lleva el token ni el valor del secreto, y los errores
@@ -68,10 +69,10 @@ def _abrir(req, timeout):
     return json.loads(b''.join(partes).decode('utf-8'))
 
 
-def validar_url(url):
-    """La URL del secreto, o RuntimeError si no es de Key Vault. Se revisa antes de mandar el token."""
-    error = RuntimeError('TOTP_KEY_VAULT_SECRET_URL debe ser https://<bóveda>.vault.azure.net/secrets/<nombre>/'
-                         '<versión>')
+def validar_url(url, variable='TOTP_KEY_VAULT_SECRET_URL'):
+    """La URL del secreto, o RuntimeError si no es de Key Vault. Se revisa antes de mandar el token. El mensaje nombra
+    la variable de donde salió la URL."""
+    error = RuntimeError('%s debe ser https://<bóveda>.vault.azure.net/secrets/<nombre>/<versión>' % variable)
     # urlsplit quita espacios y controles del principio y de en medio: aquí no se aceptan.
     if not isinstance(url, str) or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
         raise error
@@ -88,9 +89,9 @@ def validar_url(url):
     return url
 
 
-def _con_reintentos(req, que, fin, reintentar):
+def _con_reintentos(req, que, fin, reintentar, variable):
     """El JSON de `req`, con reintentos hasta `fin` (de `_reloj`) para los códigos HTTP de `reintentar`. El
-    RuntimeError sale fuera del `except`, sin el error de urllib en __context__."""
+    RuntimeError nombra `variable` y sale fuera del `except`, sin el error de urllib en __context__."""
     fallo = 'no respondió a tiempo'
     for espera in (0,) + ESPERAS:
         if espera:
@@ -110,28 +111,29 @@ def _con_reintentos(req, que, fin, reintentar):
                 break
         except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
             fallo = 'no respondió (%s)' % type(e).__name__
-    raise RuntimeError('%s %s' % (que, fallo))
+    raise RuntimeError('%s %s (%s)' % (que, fallo, variable))
 
 
-def leer_secreto(url):
-    """Valor del secreto de Key Vault en `url` con la identidad administrada de la VM."""
-    url = validar_url(url)
+def leer_secreto(url, variable='TOTP_KEY_VAULT_SECRET_URL'):
+    """Valor del secreto de Key Vault en `url` con la identidad administrada de la VM. `variable` es la del .env de
+    donde salió la URL: todo mensaje de error la nombra, porque la bóveda guarda dos secretos (RC-330)."""
+    url = validar_url(url, variable)
     fin = _reloj() + PLAZO
     req = urllib.request.Request(IMDS_TOKEN, headers={'Metadata': 'true'})
-    token = _con_reintentos(req, 'La identidad administrada (IMDS)', fin, REINTENTAR)
+    token = _con_reintentos(req, 'La identidad administrada (IMDS)', fin, REINTENTAR, variable)
     token = token.get('access_token') if isinstance(token, dict) else None
     if not isinstance(token, str) or not token:
-        raise RuntimeError('La identidad administrada (IMDS) no devolvió un token')
+        raise RuntimeError('La identidad administrada (IMDS) no devolvió un token (%s)' % variable)
     req = urllib.request.Request(url + '?api-version=' + API_VERSION)
     # Encabezado sin redirección: urllib no lo copia si alguna vez siguiera una.
     req.add_unredirected_header('Authorization', 'Bearer ' + token)
     del token
     try:
-        datos = _con_reintentos(req, 'Key Vault', fin, REINTENTAR_VAULT)
+        datos = _con_reintentos(req, 'Key Vault', fin, REINTENTAR_VAULT, variable)
     finally:
         # Los frames de un traceback guardan `req`: sin esto el token seguiría ahí.
         req.unredirected_hdrs.pop('Authorization', None)
     valor = datos.get('value') if isinstance(datos, dict) else None
     if not isinstance(valor, str) or not valor:
-        raise RuntimeError('Key Vault no devolvió el valor del secreto')
+        raise RuntimeError('Key Vault no devolvió el valor del secreto (%s)' % variable)
     return valor

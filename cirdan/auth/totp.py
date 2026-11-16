@@ -16,6 +16,7 @@ import threading
 import time
 
 import pyotp
+import segno
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from cirdan.auth import keyvault
@@ -64,13 +65,15 @@ def _key():
     global _llave_vault
     with _candado:
         if _llave_vault is None or _llave_vault[0] != url:
-            _llave_vault = (url, _decodificar(keyvault.leer_secreto(url), 'El secreto de Key Vault'))
+            _llave_vault = (url, _decodificar(keyvault.leer_secreto(url),
+                                                'El secreto de Key Vault de TOTP_KEY_VAULT_SECRET_URL'))
         return _llave_vault[1]
 
 
 def comprobar_llave():
-    """Al arrancar la API: sin llave válida no arranca, en vez de fallar en el primer inicio de sesión con MFA."""
-    _key()
+    """Al arrancar la API: sin llave válida no arranca, en vez de fallar en el primer inicio de sesión con MFA.
+    Devuelve la llave, para que cirdan/auth/passwords.py revise que la de las huellas sea otra (RC-330)."""
+    return _key()
 
 
 def encrypt_secret(secret, user_id):
@@ -82,6 +85,25 @@ def encrypt_secret(secret, user_id):
 def decrypt_secret(blob, user_id):
     blob = bytes(blob)
     return AESGCM(_key()).decrypt(blob[:12], blob[12:], str(user_id).encode()).decode()
+
+
+ISSUER = 'LowTide'
+
+
+def new_secret():
+    """Secreto nuevo de 160 bits en base32 (el tamaño que recomienda el RFC 4226 para HMAC-SHA1)."""
+    return pyotp.random_base32(32)
+
+
+def provisioning_uri(secret, email):
+    """URI otpauth://totp/ que leen las apps autenticadoras: SHA1, 6 dígitos y 30 s, lo mismo que verify_code."""
+    return pyotp.TOTP(secret, interval=STEP_SECONDS).provisioning_uri(name=email, issuer_name=ISSUER)
+
+
+def qr_svg_data_uri(uri):
+    """El QR de la URI como imagen SVG en un data: URI. Se dibuja aquí para que el secreto no pase por
+    ningún servicio ni paquete de terceros en el navegador."""
+    return segno.make(uri, error='m').svg_data_uri(scale=6, border=4, dark='#000', light='#fff')
 
 
 def verify_code(secret, code, last_step=None, now=None):

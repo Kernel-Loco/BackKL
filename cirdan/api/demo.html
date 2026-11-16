@@ -225,12 +225,34 @@ async function start() {
   selDomain = null; last = {};
   refresh();
 }
+// Captcha del login (RC-154): pide un reto ALTCHA y busca el contador con PBKDF2-SHA256 de Web Crypto, como el widget
+// del portal. Cada login gasta su reto, así que se resuelve uno nuevo en cada intento.
+async function captcha() {
+  const r = await api('/api/v1/auth/captcha');
+  if (r.status !== 200) throw new Error('HTTP ' + r.status + ' al pedir el captcha');
+  const p = r.body.parameters, hex = s => Uint8Array.from(s.match(/../g), b => parseInt(b, 16));
+  const nonce = hex(p.nonce), salt = hex(p.salt), password = new Uint8Array(nonce.length + 4);
+  password.set(nonce);
+  for (let counter = 0; counter <= 0xFFFFFFFF; counter++) {
+    new DataView(password.buffer).setUint32(nonce.length, counter);
+    const key = await crypto.subtle.importKey('raw', password, 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({name: 'PBKDF2', hash: 'SHA-256', salt, iterations: p.cost}, key, p.keyLength * 8);
+    const derivedKey = [...new Uint8Array(bits)].map(b => b.toString(16).padStart(2, '0')).join('');
+    if (derivedKey.startsWith(p.keyPrefix))
+      return btoa(JSON.stringify({challenge: {parameters: p, signature: r.body.signature}, solution: {counter, derivedKey}}));
+  }
+  throw new Error('No se resolvió el captcha');
+}
 $('loginForm').onsubmit = async e => {
   e.preventDefault();
+  $('loginErr').textContent = mfaToken ? '' : 'Comprobando que no eres un robot…';
+  let r;
+  try {
+    r = mfaToken
+      ? await api('/api/v1/auth/mfa/verify', {mfa_token: mfaToken, code: $('code').value})
+      : await api('/api/v1/auth/login', {email: $('email').value, password: $('password').value, captcha: await captcha()});
+  } catch (err) { $('loginErr').textContent = err.message; return; }
   $('loginErr').textContent = '';
-  const r = mfaToken
-    ? await api('/api/v1/auth/mfa/verify', {mfa_token: mfaToken, code: $('code').value})
-    : await api('/api/v1/auth/login', {email: $('email').value, password: $('password').value});
   if (r.status === 200 && r.body.mfa_required) {
     mfaToken = r.body.mfa_token;
     $('code').hidden = false; $('code').required = true; $('code').focus();
