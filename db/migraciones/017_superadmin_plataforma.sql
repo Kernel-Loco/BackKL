@@ -4,9 +4,11 @@
 -- y, dentro de ella, actúa como Admin. RLS no cambia: la API sigue fijando
 -- app.current_org con una sola empresa por transacción y cirdan_app sigue sin
 -- BYPASSRLS. Lo que llega aquí:
--- 1. platform_admins: quién es superadmin. No tiene organization_id ni
---    políticas, lleva ENABLE y FORCE RLS y cirdan_app no tiene ningún
---    permiso sobre ella. Solo se escribe como postgres (semilla 016 o a
+-- 1. platform_admins: quién es superadmin. No tiene organization_id, lleva
+--    ENABLE y FORCE RLS con una sola política que niega todo
+--    (platform_admins_ninguna, USING y WITH CHECK false) y cirdan_app no
+--    tiene ningún permiso sobre ella. La política es para que ninguna tabla
+--    quede con RLS y sin política (test_respaldo). Solo se escribe como postgres (semilla 016 o a
 --    mano) y la app solo la lee con las dos funciones de abajo. Va aparte y
 --    no como columna de users porque cirdan_app puede escribir toda la fila
 --    de users (001): con una columna, un error de la app bastaría para
@@ -53,6 +55,9 @@ COMMENT ON TABLE public.platform_admins IS
 
 ALTER TABLE public.platform_admins ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.platform_admins FORCE ROW LEVEL SECURITY;
+-- Niega todo a quien no sea superusuario (postgres no pasa por RLS). DROP antes de CREATE para poder correrla otra vez.
+DROP POLICY IF EXISTS platform_admins_ninguna ON public.platform_admins;
+CREATE POLICY platform_admins_ninguna ON public.platform_admins USING (false) WITH CHECK (false);
 REVOKE ALL ON public.platform_admins FROM PUBLIC;
 REVOKE ALL ON public.platform_admins FROM cirdan_app;
 
