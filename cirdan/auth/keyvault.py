@@ -89,9 +89,9 @@ def validar_url(url, variable='TOTP_KEY_VAULT_SECRET_URL'):
     return url
 
 
-def _con_reintentos(req, que, fin, reintentar):
+def _con_reintentos(req, que, fin, reintentar, variable):
     """El JSON de `req`, con reintentos hasta `fin` (de `_reloj`) para los códigos HTTP de `reintentar`. El
-    RuntimeError sale fuera del `except`, sin el error de urllib en __context__."""
+    RuntimeError nombra `variable` y sale fuera del `except`, sin el error de urllib en __context__."""
     fallo = 'no respondió a tiempo'
     for espera in (0,) + ESPERAS:
         if espera:
@@ -111,29 +111,29 @@ def _con_reintentos(req, que, fin, reintentar):
                 break
         except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
             fallo = 'no respondió (%s)' % type(e).__name__
-    raise RuntimeError('%s %s' % (que, fallo))
+    raise RuntimeError('%s %s (%s)' % (que, fallo, variable))
 
 
 def leer_secreto(url, variable='TOTP_KEY_VAULT_SECRET_URL'):
-    """Valor del secreto de Key Vault en `url` con la identidad administrada de la VM. `variable` solo sirve para el
-    mensaje de una URL mal formada."""
+    """Valor del secreto de Key Vault en `url` con la identidad administrada de la VM. `variable` es la del .env de
+    donde salió la URL: todo mensaje de error la nombra, porque la bóveda guarda dos secretos (RC-330)."""
     url = validar_url(url, variable)
     fin = _reloj() + PLAZO
     req = urllib.request.Request(IMDS_TOKEN, headers={'Metadata': 'true'})
-    token = _con_reintentos(req, 'La identidad administrada (IMDS)', fin, REINTENTAR)
+    token = _con_reintentos(req, 'La identidad administrada (IMDS)', fin, REINTENTAR, variable)
     token = token.get('access_token') if isinstance(token, dict) else None
     if not isinstance(token, str) or not token:
-        raise RuntimeError('La identidad administrada (IMDS) no devolvió un token')
+        raise RuntimeError('La identidad administrada (IMDS) no devolvió un token (%s)' % variable)
     req = urllib.request.Request(url + '?api-version=' + API_VERSION)
     # Encabezado sin redirección: urllib no lo copia si alguna vez siguiera una.
     req.add_unredirected_header('Authorization', 'Bearer ' + token)
     del token
     try:
-        datos = _con_reintentos(req, 'Key Vault', fin, REINTENTAR_VAULT)
+        datos = _con_reintentos(req, 'Key Vault', fin, REINTENTAR_VAULT, variable)
     finally:
         # Los frames de un traceback guardan `req`: sin esto el token seguiría ahí.
         req.unredirected_hdrs.pop('Authorization', None)
     valor = datos.get('value') if isinstance(datos, dict) else None
     if not isinstance(valor, str) or not valor:
-        raise RuntimeError('Key Vault no devolvió el valor del secreto')
+        raise RuntimeError('Key Vault no devolvió el valor del secreto (%s)' % variable)
     return valor
