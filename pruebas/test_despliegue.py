@@ -34,6 +34,7 @@ ENV_FALSO = {
     # Lo que un .env copiado de una PC de desarrollo traería: el despliegue tiene que ganarle.
     'DEMO_ACCOUNTS': 'true',
     'DEMO_EXPLORER': 'true',
+    'API_DOCS': 'true',
     'COOKIE_SECURE': 'false',
     'FORWARDED_ALLOW_IPS': '*',
 }
@@ -74,6 +75,9 @@ class Despliegue(unittest.TestCase):
     def test_2_cuentas_de_demo_y_explorador_apagados(self):
         self.assertEqual(self.svc['demo-accounts']['environment']['DEMO_ACCOUNTS'], 'false')
         self.assertEqual(self.svc['api']['environment']['DEMO_EXPLORER'], 'false')
+        # Sin /openapi.json, /docs ni /redoc aunque el .env diga true (comentario 10063). Qué hace la API con false lo
+        # prueba pruebas/test_documentacion_api.py.
+        self.assertEqual(self.svc['api']['environment']['API_DOCS'], 'false')
 
     def test_3_origen_y_cookie_segura(self):
         self.assertEqual(self.svc['api']['environment']['ALLOWED_ORIGINS'], ORIGEN)
@@ -240,6 +244,16 @@ class Despliegue(unittest.TestCase):
         lecturas = len(re.findall(r'\b(?:totp|passwords)\.comprobar_llave\(', main))
         self.assertEqual(lecturas, 2)
         self.assertGreater(inicio, lecturas * plazo + 10)
+
+
+class ImagenDeLaApi(unittest.TestCase):
+    def test_1_uvicorn_sin_encabezado_server(self):
+        # Comentario 10063: el CMD del Dockerfile manda --no-server-header. pruebas/test_documentacion_api.py arranca la
+        # API con este mismo CMD y revisa que no salga el encabezado. No necesita docker.
+        texto = re.sub(r'\\\n\s*', '', (RAIZ / 'Dockerfile').read_text(encoding='utf-8'))
+        cmds = [l[len('CMD'):].strip() for l in texto.splitlines() if l.startswith('CMD ')]
+        self.assertEqual(json.loads(cmds[-1]), ['python', '-m', 'uvicorn', 'cirdan.api.main:app', '--host', '0.0.0.0',
+                                                '--port', '8000', '--proxy-headers', '--no-server-header'])
 
 
 if __name__ == '__main__':

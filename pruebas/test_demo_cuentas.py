@@ -37,10 +37,12 @@ class BaseFalsa:
     de `pueden_entrar`, un dict de correo a su hash de contraseña. Las filas son dicts, como con el dict_row de
     cirdan/db.py."""
 
-    def __init__(self, sin_fila=(), pueden_entrar=None):
+    def __init__(self, sin_fila=(), pueden_entrar=None, passkeys=None, tabla_passkeys=True):
         self.consultas = []
+        self.tabla_passkeys = tabla_passkeys  # False: un volumen anterior a la 018, sin webauthn_credentials
         self.sin_fila = set(sin_fila)
         self.pueden_entrar = dict(pueden_entrar or {})
+        self.passkeys = dict(passkeys or {})  # id del usuario: cuántas passkeys tiene en la base
 
     @contextmanager
     def transaction(self, org=None):
@@ -50,6 +52,12 @@ class BaseFalsa:
         self.consultas.append((sql, parametros))
         if sql.startswith('UPDATE'):
             return mock.Mock(rowcount=0 if parametros[-1] in self.sin_fila else 1)
+        if 'to_regclass' in sql:
+            return mock.Mock(**{'fetchone.return_value': {'hay': self.tabla_passkeys}})
+        if sql.startswith('DELETE FROM webauthn_credentials'):
+            if not self.tabla_passkeys:
+                raise AssertionError('DELETE sobre una tabla que no existe: %s' % sql)
+            return mock.Mock(rowcount=self.passkeys.pop(parametros[0], 0))
         if 'login_lookup' in sql:
             fila = ({'user_id': OTRO_ID, 'password_hash': self.pueden_entrar[parametros[0]]}
                     if parametros[0] in self.pueden_entrar else None)
@@ -126,7 +134,12 @@ class OrigenesPublicados(unittest.TestCase):
 
 class Script(unittest.TestCase):
     def assertApagadas(self, consultas, salida):
-        """Un UPDATE por cuenta, con el hash de relleno y sin secreto TOTP, y un aviso por cuenta."""
+        """Un UPDATE por cuenta, con el hash de relleno y sin secreto TOTP, un DELETE de sus passkeys por el mismo id y
+        un aviso por cuenta."""
+        borrados = [parametros[0] for sql, parametros in consultas
+                    if sql == 'DELETE FROM webauthn_credentials WHERE user_id = %s']
+        self.assertEqual(sorted(borrados), sorted(user_id for _, user_id, _ in demo.CUENTAS.values()))
+        consultas = [c for c in consultas if not c[0].startswith('DELETE') and 'to_regclass' not in c[0]]
         self.assertEqual(len(consultas), len(demo.CUENTAS))
         for sql, parametros in consultas:
             self.assertTrue(sql.startswith('UPDATE users SET password_hash = %s, totp_secret_enc = NULL, '), sql)
@@ -190,7 +203,27 @@ class Script(unittest.TestCase):
     def test_9c_poner_y_apagar_tocan_las_mismas_cuentas(self):
         puestas, _ = correr(DEMO_ACCOUNTS='true')
         apagadas, _ = correr(DEMO_ACCOUNTS='false')
-        self.assertEqual(sorted(p[2] for _, p in puestas), sorted(p[1] for _, p in apagadas))
+        self.assertEqual(sorted(p[2] for _, p in puestas),
+                         sorted(p[1] for sql, p in apagadas if sql.startswith('UPDATE')))
+
+    def test_9c3_apagar_borra_las_passkeys_de_las_cuentas_de_demo(self):
+        # RC-331: una passkey registrada con la contraseña y el TOTP públicos seguiría entrando como MFA.
+        alex, maya = demo.CUENTAS['alex.morgan@acme-demo.mx'][1], demo.CUENTAS['maya.reed@acme-demo.mx'][1]
+        consultas, salida = correr(BaseFalsa(passkeys={alex: 2}), DEMO_ACCOUNTS='false')
+        self.assertEqual(sorted(p[0] for sql, p in consultas if sql.startswith('DELETE FROM webauthn_credentials')),
+                         sorted(cuenta[1] for cuenta in demo.CUENTAS.values()))
+        self.assertIn('passkeys de la cuenta de demo borradas: alex.morgan@acme-demo.mx 2', salida)
+        self.assertEqual(salida.count('passkeys de la cuenta de demo borradas:'), 1)
+        # Poner las credenciales no borra passkeys: solo apagar las cuentas.
+        consultas, _ = correr(BaseFalsa(passkeys={maya: 1}), DEMO_ACCOUNTS='true')
+        self.assertFalse([sql for sql, _ in consultas if sql.startswith('DELETE')])
+
+    def test_9c4_sin_la_017_apaga_las_cuentas_sin_borrar_passkeys(self):
+        # R2 de RC-331: con un volumen anterior a la 018 no hay tabla de passkeys y la API debe arrancar igual.
+        consultas, salida = correr(BaseFalsa(tabla_passkeys=False), DEMO_ACCOUNTS='false')
+        self.assertFalse([sql for sql, _ in consultas if sql.startswith('DELETE')])
+        self.assertEqual(len([sql for sql, _ in consultas if sql.startswith('UPDATE users')]), len(demo.CUENTAS))
+        self.assertNotIn('passkeys de la cuenta de demo borradas', salida)
 
     def test_9c2_cada_cuenta_queda_con_su_huella_cifrada(self):
         # RC-330: la huella va cifrada con el id de su usuario, así que la de una cuenta no abre otra.
