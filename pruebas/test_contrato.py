@@ -20,7 +20,7 @@ from pruebas.test_crtsh import AHORA, SUBDOMINIOS, CrtshSimulado, cert  # noqa: 
 from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
 from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa: E402
 from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a, bases_por_defecto  # noqa: E402
-from pruebas.test_subfinder import CdxSimulado, con_cdx  # noqa: E402
+from pruebas.test_subfinder import AthenaSimulada, con_athena  # noqa: E402
 from pruebas.test_rdap import HttpSimulado as RdapSimulado, respuesta as respuesta_rdap  # noqa: E402
 from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, rdap,  # noqa: E402
                                  registros_dns, shodan, subfinder, visita)
@@ -394,7 +394,7 @@ class Ejecutar(unittest.TestCase):
         self.assertIn('api.acme-demo.mx', [a.valor for a in res.activos])
 
     def test_14_cada_recolector_graba_de_nuevo_y_reproduce_lo_grabado(self):
-        """Sin red ni binarios: crt.sh y Cert Spotter con su transporte simulado, subfinder con el CDX de Common Crawl simulado, el DNS con un
+        """Sin red ni binarios: crt.sh y Cert Spotter con su transporte simulado, subfinder con Athena simulada, el DNS con un
         resolvedor simulado, GitHub con su API, git y gitleaks simulados, con acme-demo.mx declarado como la organización
         acme-demo (sin declaración GitHub no consulta ni graba nada), y Shodan con Cert Spotter e InternetDB simulados y
         el A de acme-demo.mx en una IP con el 8080 abierto, RDAP con el bootstrap y el registro simulados, y la visita
@@ -415,7 +415,7 @@ class Ejecutar(unittest.TestCase):
             modulo = cargar(fuente)
             with tempfile.TemporaryDirectory() as d, mock.patch.object(modulo, 'CARPETA_GRABADAS', Path(d)), \
                     mock.patch.object(crtsh, '_descargar', CrtshSimulado()), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
-                    con_cdx(CdxSimulado()), \
+                    con_athena(AthenaSimulada()), \
                     mock.patch.object(registros_dns, '_consultar', DnsSimulado(zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject']))), \
                     mock.patch.object(github, '_descargar', ApiSimulada()), \
                     mock.patch.object(github, '_ejecutar', ProcesosSimulados()), \
@@ -452,7 +452,7 @@ class Ejecutar(unittest.TestCase):
             self.assertGreaterEqual(maximo, 0, fuente)
         self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, shodan.MAX_CONSULTAS,
                           rdap.MAX_CONSULTAS, visita.MAX_CONSULTAS, api_docs.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS),
-                         (36, 25, 16, 184, 10, 184, 264, 0))
+                         (36, 3, 16, 184, 10, 184, 264, 0))
 
     def test_15c_el_respaldo_de_ct_logs_no_pasa_de_su_maximo(self):
         """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento: 18

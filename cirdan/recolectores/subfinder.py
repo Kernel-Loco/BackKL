@@ -1,63 +1,56 @@
-"""Subdominios pasivos del índice público de Common Crawl (#14b, RC-184), en la fuente subfinder.
+"""Subdominios pasivos del URL Index de Common Crawl con Amazon Athena (#14b, RC-184), en la fuente subfinder.
 
 La fuente se llama subfinder porque nació para correr el binario de ProjectDiscovery con sus fuentes pasivas. El 15 nov,
-de sus 20 fuentes solo commoncrawl pasó la revisión de términos (decisión 6 de docs/servicios_externos.md), y el
-commoncrawl de subfinder 2.17.0 revisa un solo índice por año de los últimos 5, en orden al azar, y deja de buscar en el
-primer 404 'No Captures found'. Con eso un dominio chico casi nunca daba nombres, y una corrida vacía no se distinguía
-de una que no buscó en todos los años. Desde el 15 nov este recolector ya no corre el binario: pide el CDX de Common
-Crawl directo, con transporte.py (TLS verificado, sin redirecciones, solo direcciones públicas y el puerto 443). La fila
-de data_sources, la carpeta de grabaciones y los activos siguen iguales. El binario sigue en la imagen sin usarse.
+de sus 20 fuentes solo commoncrawl pasó la revisión de términos (decisión 6 de docs/servicios_externos.md). Del 15 al
+16 nov este recolector pidió el CDX de index.commoncrawl.org, pero ese servidor está saturado y corta con 504 a los
+~10 s. Desde el 16 nov lee la copia columnar del mismo índice (el URL Index, s3://commoncrawl/cc-index/table/) con una
+consulta de Athena en us-east-1, en la cuenta de AWS de LowTide. La fila de data_sources, la carpeta de grabaciones, el
+origen 'commoncrawl' de los activos y la forma de lo grabado siguen iguales. El binario sigue en la imagen sin usarse.
 
-Qué pide, sin tocar los servidores del dominio:
-- collinfo.json, la lista de índices de Common Crawl, y de ahí toma los INDICES más recientes (unos 12 son un año),
-- el CDX de cada uno con url=*.<dominio>, solo el campo url y a lo más LIMITE_FILAS capturas, con PAUSA segundos entre
-  petición y petición, porque Common Crawl pide bajar el ritmo y bloquea la IP 24 h si no (https://commoncrawl.org/faq).
-  La pausa y el turno (Ritmo) son de todo el proceso: dos escaneos a la vez en la API no le pegan más rápido.
-De cada captura solo se guarda el nombre del host, nunca la URL.
+Qué pide, sin tocar los servidores del dominio ni a index.commoncrawl.org:
+- GetWorkGroup del workgroup CC_ATHENA_WORKGROUP: que esté prendido, que imponga su configuración, que su salida sea
+  CC_ATHENA_SALIDA y que tenga un tope de bytes por consulta de a lo más TOPE_BYTES. Sin eso no corre ninguna consulta:
+  el tope es lo que impide que una consulta mal podada cueste más de unos centavos.
+- ListObjectsV2 de s3://commoncrawl/cc-index/table/cc-main/warc/ con Delimiter '/': los prefijos crawl=CC-MAIN-AAAA-SS/
+  dan los INDICES crawls más recientes. Cada id pasa por ID_INDICE.
+- BatchGetPartition de la tabla ccindex.ccindex: qué crawls ya tiene. Los que falten (un crawl nuevo, uno al mes) se
+  agregan con un ALTER TABLE ADD IF NOT EXISTS PARTITION, que es DDL: Athena no lo cobra.
+- Un SELECT DISTINCT url_host_name de los INDICES crawls, con la poda por url_surtkey (las etiquetas del dominio al
+  revés, unidas con coma) y el filtro exacto url_host_name = dominio o termina en '.' + dominio, LIMIT LIMITE_FILAS + 1.
+  El dominio, su clave SURT y los crawls van en ExecutionParameters, nunca pegados en el texto del SQL.
+De cada fila solo se guarda el nombre del host. Lo recibe AWS (Athena, Glue y S3), no Common Crawl.
 
-Un 404 con 'No Captures found' es un índice sin capturas del dominio y no corta la búsqueda: se revisan todos. Un
-índice cuyo CDX da 500, 502 o 504 se pide otra vez tras ESPERAS (15 s y luego 30 s). El 16 nov el nginx de
-index.commoncrawl.org cortó a los ~10 s con 504 o 502 porque los procesos del índice estaban llenos, incluso en una
-consulta que no lee S3, y la misma consulta respondió 15 s después: la falla va y viene y no depende de la consulta.
-Toda la corrida tiene a lo más REINTENTOS reintentos del CDX, así una caída total no pide 3 veces cada índice ni gasta
-el cupo diario sin datos. Si se acaban los intentos del índice o la bolsa de la corrida, si el reintento ya no cabe en
-MAX_SEGUNDOS con MINIMO_INTENTO por delante, o si el CDX no termina en TIMEOUT_PETICION (eso no se reintenta: ya gastó
-su plazo), el índice se salta y se sigue con los demás: el resultado lleva el aviso SALTADOS con cuáles y por qué,
-revisados con los que sí se revisaron y sin_revisar con los saltados, así el escaneo termina 'partial'
-(stats.sources_partial), como ct_logs cuando falta una variante de dominios parecidos. Si ya no caben MINIMO_INTENTO
-segundos para el índice siguiente, o su turno en Ritmo no llega a tiempo, los que faltan quedan en sin_revisar con el
-aviso SIN_TIEMPO: lo ya revisado no se pierde. Si no se revisó ninguno, FuenteNoResponde. Cualquier otra
-respuesta (un 503 o un 429, que son la señal de Common Crawl de bajar el ritmo, un 404 sin ese texto, una red caída, una
-redirección, una respuesta de más de MAX_BYTES_CDX, un 200 sin ninguna captura legible o cualquier falla de
-collinfo.json) deja la corrida en FuenteNoResponde, sin grabar. Así una corrida que termina dice qué índices revisó
-completos, y 0 nombres en ellos es un resultado de verdad: se graba, con el aviso SIN_CAPTURAS si ninguno tenía
-capturas. Toda la corrida tiene MAX_SEGUNDOS, y cada petición a lo más TIMEOUT_PETICION. Una corrida con índices
-saltados también se graba (con su aviso) y reemplaza la grabación anterior del dominio, como cualquier --grabar.
+La consulta es todo o nada: si termina, se revisaron los INDICES crawls, y 0 nombres es un resultado de verdad que se
+graba, con el aviso SIN_CAPTURAS. Con LIMITE_FILAS + 1 filas lleva el aviso RECORTADO. Una consulta FAILED con categoría
+de error 1 (del sistema) o una StartQueryExecution con ThrottlingException se intenta otra vez, una sola en la corrida.
+Un error de categoría 2 o 3, una consulta CANCELLED (el tope de bytes del workgroup la cancela) o cualquier falla de
+AWS deja la corrida en FuenteNoResponde, sin grabar. Toda la corrida tiene MAX_SEGUNDOS: el estado se pregunta tras
+ESPERAS y luego cada ESPERA_MAXIMA s, y si ya no cabe otra espera se pide StopQueryExecution y queda FuenteNoResponde.
+Cada llamada a AWS tiene a lo más TIMEOUT_CONEXION + TIMEOUT_LECTURA por intento y INTENTOS_AWS intentos (botocore,
+modo standard). Una llamada que empezó antes de MAX_SEGUNDOS puede terminar después: el peor caso de una corrida es
+MAX_SEGUNDOS más una llamada, unos 180 + 3 x 40 + 40 de esperas de botocore = 340 s, debajo de TOPE_CORRIDA (20 min).
 
-Modos: 'vivo' consulta; 'grabar' además guarda el resultado ya leído (líneas, avisos e índices) en
+Credenciales: CC_ATHENA_ACCESS_KEY_ID, CC_ATHENA_SECRET_ACCESS_KEY, CC_ATHENA_WORKGROUP y CC_ATHENA_SALIDA (VARIABLES).
+El cliente arma su propia sesión de boto3 con esas y los extremos fijos de us-east-1, así nunca toma otras credenciales
+de AWS_* ni de ~/.aws. Si falta alguna, vivo y grabar dan FuenteNoResponde con los nombres de las que faltan, nunca sus
+valores. La llave no va a errores, avisos ni grabaciones: los errores solo llevan el código de AWS o el tipo.
+
+Modos: 'vivo' consulta; 'grabar' además guarda el resultado ya leído (líneas, avisos, crawls y 'via': 'athena') en
 cirdan/recolectores/respuestas_grabadas/subfinder/<dominio>/ con la Grabadora del contrato (#13); 'reproducir' solo lee
-esa grabación. Sin grabación del dominio, reproducir sale succeeded con el aviso SIN_GRABACION_DOMINIO y sin activos,
-como github.py: no es una fuente caída y el escaneo de una demo no queda partial por eso. Un archivo de la grabación
-que no se puede leer sí es FuenteNoResponde. No tiene línea de comandos propia. En la imagen, el usuario cirdan es dueño
-de respuestas_grabadas/subfinder/ y de nada más (Dockerfile), así que puede grabar dentro del contenedor.
+esa grabación, no importa boto3 ni pide variables. Las grabaciones del CDX (sin 'via', quizá con 'revisados') se siguen
+leyendo. Sin grabación del dominio, reproducir sale succeeded con el aviso SIN_GRABACION_DOMINIO y sin activos, como
+github.py. Un archivo de la grabación que no se puede leer sí es FuenteNoResponde. En la imagen, el usuario cirdan es
+dueño de respuestas_grabadas/subfinder/ y de nada más (Dockerfile), así que puede grabar dentro del contenedor.
 
-Consultas del límite diario (#13b): peticiones HTTP, como en las demás fuentes. MAX_CONSULTAS es collinfo.json, un
-CDX por índice y los REINTENTOS de la corrida (25). collinfo.json no se reintenta dentro de la corrida: si falla, la
-corrida queda en FuenteNoResponde y el orquestador la reintenta a 1, 5 y 25 minutos, y cada una de esas corridas
-reserva MAX_CONSULTAS: un escaneo con Common Crawl caído gasta a lo más 4 x 25 = 100. `consultas` cuenta las que sí se
-hicieron (13 si ningún índice falla), y 0 al reproducir.
+Consultas del límite diario (#13b): una consulta es una StartQueryExecution, lo que cobra Athena. GetWorkGroup,
+ListObjectsV2, BatchGetPartition, GetQueryExecution, GetQueryResults y StopQueryExecution no cuentan: cuestan fracciones
+de centavo y no leen el índice. MAX_CONSULTAS es el ALTER de particiones, el SELECT y el reintento de la corrida (3).
+`consultas` cuenta las que sí se pidieron (1 o 2 sin fallas), y 0 al reproducir.
 """
-import http.client
-import json
+import os
 import re
-import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 
-from cirdan.recolectores import transporte
-from cirdan.recolectores.contrato import AGENTE
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Resultado, SinGrabacion,
                                           en_alcance_nombre)
@@ -71,293 +64,368 @@ CODIGOS = {}
 # La única fuente que pasó la regla de la decisión 6 de docs/servicios_externos.md (sus términos publicados permiten el
 # uso automático y mostrar sus datos a terceros). Va en 'origen' de cada activo.
 ORIGEN = 'commoncrawl'
-COLLINFO = 'https://index.commoncrawl.org/collinfo.json'
-CDX = 'https://index.commoncrawl.org/%s-index?'   # el id del índice, que antes pasa por ID_INDICE
+VIA = 'athena'                       # va en lo grabado: las grabaciones del CDX no lo llevan
+REGION = 'us-east-1'                 # ahí vive s3://commoncrawl y Athena lo lee sin cargo de transferencia
+BUCKET_CC = 'commoncrawl'
+PREFIJO_CC = 'cc-index/table/cc-main/warc/'
+CRAWL_DE_PREFIJO = re.compile(re.escape(PREFIJO_CC) + r'crawl=(CC-MAIN-[0-9]{4}-[0-9]{2})/')
+BASE = 'ccindex'                     # base y tabla del DDL oficial de commoncrawl/cc-index-table
+TABLA = 'ccindex'
 ID_INDICE = re.compile(r'CC-MAIN-[0-9]{4}-[0-9]{2}')
-INDICES = 12                 # los índices más recientes que se revisan: unos 12 son un año
-LIMITE_FILAS = 5000          # capturas por índice (limit del CDX). Si llega, el aviso RECORTADO
-PAUSA = 1.0                  # segundos entre petición y petición
-TIMEOUT_PETICION = 30        # segundos de cada petición, de getaddrinfo al último bloque (transporte.descargar)
-ESPERAS = (15, 30)           # segundos antes del 2.º y del 3.er intento del CDX de un índice con 500, 502 o 504
-# Reintentos del CDX en toda la corrida, uno por índice en promedio. El 16 nov el 504 iba y venía: con la mitad de los
-# intentos fallando, 12 índices piden unos 10. Con todo caído corta en 25 peticiones y no en 37.
-REINTENTOS = 12
-MINIMO_INTENTO = 20          # segundos que tienen que quedar para pedir un CDX o esperar su reintento, como crt.sh
-# Segundos de toda la corrida, pausas y esperas incluidas. El peor caso de una corrida sola son unos 1045 s: 25
-# peticiones de TIMEOUT_PETICION (un 500, 502 o 504 puede llegar hasta ahí), 6 índices con sus 2 esperas (la bolsa en
-# pares, 6 x 45 s) y la PAUSA antes de cada petición. Con el 504 a los ~10.5 s del 16 nov y todo caído son unos 560 s.
-# Queda debajo de TOPE_CORRIDA (20 min) del orquestador. Con otras corridas en Ritmo puede no alcanzar: los índices que
-# falten quedan sin revisar (SIN_TIEMPO), sin tirar los revisados. Con los reintentos del orquestador (1, 5 y 25 min) un
-# escaneo tiene a subfinder en curso a lo más unos 101 min (4 x 1050 s + 31 min), unos 68 min en la caída del 16 nov.
-MAX_SEGUNDOS = 1050
-MAX_BYTES_COLLINFO = 1 << 20
-MAX_BYTES_CDX = 4 << 20      # 5000 capturas de solo la URL caben con holgura
-# collinfo.json, un CDX por índice y los reintentos de la corrida: peticiones HTTP de una corrida (#13b), 25
-MAX_CONSULTAS = 1 + INDICES + REINTENTOS
-CONSULTA = 'subfinder:'      # consulta de la grabadora: subfinder_<dominio>.json
+INDICES = 12                         # los crawls más recientes que se revisan: unos 12 son un año
+LIMITE_FILAS = 5000                  # nombres distintos. La consulta pide uno más: si llega, el aviso RECORTADO
+FILAS_POR_PAGINA = 1000              # el máximo de GetQueryResults
+MAX_PAGINAS_RESULTADOS = 7           # 5001 filas y el encabezado caben en 6
+MAX_PAGINAS_S3 = 3                   # unos 120 crawls caben en una página de ListObjectsV2 (1000 prefijos)
+TOPE_BYTES = 1 << 30                 # el tope de bytes por consulta del workgroup no puede pasar de 1 GB (0.005 USD)
+MAX_SEGUNDOS = 180                   # de toda la corrida, esperas incluidas
+MINIMO_CONSULTA = 10                 # segundos que tienen que quedar para pedir una StartQueryExecution
+ESPERAS = (1, 2, 4)                  # segundos antes de preguntar otra vez el estado de una consulta
+ESPERA_MAXIMA = 5                    # y luego cada 5 s
+TIMEOUT_CONEXION = 10
+TIMEOUT_LECTURA = 30
+INTENTOS_AWS = 3                     # de cada llamada, con los reintentos de botocore (modo standard)
+REINTENTOS = 1                       # StartQueryExecution de más en toda la corrida
+MAX_CONSULTAS = 1 + 1 + REINTENTOS   # el ALTER de particiones, el SELECT y el reintento: 3
+VARIABLES = ('CC_ATHENA_ACCESS_KEY_ID', 'CC_ATHENA_SECRET_ACCESS_KEY', 'CC_ATHENA_WORKGROUP', 'CC_ATHENA_SALIDA')
+LLAVE_VALIDA = re.compile(r'[A-Z0-9_]{16,128}')   # AKIA... de AWS, o la CIRDAN_FAKE_ de las pruebas
+WORKGROUP_VALIDO = re.compile(r'[A-Za-z0-9._-]{1,128}')
+SALIDA_VALIDA = re.compile(r's3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[A-Za-z0-9!_.*\'()/-]*)?')
+ID_CONSULTA = re.compile(r'[A-Za-z0-9-]{1,128}')
+CODIGO_AWS = re.compile(r'[A-Za-z0-9.]{1,64}')
+LENTO = ('ThrottlingException', 'TooManyRequestsException')   # StartQueryExecution: bajar el ritmo y reintentar
+# Lo que va en ExecutionParameters, ya entre comillas simples: nunca trae una comilla porque el dominio pasó
+# NOMBRE_VALIDO y los crawls ID_INDICE. Se revisa otra vez aquí, por si alguien cambia esas reglas.
+PARAMETRO_VALIDO = re.compile(r'[a-z0-9.,~%-]{1,260}|CC-MAIN-[0-9]{4}-[0-9]{2}')
+CONSULTA = 'subfinder:'              # consulta de la grabadora: subfinder_<dominio>.json
 SIN_CAPTURAS = 'subfinder: Common Crawl no tiene capturas de este dominio en sus últimos %d índices'
 SIN_GRABACION_DOMINIO = 'subfinder: no hay grabación de Common Crawl de este dominio, no se revisó Common Crawl'
-RECORTADO = 'subfinder: %s al tope de %d capturas, la lista puede estar incompleta'
-SALTADOS = 'subfinder: Common Crawl no respondió en %s, se revisaron los demás índices'
-SIN_TIEMPO = 'subfinder: la corrida llegó a su tope de %d s sin revisar %s'
-REINTENTABLES = (500, 502, 504)   # el servidor de ese índice falló o no contestó a tiempo: se reintenta y, si se
-                                  # acaban los intentos, se salta (no 503 ni 429, que cortan la corrida)
-NO_CAPTURAS = b'No Captures found'   # el cuerpo del 404 del CDX cuando el índice no tiene capturas del dominio
+RECORTADO = 'subfinder: Common Crawl llegó al tope de %d nombres, la lista puede estar incompleta'
 NOMBRE_FUENTE = re.compile(r'[a-z0-9_-]{1,40}')
-FALLAS = (OSError, ValueError, http.client.HTTPException, transporte.PlazoVencido, transporte.Redirigida)
+
+SQL = ('SELECT DISTINCT url_host_name FROM ccindex WHERE crawl IN (%s) AND subset = \'warc\' '
+       'AND url_surtkey >= ? AND url_surtkey < ? AND (url_host_name = ? OR url_host_name LIKE ?) LIMIT %d')
 
 
-class SinCapturas(Exception):
-    """El 404 'No Captures found' del CDX: el índice no tiene capturas del dominio."""
+def clave_surt(dominio):
+    """Las etiquetas del dominio al revés, unidas con coma: olmardo.com da 'com,olmardo'. Es el principio de la
+    url_surtkey de sus páginas y de las de sus subdominios ('com,olmardo)/', 'com,olmardo,www)/')."""
+    return ','.join(reversed(dominio.split('.')))
 
 
-def _reintentable(error):
-    """Un 500, 502 o 504: el servidor del índice falló o nginx cortó a los ~10 s. No la señal de bajar el ritmo (503
-    o 429) ni una respuesta rara."""
-    return isinstance(error, urllib.error.HTTPError) and error.code in REINTENTABLES
+def _literal(valor):
+    """Un texto de ExecutionParameters: Athena pone cada uno tal cual en su '?', así que va entre comillas simples."""
+    if not PARAMETRO_VALIDO.fullmatch(valor):
+        raise FuenteNoResponde('subfinder: un parámetro de la consulta no tiene la forma esperada')
+    return "'%s'" % valor
 
 
-def _saltable(error):
-    """Un 500, 502 o 504 (ya sin reintentos) o el plazo de la petición vencido: una falla de ese índice."""
-    return isinstance(error, transporte.PlazoVencido) or _reintentable(error)
+def consulta_select(dominio, crawls):
+    """(texto del SQL, ExecutionParameters) del SELECT: el texto no lleva el dominio ni los crawls."""
+    surt = clave_surt(dominio)
+    texto = SQL % (', '.join('?' for _ in crawls), LIMITE_FILAS + 1)
+    return texto, [_literal(c) for c in crawls] + [_literal(surt), _literal(surt + '~'), _literal(dominio),
+                                                   _literal('%.' + dominio)]
 
 
-class Ritmo:
-    """Una petición a la vez a Common Crawl en todo el proceso y PAUSA entre el fin de una y el inicio de la siguiente,
-    aunque sean de corridas distintas: la API corre cada escaneo en su propio hilo (cirdan/api/escaneos.py). Entre
-    procesos no se coordina: la línea de comandos que corre a la vez que la API lleva su propio ritmo."""
-
-    def __init__(self):
-        self.candado = threading.Lock()
-        self.ultima = None   # cuándo terminó la última petición, en el cronómetro del cliente (time.monotonic)
-
-
-RITMO = Ritmo()   # el de todos los clientes del proceso
-
-
-def _descargar(url, plazo, tope, cronometro):
-    """El cuerpo de la respuesta a `url`, de a lo más `tope` bytes y todo antes de `plazo` (un instante de
-    `cronometro`). La única función que hace HTTP. Lanza SinCapturas con el 404 'No Captures found'. Cualquier otra
-    falla sale como la da transporte.descargar (HTTPError, OSError, PlazoVencido, Redirigida o ValueError)."""
-    req = urllib.request.Request(url, headers={'User-Agent': AGENTE})
-    try:
-        return transporte.descargar(req, plazo, tope, cronometro)
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            try:
-                cuerpo = e.read(4096) or b''
-            except (OSError, ValueError, http.client.HTTPException):
-                cuerpo = b''
-            if NO_CAPTURAS in cuerpo:
-                raise SinCapturas() from None
-        raise
+def consulta_particiones(crawls):
+    """El ALTER TABLE que agrega las particiones que faltan. Es DDL y no acepta ExecutionParameters: cada crawl pasó
+    ID_INDICE, así que no trae comillas ni espacios."""
+    partes = []
+    for c in crawls:
+        if not ID_INDICE.fullmatch(c):
+            raise FuenteNoResponde('subfinder: un crawl no tiene la forma CC-MAIN-AAAA-SS')
+        partes.append("PARTITION (crawl = '%s', subset = 'warc') LOCATION 's3://%s/%scrawl=%s/subset=warc/'" % (
+            c, BUCKET_CC, PREFIJO_CC, c))
+    return 'ALTER TABLE %s ADD IF NOT EXISTS %s' % (TABLA, ' '.join(partes))
 
 
-def url_cdx(indice, dominio):
-    """La consulta del CDX de un índice para el dominio y sus subdominios, solo con la URL de cada captura."""
-    return CDX % indice + urllib.parse.urlencode({'url': '*.' + dominio, 'output': 'json', 'fl': 'url',
-                                                  'limit': LIMITE_FILAS})
-
-
-def indices(cuerpo):
-    """Los ids de los INDICES índices más recientes de collinfo.json, del más nuevo al más viejo. Solo los que tienen
-    la forma CC-MAIN-AAAA-SS: la URL del CDX se arma aquí, nunca se toma de la respuesta."""
-    try:
-        lista = json.loads(cuerpo.decode('utf-8', 'replace'))
-    except ValueError:
-        raise FuenteNoResponde('subfinder: collinfo.json de Common Crawl no es JSON') from None
-    if not isinstance(lista, list):
-        raise FuenteNoResponde('subfinder: collinfo.json de Common Crawl no es una lista')
-    ids = {c['id'] for c in lista if isinstance(c, dict) and isinstance(c.get('id'), str) and
-           ID_INDICE.fullmatch(c['id'])}
-    if not ids:
-        raise FuenteNoResponde('subfinder: collinfo.json de Common Crawl no trae ningún índice')
-    return sorted(ids, reverse=True)[:INDICES]
-
-
-def hosts(cuerpo):
-    """(hosts, filas, raras) de una respuesta del CDX: un JSON por línea con su 'url'. Solo el nombre del host."""
-    nombres, filas, raras = set(), 0, 0
-    for texto in cuerpo.decode('utf-8', 'replace').splitlines():
-        texto = texto.strip()
-        if not texto:
-            continue
-        filas += 1
-        try:
-            captura = json.loads(texto)
-            host = urllib.parse.urlsplit(captura['url']).hostname if isinstance(captura, dict) else None
-        except (ValueError, KeyError, TypeError, AttributeError):
-            host = None
-        if isinstance(host, str) and host:
-            nombres.add(host)
-        else:
-            raras += 1
-    return nombres, filas, raras
-
-
-def _motivo(error):
-    """Un texto corto de la falla, sin el cuerpo ni la URL de la respuesta."""
-    if isinstance(error, urllib.error.HTTPError):
-        return 'HTTP %s' % error.code
-    return type(error).__name__
+def _codigo(error):
+    """El código de AWS de una falla (ThrottlingException, AccessDeniedException...) o el tipo, nunca el mensaje."""
+    respuesta = getattr(error, 'response', None)
+    codigo = respuesta.get('Error', {}).get('Code') if isinstance(respuesta, dict) else None
+    return codigo if isinstance(codigo, str) and CODIGO_AWS.fullmatch(codigo) else type(error).__name__
 
 
 def _sin_tiempo(que):
-    error = FuenteNoResponde('subfinder: Common Crawl no terminó en %d s (faltó %s)' % (MAX_SEGUNDOS, que))
-    error.sin_tiempo = True   # _consultar deja sin revisar los índices que faltan
-    return error
+    return FuenteNoResponde('subfinder: Athena no terminó en %d s (faltó %s)' % (MAX_SEGUNDOS, que))
 
 
-def _saltado(indice, error):
-    """El texto de un índice saltado en el aviso SALTADOS: su falla, cuántos intentos y por qué no hubo otro."""
-    detalle = error.motivo if error.intentos == 1 else '%s tras %d intentos' % (error.motivo, error.intentos)
-    por_que = getattr(error, 'sin_otro', None)
-    return '%s (%s)' % (indice, detalle if por_que is None else '%s, %s' % (detalle, por_que))
+def _rara(que):
+    return FuenteNoResponde('subfinder: AWS dio una respuesta que no se puede leer en %s' % que)
 
 
-def _cuantos(n, singular, plural):
-    return '%d %s' % (n, singular if n == 1 else plural)
+def credenciales(entorno):
+    """{nombre: valor} de VARIABLES, o FuenteNoResponde con los nombres de las que faltan o no tienen la forma."""
+    valores = {v: (entorno.get(v) or '').strip() for v in VARIABLES}
+    reglas = {'CC_ATHENA_ACCESS_KEY_ID': LLAVE_VALIDA, 'CC_ATHENA_WORKGROUP': WORKGROUP_VALIDO,
+              'CC_ATHENA_SALIDA': SALIDA_VALIDA}
+    malas = [v for v in VARIABLES if not valores[v] or (v in reglas and not reglas[v].fullmatch(valores[v]))]
+    if malas:
+        raise FuenteNoResponde('subfinder: faltan las variables %s o no tienen la forma esperada' % ', '.join(malas))
+    return valores
+
+
+def _clientes_reales(cred):
+    """(athena, glue, s3, fallas) con boto3. Se importa aquí: reproducir nunca lo carga. La sesión lleva solo la llave
+    de CC_ATHENA_* y cada cliente su extremo fijo de us-east-1, con TLS verificado."""
+    import boto3
+    import botocore.session
+    from botocore.config import Config
+    from botocore.exceptions import BotoCoreError, ClientError
+    # Sin ~/.aws ni AWS_CONFIG_FILE, AWS_SHARED_CREDENTIALS_FILE, AWS_PROFILE o AWS_DEFAULT_PROFILE: (nombre en el
+    # config, variable de entorno, valor por omisión, conversión) sin variable de entorno. Un perfil ajeno no cambia la
+    # llave, la región ni los reintentos, y uno que no existe no hace fallar la sesión.
+    base = botocore.session.Session(session_vars={'profile': (None, None, None, None),
+                                                  'config_file': (None, None, os.devnull, None),
+                                                  'credentials_file': (None, None, os.devnull, None)})
+    sesion = boto3.session.Session(aws_access_key_id=cred['CC_ATHENA_ACCESS_KEY_ID'],
+                                   aws_secret_access_key=cred['CC_ATHENA_SECRET_ACCESS_KEY'],
+                                   aws_session_token=None, region_name=REGION, botocore_session=base)
+    config = Config(region_name=REGION, connect_timeout=TIMEOUT_CONEXION, read_timeout=TIMEOUT_LECTURA,
+                    retries={'mode': 'standard', 'total_max_attempts': INTENTOS_AWS})
+    clientes = [sesion.client(s, config=config, verify=True, endpoint_url='https://%s.%s.amazonaws.com' % (s, REGION))
+                for s in ('athena', 'glue', 's3')]
+    return clientes + [(BotoCoreError, ClientError)]
 
 
 class ClienteSubfinder:
-    """Pide el CDX de Common Crawl y, según el modo, graba o reproduce el resultado ya leído con la Grabadora (#13).
+    """Pide el URL Index de Common Crawl a Athena y, según el modo, graba o reproduce el resultado ya leído con la
+    Grabadora (#13).
 
-    `descargar(url, plazo, tope, cronometro)`, `cronometro`, `dormir` y `ritmo` se inyectan en las pruebas. Por
-    omisión son _descargar, time.monotonic, time.sleep y RITMO. `reloj` es el de la Grabadora (fecha de grabación).
-    `consultas` suma cada petición HTTP que sí se hizo."""
+    `aws` (athena, glue, s3, fallas), `entorno`, `cronometro` y `dormir` se inyectan en las pruebas. Por omisión son
+    _clientes_reales, os.environ, time.monotonic y time.sleep. `reloj` es el de la Grabadora (fecha de grabación).
+    `consultas` suma cada StartQueryExecution que sí se pidió y `bytes_leidos` lo que Athena dice que leyó."""
 
-    def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, descargar=None, nueva=False, reloj=None,
-                 cronometro=None, dormir=None, ritmo=None):
+    def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, aws=None, entorno=None, nueva=False, reloj=None,
+                 cronometro=None, dormir=None):
         self.modo = modo
         self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj)
-        self.descargar = descargar or _descargar
+        self.fabrica = aws or _clientes_reales
+        self.entorno = entorno if entorno is not None else os.environ
         self.cronometro = cronometro or time.monotonic
         self.dormir = dormir or time.sleep
-        self.ritmo = ritmo or RITMO
         self.consultas = 0
-        self.reintentos = REINTENTOS   # los que le quedan a la corrida: _consultar la llena al empezar
+        self.bytes_leidos = 0
+        self.reintentos = REINTENTOS
+        self.athena = self.glue = self.s3 = None
+        self.fallas = ()
+        self.workgroup = None
 
     @property
     def leidas(self):
         """(archivo, fecha de grabación) de cada respuesta tomada del disco."""
         return self.grabadora.leidas
 
-    def _pedir(self, url, tope, fin, que, minimo=0):
-        """El cuerpo de una petición, con lo que quede de la corrida como plazo. `que` nombra la petición en el error.
-        Espera su turno en `ritmo` (a lo más hasta que solo queden `minimo` segundos) y, si la última petición del
-        proceso terminó hace menos de PAUSA, lo que falte para completarla. No pide si después quedan menos de
-        `minimo` segundos: eso es la corrida sin tiempo (el error lleva sin_tiempo)."""
-        sin_tiempo = _sin_tiempo(que)
-        if not self.ritmo.candado.acquire(timeout=max(0.0, fin - minimo - self.cronometro())):
-            raise sin_tiempo
+    def _aws(self, que, llamada, fin, **parametros):
+        """Una llamada a AWS si la corrida todavía tiene tiempo. Una falla sale como FuenteNoResponde con el código de
+        AWS en `codigo` y en el texto, sin el mensaje (puede traer la cuenta o el texto de la consulta)."""
+        if self.cronometro() >= fin:
+            raise _sin_tiempo(que)
         try:
-            if self.ritmo.ultima is not None:
-                falta = self.ritmo.ultima + PAUSA - self.cronometro()
-                if falta > 0:
-                    self.dormir(min(falta, PAUSA))
-            ahora = self.cronometro()
-            if ahora >= fin or fin - ahora < minimo:
-                raise sin_tiempo
-            self.consultas += 1
-            try:
-                return self.descargar(url, min(ahora + TIMEOUT_PETICION, fin), tope, self.cronometro)
-            except FALLAS as e:
-                error = FuenteNoResponde('subfinder: Common Crawl no respondió en %s (%s)' % (que, _motivo(e)))
-                # _cdx decide si reintenta y _consultar si salta el índice
-                error.motivo, error.saltable, error.reintentable = _motivo(e), _saltable(e), _reintentable(e)
-                raise error from None
-            finally:
-                self.ritmo.ultima = self.cronometro()
-        finally:
-            self.ritmo.candado.release()
+            return llamada(**parametros)
+        except self.fallas as e:
+            codigo = _codigo(e)
+            error = FuenteNoResponde('subfinder: AWS no respondió en %s (%s)' % (que, codigo))
+            error.codigo = codigo
+            raise error from None
 
-    def _cdx(self, indice, dominio, fin):
-        """El CDX de un índice, con un intento más tras cada una de ESPERAS si da 500, 502 o 504, mientras quede bolsa
-        (self.reintentos) y el reintento quepa: la espera, la PAUSA y MINIMO_INTENTO antes de `fin`. La espera va fuera
-        del turno de `ritmo`, así las demás corridas siguen con su PAUSA. El último error sale con 'intentos' y, si
-        quedaban intentos del índice, 'sin_otro' con el porqué, para el aviso SALTADOS."""
-        intentos = 0
-        for espera in ESPERAS + (None,):
-            intentos += 1
+    def _revisar_workgroup(self, cred, fin):
+        r = self._aws('el workgroup', self.athena.get_work_group, fin, WorkGroup=self.workgroup)
+        try:
+            grupo = r['WorkGroup']
+            config = grupo['Configuration']
+            salida = config.get('ResultConfiguration', {}).get('OutputLocation')
+            tope = config.get('BytesScannedCutoffPerQuery')
+            prendido, impone = grupo.get('State'), config.get('EnforceWorkGroupConfiguration')
+        except (KeyError, TypeError, AttributeError):
+            raise _rara('el workgroup') from None
+        if prendido != 'ENABLED' or impone is not True:
+            raise FuenteNoResponde('subfinder: el workgroup de Athena no está prendido o no impone su configuración')
+        if type(tope) is not int or not 0 < tope <= TOPE_BYTES:
+            raise FuenteNoResponde('subfinder: el workgroup de Athena no tiene un tope de bytes por consulta de a lo '
+                                   'más %d MB' % (TOPE_BYTES >> 20))
+        if not isinstance(salida, str) or salida.rstrip('/') != cred['CC_ATHENA_SALIDA'].rstrip('/'):
+            raise FuenteNoResponde('subfinder: la salida del workgroup de Athena no es CC_ATHENA_SALIDA')
+
+    def _crawls(self, fin):
+        """Los INDICES crawls más recientes según los prefijos de S3, del más nuevo al más viejo."""
+        ids, pedido = set(), {'Bucket': BUCKET_CC, 'Prefix': PREFIJO_CC, 'Delimiter': '/'}
+        for _ in range(MAX_PAGINAS_S3):
+            r = self._aws('la lista de crawls', self.s3.list_objects_v2, fin, **pedido)
             try:
-                return self._pedir(url_cdx(indice, dominio), MAX_BYTES_CDX, fin, indice, MINIMO_INTENTO)
+                prefijos = r.get('CommonPrefixes') or []
+                if not isinstance(prefijos, list):
+                    raise TypeError
+                for p in prefijos:
+                    m = CRAWL_DE_PREFIJO.fullmatch(p.get('Prefix') or '') if isinstance(p, dict) else None
+                    if m:
+                        ids.add(m.group(1))
+                sigue, token = r.get('IsTruncated') is True, r.get('NextContinuationToken')
+            except (TypeError, AttributeError):
+                raise _rara('la lista de crawls') from None
+            if not sigue:
+                break
+            if not isinstance(token, str) or not token:
+                raise _rara('la lista de crawls')
+            pedido['ContinuationToken'] = token
+        else:
+            raise FuenteNoResponde('subfinder: la lista de crawls de Common Crawl pasa de %d páginas' % MAX_PAGINAS_S3)
+        if not ids:
+            raise FuenteNoResponde('subfinder: la lista de crawls de Common Crawl no trae ningún crawl')
+        return sorted(ids, reverse=True)[:INDICES]
+
+    def _faltantes(self, crawls, fin):
+        """Los crawls que la tabla todavía no tiene. Uno sin procesar cuenta como faltante (el ALTER es IF NOT
+        EXISTS)."""
+        r = self._aws('las particiones', self.glue.batch_get_partition, fin, DatabaseName=BASE, TableName=TABLA,
+                      PartitionsToGet=[{'Values': [c, 'warc']} for c in crawls])
+        try:
+            hay = {tuple(p['Values']) for p in r.get('Partitions') or []
+                   if isinstance(p, dict) and isinstance(p.get('Values'), list)}
+        except (TypeError, AttributeError):
+            raise _rara('las particiones') from None
+        return [c for c in crawls if (c, 'warc') not in hay]
+
+    def _parar(self, qid):
+        """StopQueryExecution aunque ya no quede tiempo: la consulta seguiría leyendo (y cobrando) sin nadie."""
+        try:
+            self.athena.stop_query_execution(QueryExecutionId=qid)
+        except self.fallas:
+            pass
+
+    def _esperar(self, que, qid, fin):
+        """Pregunta el estado hasta SUCCEEDED. FAILED y CANCELLED salen como FuenteNoResponde, y FAILED con categoría
+        1 lleva reintentable. Si ya no cabe otra espera o falla la pregunta, la para antes de salir."""
+        esperas, terminada = iter(ESPERAS), False
+        try:
+            while True:
+                r = self._aws(que, self.athena.get_query_execution, fin, QueryExecutionId=qid)
+                try:
+                    ejecucion = r['QueryExecution']
+                    estado = ejecucion['Status']['State']
+                except (KeyError, TypeError):
+                    raise _rara(que) from None
+                if estado == 'SUCCEEDED':
+                    terminada = True
+                    leidos = (ejecucion.get('Statistics') or {}).get('DataScannedInBytes')
+                    self.bytes_leidos += leidos if type(leidos) is int and leidos >= 0 else 0
+                    return
+                if estado in ('FAILED', 'CANCELLED'):
+                    terminada = True
+                    categoria = ((ejecucion['Status'].get('AthenaError') or {}).get('ErrorCategory')
+                                 if estado == 'FAILED' else None)
+                    error = FuenteNoResponde(
+                        'subfinder: Athena dio FAILED en %s (categoría %s)' % (que, categoria) if estado == 'FAILED'
+                        else 'subfinder: Athena canceló %s (el tope de bytes del workgroup o una parada)' % que)
+                    error.reintentable = categoria == 1
+                    raise error
+                if estado not in ('QUEUED', 'RUNNING'):
+                    raise _rara(que)
+                espera = next(esperas, ESPERA_MAXIMA)
+                if self.cronometro() + espera >= fin:
+                    raise _sin_tiempo(que)
+                self.dormir(espera)
+        except BaseException:   # también un error inesperado: la consulta no se queda corriendo
+            if not terminada:
+                self._parar(qid)
+            raise
+
+    def _una(self, que, texto, fin, parametros):
+        if self.cronometro() + MINIMO_CONSULTA > fin:
+            raise _sin_tiempo(que)
+        if self.consultas >= MAX_CONSULTAS:   # no pasa con REINTENTOS: es el seguro del cupo reservado
+            raise FuenteNoResponde('subfinder: la corrida ya pidió sus %d consultas' % MAX_CONSULTAS)
+        pedido = {'QueryString': texto, 'WorkGroup': self.workgroup, 'QueryExecutionContext': {'Database': BASE}}
+        if parametros:
+            pedido['ExecutionParameters'] = parametros
+        self.consultas += 1
+        try:
+            r = self._aws(que, self.athena.start_query_execution, fin, **pedido)
+        except FuenteNoResponde as e:
+            e.reintentable = getattr(e, 'codigo', None) in LENTO
+            raise
+        qid = r.get('QueryExecutionId') if isinstance(r, dict) else None
+        if not isinstance(qid, str) or not ID_CONSULTA.fullmatch(qid):
+            raise _rara(que)
+        self._esperar(que, qid, fin)
+        return qid
+
+    def _correr(self, que, texto, fin, parametros=None):
+        """Una consulta hasta SUCCEEDED, con el reintento de la corrida si la falla es reintentable."""
+        while True:
+            try:
+                return self._una(que, texto, fin, parametros)
             except FuenteNoResponde as e:
-                e.intentos = intentos
-                if espera is None or not getattr(e, 'reintentable', False):
+                if not getattr(e, 'reintentable', False) or self.reintentos <= 0:
                     raise
-                if self.reintentos <= 0:
-                    e.sin_otro = 'sin reintentos en la corrida'
-                    raise
-                if self.cronometro() + espera + PAUSA + MINIMO_INTENTO > fin:
-                    e.sin_otro = 'sin tiempo para reintentar'
-                    raise
-            self.reintentos -= 1
-            self.dormir(espera)
+                self.reintentos -= 1
+
+    def _filas(self, qid, fin):
+        """Los url_host_name del SELECT, hasta LIMITE_FILAS + 1, y cuántas filas no se pudieron leer."""
+        nombres, raras, pedido = [], 0, {'QueryExecutionId': qid, 'MaxResults': FILAS_POR_PAGINA}
+        for pagina in range(MAX_PAGINAS_RESULTADOS):
+            r = self._aws('los resultados', self.athena.get_query_results, fin, **pedido)
+            try:
+                filas = r['ResultSet']['Rows']
+                if pagina == 0:   # el encabezado del SELECT
+                    if not filas or filas[0].get('Data') != [{'VarCharValue': 'url_host_name'}]:
+                        raise _rara('los resultados')
+                    filas = filas[1:]
+                for fila in filas:
+                    datos = fila.get('Data') if isinstance(fila, dict) else None
+                    valor = datos[0].get('VarCharValue') if isinstance(datos, list) and len(datos) == 1 and \
+                        isinstance(datos[0], dict) else None
+                    if isinstance(valor, str) and valor:
+                        nombres.append(valor)
+                    else:
+                        raras += 1
+                token = r.get('NextToken')
+            except (KeyError, TypeError, AttributeError, IndexError):
+                raise _rara('los resultados') from None
+            if not token or len(nombres) + raras > LIMITE_FILAS:
+                return nombres, raras
+            if not isinstance(token, str):
+                raise _rara('los resultados')
+            pedido['NextToken'] = token
+        raise FuenteNoResponde('subfinder: los resultados de Athena pasan de %d páginas' % MAX_PAGINAS_RESULTADOS)
 
     def _consultar(self, dominio):
         fin = self.cronometro() + MAX_SEGUNDOS
         self.reintentos = REINTENTOS
+        cred = credenciales(self.entorno)
+        self.workgroup = cred['CC_ATHENA_WORKGROUP']
         try:
-            ids = indices(self._pedir(COLLINFO, MAX_BYTES_COLLINFO, fin, 'collinfo.json'))
-        except SinCapturas:
-            raise FuenteNoResponde('subfinder: Common Crawl no respondió en collinfo.json (HTTP 404)') from None
-        nombres, recortados, raras, con_capturas, revisados, saltados = set(), [], 0, 0, [], []
-        faltan = []   # los que ya no cupieron en MAX_SEGUNDOS
-        for n, indice in enumerate(ids):
-            try:
-                cuerpo = self._cdx(indice, dominio, fin)
-            except SinCapturas:
-                revisados.append(indice)
-                continue
-            except FuenteNoResponde as e:
-                # Sin tiempo (también un plazo vencido o un 5xx en `fin`), ni este ni los que siguen caben: quedan sin
-                # revisar. Un 503, un 429 o cualquier falla que no se salta corta aunque llegue en `fin`.
-                if getattr(e, 'sin_tiempo', False) or (getattr(e, 'saltable', False) and self.cronometro() >= fin):
-                    faltan = ids[n:]
-                    break
-                if not getattr(e, 'saltable', False):
-                    raise
-                saltados.append(_saltado(indice, e))
-                continue
-            encontrados, filas, malas = hosts(cuerpo)
-            if malas == filas:   # un 200 vacío o sin ninguna captura legible: no se sabe qué hay, no se graba
-                raise FuenteNoResponde('subfinder: Common Crawl no dio ninguna captura legible en %s' % indice)
-            con_capturas += 1
-            revisados.append(indice)
-            nombres |= encontrados
-            raras += malas
-            if filas >= LIMITE_FILAS:
-                recortados.append(indice)
-        if not revisados:
-            if not saltados:
-                raise _sin_tiempo(faltan[0])
-            raise FuenteNoResponde('subfinder: Common Crawl no respondió en ninguno de sus %d índices (%s)' % (
-                len(ids), ', '.join(saltados + (['sin tiempo para %s' % ', '.join(faltan)] if faltan else []))))
-        avisos = []
-        if saltados:
-            avisos.append(SALTADOS % ', '.join(saltados))
+            self.athena, self.glue, self.s3, self.fallas = self.fabrica(cred)
+        except Exception as e:   # boto3 no instalado, un perfil de ~/.aws roto: nunca el mensaje, que puede traer rutas
+            raise FuenteNoResponde('subfinder: no se pudo preparar el cliente de AWS (%s)' % type(e).__name__) from None
+        self._revisar_workgroup(cred, fin)
+        crawls = self._crawls(fin)
+        faltan = self._faltantes(crawls, fin)
         if faltan:
-            avisos.append(SIN_TIEMPO % (MAX_SEGUNDOS, ', '.join(faltan)))
-        if not con_capturas:
-            avisos.append(SIN_CAPTURAS % len(revisados))
-        if recortados:
-            avisos.append(RECORTADO % ('el índice %s llegó' % recortados[0] if len(recortados) == 1 else
-                                       '%d índices llegaron' % len(recortados), LIMITE_FILAS))
+            self._correr('las particiones nuevas', consulta_particiones(faltan), fin)
+        texto, parametros = consulta_select(dominio, crawls)
+        qid = self._correr('la consulta', texto, fin, parametros)
+        nombres, raras = self._filas(qid, fin)
+        if raras and not nombres:   # ninguna fila legible: no se sabe qué hay, no se graba
+            raise FuenteNoResponde('subfinder: Athena no dio ninguna fila legible')
+        avisos = []
+        if not nombres:
+            avisos.append(SIN_CAPTURAS % len(crawls))
+        if len(nombres) + raras > LIMITE_FILAS:
+            avisos.append(RECORTADO % LIMITE_FILAS)
+            nombres = nombres[:LIMITE_FILAS]
         if raras:
-            avisos.append('subfinder: se %s %s del CDX que no se %s leer' % (
-                'saltó' if raras == 1 else 'saltaron', _cuantos(raras, 'captura', 'capturas'),
+            avisos.append('subfinder: se %s %s de Athena que no se %s leer' % (
+                'saltó' if raras == 1 else 'saltaron', '1 fila' if raras == 1 else '%d filas' % raras,
                 'pudo' if raras == 1 else 'pudieron'))
-        lineas = [{'host': h, 'input': dominio, 'sources': [ORIGEN]} for h in sorted(nombres)]
-        datos = {'lineas': lineas, 'avisos': avisos, 'indices': ids}
-        if saltados or faltan:
-            datos['revisados'] = revisados
-        return datos
+        lineas = [{'host': h, 'input': dominio, 'sources': [ORIGEN]} for h in sorted(set(nombres))]
+        return {'lineas': lineas, 'avisos': avisos, 'indices': crawls, 'via': VIA}
 
     def enumerar(self, dominio):
-        """{'lineas', 'avisos', 'indices'} de Common Crawl para el dominio, más 'revisados' si se saltó algún índice o
-        faltaron por tiempo. Sale del disco al reproducir (SinGrabacion si no hay grabación) y se graba al grabar. Si la
-        corrida queda en FuenteNoResponde no se graba nada, así la grabación anterior queda intacta. Un índice saltado
-        o sin tiempo no la deja así."""
+        """{'lineas', 'avisos', 'indices', 'via'} de Common Crawl para el dominio. Una grabación del CDX puede traer
+        además 'revisados' y no traer 'via'. Sale del disco al reproducir (SinGrabacion si no hay grabación) y se graba
+        al grabar. Si la corrida queda en FuenteNoResponde no se graba nada, así la grabación anterior queda intacta."""
         consulta = CONSULTA + dominio
         del_disco, datos = self.grabadora.de_disco(consulta)
         if del_disco:
@@ -371,7 +439,7 @@ class ClienteSubfinder:
 
 
 def _revisados_validos(datos):
-    """'revisados' de una grabación: falta, o es una parte sin repetir de sus 'indices', con al menos uno."""
+    """'revisados' de una grabación del CDX: falta, o es una parte sin repetir de sus 'indices', con al menos uno."""
     if 'revisados' not in datos:
         return True
     rev, ids = datos['revisados'], datos.get('indices')
@@ -418,13 +486,13 @@ def carpeta_de(dominio):
 
 
 def crear_cliente(modo, dominio):
-    """Cliente para el orquestador (#13): 'vivo' consulta Common Crawl, 'reproducir' usa la grabación del dominio y
-    'grabar' empieza una grabación nueva."""
+    """Cliente para el orquestador (#13): 'vivo' consulta Athena, 'reproducir' usa la grabación del dominio y 'grabar'
+    empieza una grabación nueva."""
     return ClienteSubfinder(modo=modo, carpeta=carpeta_de(dominio), nueva=(modo == 'grabar'))
 
 
 def recolectar(dominio, cliente=None, ahora=None, propios=()):
-    """Subdominios de `dominio` según el índice de Common Crawl. `ahora` y `propios` no se usan: Common Crawl no da
+    """Subdominios de `dominio` según el URL Index de Common Crawl. `ahora` y `propios` no se usan: Common Crawl no da
     fechas de los nombres ni busca dominios parecidos."""
     dominio = dominio.strip().lower().rstrip('.')
     res = Resultado(dominio, FUENTE)
@@ -440,7 +508,7 @@ def recolectar(dominio, cliente=None, ahora=None, propios=()):
     finally:
         res.consultas = cliente.consultas
     res.avisos += [a for a in datos['avisos'] if isinstance(a, str)]
-    if 'revisados' in datos:   # se saltó algún índice: el escaneo termina 'partial' (contrato, #23)
+    if 'revisados' in datos:   # una grabación del CDX con índices saltados: el escaneo termina 'partial' (#23)
         res.revisados = list(datos['revisados'])
         res.sin_revisar = [i for i in datos['indices'] if i not in datos['revisados']]
     res.activos, fuera, invalidos = subdominios(dominio, datos['lineas'])
