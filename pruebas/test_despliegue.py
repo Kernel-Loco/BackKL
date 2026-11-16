@@ -182,6 +182,23 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(self.svc['api']['environment']['TOTP_KEY_VAULT_SECRET_URL'], '')
         self.assertEqual(self.svc['api']['environment']['TOTP_ENCRYPTION_KEY'], 'CIRDAN_FAKE_totp')
 
+    def test_13b_llave_de_las_huellas_desde_key_vault(self):
+        # RC-330: la llave de las huellas de contraseña sigue la misma regla que la del MFA. La API y el script de demo
+        # reciben las dos variables; con la llave en el .env la URL llega vacía.
+        url = 'https://kv-lowtide.vault.azure.net/secrets/password-hash-key/0123456789abcdef0123456789abcdef'
+        rc, salida = _config(dict(ENV_FALSO, PASSWORD_HASH_KEY_VAULT_SECRET_URL=url))
+        self.assertEqual(rc, 0, salida[-500:])
+        svc = json.loads(salida)['services']
+        for nombre in ('api', 'demo-accounts'):
+            self.assertEqual(svc[nombre]['environment']['PASSWORD_HASH_KEY_VAULT_SECRET_URL'], url, nombre)
+            self.assertEqual(svc[nombre]['environment']['PASSWORD_HASH_ENCRYPTION_KEY'], '', nombre)
+        rc, salida = _config(dict(ENV_FALSO, PASSWORD_HASH_ENCRYPTION_KEY='CIRDAN_FAKE_huellas'))
+        self.assertEqual(rc, 0, salida[-500:])
+        svc = json.loads(salida)['services']
+        for nombre in ('api', 'demo-accounts'):
+            self.assertEqual(svc[nombre]['environment']['PASSWORD_HASH_ENCRYPTION_KEY'], 'CIRDAN_FAKE_huellas', nombre)
+            self.assertEqual(svc[nombre]['environment']['PASSWORD_HASH_KEY_VAULT_SECRET_URL'], '', nombre)
+
     def test_14_solo_la_api_llega_a_imds(self):
         # Hallazgo 0 de la revisión de la opción 4 de RC-91: la regla de DOCKER-USER de docs/despliegue.md deja pasar
         # a 169.254.169.254 solo la IP fija de la API. Esa IP cae en la subred de default, fuera del rango que Docker

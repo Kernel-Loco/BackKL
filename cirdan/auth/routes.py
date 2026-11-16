@@ -93,7 +93,7 @@ def login(body: LoginIn, request: Request, response: Response):
         raise HTTPException(401, INVALID)
 
     org, user_id = str(found['organization_id']), str(found['user_id'])
-    if not passwords.verify_password(found['password_hash'], body.password):
+    if not passwords.verify_password(found['password_hash'], body.password, user_id):
         sessions.register_fail(email, ip)
         # La bitácora se escribe después de mandar el 401. Escrita antes, la conexión y el INSERT
         # hacían que un correo que existe tardara unos 17 ms más que uno que no existe.
@@ -102,8 +102,11 @@ def login(body: LoginIn, request: Request, response: Response):
                             background=BackgroundTask(_audit_bad_password, org, user_id, ip))
 
     with transaction(org) as conn:
-        if passwords.needs_rehash(found['password_hash']):
-            conn.execute('UPDATE users SET password_hash = %s WHERE id = %s', (passwords.hash_password(body.password), user_id))
+        if passwords.needs_rehash(found['password_hash'], user_id):
+            # Una huella vieja sin cifrar queda cifrada en este mismo inicio de sesión (RC-330). Solo si nadie la
+            # cambió desde la búsqueda: así un cambio de contraseña en paralelo no se pisa con la anterior.
+            conn.execute('UPDATE users SET password_hash = %s WHERE id = %s AND password_hash = %s',
+                         (passwords.hash_password(body.password, user_id), user_id, found['password_hash']))
         if found['mfa_enabled']:
             # Los fallos del correo se borran hasta que el código sea correcto. Borrados aquí, quien
             # tiene la contraseña repetiría el login y 5 códigos sin llegar nunca al bloqueo.
@@ -178,8 +181,8 @@ def me(session: Session = Depends(current_session)):
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
     with transaction(session.org_id) as conn:
         row = conn.execute('SELECT password_hash FROM users WHERE id = %s', (session.user_id,)).fetchone()
-        if not row or not passwords.verify_password(row['password_hash'], body.current_password):
+        if not row or not passwords.verify_password(row['password_hash'], body.current_password, session.user_id):
             raise HTTPException(400, 'La contraseña actual no es correcta.')
         conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
-                     (passwords.hash_password(body.new_password), session.user_id))
+                     (passwords.hash_password(body.new_password, session.user_id), session.user_id))
         audit(conn, session.org_id, 'auth.password_changed', session.user_id, client_ip(request), 'user', session.user_id)

@@ -1,6 +1,7 @@
 """Lectura de un secreto de Azure Key Vault con la identidad administrada de la VM (#49, RC-91).
 
-Solo la usa la llave del MFA (`TOTP_KEY_VAULT_SECRET_URL`, ver `cirdan/auth/totp.py` y docs/despliegue.md). Pide un
+La usan la llave del MFA (`TOTP_KEY_VAULT_SECRET_URL`, ver `cirdan/auth/totp.py` y docs/despliegue.md) y la de las
+huellas de contraseña (`PASSWORD_HASH_KEY_VAULT_SECRET_URL`, `cirdan/auth/passwords.py`, RC-330). Pide un
 token al servicio de metadatos de Azure (IMDS, 169.254.169.254, que solo responde dentro de la VM) y con él lee el
 secreto por la API REST de Key Vault. Sin dependencias nuevas: urllib, sin proxy y sin seguir redirecciones, para que
 el token no salga hacia otro servidor. Ningún mensaje de error lleva el token ni el valor del secreto, y los errores
@@ -68,10 +69,10 @@ def _abrir(req, timeout):
     return json.loads(b''.join(partes).decode('utf-8'))
 
 
-def validar_url(url):
-    """La URL del secreto, o RuntimeError si no es de Key Vault. Se revisa antes de mandar el token."""
-    error = RuntimeError('TOTP_KEY_VAULT_SECRET_URL debe ser https://<bóveda>.vault.azure.net/secrets/<nombre>/'
-                         '<versión>')
+def validar_url(url, variable='TOTP_KEY_VAULT_SECRET_URL'):
+    """La URL del secreto, o RuntimeError si no es de Key Vault. Se revisa antes de mandar el token. El mensaje nombra
+    la variable de donde salió la URL."""
+    error = RuntimeError('%s debe ser https://<bóveda>.vault.azure.net/secrets/<nombre>/<versión>' % variable)
     # urlsplit quita espacios y controles del principio y de en medio: aquí no se aceptan.
     if not isinstance(url, str) or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
         raise error
@@ -113,9 +114,10 @@ def _con_reintentos(req, que, fin, reintentar):
     raise RuntimeError('%s %s' % (que, fallo))
 
 
-def leer_secreto(url):
-    """Valor del secreto de Key Vault en `url` con la identidad administrada de la VM."""
-    url = validar_url(url)
+def leer_secreto(url, variable='TOTP_KEY_VAULT_SECRET_URL'):
+    """Valor del secreto de Key Vault en `url` con la identidad administrada de la VM. `variable` solo sirve para el
+    mensaje de una URL mal formada."""
+    url = validar_url(url, variable)
     fin = _reloj() + PLAZO
     req = urllib.request.Request(IMDS_TOKEN, headers={'Metadata': 'true'})
     token = _con_reintentos(req, 'La identidad administrada (IMDS)', fin, REINTENTAR)

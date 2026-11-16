@@ -21,7 +21,12 @@ from cirdan.auth import demo, passwords
 LOCALES = 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000'
 PUBLICADO = 'https://portal.ejemplo.test'
 # La URL de Key Vault también sale: con ella y la llave al azar puestas, la llave del MFA falla por configuración.
-VARIABLES = ('DEMO_ACCOUNTS', 'ALLOWED_ORIGINS', 'TOTP_KEY_VAULT_SECRET_URL')
+VARIABLES = ('DEMO_ACCOUNTS', 'ALLOWED_ORIGINS', 'TOTP_KEY_VAULT_SECRET_URL', 'PASSWORD_HASH_KEY_VAULT_SECRET_URL')
+# Llave de las huellas de contraseña (RC-330), al azar pero la misma en todo el módulo: las huellas que arma una prueba
+# antes de correr el script tienen que abrir dentro de él.
+LLAVE_HUELLAS = base64.urlsafe_b64encode(os.urandom(32)).decode()
+# Id de la fila que login_lookup() devuelve cuando el UPDATE no cambió nada: otra fila con el mismo correo.
+OTRO_ID = '30000000-0000-4000-8000-0000000000aa'
 
 
 class BaseFalsa:
@@ -45,17 +50,19 @@ class BaseFalsa:
         if sql.startswith('UPDATE'):
             return mock.Mock(rowcount=0 if parametros[-1] in self.sin_fila else 1)
         if 'login_lookup' in sql:
-            fila = ({'password_hash': self.pueden_entrar[parametros[0]]} if parametros[0] in self.pueden_entrar
-                    else None)
+            fila = ({'user_id': OTRO_ID, 'password_hash': self.pueden_entrar[parametros[0]]}
+                    if parametros[0] in self.pueden_entrar else None)
             return mock.Mock(**{'fetchone.return_value': fila})
         raise AssertionError('consulta no esperada: %s' % sql)
 
 
 @contextmanager
 def entorno(**variables):
-    """Solo las `variables` dadas, sin las del contenedor ni las de un `.env`. La llave TOTP es al azar."""
+    """Solo las `variables` dadas, sin las del contenedor ni las de un `.env`. La llave TOTP es al azar y la de las
+    huellas, LLAVE_HUELLAS."""
     limpio = {k: v for k, v in os.environ.items() if k not in VARIABLES}
     limpio['TOTP_ENCRYPTION_KEY'] = base64.urlsafe_b64encode(os.urandom(32)).decode()
+    limpio['PASSWORD_HASH_ENCRYPTION_KEY'] = LLAVE_HUELLAS
     limpio.update(variables)
     with mock.patch.dict(os.environ, limpio, clear=True), mock.patch.object(configuracion, '_env_file', dict):
         yield
@@ -176,12 +183,23 @@ class Script(unittest.TestCase):
     def test_9b_el_hash_de_relleno_no_deja_entrar_con_ninguna_contrasena(self):
         for intento in (demo.PASSWORD, 'lowtide-relleno-que-nunca-coincide', '', 'demo-only'):
             with self.subTest(intento=intento):
-                self.assertFalse(passwords.verify_password(demo.HASH_DE_RELLENO, intento))
+                for user_id in (cuenta[1] for cuenta in demo.CUENTAS.values()):
+                    self.assertFalse(passwords.verify_password(demo.HASH_DE_RELLENO, intento, user_id))
 
     def test_9c_poner_y_apagar_tocan_las_mismas_cuentas(self):
         puestas, _ = correr(DEMO_ACCOUNTS='true')
         apagadas, _ = correr(DEMO_ACCOUNTS='false')
         self.assertEqual(sorted(p[2] for _, p in puestas), sorted(p[1] for _, p in apagadas))
+
+    def test_9c2_cada_cuenta_queda_con_su_huella_cifrada(self):
+        # RC-330: la huella va cifrada con el id de su usuario, así que la de una cuenta no abre otra.
+        puestas, _ = correr(DEMO_ACCOUNTS='true')
+        with entorno():
+            for _, (huella, _, user_id) in puestas:
+                self.assertTrue(huella.startswith('lt1$'))
+                self.assertTrue(passwords.verify_password(huella, demo.PASSWORD, user_id))
+                self.assertFalse(passwords.verify_password(huella, demo.PASSWORD, OTRO_ID))
+        self.assertEqual(len({p[0] for _, p in puestas}), len(demo.CUENTAS))
 
     def test_9d_una_cuenta_que_no_puede_entrar_y_no_cambio_solo_avisa(self):
         # R3 de la revisión de RC-91: sin fila que cambiar no se dice 'apagada'.
@@ -194,8 +212,9 @@ class Script(unittest.TestCase):
 
     def test_9e_una_cuenta_que_puede_entrar_y_no_cambio_termina_con_error(self):
         alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
-        base = BaseFalsa(sin_fila={alex},
-                         pueden_entrar={'alex.morgan@acme-demo.mx': passwords.hash_password(demo.PASSWORD)})
+        with entorno():
+            huella = passwords.hash_password(demo.PASSWORD, OTRO_ID)
+        base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': huella})
         salida = io.StringIO()
         with self.assertRaises(SystemExit) as error, entorno(DEMO_ACCOUNTS='true', ALLOWED_ORIGINS=PUBLICADO), \
                 mock.patch.object(demo, 'transaction', base.transaction), redirect_stdout(salida):
@@ -209,8 +228,9 @@ class Script(unittest.TestCase):
     def test_9f_un_correo_con_otro_id_que_puede_entrar_sin_la_contrasena_de_demo_solo_avisa(self):
         # N2 de la ronda 3 de RC-91: esa fila nunca tuvo las credenciales públicas, la API sí arranca.
         alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
-        base = BaseFalsa(sin_fila={alex},
-                         pueden_entrar={'alex.morgan@acme-demo.mx': passwords.hash_password('Otra-Clave-De-Prueba-1')})
+        with entorno():
+            huella = passwords.hash_password('Otra-Clave-De-Prueba-1', OTRO_ID)
+        base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': huella})
         consultas, salida = correr(base, DEMO_ACCOUNTS='false')
         self.assertEqual(salida.count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
         self.assertIn('con otro id y sin la contraseña de demo, no se toca: alex.morgan@acme-demo.mx', salida)
@@ -235,8 +255,11 @@ class Script(unittest.TestCase):
         # Hallazgo 9 de la revisión de la opción 4 de RC-91: la API espera a este script, así que con su error
         # `docker compose up -d` se detiene, en vez de dejar la API reiniciándose. No toca la base ni Key Vault.
         url = 'https://kv-lowtide.vault.azure.net/secrets/totp-encryption-key/0123456789abcdef0123456789abcdef'
-        casos = ({'TOTP_ENCRYPTION_KEY': ''}, {'TOTP_KEY_VAULT_SECRET_URL': url})
-        for variables in casos:
+        url_huellas = url.replace('totp-encryption-key', 'password-hash-key')
+        casos = (({'TOTP_ENCRYPTION_KEY': ''}, 'TOTP_'), ({'TOTP_KEY_VAULT_SECRET_URL': url}, 'TOTP_'),
+                 ({'PASSWORD_HASH_ENCRYPTION_KEY': ''}, 'PASSWORD_HASH_'),
+                 ({'PASSWORD_HASH_KEY_VAULT_SECRET_URL': url_huellas}, 'PASSWORD_HASH_'))
+        for variables, variable in casos:
             with self.subTest(variables=variables):
                 base = BaseFalsa()
                 with entorno(DEMO_ACCOUNTS='false', **variables), \
@@ -244,7 +267,7 @@ class Script(unittest.TestCase):
                         mock.patch('cirdan.auth.keyvault._abrir', side_effect=AssertionError('sin red')), \
                         self.assertRaises(SystemExit) as error:
                     demo.main(['demo'])
-                self.assertIn('TOTP_', str(error.exception.code))
+                self.assertIn(variable, str(error.exception.code))
                 self.assertEqual(base.consultas, [])
 
 
@@ -256,7 +279,8 @@ class ComoProceso(unittest.TestCase):
     def correr(self, **variables):
         limpio = {k: v for k, v in os.environ.items() if k not in VARIABLES}
         limpio.update(variables, PGHOST='127.0.0.1', PGPORT='1', CIRDAN_APP_PASSWORD='sin-uso',
-                      TOTP_ENCRYPTION_KEY=base64.urlsafe_b64encode(os.urandom(32)).decode())
+                      TOTP_ENCRYPTION_KEY=base64.urlsafe_b64encode(os.urandom(32)).decode(),
+                      PASSWORD_HASH_ENCRYPTION_KEY=LLAVE_HUELLAS)
         return subprocess.run([sys.executable, '-m', 'cirdan.auth.demo'], env=limpio, capture_output=True, text=True,
                               timeout=60)
 

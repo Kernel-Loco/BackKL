@@ -45,7 +45,8 @@ CUENTAS = {
 
 
 # El mismo marcador de db/semillas/001_datos_demo.sql: no es un hash que argon2 pueda verificar, así que ninguna
-# contraseña entra con él (passwords.verify_password da False).
+# contraseña entra con él (passwords.verify_password da False). Va sin cifrar a propósito: con la forma de una huella
+# vieja tampoco abre nada (RC-330).
 HASH_DE_RELLENO = '$argon2id$v=19$m=65536,t=3,p=4$ZGVtby1zYWx0$ZGVtby1vbmx5'
 
 
@@ -68,12 +69,14 @@ def apagar_credenciales():
                 'mfa_enabled_at = NULL WHERE id = %s',
                 (HASH_DE_RELLENO, user_id)).rowcount
             fila = None if cambiadas else conn.execute(
-                'SELECT password_hash FROM login_lookup(%s)', (email,)).fetchone()
+                'SELECT user_id::text, password_hash FROM login_lookup(%s)', (email,)).fetchone()
         if cambiadas:
             print('cuenta de demo apagada:', email)
         elif fila is None:
             print('cuenta de demo que no puede iniciar sesión, nada que apagar:', email)
-        elif passwords.verify_password(fila['password_hash'], PASSWORD):
+        # Con una huella cifrada esto lee la llave de las huellas (RC-330). Si no se puede leer, el script termina con
+        # error y la API no arranca: no se da por apagada una cuenta que no se pudo revisar.
+        elif passwords.verify_password(fila['password_hash'], PASSWORD, fila['user_id']):
             sin_apagar.append(email)
         else:
             print('cuenta de demo con otro id y sin la contraseña de demo, no se toca:', email)
@@ -83,13 +86,13 @@ def apagar_credenciales():
 
 
 def poner_credenciales():
-    hash_ = passwords.hash_password(PASSWORD)
     for email, (org, user_id, secreto) in CUENTAS.items():
+        # Una huella por cuenta: va cifrada con el id del usuario como dato asociado (RC-330).
         with transaction(org) as conn:
             conn.execute(
                 'UPDATE users SET password_hash = %s, totp_secret_enc = %s, last_totp_step = NULL, '
                 'mfa_enabled_at = coalesce(mfa_enabled_at, now()) WHERE id = %s',
-                (hash_, totp.encrypt_secret(secreto, user_id), user_id))
+                (passwords.hash_password(PASSWORD, user_id), totp.encrypt_secret(secreto, user_id), user_id))
         print('cuenta de demo lista:', email)
 
 
@@ -127,9 +130,11 @@ def origenes_publicados():
 def main(argv):
     # Sin la llave del MFA la API no arranca. En desarrollo nadie espera a la API, así que sin esto `docker compose
     # up -d` terminaría bien y la API se quedaría reiniciándose. Como la API espera a este script, aquí sí se detiene
-    # el `up` (#49, RC-91). No lee Key Vault: apagar las cuentas no usa la llave.
+    # el `up` (#49, RC-91). Lo mismo con la llave de las huellas de contraseña (RC-330). No lee Key Vault: apagar las
+    # cuentas no usa las llaves.
     try:
         totp.revisar_variables()
+        passwords.revisar_variables()
     except RuntimeError as e:
         sys.exit(str(e))
     if len(argv) == 3 and argv[1] == 'codigo':

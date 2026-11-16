@@ -423,7 +423,9 @@ class Redireccion(unittest.TestCase):
         self.assertEqual(vistos, [('/secreto', None)])
 
 
-FALSOS = {'CIRDAN_APP_PASSWORD': 'CIRDAN_FAKE_app'}
+# La API también pide la llave de las huellas de contraseña (RC-330), otra que la del MFA.
+FALSOS = {'CIRDAN_APP_PASSWORD': 'CIRDAN_FAKE_app',
+          'PASSWORD_HASH_ENCRYPTION_KEY': base64.urlsafe_b64encode(b'CIRDAN_FAKE_llave_huellas_32_byt').decode()}
 
 
 class Arranque(Base):

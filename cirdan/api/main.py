@@ -22,7 +22,7 @@ from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
 from cirdan.api.v1 import router as v1_router
-from cirdan.auth import totp
+from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import ORIGENES_LOCALES, config
 from cirdan.db import transaction
@@ -31,8 +31,10 @@ from cirdan.db import transaction
 @asynccontextmanager
 async def _arranque(app):
     # Sin la llave del MFA la API no arranca: con Key Vault, un error de la identidad o del rol sale aquí, en
-    # `docker compose logs api`, y no en el primer inicio de sesión (#49, RC-91).
+    # `docker compose logs api`, y no en el primer inicio de sesión (#49, RC-91). Igual con la llave de las huellas de
+    # contraseña (RC-330).
     totp.comprobar_llave()
+    passwords.comprobar_llave()
     yield
 
 
