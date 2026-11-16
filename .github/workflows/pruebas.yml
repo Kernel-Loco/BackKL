@@ -100,13 +100,13 @@ jobs:
       # Transporte de test_rdap.py hace su certificado con cryptography, que el runner no trae: allí se salta y aquí
       # prueba el transporte, TLS incluido, con el OpenSSL de la imagen. TRANSPORTE_TLS=1 hace que falle si a la
       # imagen le falta (RC-166).
-      - name: Pruebas dentro del contenedor (orquestador, explorador, modelo ML, TXT, cuentas de demo, bloqueo por IP, llave del MFA, gitleaks y TLS)
+      - name: Pruebas dentro del contenedor (orquestador, explorador, modelo ML, TXT, cuentas de demo, bloqueo por IP, llave del MFA, gitleaks, TLS y pesos)
         run: >-
           docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -v "$PWD/pruebas:/app/pruebas:ro"
           -v "$PWD/datos/ml:/app/datos/ml:ro" -v "$PWD/db:/app/db:ro" -v "$PWD/docs:/app/docs:ro" api python -m unittest
           pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_txt.py
           pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_llave_totp.py pruebas.test_github.Integracion
-          pruebas.test_rdap.Transporte
+          pruebas.test_rdap.Transporte pruebas/test_pesos_configurables.py
 
       - name: Pruebas sin base ni red
         run: >-
@@ -117,7 +117,7 @@ jobs:
           pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py pruebas/test_borde.py
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
           pruebas/test_exportar.py pruebas/test_politica_seguridad.py pruebas/test_siem.py pruebas/test_despliegue.py
-          pruebas/test_pesos_configurables.py pruebas/test_ci.py
+          pruebas/test_ci.py
 
       - name: Logs si algo falló
         if: failure()

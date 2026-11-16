@@ -40,6 +40,21 @@ COUNTS = ("SELECT (SELECT count(*) FROM domains) || ',' || (SELECT count(*) FROM
           " || ',' || (SELECT count(*) FROM users);")
 
 
+# Tablas por cliente: las de public con organization_id, más organizations y scoring_rules, que se nombran aparte
+CON_ORG = ("FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') "
+           "AND (c.relname IN ('organizations', 'scoring_rules') "
+           "OR EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid "
+           "AND a.attname = 'organization_id' AND a.attnum > 0 AND NOT a.attisdropped))")
+# Lectura de la política: FOR ALL ('*') o FOR SELECT ('r'). Las permisivas se suman con OR, así que basta una que
+# no filtre por app_current_org() para abrir la tabla. Las restrictivas solo recortan.
+LEE = "p.polrelid = c.oid AND p.polcmd IN ('*', 'r') AND p.polpermissive"
+FILTRA = "coalesce(pg_get_expr(p.polqual, p.polrelid), '') LIKE '%app_current_org()%'"
+SIN_AISLAMIENTO = ("SELECT coalesce(string_agg(c.relname, ',' ORDER BY c.relname), 'ninguna') " + CON_ORG +
+                   " AND NOT (c.relrowsecurity AND c.relforcerowsecurity"
+                   " AND EXISTS (SELECT 1 FROM pg_policy p WHERE " + LEE + " AND " + FILTRA + ")"
+                   " AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE " + LEE + " AND NOT " + FILTRA + "))")
+
+
 class AislamientoPorCliente(unittest.TestCase):
 
     def test_1_rol_de_la_app_sin_privilegios(self):
@@ -48,18 +63,28 @@ class AislamientoPorCliente(unittest.TestCase):
 
     def test_2_rls_forzado_y_con_politica_en_toda_tabla_con_organization_id(self):
         """Sin un número fijo (comentario 10056 de RC-43): toda tabla de public con la columna organization_id lleva
-        RLS con ENABLE, FORCE y al menos una política. Una tabla por cliente nueva entra sola en la prueba.
-        organizations (su política compara id) y scoring_rules (va por rule_set_id) no tienen esa columna y se
-        nombran aparte, para no perder lo que cubría el conteo de antes (revisión del 8 nov)."""
-        con_org = ("FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') "
-                   "AND (c.relname IN ('organizations', 'scoring_rules') "
-                   "OR EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid "
-                   "AND a.attname = 'organization_id' AND a.attnum > 0 AND NOT a.attisdropped))")
-        self.assertGreaterEqual(int(scalar('SELECT count(*) ' + con_org + ';', user='postgres')), 20)
-        faltan = scalar("SELECT coalesce(string_agg(c.relname, ',' ORDER BY c.relname), 'ninguna') " + con_org +
-                        " AND NOT (c.relrowsecurity AND c.relforcerowsecurity"
-                        " AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid));", user='postgres')
-        self.assertEqual(faltan, 'ninguna', 'tablas con organization_id sin RLS forzado o sin política')
+        RLS con ENABLE, FORCE y una política de lectura que filtra por app_current_org(). Una tabla por cliente nueva
+        entra sola en la prueba. organizations (su política compara id) y scoring_rules (va por rule_set_id) no
+        tienen esa columna y se nombran aparte, para no perder lo que cubría el conteo de antes (revisión del 8 nov)."""
+        self.assertGreaterEqual(int(scalar('SELECT count(*) ' + CON_ORG + ';', user='postgres')), 20)
+        self.assertEqual(scalar(SIN_AISLAMIENTO + ';', user='postgres'), 'ninguna',
+                         'tablas con organization_id sin RLS forzado o sin política que filtre por app_current_org()')
+
+    def test_2b_una_politica_que_no_filtra_no_cuenta(self):
+        """Revisión de riesgo del 15 nov, #8: con USING (true) Acme leería lo de Beta y test_2 daba 'ninguna'."""
+        casos = {
+            'rls_prueba_true': "USING (true)",
+            'rls_prueba_solo_insert': "FOR INSERT WITH CHECK (organization_id = app_current_org())",
+            'rls_prueba_buena_y_true': "USING (organization_id = app_current_org()); "
+                                       "CREATE POLICY otra ON rls_prueba_buena_y_true FOR SELECT USING (true)",
+            'rls_prueba_buena': "USING (organization_id = app_current_org())",
+        }
+        ddl = ''.join("CREATE TABLE %s (organization_id uuid); ALTER TABLE %s ENABLE ROW LEVEL SECURITY; "
+                      "ALTER TABLE %s FORCE ROW LEVEL SECURITY; CREATE POLICY p ON %s %s;\n"
+                      % (tabla, tabla, tabla, tabla, politica) for tabla, politica in casos.items())
+        faltan = scalar('BEGIN;\n' + ddl + SIN_AISLAMIENTO + " AND c.relname LIKE 'rls_prueba%';\nROLLBACK;",
+                        user='postgres')
+        self.assertEqual(faltan, 'rls_prueba_buena_y_true,rls_prueba_solo_insert,rls_prueba_true')
 
     def test_3_acme_ve_solo_sus_datos(self):
         self.assertEqual(scalar(COUNTS, org=ACME), '5,4,3')
