@@ -2,8 +2,9 @@
 
 Pide la página principal de cada sitio del dominio por https, como un navegador, y saca de la respuesta sus
 tecnologías (huellas.py), el CDN o WAF que tiene delante (borde.py), si la versión ya no tiene soporte
-(outdated_software, con endoflife.date, soporte.py) y las CVE conocidas de esa versión (known_vulnerability, con la
-API 2.0 de la NVD, nvd.py). Las CVE van además en Resultado.cves, que el orquestador guarda en la tabla cves.
+(outdated_software, con endoflife.date, soporte.py), las CVE conocidas de esa versión (known_vulnerability, con la
+API 2.0 de la NVD, nvd.py) y si sus cabeceras Server o X-Powered-By dicen la versión (server_version_disclosed).
+Las CVE van además en Resultado.cves, que el orquestador guarda en la tabla cves.
 
 Qué se pide, todo pasivo o dentro del Anexo A:
 1. Los nombres del dominio en Cert Spotter (las mismas PAGINAS_CT de shodan.py) más la raíz, hasta MAX_SITIOS.
@@ -15,6 +16,9 @@ Qué se pide, todo pasivo o dentro del Anexo A:
    revisa. Se siguen a lo más MAX_REDIRECCIONES redirecciones, solo a https en el puerto 443 de un nombre del dominio.
    Una redirección a otro dominio no se sigue: solo se guarda a qué nombre manda. Nunca se pide otra ruta, ni un
    script, ni se envía un formulario, ni se reintenta para saltar un reto del WAF.
+   Si el 443 rechaza la conexión o no responde (una nube que descarta los paquetes a un puerto cerrado da tiempo, no
+   rechazo), se pide una sola vez GET http://<nombre>/ en el puerto 80 (transporte.PUERTOS_HTTP), con el mismo filtro
+   de IP públicas y sin seguir su redirección. Si da una página, esa es la visita del sitio (_recorrer).
 4. endoflife.date (una vez por producto, MAX_PRODUCTOS) y la NVD (una vez por CPE con versión, MAX_CPE, con PAUSA_NVD
    segundos entre una y otra, el ritmo de la NVD sin llave), solo para lo que soporte.py y nvd.py pueden revisar.
    El ritmo de la NVD es de todo el proceso (RITMO_NVD): dos escaneos a la vez salen de la misma IP y comparten las
@@ -24,7 +28,7 @@ Con más de MAX_SITIOS nombres se visitan la raíz y un bloque de los demás que
 queda siempre fuera. La conexión a un sitio va solo por IPv4, como su A.
 
 Cobertura (#23). Las partes son los sitios (sus nombres). Un sitio queda revisado si su visita terminó y todo lo que
-pedían sus tecnologías llegó: también un nombre sin A, uno que rechaza el 443 (no hay sitio https) o uno que redirige a
+pedían sus tecnologías llegó: también un nombre sin A, uno sin sitio en el 443 ni en el 80 o uno que redirige a
 otro dominio o uno cuyo A solo trae IP que no son públicas (no tiene sitio público). Queda sin revisar si no se
 pudo visitar (tiempo, red, certificado, o al conectar no quedó ninguna IP pública), si respondió con un error del
 servidor (5xx), con un reto o bloqueo del WAF, si las huellas no vieron toda la respuesta o si faltó la respuesta de endoflife.date o de la NVD
@@ -71,8 +75,14 @@ from cirdan.recolectores.shodan import LimiteAlcanzado, RespuestaIlegible, SinTi
 FUENTE = 'web'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'web'
 
-# Código de regla -> severidad base. Los dos existen en el catálogo de reglas (semillas 001 y 004).
-CODIGOS = dict(soporte.CODIGOS, **nvd.CODIGOS)
+# Código de regla -> severidad base. Los tres existen en el catálogo de reglas (semillas 001 y 004).
+CODIGOS = dict(soporte.CODIGOS, **nvd.CODIGOS, server_version_disclosed='low')
+
+# Cabeceras que revelan el programa del servidor y una versión: 'nginx/1.24.0 (Ubuntu)', 'PHP/8.1.2'. Sin número de
+# versión ('nginx', 'cloudflare', 'Express') no hay hallazgo.
+CABECERAS_VERSION = ('server', 'x-powered-by')
+_CON_VERSION = re.compile(r'[A-Za-z][\w.+-]*/v?[0-9]+(\.[0-9]+)*', re.A)
+MAX_VALOR_CABECERA = 200     # caracteres del valor de la cabecera en la evidencia
 
 AGENTE = contrato.AGENTE
 ACEPTA = 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.1'
@@ -99,7 +109,9 @@ MIN_RESTANTE = 5             # con menos segundos que esto ya no se empieza otro
 # Segundos que los sitios le dejan a endoflife.date y a la NVD: sin esto, unos sitios lentos se comen la corrida y
 # ninguna tecnología se revisa.
 RESERVA_APIS = 150
-# Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición.
+# Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición. La petición por http del 80
+# solo va cuando el primer https no dio respuesta, así que ese sitio no siguió redirecciones: usa 2 de sus
+# 1 + MAX_REDIRECCIONES peticiones posibles y el peor caso no cambia.
 MAX_CONSULTAS = (PAGINAS_CT * INTENTOS_CT + MAX_SITIOS * shodan.INTENTOS + MAX_SITIOS * (1 + MAX_REDIRECCIONES)
                  + MAX_PRODUCTOS * INTENTOS_API + MAX_CPE * INTENTOS_API)
 
@@ -306,8 +318,10 @@ class ClienteWeb(shodan.ClienteShodan):
     def _transporte(self, url, timeout):
         return _descargar_api(url, timeout)
 
-    def sitio(self, url):
+    def sitio(self, url, contar=True):
         """La visita a `url` ya limpia (limpiar_visita). Antes de cada petición, salvo la primera, espera PAUSA_SITIO.
+        Con `contar` en False una falla de red no se suma a self.fallas: la cuenta quien llama (_recorrer, que antes
+        prueba el 80).
         Una URL que ya se pidió en esta corrida (el salto intermedio de otra redirección) da la misma visita, sin
         otra petición. Lanza SinTiempo si a la corrida ya no le alcanza para la petición, también si la petición
         empezó con menos de TIMEOUT_SITIO porque se acababa la corrida y no terminó, y SinGrabacion al reproducir
@@ -334,7 +348,7 @@ class ClienteWeb(shodan.ClienteShodan):
         if datos.get('sin_respuesta') == 'tiempo' and limite < TIMEOUT_SITIO:
             # No tuvo sus TIMEOUT_SITIO segundos: lo que se acabó fue la corrida, no es que el sitio no responda
             raise SinTiempo('web: se acabó el tiempo de la corrida mientras se visitaba %s' % url)
-        if datos.get('sin_respuesta') in FALLAS_DE_RED:
+        if contar and datos.get('sin_respuesta') in FALLAS_DE_RED:
             self.fallas += 1
         self._grabar(consulta, datos)
         self.vistas[consulta] = datos
@@ -426,10 +440,17 @@ def _siguiente(destino, dominio):
 def _recorrer(cliente, dominio, nombre, sitios=None):
     """(host final, url final, visita, redirige_a) de la visita a https://<nombre>/ con sus redirecciones dentro del
     dominio. redirige_a es el nombre de otro dominio al que manda, o None. Un salto a otro sitio que ya se visitó (o
-    ya quedó sin revisar) en `sitios` no se pide otra vez: da ese host con la visita {'ya_visitado': True}."""
+    ya quedó sin revisar) en `sitios` no se pide otra vez: da ese host con la visita {'ya_visitado': True}.
+    Si el primer https no dio respuesta (rechazo, tiempo o red), se pide http://<nombre>/ una vez (_http)."""
     url = 'https://%s/' % nombre
     for salto in range(MAX_REDIRECCIONES + 1):
-        visita = cliente.sitio(url)
+        visita = cliente.sitio(url, contar=salto > 0)
+        if salto == 0 and (visita.get('rechazada') or visita.get('sin_respuesta') in FALLAS_DE_RED):
+            plano = _http(cliente, nombre)
+            if plano is not None:
+                return nombre, 'http://%s/' % nombre, plano, None
+            if visita.get('sin_respuesta') in FALLAS_DE_RED:
+                cliente.fallas += 1   # la que sitio() no contó: el 80 tampoco dio la página
         if 'redirige' not in visita:
             return urllib.parse.urlsplit(url).hostname, url, visita, None
         if salto == MAX_REDIRECCIONES:
@@ -451,6 +472,40 @@ def _recorrer(cliente, dominio, nombre, sitios=None):
             return destino, siguiente, {'ya_visitado': True}, None
         url = siguiente
     raise AssertionError('no se llega aquí')
+
+
+def _http(cliente, nombre):
+    """La página de http://<nombre>/ en el puerto 80, o None si no dio una (rechazo, falla, redirección o una grabación
+    de antes que no trae esa petición). Su redirección no se sigue: un 80 que manda al 443 no tiene otra página."""
+    try:
+        visita = cliente.sitio('http://%s/' % nombre, contar=False)
+    except SinGrabacion:
+        return None
+    return visita if 'estado' in visita else None
+
+
+def _versiones(cabeceras):
+    """[{cabecera, valor}] de las cabeceras Server y X-Powered-By que traen una versión, con el valor cortado."""
+    vistas = []
+    for nombre, valor in cabeceras or ():
+        if nombre.lower() in CABECERAS_VERSION and _CON_VERSION.search(valor):
+            par = {'cabecera': nombre, 'valor': valor.strip()[:MAX_VALOR_CABECERA]}
+            if par not in vistas:
+                vistas.append(par)
+    return vistas
+
+
+def _version_expuesta(sitio, dominio, ahora):
+    """server_version_disclosed del sitio, uno por sitio con todas sus cabeceras. La huella no lleva el valor, así
+    el hallazgo sigue siendo el mismo si la versión cambia."""
+    codigo = 'server_version_disclosed'
+    tipo = 'domain' if sitio.nombre == dominio else 'subdomain'
+    cabeceras = ' y '.join(dict.fromkeys(c['cabecera'] for c in sitio.expuestas))
+    evidencia = {'title': 'El sitio %s dice la versión de su servidor en %s' % (sitio.nombre, cabeceras),
+                 'cabeceras': [dict(c) for c in sitio.expuestas], 'host': sitio.nombre, 'url': sitio.url}
+    return Hallazgo(codigo, CODIGOS[codigo], sitio.nombre, evidencia['title'], evidencia,
+                    rubrica.calcular(codigo, tipo, evidencia, ahora), _huella(codigo, dominio, sitio.nombre),
+                    partes=[sitio.nombre])
 
 
 def _huella(codigo, dominio, activo, clave=''):
@@ -512,6 +567,7 @@ class _Sitio:
         self.borde = False       # False: no se escribe. None o un dict: borde.detectar()
         self.tecnologias = None  # las de huellas.analizar(), si el análisis terminó completo
         self.url = None          # la URL de la página que se analizó
+        self.expuestas = []      # las cabeceras Server y X-Powered-By con versión, si el análisis terminó completo
         self.falta = None        # el motivo de MOTIVOS si quedó sin revisar
 
     def sin_revisar(self, motivo):
@@ -642,8 +698,11 @@ def _revisar(res, cliente, dominio, ahora):
             sitio.borde = False
             sitio.sin_revisar('borde')
 
-    # 4. endoflife.date y la NVD de lo que soporte.py y nvd.py pueden revisar
+    # 4. endoflife.date y la NVD de lo que soporte.py y nvd.py pueden revisar, y la versión en las cabeceras
     _soporte_y_cve(res, cliente, sitios, dominio, ahora, parcial)
+    for host in sorted(sitios):
+        if sitios[host].expuestas and sitios[host].tecnologias is not None:
+            res.hallazgos.append(_version_expuesta(sitios[host], dominio, ahora))
 
     # 5. Activos
     for host in sorted(sitios, key=lambda h: (h != dominio, h)):
@@ -712,6 +771,8 @@ def _registrar(res, sitios, sitio, host, url, visita, otro, dominio):
         sitio.sin_revisar(visita['sin_respuesta'])
         return
     sitio.web = {'estado': 'visitado', 'url': _sin_consulta(url), 'estado_http': visita['estado']}
+    if url.startswith('http://'):
+        sitio.web['protocolo'] = 'http'   # el 443 no dio la página: se vio la del 80
     sitio.borde = visita['cabeceras']   # borde.detectar() las usa en el paso 3
     sitio.url = _sin_consulta(url)
     try:
@@ -730,6 +791,7 @@ def _registrar(res, sitios, sitio, host, url, visita, otro, dominio):
         sitio.sin_revisar('huellas')
         return
     sitio.tecnologias = analisis['tecnologias'] or []
+    sitio.expuestas = _versiones(visita['cabeceras'])
 
 
 def _soporte_y_cve(res, cliente, sitios, dominio, ahora, parcial):

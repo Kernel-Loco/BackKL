@@ -207,7 +207,8 @@ class _ConPlazo:
         """El socket conectado a la primera dirección pública de `direccion` (host, puerto) que responda, con
         settimeout en lo que queda para el handshake TLS. Las que no son públicas (publica()) se saltan sin crear su
         socket, y si no queda ninguna lanza NoPublica. Con un puerto fuera de `puertos` (PUERTOS en https,
-        PUERTOS_HTTP en http) lanza PuertoNoPermitido sin resolver el nombre. Todo socket que falla se cierra. Con `familia` solo cuentan las
+        PUERTOS_HTTP en http) lanza PuertoNoPermitido sin resolver el nombre. Todo socket que falla se cierra.
+        Con `familia` solo cuentan las
         direcciones de esa familia: la visita web pide AF_INET, así una AAAA que el DNS de la red arma con su propio
         prefijo de NAT64 (uno que publica() no puede conocer) nunca se usa para llegar a una IPv4 interna."""
         host, puerto = direccion

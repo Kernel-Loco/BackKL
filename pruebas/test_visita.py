@@ -114,7 +114,8 @@ class Visita(unittest.TestCase):
             grabado = ''.join(p.read_text(encoding='utf-8') for p in carpeta.glob('*.json'))
         self.assertEqual(res.estado, 'succeeded', res.error)
         self.assertEqual(contrato.validar(res, codigos=set(visita.CODIGOS)), [])
-        self.assertEqual(sorted(h.codigo for h in res.hallazgos), ['known_vulnerability'] * 3 + ['outdated_software'])
+        self.assertEqual(sorted(h.codigo for h in res.hallazgos),
+                         ['known_vulnerability'] * 3 + ['outdated_software', 'server_version_disclosed'])
         self.assertEqual({(h.activo, tuple(h.partes)) for h in res.hallazgos}, {(WWW, (WWW,))})
         self.assertTrue(all(h.evidencia['url'] == 'https://%s/' % WWW for h in res.hallazgos))
         self.assertEqual([f['cve_id'] for f in res.cves], CVES_NGINX)
@@ -191,7 +192,8 @@ class Visita(unittest.TestCase):
             self.assertEqual(list((Path(d) / DOMINIO).glob('*.json')), [])
         self.assertEqual(res.estado, 'succeeded', res.error)
         self.assertIn(visita.NO_SE_GRABO, res.avisos)
-        self.assertEqual([h.codigo for h in res.hallazgos], ['outdated_software'])   # lo de endoflife.date sí llegó
+        # lo de endoflife.date y las cabeceras sí llegó
+        self.assertEqual([h.codigo for h in res.hallazgos], ['outdated_software', 'server_version_disclosed'])
         self.assertEqual(res.cves, [])
         self.assertEqual(res.revisados, [])
         self.assertIn(DOMINIO, res.sin_revisar)
@@ -383,6 +385,142 @@ class Conectar(unittest.TestCase):
         self.assertEqual((resueltos, self.Socket.conectadas), ([], []))
 
 
+def pagina_reservas():
+    """Como reservas.olmardo.com (hallazgos_esperados.md, fila 12): solo el 80, con Server y versión."""
+    return {'estado': 200, 'cabeceras': [['Server', 'nginx/1.24.0 (Ubuntu)'],
+                                         ['Content-Type', 'text/html; charset=utf-8']],
+            'cuerpo': '<html><head><title>Reservas (sitio de pruebas)</title></head><body>pruebas</body></html>'}
+
+
+class Http(unittest.TestCase):
+    """El 80 por http cuando el 443 no da la página (RC-46, RC-165), y server_version_disclosed (HX1)."""
+    RAIZ_HTTPS, RAIZ_HTTP = 'https://%s/' % DOMINIO, 'http://%s/' % DOMINIO
+
+    def test_1_443_cerrado_o_sin_respuesta_y_pagina_en_el_80(self):
+        for nombre, https in (('rechazada', {'rechazada': True}), ('tiempo', {'sin_respuesta': 'tiempo'}),
+                              ('red', {'sin_respuesta': 'red'})):
+            with self.subTest(nombre), tempfile.TemporaryDirectory() as d:
+                res, cliente, _ = correr({self.RAIZ_HTTPS: https, self.RAIZ_HTTP: pagina_reservas()},
+                                         apis=Apis(eol=404, nvd={'totalResults': 0, 'vulnerabilities': []}),
+                                         modo='grabar', carpeta=Path(d) / DOMINIO)
+                self.assertEqual(cliente.visitar.urls, [self.RAIZ_HTTPS, self.RAIZ_HTTP])
+                self.assertEqual(res.estado, 'succeeded', res.error)
+                self.assertEqual(contrato.validar(res, codigos=set(visita.CODIGOS)), [])
+                web = activo(res, DOMINIO).atributos
+                self.assertEqual(web['web'], {'estado': 'visitado', 'url': self.RAIZ_HTTP, 'estado_http': 200,
+                                              'protocolo': 'http', 'fuente': 'web'})
+                self.assertIn('Nginx', [x['nombre'] for x in web['tecnologias']])
+                self.assertEqual([h.codigo for h in res.hallazgos], ['server_version_disclosed'])
+                h = res.hallazgos[0]
+                self.assertEqual((h.activo, h.partes, h.severidad), (DOMINIO, [DOMINIO], 'low'))
+                self.assertEqual(h.evidencia['cabeceras'], [{'cabecera': 'Server', 'valor': 'nginx/1.24.0 (Ubuntu)'}])
+                self.assertEqual(h.evidencia['url'], self.RAIZ_HTTP)
+                # El 80 dio la página: la falla del 443 no es de la corrida y la grabación se escribe
+                self.assertEqual(cliente.fallas, 0)
+                self.assertNotIn(visita.NO_SE_GRABO, res.avisos)
+                self.assertEqual((res.revisados, res.sin_revisar, res.sin_cobertura), (None, None, []))
+
+    def test_2_sin_pagina_en_el_80_queda_lo_del_443(self):
+        for nombre, https, http, estado, fallas in (
+                ('los dos cerrados', {'rechazada': True}, {'rechazada': True}, 'sin_https', 0),
+                ('80 redirige al 443', {'rechazada': True}, {'redirige': self.RAIZ_HTTPS, 'codigo': 301},
+                 'sin_https', 0),
+                ('443 sin respuesta y 80 cerrado', {'sin_respuesta': 'tiempo'}, {'rechazada': True},
+                 'sin_respuesta', 1)):
+            with self.subTest(nombre):
+                res, cliente, _ = correr({self.RAIZ_HTTPS: https, self.RAIZ_HTTP: http})
+                # La redirección del 80 no se sigue: solo esas dos peticiones
+                self.assertEqual(cliente.visitar.urls, [self.RAIZ_HTTPS, self.RAIZ_HTTP])
+                self.assertEqual(activo(res, DOMINIO).atributos['web']['estado'], estado)
+                self.assertEqual(cliente.fallas, fallas)
+                self.assertEqual(res.hallazgos, [])
+
+    def test_3_el_80_solo_se_prueba_en_el_primer_salto(self):
+        """Un https que contesta (aunque sea con un error) o una redirección a un 443 cerrado no piden el 80."""
+        www = 'https://%s/' % WWW
+        res, cliente, _ = correr({self.RAIZ_HTTPS: {'redirige': www, 'codigo': 301}, www: {'sin_respuesta': 'tiempo'}},
+                                 zona={DOMINIO: a(IP), WWW: a(IP)})
+        self.assertEqual(cliente.visitar.urls, [self.RAIZ_HTTPS, www])
+        self.assertEqual(cliente.fallas, 1)
+        res, cliente, _ = correr({self.RAIZ_HTTPS: dict(pagina_nginx(), estado=502)})
+        self.assertEqual(cliente.visitar.urls, [self.RAIZ_HTTPS])
+
+    def test_4_una_grabacion_de_antes_sin_el_80_queda_como_estaba(self):
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            _, grabo, _ = correr({self.RAIZ_HTTPS: {'rechazada': True}}, modo='grabar', carpeta=carpeta)
+            clave_80 = 'sitio:%s:%s' % (DOMINIO, visita.hashlib.sha256(self.RAIZ_HTTP.encode()).hexdigest()[:16])
+            grabo.grabadora.archivo(clave_80).unlink()   # como una grabación de antes de RC-46, sin el 80
+            res, cliente, _ = correr({}, zona={}, modo='reproducir', carpeta=carpeta)
+        self.assertEqual(res.estado, 'succeeded', res.error)
+        self.assertEqual(activo(res, DOMINIO).atributos['web']['estado'], 'sin_https')
+        self.assertEqual((res.revisados, res.sin_revisar, res.sin_cobertura), (None, None, []))
+
+    def test_5_server_sin_version_no_da_hallazgo(self):
+        for cabeceras in ([['Server', 'nginx']], [['Server', 'cloudflare'], ['X-Powered-By', 'Express']], []):
+            with self.subTest(cabeceras):
+                pagina = dict(pagina_reservas(), cabeceras=cabeceras + [['Content-Type', 'text/html']])
+                res, _, _ = correr({self.RAIZ_HTTPS: pagina}, apis=Apis(eol=404, nvd={'totalResults': 0,
+                                                                                      'vulnerabilities': []}))
+                self.assertNotIn('server_version_disclosed', [h.codigo for h in res.hallazgos])
+                self.assertEqual(res.sin_cobertura, [])
+
+    def test_6_versiones_de_las_cabeceras(self):
+        largo = 'Apache/2.4.58 (Unix) ' + 'x' * 400
+        self.assertEqual(visita._versiones([['server', 'nginx/1.24.0 (Ubuntu)'], ['X-Powered-By', 'PHP/8.1.2'],
+                                            ['Server', 'nginx/1.24.0 (Ubuntu)'], ['Via', '1.1 varnish/6.0'],
+                                            ['X-Powered-By', 'ASP.NET'], ['Server', largo]]),
+                         [{'cabecera': 'server', 'valor': 'nginx/1.24.0 (Ubuntu)'},
+                          {'cabecera': 'X-Powered-By', 'valor': 'PHP/8.1.2'},
+                          {'cabecera': 'Server', 'valor': 'nginx/1.24.0 (Ubuntu)'},
+                          {'cabecera': 'Server', 'valor': largo[:visita.MAX_VALOR_CABECERA]}])
+        # La huella no lleva el valor: otra versión es el mismo hallazgo
+        uno, _, _ = correr({self.RAIZ_HTTPS: pagina_reservas()}, apis=Apis(eol=404, nvd={'totalResults': 0,
+                                                                                         'vulnerabilities': []}))
+        otra = dict(pagina_reservas(), cabeceras=[['Server', 'nginx/1.26.2'], ['Content-Type', 'text/html']])
+        dos, _, _ = correr({self.RAIZ_HTTPS: otra}, apis=Apis(eol=404, nvd={'totalResults': 0, 'vulnerabilities': []}))
+        huella = lambda r: [h.huella for h in r.hallazgos if h.codigo == 'server_version_disclosed']
+        self.assertEqual(huella(uno), huella(dos))
+        self.assertEqual(len(huella(uno)), 1)
+
+    def test_7_el_80_solo_por_http_y_solo_en_visitar(self):
+        """transporte: http solo al 80 (PUERTOS_HTTP) y solo en visitar(); https al 80 y http a otro puerto no
+        resuelven ni abren un socket. descargar() (las API) sigue solo con https."""
+        self.assertEqual(transporte.PUERTOS_HTTP, frozenset({80}))
+        resueltos, abiertos = [], []
+        with mock.patch.object(transporte, 'resolver', lambda *a: resueltos.append(a) or []), \
+                mock.patch.object(transporte.socket, 'socket', lambda *a: abiertos.append(a)), \
+                mock.patch.object(transporte._ConexionHttp, 'clase_socket', lambda *a: abiertos.append(a)):
+            for url in ('http://%s:8080/' % WWW, 'http://%s:443/' % WWW, 'http://%s:6379/' % WWW,
+                        'https://%s:80/' % WWW):
+                with self.subTest(url), self.assertRaises(urllib.error.URLError) as error:
+                    transporte.visitar(urllib.request.Request(url), time.monotonic() + 30, 1000)
+                self.assertIsInstance(error.exception.reason, transporte.PuertoNoPermitido)
+            with self.assertRaises(ValueError):
+                transporte.descargar(urllib.request.Request('http://%s/' % WWW), time.monotonic() + 30, 1000)
+        self.assertEqual((resueltos, abiertos), ([], []))
+
+    def test_8_el_80_tampoco_se_conecta_a_ip_internas(self):
+        conectadas = []
+
+        class Socket(Conectar.Socket):
+            def connect(self, destino):
+                conectadas.append(destino[0])
+        for ips, lanza in ((['10.0.0.5', '169.254.169.254'], True), (['127.0.0.1', IP], False)):
+            conectadas.clear()
+            conexion = transporte._ConexionHttp(WWW, plazo=time.monotonic() + 30, cronometro=time.monotonic,
+                                               familia=socket.AF_INET)
+            info = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, 80)) for ip in ips]
+            with self.subTest(ips), mock.patch.object(transporte, 'resolver', lambda host, puerto, espera: info), \
+                    mock.patch.object(transporte._ConexionHttp, 'clase_socket', Socket):
+                if lanza:
+                    with self.assertRaises(transporte.NoPublica):
+                        conexion._conectar((WWW, 80))
+                else:
+                    conexion._conectar((WWW, 80))
+            self.assertEqual(conectadas, [] if lanza else [IP])
+
+
 class Contrato(unittest.TestCase):
     def resultado(self, cves):
         return contrato.Resultado(DOMINIO, 'web', cves=cves)
@@ -413,7 +551,7 @@ class Contrato(unittest.TestCase):
         self.assertEqual(REGISTRO['web'], 'cirdan.recolectores.visita')
         self.assertEqual(visita.MAX_CONSULTAS, 2 * 2 + 20 * 3 + 20 * 4 + 10 * 2 + 10 * 2)
         self.assertEqual(visita.MAX_CONSULTAS, 184)
-        self.assertEqual(set(visita.CODIGOS), {'outdated_software', 'known_vulnerability'})
+        self.assertEqual(set(visita.CODIGOS), {'outdated_software', 'known_vulnerability', 'server_version_disclosed'})
 
 
 class Base(unittest.TestCase):
@@ -660,7 +798,7 @@ class Arreglos(unittest.TestCase):
             archivos = sorted(carpeta.glob('*.json'))
             self.assertGreaterEqual(len(archivos), 6)   # CT, dos A, dos sitios, endoflife.date y la NVD
             completa, _, _ = correr({}, zona={}, modo='reproducir', carpeta=carpeta)
-            self.assertEqual((completa.revisados, len(completa.hallazgos)), (None, 4))
+            self.assertEqual((completa.revisados, len(completa.hallazgos)), (None, 5))
             for archivo in archivos:
                 bueno = archivo.read_text(encoding='utf-8')
                 for roto in ('', '[]', '{}', bueno[:len(bueno) // 2], '{"datos": 5}', '"x"'):
