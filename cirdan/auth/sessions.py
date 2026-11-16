@@ -204,18 +204,28 @@ def _passkey_reg_key(user_id, session_token):
     return 'webauthn:reg:%s:%s' % (_digest(str(user_id)), _digest(session_token))
 
 
-def create_passkey_registration(user_id, session_token, challenge):
+def password_tag(password_hash):
+    """SHA-256 de la huella guardada de la contraseña: cambia cada vez que se cambia la contraseña."""
+    return hashlib.sha256(password_hash.encode()).hexdigest()
+
+
+def create_passkey_registration(user_id, session_token, challenge, tag):
     """Guarda el reto de un registro de passkey por PASSKEY_SECONDS. Pedir otro desde la misma sesión reemplaza al
-    anterior. Queda amarrado a la sesión que lo pidió: otra sesión de la misma cuenta no lo puede usar ni borrar."""
-    _valkey().set(_passkey_reg_key(user_id, session_token), base64.b64encode(challenge).decode(), ex=PASSKEY_SECONDS)
+    anterior. Queda amarrado a la sesión que lo pidió: otra sesión de la misma cuenta no lo puede usar ni borrar.
+    Guarda también `tag`, el password_tag de la contraseña con la que se pidió: tras un cambio ya no registra."""
+    _valkey().set(_passkey_reg_key(user_id, session_token), base64.b64encode(challenge).decode() + ':' + tag,
+                  ex=PASSKEY_SECONDS)
 
 
 def take_passkey_registration(user_id, session_token):
-    """El reto del registro de esta sesión, una sola vez (GETDEL); None si no hay o venció."""
+    """(reto, tag) del registro de esta sesión, una sola vez (GETDEL); None si no hay o venció."""
     if not session_token:
         return None
     raw = _valkey().getdel(_passkey_reg_key(user_id, session_token))
-    return base64.b64decode(raw) if raw else None
+    if not raw or ':' not in raw:
+        return None
+    challenge, tag = raw.split(':', 1)
+    return base64.b64decode(challenge), tag
 
 
 def create_passkey_login(challenge):

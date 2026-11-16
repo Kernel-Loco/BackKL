@@ -202,7 +202,8 @@ class AltaTotp(unittest.TestCase):
                                 user='postgres'), '0')
         for passkey_id in ids:
             self.assertEqual(scalar("SELECT count(*) FROM audit_log WHERE action = 'auth.passkey_deleted' AND "
-                                    "entity_id = '%s' AND details->>'reason' = 'mfa_enabled';" % passkey_id,
+                                    "entity_id = '%s' AND details = '{\"reason\": \"mfa_enabled\"}'::jsonb;"
+                                    % passkey_id,  # T4 de RC-331: sin el nombre de la passkey
                                     user='postgres'), '1')
 
     def test_11b_un_codigo_malo_no_borra_las_passkeys(self):

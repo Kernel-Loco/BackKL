@@ -272,11 +272,7 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
             audit(conn, session.org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
             # Las passkeys de la cuenta se registraron sin TOTP, solo con la contraseña (RC-331): quien la tenía pudo dar
             # de alta la suya y seguiría entrando sin el código. Se borran y se vuelven a registrar con el código.
-            removed = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s RETURNING id::text, name',
-                                   (session.user_id,)).fetchall()
-            for passkey in removed:
-                audit(conn, session.org_id, 'auth.passkey_deleted', session.user_id, ip, 'passkey', passkey['id'],
-                      {'name': passkey['name'], 'reason': 'mfa_enabled'})
+            removed = _delete_passkeys(conn, session, ip, 'mfa_enabled')
             # Las demás sesiones de la cuenta entraron sin el segundo factor: se cierran y solo queda la que activó.
             # Va antes del commit y con la fila bloqueada: si Valkey falla, el alta no se guarda y se puede repetir.
             sessions.delete_others(session.user_id, session.token)
@@ -308,15 +304,35 @@ def me(session: Session = Depends(current_session)):
     return dict(user, **sessions.limits(session.created_at))
 
 
-@router.post('/password', status_code=204, summary='Cambia la contraseña del usuario de la sesión')
+@router.post('/password', summary='Cambia la contraseña del usuario de la sesión y borra sus passkeys')
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
+    ip = client_ip(request)
     with transaction(session.org_id) as conn:
-        row = conn.execute('SELECT password_hash FROM users WHERE id = %s', (session.user_id,)).fetchone()
+        # FOR NO KEY UPDATE, como /passkeys/register/verify: un registro a medias espera a este cambio y después ve la
+        # contraseña nueva, así que ya no guarda su passkey.
+        row = conn.execute('SELECT password_hash FROM users WHERE id = %s FOR NO KEY UPDATE',
+                           (session.user_id,)).fetchone()
         if not row or not passwords.verify_password(row['password_hash'], body.current_password, session.user_id):
             raise HTTPException(400, 'La contraseña actual no es correcta.')
         conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
                      (passwords.hash_password(body.new_password, session.user_id), session.user_id))
-        audit(conn, session.org_id, 'auth.password_changed', session.user_id, client_ip(request), 'user', session.user_id)
+        # Sin TOTP una passkey se registra solo con la contraseña (RC-331): quien tenía la anterior pudo dar de alta la
+        # suya y seguiría entrando, como MFA, después del cambio. Se borran y se vuelven a registrar con la nueva.
+        # El borrado va antes de cualquier audit(): así no se espera una fila de passkey con el candado de la bitácora.
+        removed = _delete_passkeys(conn, session, ip, 'password_changed')
+        audit(conn, session.org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
+    return {'passkeys_removed': len(removed)}
+
+
+def _delete_passkeys(conn, session, ip, reason):
+    """Borra todas las passkeys de la cuenta de la sesión y deja un auth.passkey_deleted por cada una. En la bitácora
+    va solo el id: el nombre es texto libre y audit_log no se puede borrar ni anonimizar."""
+    removed = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s RETURNING id::text',
+                           (session.user_id,)).fetchall()
+    for passkey in removed:
+        audit(conn, session.org_id, 'auth.passkey_deleted', session.user_id, ip, 'passkey', passkey['id'],
+              {'reason': reason})
+    return removed
 
 
 # ------------------------------------------------------------------ passkeys (RC-331)
@@ -425,7 +441,8 @@ def passkey_register_options(body: PasskeyRegisterOptionsIn, request: Request, r
     if row['mfa_enabled']:
         _clear_fails(session.email)  # el código fue correcto, como en /mfa/verify
     options, challenge = webauthn.registration_options(session.user_id, row['email'], row['full_name'], existing)
-    sessions.create_passkey_registration(session.user_id, session.token, challenge)
+    sessions.create_passkey_registration(session.user_id, session.token, challenge,
+                                         sessions.password_tag(row['password_hash']))
     response.headers.update(NO_STORE)
     return {'options': options, 'expires_in_seconds': sessions.PASSKEY_SECONDS}
 
@@ -439,9 +456,10 @@ def passkey_register_verify(body: PasskeyRegisterVerifyIn, request: Request, ses
         raise HTTPException(422, 'Ponle un nombre a la passkey.')
     # El reto se gasta antes de revisar la respuesta: una respuesta que no sirve obliga a empezar de nuevo, con la
     # contraseña y el código.
-    challenge = sessions.take_passkey_registration(session.user_id, session.token)
-    if challenge is None:
+    pending = sessions.take_passkey_registration(session.user_id, session.token)
+    if pending is None:
         raise HTTPException(400, PASSKEY_REG_EXPIRED)
+    challenge, password_tag = pending
     ip = client_ip(request)
     try:
         data = webauthn.verify_registration(body.credential, challenge)
@@ -452,10 +470,15 @@ def passkey_register_verify(body: PasskeyRegisterVerifyIn, request: Request, ses
                   session.user_id, {'reason': 'response'})
         raise HTTPException(400, PASSKEY_REG_INVALID)
     with transaction(session.org_id) as conn:
-        if not conn.execute('SELECT 1 FROM users WHERE id = %s AND is_active FOR NO KEY UPDATE',
-                            (session.user_id,)).fetchone():
+        user = conn.execute('SELECT password_hash FROM users WHERE id = %s AND is_active FOR NO KEY UPDATE',
+                            (session.user_id,)).fetchone()
+        if not user:
             sessions.delete(session.token)
             raise HTTPException(401, SESSION_ENDED)
+        # Con la fila bloqueada, la contraseña debe ser la misma con la que se pidió el reto: un cambio de contraseña
+        # en medio ya borró las passkeys, y este registro, empezado con la anterior, tampoco se guarda.
+        if sessions.password_tag(user['password_hash']) != password_tag:
+            raise HTTPException(400, PASSKEY_REG_EXPIRED)
         # Con la fila bloqueada, la sesión debe seguir viva: /mfa/enable borra las passkeys y cierra las demás sesiones
         # con la fila bloqueada. Una de esas sesiones que ya pasó current_session no guarda la suya después (R4).
         if not sessions.get(session.token):
@@ -474,8 +497,9 @@ def passkey_register_verify(body: PasskeyRegisterVerifyIn, request: Request, ses
                      data['transports'], data['aaguid'], data['backed_up'], name)).fetchone()
         except psycopg.errors.UniqueViolation:
             raise HTTPException(409, PASSKEY_DUPLICATE)
+        # Sin el nombre: es texto libre y audit_log no se puede borrar ni anonimizar.
         audit(conn, session.org_id, 'auth.passkey_registered', session.user_id, ip, 'passkey', row['id'],
-              {'name': name, 'backed_up': data['backed_up']})
+              {'backed_up': data['backed_up']})
     return row
 
 
@@ -570,9 +594,9 @@ def passkeys_list(response: Response, session: Session = Depends(current_session
 @router.delete('/passkeys/{passkey_id}', status_code=204, summary='Borra una passkey de la cuenta de la sesión')
 def passkeys_delete(passkey_id: uuid.UUID, request: Request, session: Session = Depends(current_session)):
     with transaction(session.org_id) as conn:
-        row = conn.execute('DELETE FROM webauthn_credentials WHERE id = %s AND user_id = %s RETURNING name',
+        row = conn.execute('DELETE FROM webauthn_credentials WHERE id = %s AND user_id = %s RETURNING id',
                            (passkey_id, session.user_id)).fetchone()
         if not row:
             raise HTTPException(404, PASSKEY_NOT_FOUND)
         audit(conn, session.org_id, 'auth.passkey_deleted', session.user_id, client_ip(request), 'passkey',
-              passkey_id, {'name': row['name']})
+              passkey_id, {'reason': 'user'})

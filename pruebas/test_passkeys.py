@@ -438,6 +438,53 @@ class Registrar(unittest.TestCase):
         self.assertEqual(len(passkeys), 1)
         self.assertEqual(sorted(passkeys[0]), ['backed_up', 'created_at', 'id', 'last_used_at', 'name', 'transports'])
 
+    def test_17_cambiar_la_contrasena_borra_las_passkeys_y_el_registro_a_medias(self):
+        # T1 de RC-331: una passkey dada de alta con la contraseña anterior no sigue entrando después del cambio.
+        anterior = scalar("SELECT password_hash FROM users WHERE id = '%s';" % JORDAN_ID, user='postgres')
+        self.addCleanup(scalar, "UPDATE users SET password_hash = '%s' WHERE id = '%s'; SELECT 1;"
+                        % (anterior, JORDAN_ID), user='postgres')
+        a = Autenticador()
+        mia = _alta_directa(a)
+        ajena = _alta_directa(Autenticador(), user_id=MAYA_ID)
+        opciones = self._opciones()[1]['options']  # registro pedido con la contraseña anterior
+        self.assertEqual(self.client.post(AUTH + '/password', {'current_password': 'otra-cosa',
+                                                               'new_password': 'CIRDAN_FAKE_clave-331-b'})[0], 400)
+        self.assertEqual(scalar("SELECT count(*) FROM webauthn_credentials WHERE id = '%s';" % mia, user='postgres'),
+                         '1', 'con la contraseña actual mal no se borra nada')
+        self.assertEqual(self.client.post(AUTH + '/password', {'current_password': PASSWORD,
+                                                               'new_password': 'CIRDAN_FAKE_clave-331-a'}),
+                         (200, {'passkeys_removed': 1}))
+        self.assertEqual(scalar("SELECT count(*) FROM webauthn_credentials WHERE user_id = '%s';" % JORDAN_ID,
+                                user='postgres'), '0')
+        self.assertEqual(scalar("SELECT count(*) FROM webauthn_credentials WHERE id = '%s';" % ajena, user='postgres'),
+                         '1', 'las de Maya, de la misma empresa, no se tocan')
+        self.assertEqual(_bitacora('auth.passkey_deleted', extra="AND entity_id = '%s' AND details = "
+                                   "'{\"reason\": \"password_changed\"}'::jsonb" % mia), 1)
+        # El registro que se pidió antes del cambio ya no guarda su passkey.
+        self.assertEqual(self.client.post(PK + '/register/verify', {'credential': Autenticador().registro(opciones),
+                                                                    'name': 'Tras el cambio'}),
+                         (400, {'detail': 'La solicitud venció o ya se usó. Empieza de nuevo.'}))
+        self.assertEqual(scalar("SELECT count(*) FROM webauthn_credentials WHERE user_id = '%s';" % JORDAN_ID,
+                                user='postgres'), '0')
+        sesion.reset()
+        self.assertEqual(_entrar(a)[1], (401, {'detail': PASSKEY_INVALID}))
+        # Sin passkeys, el cambio responde 0.
+        self.assertEqual(self.client.post(AUTH + '/password', {'current_password': 'CIRDAN_FAKE_clave-331-a',
+                                                               'new_password': 'CIRDAN_FAKE_clave-331-c'}),
+                         (200, {'passkeys_removed': 0}))
+
+    def test_18_la_bitacora_no_guarda_el_nombre_de_la_passkey(self):
+        # T4 de RC-331: el nombre es texto libre y audit_log no se puede borrar ni anonimizar.
+        opciones = self._opciones()[1]['options']
+        code, fila = self.client.post(PK + '/register/verify', {'credential': Autenticador().registro(opciones),
+                                                               'name': 'Pixel de Ana López'})
+        self.assertEqual(code, 201, fila)
+        self.assertEqual(self.client.request('DELETE', PK + '/' + fila['id'])[0], 204)
+        detalles = scalar("SELECT string_agg(action || ' ' || details::text, ' | ' ORDER BY chain_seq) FROM audit_log "
+                          "WHERE entity_id = '%s';" % fila['id'], user='postgres')
+        self.assertEqual(detalles, 'auth.passkey_registered {"backed_up": false} | '
+                                   'auth.passkey_deleted {"reason": "user"}')
+
 
 if __name__ == '__main__':
     unittest.main()
