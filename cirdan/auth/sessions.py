@@ -67,6 +67,16 @@ def get(token):
     return data
 
 
+def limits(created_at=None):
+    """Lo que le queda a la sesión, para el aviso del portal (RC-328): la inactividad que renueva cada petición y
+    los segundos hasta el tope de 8 h, contados desde que se creó en Valkey. Sin created_at es una sesión nueva."""
+    if created_at is None:
+        left = ABSOLUTE_SECONDS
+    else:
+        left = max(0, int(created_at + ABSOLUTE_SECONDS - time.time()))
+    return {'idle_timeout_seconds': IDLE_SECONDS, 'absolute_expires_in_seconds': left}
+
+
 def delete(token):
     if token:
         _valkey().delete('sess:' + _digest(token))
