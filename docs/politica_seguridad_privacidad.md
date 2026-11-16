@@ -1,6 +1,6 @@
 # Política de seguridad y privacidad de LowTide
 
-Tarjeta #78 (RC-39). Versión 2.0 del 8 nov 2026: suma la matriz de responsable y encargado (sección 5.1), el responsable del aviso, el buzón ARCO y los términos de uso del portal (sección 11) de la tarjeta #96g (RC-207).
+Tarjeta #78 (RC-39). Versión 2.1 del 16 nov 2026: la llave de API es solo para los sistemas de la propia empresa (sección 11, punto 2, RC-129), la huella de la contraseña va cifrada con AES-256-GCM y una llave fuera de la base (controles 5.17 y 8.24 y sección 5.2, RC-330) y rotar una llave todavía no tiene herramienta (control 8.24). La versión 2.0 del 8 nov sumó la matriz de responsable y encargado (sección 5.1), el responsable del aviso, el buzón ARCO y los términos de uso del portal (sección 11) de la tarjeta #96g (RC-207).
 
 Esta política integra las reglas de la [política de uso ético y alcance](politica_uso_etico.md) de la tarjeta #6 (RC-36) en un sistema de gestión con la metodología de ISO/IEC 27001:2022 y los controles de ISO/IEC 27002:2022, y trae el aviso de privacidad conforme a la Ley Federal de Protección de Datos Personales en Posesión de los Particulares (LFPDPPP, DOF 20 de marzo de 2025, última reforma DOF 14 de noviembre de 2025). Va junto con la [plantilla de carta de autorización](plantilla_carta_autorizacion.md), que remite a esta política en su sección 6.
 
