@@ -46,7 +46,9 @@ def _correr(org, scan_id, fqdn):
 
 @router.post('/domains/{fqdn}/scans', status_code=202, summary='Pide un escaneo (solo con autorización vigente y TXT verificado)')
 def request_scan(fqdn: str, request: Request, session: Session = Depends(require_roles('analyst', 'admin'))):
-    solicitud = orquestador.solicitar(session.org_id, fqdn, user_id=session.user_id, ip=client_ip(request))
+    # Un superadmin en una empresa ajena no queda en requested_by (RC-332): va en la bitácora con actor 'platform'.
+    solicitud = orquestador.solicitar(session.org_id, fqdn, user_id=session.audit_user_id, ip=client_ip(request),
+                                      platform=session.audit_platform)
     if not solicitud.aceptada:
         status = 404 if solicitud.motivos == ['domain_not_found'] else 409
         return JSONResponse({'accepted': False, 'detail': solicitud.detalle, 'reasons': solicitud.motivos}, status_code=status)

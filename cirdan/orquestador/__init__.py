@@ -206,8 +206,11 @@ def abandonar_vencidos(conn, org, domain_id=None, scan_id=None):
     return ids
 
 
-def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None):
+def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None, platform=None):
     """Revisa autorización y TXT y, si todo cumple, crea el escaneo. Nunca escanea sin los dos.
+
+    `platform` es el superadmin que lo pide desde una empresa ajena (RC-332), con user_id None: va a la bitácora
+    con actor 'platform' y el escaneo queda sin requested_by.
 
     `consultar` reemplaza la consulta DNS real (pruebas). Sin él, solo se consultan en vivo los
     dominios de DOMINIOS_EN_VIVO.
@@ -259,10 +262,11 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
         if motivos:
             detalle = _texto(motivos, txt_resultado)
             audit(c, org, 'scan.rejected', user_id, ip, 'domain', domain['id'],
-                  {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado})
+                  {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado}, platform=platform)
             return Solicitud(fqdn, False, motivos, detalle, domain_id=domain['id'], txt=txt_resultado)
 
-        audit(c, org, 'scan.requested', user_id, ip, 'scan', scan_id, {'fqdn': fqdn, 'trigger': trigger})
+        audit(c, org, 'scan.requested', user_id, ip, 'scan', scan_id, {'fqdn': fqdn, 'trigger': trigger},
+              platform=platform)
         return Solicitud(fqdn, True, scan_id=scan_id, domain_id=domain['id'], txt=txt_resultado,
                          detalle='Escaneo de %s en curso.' % fqdn)
 

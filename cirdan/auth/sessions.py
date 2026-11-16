@@ -96,6 +96,20 @@ def delete(token):
         _valkey().delete('sess:' + _digest(token))
 
 
+def switch_org(token, org_id, role):
+    """Cambia la empresa activa y el rol de una sesión que ya existe (superadmin, RC-332). Conserva su inactividad,
+    su tope de 8 h y su lugar en el índice del usuario. XX: una sesión que se cerró mientras tanto no revive.
+    Devuelve False si la sesión ya no existe."""
+    if not token or len(token) > 100:
+        return False
+    key = 'sess:' + _digest(token)
+    raw = _valkey().get(key)
+    if raw is None:
+        return False
+    data = dict(json.loads(raw), org_id=str(org_id), role=role)
+    return bool(_valkey().set(key, json.dumps(data), xx=True, keepttl=True))
+
+
 # Corre entera dentro de Valkey: una sesión creada a la vez entra al índice antes (y se borra) o después. Que no
 # entre después sin el segundo factor lo asegura el FOR NO KEY UPDATE del login contra el FOR UPDATE del alta.
 _DELETE_OTHERS = '''

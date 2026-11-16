@@ -54,13 +54,34 @@ def _user(conn, user_id):
     return conn.execute(USER_SQL, (user_id,)).fetchone()
 
 
+def platform_view(session, user):
+    """Lo que /me agrega para el superadmin (RC-332). `user` es la fila de USER_SQL, leída con la empresa de la cuenta.
+    En una empresa ajena, organization_id y organization_name son los de la empresa activa y role el de la sesión."""
+    out = {'platform_admin': session.platform_admin}
+    if session.platform_admin:
+        out.update(home_organization_id=user['organization_id'], home_organization_name=user['organization_name'])
+    if session.acting_elsewhere:
+        with transaction(session.org_id) as conn:
+            org = conn.execute('SELECT id::text, name FROM organizations').fetchone()
+        if not org:
+            sessions.delete(session.token)
+            raise HTTPException(401, SESSION_ENDED)
+        out.update(organization_id=org['id'], organization_name=org['name'], role=session.role)
+    return out
+
+
 def _start_session(response, conn, user, ip, via):
-    """Crea la sesión, pone la cookie y lo deja en la bitácora."""
+    """Crea la sesión, pone la cookie y lo deja en la bitácora. Siempre empieza en la empresa de la cuenta."""
     conn.execute('UPDATE users SET last_login_at = now() WHERE id = %s', (user['id'],))
     audit(conn, user['organization_id'], 'auth.login_succeeded', user['id'], ip, 'user', user['id'], {'via': via})
-    token = sessions.create({'user_id': user['id'], 'org_id': user['organization_id'], 'role': user['role'], 'email': user['email']})
+    platform = bool(conn.execute('SELECT public.is_platform_admin(%s) AS ok', (user['id'],)).fetchone()['ok'])
+    token = sessions.create({'user_id': user['id'], 'org_id': user['organization_id'], 'role': user['role'],
+                             'email': user['email'], 'home_org_id': user['organization_id'], 'platform_admin': platform})
     response.set_cookie(COOKIE, token, httponly=True, secure=COOKIE_SECURE, samesite='lax', path='/')
-    return dict(_user(conn, user['id']), **sessions.limits())
+    row = _user(conn, user['id'])
+    session = Session(token=token, user_id=user['id'], org_id=user['organization_id'], role=user['role'],
+                      email=user['email'], home_org_id=user['organization_id'], platform_admin=platform)
+    return dict(row, **platform_view(session, row), **sessions.limits())
 
 
 def _clear_fails(email):
@@ -207,7 +228,7 @@ def mfa_setup(body: MfaSetupIn, request: Request, response: Response, session: S
     ip = client_ip(request)
     if sessions.is_locked(session.email, ip):
         raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         row = conn.execute('SELECT email::text, password_hash, %s AS mfa_enabled FROM users WHERE id = %%s AND is_active'
                            % MFA_ENABLED_SQL, (session.user_id,)).fetchone()
         if not row:
@@ -215,12 +236,12 @@ def mfa_setup(body: MfaSetupIn, request: Request, response: Response, session: S
             raise HTTPException(401, SESSION_ENDED)
         bad_password = not passwords.verify_password(row['password_hash'], body.current_password, session.user_id)
         if bad_password:
-            audit(conn, session.org_id, 'auth.mfa_setup_failed', session.user_id, ip, 'user', session.user_id,
+            audit(conn, session.own_org_id, 'auth.mfa_setup_failed', session.user_id, ip, 'user', session.user_id,
                   {'reason': 'password'})
         elif row['mfa_enabled']:
             raise HTTPException(409, MFA_ALREADY)
         else:
-            audit(conn, session.org_id, 'auth.mfa_setup_started', session.user_id, ip, 'user', session.user_id)
+            audit(conn, session.own_org_id, 'auth.mfa_setup_started', session.user_id, ip, 'user', session.user_id)
     if bad_password:
         sessions.register_fail(session.email, ip)
         raise HTTPException(400, WRONG_PASSWORD)
@@ -241,7 +262,7 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
         raise HTTPException(400, MFA_SETUP_EXPIRED)
     ip = client_ip(request)
     secret = totp.decrypt_secret(base64.b64decode(pending['secret_enc']), session.user_id)
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         # FOR UPDATE: dos códigos válidos a la vez no guardan dos secretos; el segundo ve la cuenta ya activa.
         row = conn.execute('SELECT %s AS mfa_enabled FROM users WHERE id = %%s AND is_active FOR UPDATE' % MFA_ENABLED_SQL,
                            (session.user_id,)).fetchone()
@@ -254,13 +275,13 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
             raise HTTPException(409, MFA_ALREADY)
         step = totp.verify_code(secret, body.code)
         if step is None:
-            audit(conn, session.org_id, 'auth.mfa_enable_failed', session.user_id, ip, 'user', session.user_id)
+            audit(conn, session.own_org_id, 'auth.mfa_enable_failed', session.user_id, ip, 'user', session.user_id)
         else:
             # last_totp_step con el paso de este código: el mismo código no sirve después para iniciar sesión.
             conn.execute('UPDATE users SET totp_secret_enc = %s, mfa_enabled_at = now(), last_totp_step = %s, '
                          'updated_at = now() WHERE id = %s',
                          (totp.encrypt_secret(secret, session.user_id), step, session.user_id))
-            audit(conn, session.org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
+            audit(conn, session.own_org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
             # Las demás sesiones de la cuenta entraron sin el segundo factor: se cierran y solo queda la que activó.
             # Va antes del commit y con la fila bloqueada: si Valkey falla, el alta no se guarda y se puede repetir.
             sessions.delete_others(session.user_id, session.token)
@@ -276,28 +297,30 @@ def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
     data = sessions.get(token)
     if data:
-        with transaction(data['org_id']) as conn:
-            audit(conn, data['org_id'], 'auth.logout', data['user_id'], client_ip(request), 'user', data['user_id'])
+        # La bitácora va en la empresa de la cuenta, aunque un superadmin cierre sesión desde otra (RC-332).
+        home = data.get('home_org_id') or data['org_id']
+        with transaction(home) as conn:
+            audit(conn, home, 'auth.logout', data['user_id'], client_ip(request), 'user', data['user_id'])
     sessions.delete(token)
     response.delete_cookie(COOKIE, path='/', httponly=True, secure=COOKIE_SECURE, samesite='lax')
 
 
 @router.get('/me', summary='Usuario de la sesión')
 def me(session: Session = Depends(current_session)):
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         user = _user(conn, session.user_id)
     if not user:  # se desactivó la cuenta con la sesión abierta
         sessions.delete(session.token)
         raise HTTPException(401, 'Tu sesión terminó. Vuelve a iniciar sesión.')
-    return dict(user, **sessions.limits(session.created_at))
+    return dict(user, **platform_view(session, user), **sessions.limits(session.created_at))
 
 
 @router.post('/password', status_code=204, summary='Cambia la contraseña del usuario de la sesión')
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         row = conn.execute('SELECT password_hash FROM users WHERE id = %s', (session.user_id,)).fetchone()
         if not row or not passwords.verify_password(row['password_hash'], body.current_password, session.user_id):
             raise HTTPException(400, 'La contraseña actual no es correcta.')
         conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
                      (passwords.hash_password(body.new_password, session.user_id), session.user_id))
-        audit(conn, session.org_id, 'auth.password_changed', session.user_id, client_ip(request), 'user', session.user_id)
+        audit(conn, session.own_org_id, 'auth.password_changed', session.user_id, client_ip(request), 'user', session.user_id)

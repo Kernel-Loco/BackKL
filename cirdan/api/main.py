@@ -21,6 +21,7 @@ from cirdan.auth.deps import Session, current_session
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
+from cirdan.api.plataforma import router as platform_router
 from cirdan.api.v1 import router as v1_router
 from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
@@ -90,6 +91,7 @@ async def error_no_manejado(request: Request, exc: Exception):
 app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(api_keys_router)
+app.include_router(platform_router)
 app.include_router(v1_router)
 
 # Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas

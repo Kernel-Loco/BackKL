@@ -5,11 +5,13 @@ from fastapi import HTTPException, Request
 
 from cirdan.auth import api_keys, sessions
 from cirdan.config import config
+from cirdan.db import transaction
 
 COOKIE = 'lt_session'
 COOKIE_SECURE = config('COOKIE_SECURE', 'false').lower() == 'true'  # true en producción (HTTPS)
 ROL_LLAVE = 'api_key'  # no es un rol de la base: ningún require_roles() lo deja pasar
 LLAVE_INVALIDA = 'La llave de API no es válida, venció o fue revocada.'
+SESION_TERMINADA = 'Tu sesión terminó. Vuelve a iniciar sesión.'
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,29 @@ class Session:
     domain_id: str | None = None    # solo con una llave de API de un dominio: lo único que puede leer
     api_key_id: str | None = None   # solo con llave de API
     created_at: int | None = None   # solo con sesión: cuándo se creó en Valkey, para el tope de 8 h
+    home_org_id: str | None = None  # solo con sesión: la empresa de la cuenta. org_id es la activa (RC-332)
+    platform_admin: bool = False    # solo con sesión: superadmin de la plataforma al iniciarla (RC-332)
+
+    @property
+    def own_org_id(self) -> str:
+        """La empresa de la cuenta. La fila del usuario (contraseña, MFA, /me) solo se ve con RLS de esta empresa."""
+        return self.home_org_id or self.org_id
+
+    @property
+    def acting_elsewhere(self) -> bool:
+        """Si un superadmin trabaja en una empresa que no es la suya. Ahí no puede quedar como autor de nada: las FK
+        compuestas de la 001 piden un usuario de esa empresa."""
+        return self.home_org_id is not None and self.org_id != self.home_org_id
+
+    @property
+    def audit_user_id(self) -> str | None:
+        """actor_user_id para audit(): None en una empresa ajena, donde el autor va en `audit_platform`."""
+        return None if self.acting_elsewhere else self.user_id
+
+    @property
+    def audit_platform(self) -> dict | None:
+        """El superadmin que actúa en una empresa ajena, para audit(..., platform=...). None en su propia empresa."""
+        return {'user_id': self.user_id, 'email': self.email} if self.acting_elsewhere else None
 
 
 def current_session(request: Request) -> Session:
@@ -29,9 +54,22 @@ def current_session(request: Request) -> Session:
     token = request.cookies.get(COOKIE)
     data = sessions.get(token)
     if not data:
-        raise HTTPException(401, 'Tu sesión terminó. Vuelve a iniciar sesión.')
-    return Session(token=token, user_id=data['user_id'], org_id=data['org_id'], role=data['role'], email=data['email'],
-                   created_at=data.get('created_at'))
+        raise HTTPException(401, SESION_TERMINADA)
+    session = Session(token=token, user_id=data['user_id'], org_id=data['org_id'], role=data['role'], email=data['email'],
+                      created_at=data.get('created_at'), home_org_id=data.get('home_org_id'),
+                      platform_admin=bool(data.get('platform_admin')))
+    if session.acting_elsewhere and not is_platform_admin(session.user_id):
+        # Se le quitó el permiso, se desactivó la cuenta o se suspendió su empresa con la sesión abierta en una empresa
+        # ajena: la sesión se cierra en la siguiente petición y no espera a las 8 h.
+        sessions.delete(token)
+        raise HTTPException(401, SESION_TERMINADA)
+    return session
+
+
+def is_platform_admin(user_id) -> bool:
+    """Lo dice la base en cada llamada (migración 017), no la sesión: cirdan_app no puede leer platform_admins."""
+    with transaction() as conn:
+        return bool(conn.execute('SELECT public.is_platform_admin(%s) AS ok', (user_id,)).fetchone()['ok'])
 
 
 def session_or_api_key(request: Request) -> Session:
