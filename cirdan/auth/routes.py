@@ -56,7 +56,7 @@ def _start_session(response, conn, user, ip, via):
     audit(conn, user['organization_id'], 'auth.login_succeeded', user['id'], ip, 'user', user['id'], {'via': via})
     token = sessions.create({'user_id': user['id'], 'org_id': user['organization_id'], 'role': user['role'], 'email': user['email']})
     response.set_cookie(COOKIE, token, httponly=True, secure=COOKIE_SECURE, samesite='lax', path='/')
-    return _user(conn, user['id'])
+    return dict(_user(conn, user['id']), **sessions.limits())
 
 
 def _clear_fails(email):
@@ -171,7 +171,7 @@ def me(session: Session = Depends(current_session)):
     if not user:  # se desactivó la cuenta con la sesión abierta
         sessions.delete(session.token)
         raise HTTPException(401, 'Tu sesión terminó. Vuelve a iniciar sesión.')
-    return user
+    return dict(user, **sessions.limits(session.created_at))
 
 
 @router.post('/password', status_code=204, summary='Cambia la contraseña del usuario de la sesión')

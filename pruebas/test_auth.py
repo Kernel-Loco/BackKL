@@ -69,6 +69,21 @@ class Login(unittest.TestCase):
         self.assertNotIn('password_hash', me)
         self.assertNotIn('totp_secret_enc', me)
 
+    def test_3b_me_dice_la_inactividad_y_lo_que_falta_para_las_8_horas(self):
+        # RC-328: sin estos dos campos el portal nunca da su aviso propio de las 8 h (src/lib/session/shared.ts)
+        client = sesion.login(JORDAN)
+        code, me = client.get(AUTH + '/me')
+        self.assertEqual(code, 200)
+        self.assertEqual(me['idle_timeout_seconds'], 15 * 60)
+        primero = me['absolute_expires_in_seconds']
+        self.assertTrue(8 * 3600 - 60 < primero <= 8 * 3600, primero)
+        time.sleep(2.2)
+        code, me = client.get(AUTH + '/me')
+        self.assertEqual(code, 200)
+        self.assertEqual(me['idle_timeout_seconds'], 15 * 60, 'la inactividad se renueva en cada petición')
+        self.assertLessEqual(me['absolute_expires_in_seconds'], primero - 2,
+                             'el tope de 8 h se cuenta desde que se creó la sesión, no se renueva')
+
     def test_4_un_codigo_no_se_puede_usar_dos_veces(self):
         first = Client()
         _, body = first.post(AUTH + '/login', {'email': MAYA, 'password': PASSWORD})
