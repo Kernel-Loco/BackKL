@@ -6,6 +6,7 @@ la misma forma que la real (-oJ -cs) y los avisos de stderr.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from cirdan.recolectores.contrato import Activo  # noqa: E402
 BINARIO = '/usr/local/bin/subfinder'
 RAIZ = Path(__file__).resolve().parents[1]
 SEMILLA = RAIZ / 'db' / 'semillas' / '005_subfinder_y_limites.sql'
+SEMILLA_016 = RAIZ / 'db' / 'semillas' / '016_subfinder_commoncrawl.sql'
 PROHIBIDAS = ('-active', '-nW', '-oI', '-ip', '-all', '-r', '-rL', '-recursive', '-silent')
 
 
@@ -166,7 +168,7 @@ class Fallas(unittest.TestCase):
         res = por_ejecutar(SubfinderSimulado(salida=[], stderr=stderr))
         self.assertEqual(res.estado, 'failed')
         self.assertIn('ninguna', res.error)
-        self.assertEqual((res.activos, res.consultas), ([], len(subfinder.FUENTES_SUBFINDER)))
+        self.assertEqual((res.activos, res.consultas), ([], subfinder.MAX_CONSULTAS))
         self.assertNotIn('http', res.error)
 
     def test_3_codigo_de_salida_distinto_de_0(self):
@@ -179,7 +181,7 @@ class Fallas(unittest.TestCase):
         res = por_ejecutar(SubfinderSimulado(lanza=subprocess.TimeoutExpired(['subfinder'], subfinder.TIMEOUT)))
         self.assertEqual(res.estado, 'failed')
         self.assertIn('no terminó en %d s' % subfinder.TIMEOUT, res.error)
-        self.assertEqual(res.consultas, len(subfinder.FUENTES_SUBFINDER))
+        self.assertEqual(res.consultas, subfinder.MAX_CONSULTAS)
 
     def test_5_sin_binario_no_corre_nada(self):
         simulado = SubfinderSimulado()
@@ -239,10 +241,21 @@ class Proceso(unittest.TestCase):
         self.assertEqual(opciones['stdin'], subprocess.DEVNULL)
         self.assertGreaterEqual(opciones['timeout'], subfinder.MAX_MINUTOS * 60)
 
-    def test_2_la_lista_blanca_no_trae_las_excluidas(self):
-        self.assertEqual(len(subfinder.FUENTES_SUBFINDER), 8)
+    def test_2_la_lista_blanca_es_solo_commoncrawl_y_las_19_rechazadas_van_excluidas(self):
+        """Revisión de términos del 15 nov (decisión 6 de docs/servicios_externos.md): solo pasa commoncrawl."""
+        self.assertEqual(subfinder.FUENTES_SUBFINDER, ('commoncrawl',))
         self.assertFalse(set(subfinder.FUENTES_SUBFINDER) & set(subfinder.EXCLUIDAS))
         self.assertTrue({'crtsh', 'certspotter', 'censys', 'hudsonrock', 'intelx', 'leakix'} <= set(subfinder.EXCLUIDAS))
+        rechazadas = {'anubis', 'crtname', 'digitorus', 'hackertarget', 'rapiddns', 'subdomaincenter', 'submd', 'thc',
+                      'alienvault', 'driftnet', 'urlscan', 'waybackarchive', 'sitedossier', 'shodanct', 'merklemap',
+                      'reconcloud', 'riddler', 'threatcrowd', 'threatminer'}
+        self.assertEqual(len(rechazadas), 19)
+        self.assertTrue(rechazadas <= set(subfinder.EXCLUIDAS))
+        self.assertEqual(len(subfinder.EXCLUIDAS), len(set(subfinder.EXCLUIDAS)))
+
+    def test_5_lleva_v_para_que_subfinder_escriba_los_errores_de_sus_fuentes(self):
+        """subfinder 2.17.0 solo escribe 'Encountered an error with source' con -v (probado con el binario)."""
+        self.assertIn('-v', subfinder.comando(BINARIO, 'acme-demo.mx'))
 
     def test_3_el_entorno_solo_trae_path_home_y_xdg_en_una_carpeta_temporal(self):
         simulado = SubfinderSimulado()
@@ -278,7 +291,7 @@ class GrabarYReproducir(unittest.TestCase):
             carpeta.mkdir()
             (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')  # de una grabación anterior
             grabado, cliente = recolectar(SubfinderSimulado(stderr=stderr), 'grabar', carpeta, nueva=True)
-            self.assertEqual(cliente.consultas, len(subfinder.FUENTES_SUBFINDER))
+            self.assertEqual(cliente.consultas, subfinder.MAX_CONSULTAS)
             self.assertFalse((carpeta / 'viejo.json').exists())
             self.assertIsNotNone(contrato.Grabadora.inicio(carpeta))
             archivo = json.loads((carpeta / 'subfinder_acme-demo.mx.json').read_text(encoding='utf-8'))
@@ -308,7 +321,7 @@ class GrabarYReproducir(unittest.TestCase):
     def test_4_por_ejecutar_graba_y_reproduce(self):
         with tempfile.TemporaryDirectory() as d:
             res = por_ejecutar(SubfinderSimulado(), 'grabar', d)
-            self.assertEqual((res.estado, res.consultas), ('succeeded', len(subfinder.FUENTES_SUBFINDER)))
+            self.assertEqual((res.estado, res.consultas), ('succeeded', subfinder.MAX_CONSULTAS))
             otra = por_ejecutar(sin_proceso, 'reproducir', d, binario=None)
         self.assertEqual((otra.estado, otra.consultas), ('succeeded', 0))
         self.assertEqual(otra.activos, res.activos)
@@ -323,8 +336,9 @@ class GrabarYReproducir(unittest.TestCase):
 
 class Consultas(unittest.TestCase):
 
-    def test_1_una_por_fuente_en_vivo_y_ninguna_al_reproducir(self):
-        self.assertEqual(subfinder.MAX_CONSULTAS, len(subfinder.FUENTES_SUBFINDER))
+    def test_1_las_6_peticiones_de_commoncrawl_en_vivo_y_ninguna_al_reproducir(self):
+        """collinfo.json más un CDX por cada uno de los últimos 5 años (medido con el binario y un servidor falso)."""
+        self.assertEqual(subfinder.MAX_CONSULTAS, 6)
         res, _ = recolectar(SubfinderSimulado())
         self.assertEqual(res.consultas, subfinder.MAX_CONSULTAS)
         res = por_ejecutar(SubfinderSimulado())
@@ -347,14 +361,112 @@ def fila_de_la_semilla(code):
     return None
 
 
-class Semilla(unittest.TestCase):
-    """Lectura estática de db/semillas/005_subfinder_y_limites.sql, sin base."""
+def cuerpo(stderr_404_en=None, otro_error=None):
+    """stderr de subfinder -v como lo escribe 2.17.0: el 404 del CDX de un año o cualquier otro error."""
+    lineas = ['[INF] Enumerating subdomains for acme-demo.mx']
+    if stderr_404_en:
+        lineas += ['[DBG] Response for failed request against %s:' % stderr_404_en,
+                   'No Captures found for: *.acme-demo.mx',
+                   '[WRN] Encountered an error with source commoncrawl: unexpected status code 404 received from %s'
+                   % stderr_404_en]
+    if otro_error:
+        lineas.append('[WRN] Encountered an error with source commoncrawl: %s' % otro_error)
+    return '\n'.join(lineas)
 
-    def test_1_subfinder_va_apagado_y_con_50_corridas_por_dia(self):
+
+CDX = 'https://index.commoncrawl.org/CC-MAIN-2024-40-index?url=*.acme-demo.mx'
+
+
+class SinCapturas(unittest.TestCase):
+    """El 404 del CDX de commoncrawl ('No Captures found') no es una fuente caída."""
+
+    def test_1_un_404_del_cdx_sigue_succeeded_con_su_aviso(self):
+        res, _ = recolectar(SubfinderSimulado(stderr=cuerpo(CDX)))
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertEqual(len(res.activos), 3)
+        self.assertEqual(res.avisos, [subfinder.SIN_CAPTURAS])
+
+    def test_2_sin_capturas_de_ningun_ano_es_0_nombres_y_se_graba(self):
+        with tempfile.TemporaryDirectory() as d:
+            res = por_ejecutar(SubfinderSimulado(salida=[], stderr=cuerpo(CDX)), 'grabar', d)
+            self.assertEqual((res.estado, res.activos, res.avisos), ('succeeded', [], [subfinder.SIN_CAPTURAS]))
+            otra = por_ejecutar(sin_proceso, 'reproducir', d, binario=None)
+        self.assertEqual((otra.estado, otra.avisos), ('succeeded', [subfinder.SIN_CAPTURAS]))
+
+    def test_3_otro_error_de_commoncrawl_si_es_caida(self):
+        for error in ('unexpected status code 503 received from %s' % CDX,
+                      'unexpected status code 404 received from https://index.commoncrawl.org/collinfo.json',
+                      'Get "https://index.commoncrawl.org/collinfo.json": dial tcp: lookup index.commoncrawl.org: '
+                      'no such host'):
+            with self.subTest(error=error):
+                res = por_ejecutar(SubfinderSimulado(salida=[], stderr=cuerpo(otro_error=error)))
+                self.assertEqual(res.estado, 'failed')
+                self.assertNotIn('http', res.error)
+
+    def test_4_un_404_y_una_caida_juntos_quedan_como_caida(self):
+        res = por_ejecutar(SubfinderSimulado(salida=[], stderr=cuerpo(CDX, 'unexpected status code 503 received from '
+                                                                         + CDX)))
+        self.assertEqual(res.estado, 'failed')
+
+
+class Semilla(unittest.TestCase):
+    """Lectura estática de las semillas 005 y 016, sin base."""
+
+    def test_1_la_005_lo_siembra_apagado_con_400(self):
         fila = fila_de_la_semilla('subfinder')
         self.assertIsNotNone(fila, 'la semilla 005 no trae la fila de subfinder en su INSERT INTO data_sources')
-        self.assertEqual(fila['enabled'].lower(), 'false')  # apagado hasta RC-40, la grabación y el contenedor
-        self.assertEqual(int(fila['daily_limit']), 50 * subfinder.MAX_CONSULTAS)
+        self.assertEqual(fila['enabled'].lower(), 'false')
+        self.assertEqual(int(fila['daily_limit']), 400)  # 50 corridas de las 8 fuentes de entonces
+
+    def test_2_la_016_lo_prende_con_50_corridas_por_dia_sin_pisar_un_limite_puesto_a_mano(self):
+        texto = re.sub(r'--[^\n]*', '', SEMILLA_016.read_text(encoding='utf-8'))
+        cambios = re.findall(r"UPDATE\s+data_sources\s+SET\s+(\w+)\s*=\s*(\w+)\s+WHERE\s+code\s*=\s*'subfinder'"
+                             r"\s+AND\s+(\w+)\s*=\s*(\w+)\s*;", texto, re.IGNORECASE)
+        self.assertEqual(sorted(cambios), [('daily_limit', str(50 * subfinder.MAX_CONSULTAS), 'daily_limit', '400'),
+                                           ('enabled', 'true', 'enabled', 'false')])
+        self.assertIn("RAISE EXCEPTION", texto)   # sin la fila de la 005 falla
+        self.assertRegex(texto, r'daily_limit\s*<\s*%d' % subfinder.MAX_CONSULTAS)
+        self.assertTrue(texto.lstrip().startswith("SET client_encoding = 'UTF8';"))
+        self.assertEqual(sorted(p.name[:3] for p in SEMILLA_016.parent.glob('*.sql')).count('016'), 1)
+
+
+@unittest.skipUnless((RAIZ / 'Dockerfile').exists(), 'sin Dockerfile: dentro de la imagen no se copia')
+class Imagen(unittest.TestCase):
+    """El Dockerfile le da respuestas_grabadas/ al usuario cirdan y nada más (lectura estática)."""
+
+    def test_1_chown_solo_de_respuestas_grabadas_antes_de_user_cirdan(self):
+        texto = (RAIZ / 'Dockerfile').read_text(encoding='utf-8')
+        chown = re.search(r'chown -R cirdan:cirdan (\S+)', texto)
+        self.assertIsNotNone(chown, 'el Dockerfile no le da respuestas_grabadas/ al usuario cirdan')
+        self.assertEqual(chown.group(1), 'cirdan/recolectores/respuestas_grabadas')
+        self.assertEqual(len(re.findall(r'chown', texto)), 1)
+        self.assertLess(texto.index('COPY cirdan/ cirdan/'), chown.start())
+        self.assertLess(chown.start(), texto.index('USER cirdan'))
+
+
+@unittest.skipUnless(os.environ.get('INTEGRACION_SUBFINDER') == '1' or shutil.which('subfinder'),
+                     'sin subfinder: corre dentro del contenedor con INTEGRACION_SUBFINDER=1')
+class Integracion(unittest.TestCase):
+    """Con el binario real de la imagen y sin salir a la red: -proxy apunta a un puerto cerrado de 127.0.0.1, así
+    subfinder no resuelve ni conecta a commoncrawl (probado con un servidor falso, que no recibió ninguna petición)."""
+
+    def ejecutar_sin_red(self, comando_, **opciones):
+        return subprocess.run(list(comando_) + ['-proxy', 'http://127.0.0.1:9'], **opciones)
+
+    def test_1_sin_red_queda_failed_y_no_pasa_por_0_subdominios(self):
+        binario = shutil.which('subfinder')
+        self.assertIsNotNone(binario, 'a la imagen le falta subfinder')
+        cliente = subfinder.ClienteSubfinder(ejecutar=self.ejecutar_sin_red, binario=binario, timeout=60)
+        with self.assertRaises(contrato.FuenteNoResponde) as error:
+            cliente.enumerar('acme-demo.mx')
+        self.assertIn('commoncrawl', str(error.exception))
+
+    def test_2_el_usuario_cirdan_escribe_en_respuestas_grabadas_y_no_en_el_codigo(self):
+        if os.geteuid() == 0:
+            self.skipTest('corre como root: no prueba los permisos del usuario cirdan')
+        self.assertTrue(os.access(subfinder.CARPETA_GRABADAS, os.W_OK))
+        self.assertFalse(os.access(Path(subfinder.__file__), os.W_OK))
+        self.assertFalse(os.access(Path(subfinder.__file__).parent, os.W_OK))
 
 
 if __name__ == '__main__':

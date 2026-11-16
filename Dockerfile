@@ -83,8 +83,12 @@ COPY datos/geo/ datos/geo/
 
 COPY cirdan/ cirdan/
 
-# Sin privilegios de root dentro del contenedor.
-RUN useradd --system --uid 10001 cirdan
+# Sin privilegios de root dentro del contenedor. El código sigue siendo de root y el usuario cirdan no lo puede
+# cambiar. Solo respuestas_grabadas/ es suya, para que --modo grabar escriba ahí (subfinder solo corre en la imagen,
+# RC-184). Una grabación hecha así se pierde al recrear el contenedor: para guardarla se monta la carpeta de la
+# fuente, como dice el README.
+RUN useradd --system --uid 10001 cirdan \
+    && chown -R cirdan:cirdan cirdan/recolectores/respuestas_grabadas
 USER cirdan
 
 EXPOSE 8000

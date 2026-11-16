@@ -4,16 +4,17 @@ subfinder (ProjectDiscovery, MIT) junta subdominios de fuentes pasivas públicas
 dominio: no resuelve DNS, no hace fuerza bruta y no prueba comodines. Este recolector lo corre como proceso aparte
 y devuelve solo activos 'subdomain', con las mismas llaves que los de ct_logs donde aplican: 'fuente' ('subfinder')
 y 'origen' (las fuentes de subfinder que vieron el nombre, en orden). No emite hallazgos (CODIGOS vacío) y no es
-complemento de ct_logs: tiene su fila en data_sources, sus reintentos y su límite diario. La semilla 005 la deja
-apagada (enabled = false) hasta que #8 (RC-40) revise los términos de las 8 fuentes, haya una grabación de
-olmardo.com y el contenedor pueda escribir respuestas_grabadas/.
+complemento de ct_logs: tiene su fila en data_sources, sus reintentos y su límite diario. La semilla 005 la sembró
+apagada y la 016 la prende con una sola fuente, commoncrawl, la única de las 20 revisadas el 15 nov cuyos términos
+permiten el uso automático y mostrar sus datos a terceros (decisión 6 de docs/servicios_externos.md).
 
 Modo pasivo y nada más:
 - lista blanca fija con -s (FUENTES_SUBFINDER) y las EXCLUIDAS con -es como cinturón, por si una versión nueva cambia
   la lista por omisión,
 - nunca -active, -nW, -oI, -ip, -all, -r, -rL ni -recursive (resolverían DNS o sumarían fuentes que no se revisaron),
 - -duc: sin la consulta de versión a api.pdtm.sh, que manda un identificador de la máquina y no es fuente pública,
-- sin -silent: así los avisos de fuentes caídas salen en stderr y una corrida sin red no pasa por 0 subdominios,
+- con -v y sin -silent: subfinder 2.17.0 solo escribe 'Encountered an error with source ...' en stderr con -v. Sin él
+  una corrida sin red sale con 0 y sin ningún aviso, y pasaría por 0 subdominios (y al grabar pisaría la grabación),
 - entorno limpio: solo PATH, HOME y XDG_CONFIG_HOME en una carpeta temporal que se borra al terminar. subfinder lee
   llaves de variables <FUENTE>_API_KEY y escribe su config.yaml al arrancar, así que no hereda nada de la API.
 
@@ -26,13 +27,16 @@ se mide cuánto tardó y, si llegó a ese tiempo, el resultado lleva el aviso IN
 
 Modos: 'vivo' corre subfinder; 'grabar' además guarda la salida ya leída (líneas y avisos) en
 cirdan/recolectores/respuestas_grabadas/subfinder/<dominio>/ con la Grabadora del contrato (#13); 'reproducir' solo
-lee esa grabación y no ejecuta nada. No tiene línea de comandos propia. Hoy no se puede grabar dentro del contenedor:
-el Dockerfile copia cirdan/ como root y el usuario cirdan no escribe en respuestas_grabadas/ (pausado, fuera de
-RC-184).
+lee esa grabación y no ejecuta nada. No tiene línea de comandos propia. En la imagen, el usuario cirdan es dueño de
+respuestas_grabadas/ (Dockerfile), así que puede grabar dentro del contenedor.
 
-Consultas del límite diario (#13b): una 'consulta' de subfinder es una fuente consultada en una corrida, no una
-petición HTTP. rapiddns y thc paginan y subfinder no dice cuántas peticiones hizo sin -stats, que no se lee. Cada
-corrida en vivo o al grabar cuenta len(FUENTES_SUBFINDER), y 0 al reproducir.
+commoncrawl (pkg/subscraping/sources/commoncrawl/commoncrawl.go de v2.17.0) pide collinfo.json y luego el CDX de un
+índice por cada uno de los últimos 5 años, en un orden al azar. Si un año responde 404 ('No Captures found': ese
+índice no tiene capturas del dominio) deja de buscar en los años que faltan. Ese 404 no es una fuente caída: el
+resultado sigue, con el aviso SIN_CAPTURAS. Cualquier otro error sí lo es.
+
+Consultas del límite diario (#13b): peticiones HTTP, como en las demás fuentes. Cada corrida en vivo o al grabar
+cuenta MAX_CONSULTAS (las 6 de commoncrawl, el máximo, porque subfinder no dice cuántas hizo), y 0 al reproducir.
 """
 import json
 import os
@@ -51,23 +55,38 @@ CARPETA_GRABADAS = RAIZ_GRABADAS / 'subfinder'
 # Solo activos: ningún código de regla (pruebas/test_catalogo_reglas.py acepta el dict vacío).
 CODIGOS = {}
 
-# Fuentes pasivas sin llave que se usan. Todas leen índices públicos y ninguna resuelve DNS.
-FUENTES_SUBFINDER = ('anubis', 'crtname', 'digitorus', 'hackertarget', 'rapiddns', 'subdomaincenter', 'submd', 'thc')
+# Fuentes pasivas sin llave que se usan: solo las que pasan la regla de la decisión 6 de docs/servicios_externos.md
+# (sus términos publicados permiten el uso automático y mostrar sus datos a terceros). commoncrawl no va por omisión
+# en subfinder (IsDefault false): solo corre porque se pide por nombre con -s.
+FUENTES_SUBFINDER = ('commoncrawl',)
 
-# Se excluyen siempre, aunque una versión nueva las ponga por omisión:
+# Se excluyen siempre, aunque una versión nueva las ponga por omisión (subfinder acepta en -es nombres que no conoce):
 # - crtsh y certspotter: duplican a #14 (ct_logs) y se saltarían su límite diario. crtsh además abre PostgreSQL sin TLS.
+#   shodanct y merklemap también son Certificate Transparency.
 # - censys: sus términos no permiten dar sus datos a terceros.
 # - hudsonrock, intelx y leakix: datos de equipos infectados, filtraciones y fugas. Van contra las reglas 2 y 8.
-EXCLUIDAS = ('crtsh', 'certspotter', 'censys', 'hudsonrock', 'intelx', 'leakix')
+# - Revisadas el 15 nov sin pasar la regla: anubis, crtname, digitorus, hackertarget, rapiddns, subdomaincenter, submd
+#   y thc (las 8 de antes), alienvault, driftnet y urlscan (sus términos lo prohíben), waybackarchive (solo para
+#   investigación), sitedossier (sin términos) y reconcloud, riddler, threatcrowd y threatminer (sitio caído).
+EXCLUIDAS = ('crtsh', 'certspotter', 'censys', 'hudsonrock', 'intelx', 'leakix',
+             'anubis', 'crtname', 'digitorus', 'hackertarget', 'rapiddns', 'subdomaincenter', 'submd', 'thc',
+             'alienvault', 'driftnet', 'urlscan', 'waybackarchive', 'sitedossier', 'shodanct', 'merklemap',
+             'reconcloud', 'riddler', 'threatcrowd', 'threatminer')
 
-MAX_CONSULTAS = len(FUENTES_SUBFINDER)   # una consulta por fuente consultada en cada corrida (límite diario, #13b)
+ANIOS_COMMONCRAWL = 5        # maxYearsBack de commoncrawl.go: un CDX por año
+MAX_CONSULTAS = 1 + ANIOS_COMMONCRAWL    # collinfo.json más un CDX por año: peticiones HTTP de una corrida (#13b)
 TIMEOUT_FUENTE = 30          # segundos por petición HTTP de cada fuente (-timeout)
 MAX_MINUTOS = 5              # minutos de toda la enumeración (-max-time)
 TIMEOUT = 360                # segundos del proceso completo: los 5 minutos más margen para arrancar y escribir
 CONSULTA = 'subfinder:'      # consulta de la grabadora: subfinder_<dominio>.json
 INCOMPLETO = 'subfinder: la lista puede estar incompleta (llegó a su tiempo máximo)'  # cortó por -max-time
+SIN_CAPTURAS = ('subfinder: commoncrawl no tiene capturas del dominio en uno de los años que revisó y no buscó en los '
+                'que faltaban (la lista puede estar incompleta)')
 
-FALLA_FUENTE = re.compile(r'Encountered an error with source ([A-Za-z0-9_-]{1,40})')
+FALLA_FUENTE = re.compile(r'Encountered an error with source ([A-Za-z0-9_-]{1,40}): ([^\n]*)')
+# El 404 del CDX de commoncrawl: el índice de ese año no tiene capturas del dominio.
+CDX_SIN_CAPTURAS = re.compile(r'unexpected status code 404 received from https://index\.commoncrawl\.org/'
+                              r'CC-MAIN-[0-9]{4}-[0-9]{2}-index\?')
 NOMBRE_FUENTE = re.compile(r'[a-z0-9_-]{1,40}')
 
 
@@ -82,9 +101,9 @@ def _ejecutar(comando, **opciones):
 
 def comando(binario, dominio):
     """La línea de subfinder para un dominio. Siempre pasiva: lista blanca, excluidas, JSON con todas las fuentes de
-    cada nombre (-cs), sin color y sin consulta de versión."""
+    cada nombre (-cs), sin color, sin consulta de versión y con -v para que escriba el error de cada fuente."""
     return [binario, '-d', dominio, '-s', ','.join(FUENTES_SUBFINDER), '-es', ','.join(EXCLUIDAS), '-oJ', '-cs', '-nc',
-            '-duc', '-timeout', str(TIMEOUT_FUENTE), '-max-time', str(MAX_MINUTOS)]
+            '-duc', '-v', '-timeout', str(TIMEOUT_FUENTE), '-max-time', str(MAX_MINUTOS)]
 
 
 def _cuantos(n, singular, plural):
@@ -108,7 +127,9 @@ def leer_salida(stdout, stderr):
     """{'lineas': [{host, input, sources}], 'avisos': [...], 'caidas': [...]} de una corrida de subfinder.
 
     Cada línea de stdout es un JSON con host, input y sources. Las que no son JSON se saltan con un aviso que dice
-    cuántas. De stderr solo se toma el nombre de cada fuente que no respondió, sin URLs ni el texto del error."""
+    cuántas. De stderr solo se toma el nombre de cada fuente que no respondió, sin URLs ni el texto del error. El 404
+    del CDX de commoncrawl no la cuenta como caída: deja el aviso SIN_CAPTURAS. Con -v, stderr también trae el cuerpo
+    de cada respuesta fallida, que no se lee."""
     lineas, raras = [], 0
     for texto in (stdout or '').splitlines():
         texto = texto.strip()
@@ -125,12 +146,16 @@ def leer_salida(stdout, stderr):
         entrada = linea.get('input')
         lineas.append({'host': _texto(linea['host']), 'input': _texto(entrada) if isinstance(entrada, str) else '',
                        'sources': _fuentes(linea)})
-    caidas = []
-    for nombre in FALLA_FUENTE.findall(stderr or ''):
+    caidas, sin_capturas = [], False
+    for nombre, error in FALLA_FUENTE.findall(stderr or ''):
         nombre = nombre.lower()
-        if nombre not in caidas:
+        if nombre == 'commoncrawl' and CDX_SIN_CAPTURAS.match(error):
+            sin_capturas = True
+        elif nombre not in caidas:
             caidas.append(nombre)
     avisos = ['subfinder: la fuente %s no respondió' % n for n in caidas]
+    if sin_capturas and 'commoncrawl' not in caidas:
+        avisos.append(SIN_CAPTURAS)
     if raras:
         avisos.append('subfinder: se %s %s que no %s JSON' % (
             'saltó' if raras == 1 else 'saltaron', _cuantos(raras, 'línea', 'líneas'), 'es' if raras == 1 else 'son'))
@@ -142,7 +167,7 @@ class ClienteSubfinder:
 
     `ejecutar(comando, **opciones)`, `binario` y `cronometro` se inyectan en las pruebas. Por omisión son
     subprocess.run, el primer subfinder del PATH y time.monotonic. `reloj` es el de la Grabadora (fecha de grabación).
-    `consultas` suma una por fuente de la lista blanca cada vez que el proceso arranca."""
+    `consultas` suma MAX_CONSULTAS cada vez que el proceso arranca."""
 
     def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, ejecutar=None, binario=None, nueva=False, reloj=None,
                  timeout=TIMEOUT, cronometro=None):
@@ -166,7 +191,7 @@ class ClienteSubfinder:
             config = os.path.join(casa, 'config')
             os.makedirs(config)
             entorno = {'PATH': os.environ.get('PATH', os.defpath), 'HOME': casa, 'XDG_CONFIG_HOME': config}
-            self.consultas += len(FUENTES_SUBFINDER)
+            self.consultas += MAX_CONSULTAS
             inicio = self.cronometro()
             try:
                 hecho = self.ejecutar(comando(binario, dominio), capture_output=True, text=True, encoding='utf-8',
@@ -181,7 +206,7 @@ class ClienteSubfinder:
             raise FuenteNoResponde('subfinder terminó con código %s' % hecho.returncode)
         datos = leer_salida(hecho.stdout, hecho.stderr)
         if set(FUENTES_SUBFINDER) <= set(datos['caidas']):
-            raise FuenteNoResponde('subfinder: ninguna de sus %d fuentes respondió' % len(FUENTES_SUBFINDER))
+            raise FuenteNoResponde('subfinder: ninguna de sus fuentes respondió (%s)' % ', '.join(FUENTES_SUBFINDER))
         avisos = datos['avisos']
         if tardo >= MAX_MINUTOS * 60:  # -max-time cortó la enumeración y salió con 0: pueden faltar nombres
             avisos.append(INCOMPLETO)

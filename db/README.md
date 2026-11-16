@@ -45,6 +45,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `semillas/013_api_docs.sql` | Fuente `api_docs` (la actividad 9 del Anexo A: hasta 10 rutas fijas de documentación de APIs por sitio, solo GET), sembrada apagada, con `keep_raw_payload` = true y límite diario de 2640 consultas, 10 corridas de 264 (#63, RC-118). Necesita la migración 008 y la 015. Se enciende con otra semilla cuando el aviso de la actividad nueva esté dado a cada cliente |
 | `semillas/014_cupo_ct_logs.sql` | Sube el límite diario de `ct_logs` de 200 a 400 consultas, 11 corridas de 36, porque cada escaneo ya busca dominios parecidos en crt.sh (RC-226, #109). Solo cambia la fila si tiene el 200 de la 005 |
 | `semillas/015_organizacion_lowtide.sql` | Organización LowTide (plan Business) con lowtidesec.com, el dominio del producto, con su TXT verificado por DoH, su carta firmada por el titular y un solo admin, `equipo@lowtidesec.com`, con el hash de relleno que no abre nada (RC-329, #210). La contraseña y el MFA se ponen fuera del repo |
+| `semillas/016_subfinder_commoncrawl.sql` | Prende la fuente `subfinder`, que la 005 sembró apagada, con su única fuente, `commoncrawl`, y baja su límite diario de 400 a 300 consultas, 50 corridas de 6 peticiones HTTP (RC-184, #14b). Solo cambia el límite si tiene el 400 de la 005 y avisa con un WARNING si es menor que 6. Necesita la 005 y va después de reconstruir la API |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 25 tablas con filas y RLS, más el resumen de objetos |
@@ -57,8 +58,8 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 - RLS con ENABLE + FORCE en las 18 tablas por cliente. Las políticas comparan `organization_id` (o `id` en `organizations`) con `app_current_org()`, que devuelve `NULLIF(current_setting('app.current_org', true), '')::uuid`. Sin tenant no se ve nada.
 - Triggers: cadena de hashes SHA-256 por organización en `audit_log` (chain_seq, prev_hash, row_hash); bloqueo de UPDATE, DELETE y TRUNCATE en `audit_log`, `dns_txt_verifications`, `domain_scores` y `score_contributions`; `domain_authorizations` inmutable salvo `revoked_at`; `scans` exige autorización vigente y TXT `match` de la última hora; `scan_source_runs` rechaza `raw_payload` si la fuente tiene `keep_raw_payload = false` (HIBP).
 - Datos de Acme Demo (plan Starter), los mismos de las pantallas de Figma, más Beta Corp solo para la prueba de aislamiento. La semilla 002 agrega Grupo Olmardo (plan Business) con el dominio de prueba olmardo.com.
-- Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200, que la semilla 014 sube a 400, y `subfinder` 400 consultas por día UTC, de toda la plataforma. La semilla 006 pone 400 a `github`, donde cada intento a la API de GitHub y cada clon cuentan como consulta, y la semilla 007 pone 640 a `shodan`, que la semilla 011 sube a 1840, donde cuentan cada intento HTTP (Cert Spotter e InternetDB) y cada A. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una fuente de su lista blanca consultada en una corrida, no una petición HTTP.
-- `subfinder` queda sembrada apagada (`enabled = false`), como `censys` en la semilla 001. Se prende con otra semilla cuando #8 (RC-40) revise los términos de sus 8 fuentes, haya una grabación de `subfinder` para olmardo.com y el contenedor pueda escribir en `respuestas_grabadas/` (hoy no, el Dockerfile copia `cirdan/` como root). Así la demo en reproducir de S12 no la muestra fallida.
+- Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200, que la semilla 014 sube a 400, y `subfinder` 400 consultas por día UTC, que la semilla 016 baja a 300, de toda la plataforma. La semilla 006 pone 400 a `github`, donde cada intento a la API de GitHub y cada clon cuentan como consulta, y la semilla 007 pone 640 a `shodan`, que la semilla 011 sube a 1840, donde cuentan cada intento HTTP (Cert Spotter e InternetDB) y cada A. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una petición HTTP desde la semilla 016. Con la 005 sola era una fuente de su lista blanca consultada en una corrida.
+- La semilla 005 sembró `subfinder` apagada (`enabled = false`), como `censys` en la semilla 001, para que la demo en reproducir de S12 no la mostrara fallida. La semilla 016 la prende con una sola fuente, `commoncrawl`, la única de las 20 de subfinder 2.17.0 cuyos términos permiten el uso automático y mostrar sus datos a terceros (decisión 6 de `docs/servicios_externos.md`, 15 nov).
 - `github` sí queda sembrada encendida (semilla 006): un dominio sin organización declarada en `ORGS_GITHUB_DECLARADAS` no consulta nada, y en reproducir un dominio sin grabación no falla. En los dos casos la fuente queda `succeeded` con sus 2 códigos sin cobertura. La excepción es el cupo: el orquestador reserva las 16 consultas de `github` antes de llamar al recolector, así que si ya no caben en el límite del día la fuente queda `failed` por falta de cupo, aunque el dominio no tenga organización declarada.
 
 ## Cómo cargarla
@@ -118,6 +119,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/013_api_docs.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/014_cupo_ct_logs.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/015_organizacion_lowtide.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/016_subfinder_commoncrawl.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -196,7 +198,7 @@ Cada una corre en una sola transacción y se puede correr otra vez sin error: la
 docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limit, enabled FROM data_sources WHERE daily_limit IS NOT NULL ORDER BY code"
 ```
 
-Con las dos da `ct_logs|200|t` y `subfinder|400|f` (sembrada apagada). Con la semilla 014 `ct_logs` pasa a 400. Que las dos funciones tengan `search_path` fijo y no sean de PUBLIC lo revisan la sección [12] de `prueba_rls.sql` y la prueba 12 de `pruebas/test_aislamiento.py`. El día del contador es UTC, explícito en las funciones, y no el de México que fija `cirdan/db.py`: a las 18:00 de Monterrey empieza otro día de cupo. El día nunca retrocede: una reserva hecha en una transacción que empezó antes de medianoche UTC suma sobre el día nuevo si otra ya lo marcó. Margen aceptado: una corrida que reservó antes de medianoche UTC y ajusta después no toca el día nuevo, así que ese día puede pasar su límite hasta en el `MAX_CONSULTAS` de esa corrida.
+Con las dos da `ct_logs|200|t` y `subfinder|400|f` (sembrada apagada). Con la semilla 014 `ct_logs` pasa a 400, y con la 016 queda `subfinder|300|t`. Que las dos funciones tengan `search_path` fijo y no sean de PUBLIC lo revisan la sección [12] de `prueba_rls.sql` y la prueba 12 de `pruebas/test_aislamiento.py`. El día del contador es UTC, explícito en las funciones, y no el de México que fija `cirdan/db.py`: a las 18:00 de Monterrey empieza otro día de cupo. El día nunca retrocede: una reserva hecha en una transacción que empezó antes de medianoche UTC suma sobre el día nuevo si otra ya lo marcó. Margen aceptado: una corrida que reservó antes de medianoche UTC y ajusta después no toca el día nuevo, así que ese día puede pasar su límite hasta en el `MAX_CONSULTAS` de esa corrida.
 
 Para la fuente `github` (RC-50, #16) basta la semilla 006, que necesita la 008. El orden con la API no importa: la API anterior salta las fuentes sin recolector en `REGISTRO`, y la nueva sin la semilla no corre `github`, porque el escaneo solo toma las fuentes de `data_sources`. Va antes de reconstruir la API para que el primer escaneo ya la incluya:
 
@@ -233,6 +235,15 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT o.name, d.fqdn, 
 ```
 
 Da `LowTide|lowtidesec.com|verified`.
+
+Para prender `subfinder` (RC-184, #14b) va la semilla 016, que necesita la 005, y va **después** de reconstruir la API. La API anterior le pasa a subfinder las 8 fuentes de antes, que no pasaron la revisión de términos, así que con la 016 aplicada y esa API un escaneo las consultaría. La API nueva sin la 016 no cambia nada: la fuente sigue apagada. Si la demo corre en `reproducir`, antes de la 016 se graba olmardo.com (una consulta en vivo a Common Crawl, ver el README de la raíz) y se reconstruye la API para que la imagen copie la grabación: sin ella, `subfinder` queda `failed` en reproducir. Corre en una sola transacción y se puede correr otra vez sin error: solo prende la fila si está apagada y solo cambia el límite si tiene el 400 de la 005. Sin la fila de `subfinder` falla sin cambiar nada:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/016_subfinder_commoncrawl.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limit, enabled FROM data_sources WHERE code = 'subfinder'"
+```
+
+Da `subfinder|300|t`.
 
 Para el tope de 50 nombres de `shodan` (RC-55, #23) va la semilla 011, que necesita la 007. Va antes de reconstruir la API: con el tope nuevo una corrida reserva 184, y con el 640 de la 007 solo caben 3 corridas por día en el peor caso:
 
