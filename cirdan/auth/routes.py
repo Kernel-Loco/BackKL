@@ -105,8 +105,11 @@ def login(body: LoginIn, request: Request, response: Response):
         if passwords.needs_rehash(found['password_hash'], user_id):
             # Una huella vieja sin cifrar queda cifrada en este mismo inicio de sesión (RC-330). Solo si nadie la
             # cambió desde la búsqueda: así un cambio de contraseña en paralelo no se pisa con la anterior.
-            conn.execute('UPDATE users SET password_hash = %s WHERE id = %s AND password_hash = %s',
-                         (passwords.hash_password(body.password, user_id), user_id, found['password_hash']))
+            # Sin fila cambiada, la contraseña cambió mientras tanto y la que se verificó ya no es la de la cuenta.
+            if not conn.execute('UPDATE users SET password_hash = %s WHERE id = %s AND password_hash = %s',
+                                (passwords.hash_password(body.password, user_id), user_id,
+                                 found['password_hash'])).rowcount:
+                raise HTTPException(401, INVALID)
         if found['mfa_enabled']:
             # Los fallos del correo se borran hasta que el código sea correcto. Borrados aquí, quien
             # tiene la contraseña repetiría el login y 5 códigos sin llegar nunca al bloqueo.
