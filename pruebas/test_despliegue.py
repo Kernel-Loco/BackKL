@@ -182,6 +182,23 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(self.svc['api']['environment']['TOTP_KEY_VAULT_SECRET_URL'], '')
         self.assertEqual(self.svc['api']['environment']['TOTP_ENCRYPTION_KEY'], 'CIRDAN_FAKE_totp')
 
+    def test_13b_llave_de_las_huellas_desde_key_vault(self):
+        # RC-330: la llave de las huellas de contraseña sigue la misma regla que la del MFA. La API y el script de demo
+        # reciben las dos variables; con la llave en el .env la URL llega vacía.
+        url = 'https://kv-lowtide.vault.azure.net/secrets/password-hash-key/0123456789abcdef0123456789abcdef'
+        rc, salida = _config(dict(ENV_FALSO, PASSWORD_HASH_KEY_VAULT_SECRET_URL=url))
+        self.assertEqual(rc, 0, salida[-500:])
+        svc = json.loads(salida)['services']
+        for nombre in ('api', 'demo-accounts'):
+            self.assertEqual(svc[nombre]['environment']['PASSWORD_HASH_KEY_VAULT_SECRET_URL'], url, nombre)
+            self.assertEqual(svc[nombre]['environment']['PASSWORD_HASH_ENCRYPTION_KEY'], '', nombre)
+        rc, salida = _config(dict(ENV_FALSO, PASSWORD_HASH_ENCRYPTION_KEY='CIRDAN_FAKE_huellas'))
+        self.assertEqual(rc, 0, salida[-500:])
+        svc = json.loads(salida)['services']
+        for nombre in ('api', 'demo-accounts'):
+            self.assertEqual(svc[nombre]['environment']['PASSWORD_HASH_ENCRYPTION_KEY'], 'CIRDAN_FAKE_huellas', nombre)
+            self.assertEqual(svc[nombre]['environment']['PASSWORD_HASH_KEY_VAULT_SECRET_URL'], '', nombre)
+
     def test_14_solo_la_api_llega_a_imds(self):
         # Hallazgo 0 de la revisión de la opción 4 de RC-91: la regla de DOCKER-USER de docs/despliegue.md deja pasar
         # a 169.254.169.254 solo la IP fija de la API. Esa IP cae en la subred de default, fuera del rango que Docker
@@ -211,14 +228,18 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(set(re.findall(r'! -s ([0-9.]+)/32', doc)), {str(api)})
 
     def test_15_el_healthcheck_espera_a_la_llave_de_key_vault(self):
-        # Hallazgos 8, 11 y 12: la API puede tardar hasta keyvault.PLAZO en leer la llave antes de rendirse. El
-        # periodo de arranque del HEALTHCHECK tiene que ser mayor, para que no la marque unhealthy antes.
+        # Hallazgos 8, 11 y 12: la API puede tardar hasta keyvault.PLAZO en leer cada llave antes de rendirse, y desde
+        # RC-330 lee dos (la del MFA y la de las huellas). El periodo de arranque del HEALTHCHECK tiene que ser mayor
+        # que las dos juntas, para que no la marque unhealthy antes.
         fuente = (RAIZ / 'cirdan' / 'auth' / 'keyvault.py').read_text(encoding='utf-8')
         plazo = next(ast.literal_eval(n.value) for n in ast.parse(fuente).body
                      if isinstance(n, ast.Assign) and [getattr(x, 'id', None) for x in n.targets] == ['PLAZO'])
         dockerfile = (RAIZ / 'Dockerfile').read_text(encoding='utf-8')
         inicio = int(re.search(r'HEALTHCHECK .*--start-period=(\d+)s', dockerfile).group(1))
-        self.assertGreater(inicio, plazo + 10)
+        main = (RAIZ / 'cirdan' / 'api' / 'main.py').read_text(encoding='utf-8')
+        lecturas = len(re.findall(r'\b(?:totp|passwords)\.comprobar_llave\(', main))
+        self.assertEqual(lecturas, 2)
+        self.assertGreater(inicio, lecturas * plazo + 10)
 
 
 if __name__ == '__main__':

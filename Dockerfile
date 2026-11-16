@@ -88,10 +88,11 @@ RUN useradd --system --uid 10001 cirdan
 USER cirdan
 
 EXPOSE 8000
-# start-period mayor que keyvault.PLAZO (90 s): con la llave del MFA en Key Vault la API puede tardar en arrancar
-# mientras IMDS se recupera, y no se marca unhealthy antes de rendirse (#49, RC-91). Llega a healthy en el primer
-# chequeo que pasa, así que no retrasa un arranque normal.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=5 \
+# start-period mayor que dos veces keyvault.PLAZO (90 s): al arrancar, la API lee de Key Vault la llave del MFA y
+# la de las huellas de contraseña (RC-330), cada lectura con su plazo, y puede tardar mientras IMDS se recupera.
+# Así no se marca unhealthy antes de rendirse (#49, RC-91). Llega a healthy en el primer chequeo que pasa, así que
+# no retrasa un arranque normal.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=200s --retries=5 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
 # --proxy-headers: X-Forwarded-For solo se toma en cuenta si quien conecta está en FORWARDED_ALLOW_IPS
 # (ver docker-compose.yml). Por omisión nadie de fuera, porque el portal (Next) no lo agrega.

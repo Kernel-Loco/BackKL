@@ -11,6 +11,7 @@ revisa en ejemplo. test_13 revisa que NOTICE atribuya los marcos del mapeo y que
 
     python -m unittest -v pruebas/test_catalogo_reglas.py
 """
+import ast
 import functools
 import hashlib
 import json
@@ -582,6 +583,23 @@ class Reglas(unittest.TestCase):
         self.assertEqual(len(filas), 1, 'el README debe tener una sola fila de NOTICE en su tabla de archivos')
         for nombre in ('CIS Controls', 'MITRE ATT&CK'):
             self.assertIn(nombre, filas[0], 'la fila de NOTICE del README no nombra %s' % nombre)
+
+
+class RellenoDeLasSemillas(unittest.TestCase):
+    """Punto 3 de RC-330: el hash de relleno de las semillas es el mismo que el de cirdan/auth/demo.py, que las pruebas
+    de la huella (test_llave_huellas.py, test_3c) prueban que no abre ninguna cuenta."""
+
+    def test_1_toda_huella_de_las_semillas_es_el_relleno_de_demo(self):
+        fuente = (RAIZ / 'cirdan' / 'auth' / 'demo.py').read_text(encoding='utf-8')
+        relleno = next(ast.literal_eval(n.value) for n in ast.parse(fuente).body if isinstance(n, ast.Assign)
+                       and [getattr(x, 'id', None) for x in n.targets] == ['HASH_DE_RELLENO'])
+        huellas = {}
+        for archivo in ARCHIVOS_SQL:
+            for huella in re.findall(r"'(\$argon2[^']*|lt1\$[^']*)'", archivo.read_text(encoding='utf-8')):
+                huellas.setdefault(huella, set()).add(archivo.name)
+        self.assertEqual(set(huellas), {relleno})
+        self.assertLessEqual({'001_datos_demo.sql', '002_dominio_prueba.sql', '015_organizacion_lowtide.sql'},
+                             huellas[relleno])
 
 
 if __name__ == '__main__':

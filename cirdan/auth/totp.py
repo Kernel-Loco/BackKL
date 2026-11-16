@@ -65,13 +65,15 @@ def _key():
     global _llave_vault
     with _candado:
         if _llave_vault is None or _llave_vault[0] != url:
-            _llave_vault = (url, _decodificar(keyvault.leer_secreto(url), 'El secreto de Key Vault'))
+            _llave_vault = (url, _decodificar(keyvault.leer_secreto(url),
+                                                'El secreto de Key Vault de TOTP_KEY_VAULT_SECRET_URL'))
         return _llave_vault[1]
 
 
 def comprobar_llave():
-    """Al arrancar la API: sin llave válida no arranca, en vez de fallar en el primer inicio de sesión con MFA."""
-    _key()
+    """Al arrancar la API: sin llave válida no arranca, en vez de fallar en el primer inicio de sesión con MFA.
+    Devuelve la llave, para que cirdan/auth/passwords.py revise que la de las huellas sea otra (RC-330)."""
+    return _key()
 
 
 def encrypt_secret(secret, user_id):
