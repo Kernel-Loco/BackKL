@@ -1090,5 +1090,23 @@ class Base(unittest.TestCase):
             self.assertFalse(ignorado('api_docs/.gitkeep'))
 
 
+class Esperados(unittest.TestCase):
+    """La fila 17 de docs/hallazgos_esperados.md (RC-118) dice lo que api_docs da y que la fuente sigue apagada."""
+
+    def test_1_la_fila_17_trae_los_codigos_de_api_docs_y_su_severidad(self):
+        texto = (RAIZ / 'docs' / 'hallazgos_esperados.md').read_text(encoding='utf-8')
+        fila = next(f for f in texto.splitlines() if f.startswith('| 17 |'))
+        celdas = [c.strip() for c in fila.strip('|').split('|')]
+        self.assertEqual(len(celdas), 9, fila)
+        for codigo in api_docs.CODIGOS:
+            self.assertIn('`%s`' % codigo, celdas[3])
+        self.assertEqual(set(api_docs.CODIGOS.values()), {'medium'})
+        self.assertEqual((celdas[4], celdas[5]), ('Infraestructura', 'Media'))
+        self.assertIn('`api_doc`', celdas[3])
+        self.assertIn('apagada', celdas[7])
+        self.assertIn("'api_docs', 'osint', false", SEMILLA.read_text(encoding='utf-8'))
+        self.assertIn('- **Fila 17:**', texto)
+
+
 if __name__ == '__main__':
     unittest.main()
