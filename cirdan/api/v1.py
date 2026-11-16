@@ -925,6 +925,8 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
             'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
             (nuevo, anterior['id']),
         )
+        # recalcular_scores ya no lanza ValueError por su cuenta, pero motor.calcular sí, con un hallazgo cuyo código no
+        # tiene regla en el juego (cirdan/score/motor.py:46-47). Responde 409 y la transacción deshace los pesos nuevos.
         try:
             recalculados = configuracion.recalcular_scores(conn, session.org_id, nuevo, pesos)
         except ValueError as error:
