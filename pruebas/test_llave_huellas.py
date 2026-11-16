@@ -21,7 +21,7 @@ from unittest import mock
 from argon2 import PasswordHasher, profiles
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from cirdan.auth import demo, keyvault, passwords
+from cirdan.auth import demo, keyvault, passwords, totp
 
 VERSION = '0123456789abcdef0123456789abcdef'
 URL = 'https://kv-lowtide.vault.azure.net/secrets/password-hash-key/' + VERSION
@@ -59,6 +59,8 @@ class Base(unittest.TestCase):
         for nombre in ('_llave_vault', '_relleno'):
             setattr(passwords, nombre, None)
             self.addCleanup(setattr, passwords, nombre, None)
+        totp._llave_vault = None
+        self.addCleanup(setattr, totp, '_llave_vault', None)
         p = mock.patch('cirdan.config._env_file', return_value={})
         p.start()
         self.addCleanup(p.stop)
@@ -145,6 +147,15 @@ class Llave(Base):
                 with self.assertRaisesRegex(RuntimeError, 'PASSWORD_HASH_ENCRYPTION_KEY debe ser de 32 bytes'):
                     passwords.comprobar_llave()
 
+    def test_2c2_revisar_variables_ya_decodifica_la_llave(self):
+        # Ronda 1, hallazgo 5: el valor de ejemplo de .env.example no pasa la revisión del script de demo, y con las
+        # dos llaves sin generar el mensaje dice que falta generarla, no que es la misma que la del MFA.
+        for totp_valor in ('', LLAVE_TOTP, 'genera_tu_llave'):
+            with self.subTest(totp=totp_valor):
+                self.env(PASSWORD_HASH_ENCRYPTION_KEY='genera_tu_llave', TOTP_ENCRYPTION_KEY=totp_valor)
+                with self.assertRaisesRegex(RuntimeError, '^PASSWORD_HASH_ENCRYPTION_KEY debe ser de 32 bytes'):
+                    passwords.revisar_variables()
+
     def test_2d_la_misma_llave_que_la_del_mfa_no_vale(self):
         self.env(PASSWORD_HASH_ENCRYPTION_KEY=LLAVE, TOTP_ENCRYPTION_KEY=LLAVE)
         with self.assertRaisesRegex(RuntimeError, 'otra llave que TOTP_ENCRYPTION_KEY'):
@@ -152,6 +163,24 @@ class Llave(Base):
         self.env(PASSWORD_HASH_KEY_VAULT_SECRET_URL=URL_TOTP, TOTP_KEY_VAULT_SECRET_URL=URL_TOTP)
         with self.assertRaisesRegex(RuntimeError, 'otro secreto que TOTP_KEY_VAULT_SECRET_URL'):
             passwords.comprobar_llave()
+
+    def test_2d2_se_comparan_los_bytes_y_el_secreto_sin_su_version(self):
+        # Ronda 1, hallazgo 4: el mismo valor escrito distinto (b64decode descarta lo que no es del alfabeto) y otra
+        # versión del mismo secreto, con el nombre en mayúsculas, también son la misma llave.
+        self.env(PASSWORD_HASH_ENCRYPTION_KEY=LLAVE[:10] + '*' + LLAVE[10:], TOTP_ENCRYPTION_KEY=LLAVE)
+        self.assertEqual(base64.urlsafe_b64decode(LLAVE[:10] + '*' + LLAVE[10:]), base64.urlsafe_b64decode(LLAVE))
+        with self.assertRaisesRegex(RuntimeError, 'otra llave que TOTP_ENCRYPTION_KEY'):
+            passwords.revisar_variables()
+        f = self.falso()
+        otra_version = URL_TOTP.replace('totp-encryption-key', 'TOTP-Encryption-Key').replace(VERSION, 'f' * 32)
+        self.env(PASSWORD_HASH_ENCRYPTION_KEY='', TOTP_ENCRYPTION_KEY='',
+                 PASSWORD_HASH_KEY_VAULT_SECRET_URL=otra_version, TOTP_KEY_VAULT_SECRET_URL=URL_TOTP)
+        with self.assertRaisesRegex(RuntimeError, 'otro secreto que TOTP_KEY_VAULT_SECRET_URL'):
+            passwords.revisar_variables()
+        self.assertEqual(f.peticiones, [])
+        # Otro secreto de la misma bóveda sí vale.
+        self.env(PASSWORD_HASH_KEY_VAULT_SECRET_URL=URL)
+        passwords.revisar_variables()
 
     def test_2e_desde_key_vault_se_lee_una_vez(self):
         self.env(PASSWORD_HASH_KEY_VAULT_SECRET_URL=URL)
@@ -204,8 +233,47 @@ class Arranque(Base):
                  PASSWORD_HASH_KEY_VAULT_SECRET_URL=URL, **FALSOS)
         self.falso(vault=urllib.error.HTTPError('http://x', 403, 'x', {}, None))
         with mock.patch.object(keyvault, '_dormir', lambda s: None):
-            with self.assertRaisesRegex(RuntimeError, 'HTTP 403'):
+            # Ronda 1, hallazgo 2: el mensaje dice de cuál de las dos URL del .env viene.
+            mensaje = r'^Key Vault respondió HTTP 403 \(PASSWORD_HASH_KEY_VAULT_SECRET_URL\)$'
+            with self.assertRaisesRegex(RuntimeError, mensaje):
                 self._arrancar()
+
+    def test_2i2_cada_error_de_key_vault_nombra_su_variable(self):
+        import urllib.error
+        imds = r'^La identidad administrada \(IMDS\) '
+        casos = {'imds': (urllib.error.URLError('x'), imds + r'no respondió \(URLError\)'),
+                 'sin token': ({}, imds + 'no devolvió un token'),
+                 '404': (urllib.error.HTTPError('http://x', 404, 'x', {}, None), '^Key Vault respondió HTTP 404'),
+                 'sin valor': ({'id': 'x'}, '^Key Vault no devolvió el valor del secreto')}
+        for caso, (respuesta, mensaje) in casos.items():
+            for variable, url in (('PASSWORD_HASH_KEY_VAULT_SECRET_URL', URL), ('TOTP_KEY_VAULT_SECRET_URL', URL_TOTP)):
+                with self.subTest(caso=caso, variable=variable):
+                    def abrir(req, timeout):
+                        imds = req.full_url.startswith('http://169.254.169.254/')
+                        if caso in ('imds', 'sin token') and imds or caso not in ('imds', 'sin token') and not imds:
+                            if isinstance(respuesta, BaseException):
+                                raise respuesta
+                            return respuesta
+                        return {'access_token': TOKEN} if imds else {'value': LLAVE}
+                    with mock.patch.object(keyvault, '_abrir', abrir), mock.patch.object(keyvault, 'PLAZO', 0.2), \
+                            mock.patch.object(keyvault, '_dormir', lambda s: None):
+                        with self.assertRaisesRegex(RuntimeError, mensaje + '.*\\(%s\\)$' % variable):
+                            keyvault.leer_secreto(url, variable=variable)
+
+    def test_2k_la_api_no_arranca_si_una_llave_directa_es_la_otra_de_key_vault(self):
+        # Ronda 1, hallazgo 4: el caso mixto solo se ve con los bytes ya leídos, al arrancar.
+        for nombre, variables in (
+                ('huellas directa', dict(TOTP_KEY_VAULT_SECRET_URL=URL_TOTP, PASSWORD_HASH_ENCRYPTION_KEY=LLAVE)),
+                ('huellas en Key Vault', dict(TOTP_ENCRYPTION_KEY=LLAVE, PASSWORD_HASH_ENCRYPTION_KEY='',
+                                              PASSWORD_HASH_KEY_VAULT_SECRET_URL=URL))):
+            with self.subTest(nombre):
+                passwords._llave_vault = totp._llave_vault = None
+                self.env(TOTP_ENCRYPTION_KEY='', TOTP_KEY_VAULT_SECRET_URL='', PASSWORD_HASH_KEY_VAULT_SECRET_URL='',
+                         **FALSOS)
+                self.env(**variables)
+                self.falso()  # Key Vault da LLAVE en las dos URL
+                with self.assertRaisesRegex(RuntimeError, 'la misma llave que la del MFA'):
+                    self._arrancar()
 
     def test_2j_la_api_arranca_con_las_dos_llaves_y_deja_listo_el_relleno(self):
         self.env(TOTP_ENCRYPTION_KEY=LLAVE_TOTP, PASSWORD_HASH_ENCRYPTION_KEY=LLAVE, **FALSOS)
@@ -217,8 +285,9 @@ class BaseFalsa:
     """Hace de cirdan.db.transaction para el login: login_lookup() da `fila`, el SELECT del rol da 'admin' y se anota
     cada UPDATE."""
 
-    def __init__(self, fila):
+    def __init__(self, fila, rowcount=1):
         self.fila = fila
+        self.rowcount = rowcount
         self.updates = []
 
     @contextmanager
@@ -230,18 +299,19 @@ class BaseFalsa:
             return mock.Mock(**{'fetchone.return_value': self.fila})
         if sql.startswith('UPDATE users SET password_hash'):
             self.updates.append(parametros)
-            return mock.Mock(rowcount=1)
+            return mock.Mock(rowcount=self.rowcount)
         raise AssertionError('consulta no esperada: %s' % sql)
 
 
 class Login(Base):
     """Puntos 3, 4 y 5 por la ruta de /auth/login, con base y Valkey falsos."""
 
-    def entrar(self, huella, clave=CLAVE, user_id=ALEX, existe=True):
+    def entrar(self, huella, clave=CLAVE, user_id=ALEX, existe=True, rowcount=1, sesiones=None):
         from cirdan.auth import routes
         base = BaseFalsa({'user_id': user_id, 'organization_id': ORG, 'password_hash': huella, 'mfa_enabled': True}
-                         if existe else None)
-        sesiones = mock.Mock(**{'is_locked.return_value': False, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+                         if existe else None, rowcount)
+        sesiones = sesiones or mock.Mock(**{'is_locked.return_value': False,
+                                            'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
         with mock.patch.object(routes, 'transaction', base.transaction), \
                 mock.patch.object(routes, 'sessions', sesiones), \
                 mock.patch.object(routes, 'client_ip', return_value='127.0.0.1'):
@@ -265,6 +335,16 @@ class Login(Base):
         respuesta, base = self.entrar(passwords.hash_password(CLAVE, ALEX))
         self.assertEqual(respuesta['mfa_required'], True)
         self.assertEqual(base.updates, [])
+
+    def test_3e_si_la_huella_cambio_durante_el_login_no_entra(self):
+        # Ronda 1, hallazgo 7: el UPDATE condicional no tocó ninguna fila porque la contraseña cambió entre la
+        # búsqueda y el rehash. La contraseña que se verificó ya no es la de la cuenta: 401 y ni mfa_token ni
+        # sesión.
+        sesiones = mock.Mock(**{'is_locked.return_value': False, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+        respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), rowcount=0, sesiones=sesiones)
+        self.assertEqual(respuesta.status_code, 401)
+        self.assertEqual(len(base.updates), 1)
+        sesiones.create_mfa.assert_not_called()
 
     def test_3c_el_hash_de_relleno_no_abre_ninguna_cuenta(self):
         for intento in (demo.PASSWORD, 'lowtide-relleno-que-nunca-coincide', 'demo-only', CLAVE):
@@ -313,6 +393,50 @@ class Login(Base):
                              verificar.call_args.args[0].split('$')[3])
         self.assertEqual(trabajo['inexistente'], trabajo['equivocada'])
         self.assertEqual(trabajo['inexistente'][:2], (1, 1))
+
+    def _no_abren(self):
+        """Huellas guardadas de ALEX que no abren con la llave de ahora: de otra llave, de otro usuario, dañadas o de
+        otra forma."""
+        self.env(PASSWORD_HASH_ENCRYPTION_KEY=base64.urlsafe_b64encode(os.urandom(32)).decode())
+        otra_llave = passwords.hash_password(CLAVE, ALEX)
+        self.env(PASSWORD_HASH_ENCRYPTION_KEY=LLAVE)
+        buena = passwords.hash_password(CLAVE, ALEX)
+        return {'otra llave': otra_llave, 'otro usuario': passwords.hash_password(CLAVE, MAYA),
+                'dañada': buena[:-6] + 'AAAAAA', 'base64 mala': 'lt1$%%%%', 'corta': 'lt1$AAAA', 'otra forma': 'texto',
+                'None': None}
+
+    def test_5c_una_huella_que_no_abre_tambien_gasta_argon2id(self):
+        # Ronda 1, hallazgo 6: sin esto, el correo de una huella que no abre respondía en microsegundos y el de un
+        # correo inexistente en lo de argon2id: se podían separar los correos que existen.
+        passwords.comprobar_llave()
+        relleno = passwords._relleno_phc().split('$')[3]
+        for caso, huella in self._no_abren().items():
+            with self.subTest(caso=caso):
+                hasher = mock.Mock(wraps=passwords._hasher)
+                with mock.patch.object(passwords, '_hasher', hasher):
+                    self.assertFalse(passwords.verify_password(huella, CLAVE, ALEX))
+                self.assertEqual(hasher.verify.call_count, 1)
+                self.assertEqual(hasher.verify.call_args.args[0].split('$')[3], relleno)
+                respuesta, base = self.entrar(huella)
+                self.assertEqual(respuesta.status_code, 401)
+                self.assertEqual(base.updates, [])
+
+    def test_5d_y_tardan_lo_mismo_que_un_correo_inexistente(self):
+        passwords.comprobar_llave()
+        no_abren = self._no_abren()
+
+        def medir(f):
+            tiempos = []
+            for _ in range(7):
+                inicio = time.perf_counter()
+                f()
+                tiempos.append(time.perf_counter() - inicio)
+            return statistics.median(tiempos)
+        inexistente = medir(lambda: passwords.burn_time('Otra-Clave-Larga-99'))
+        for caso in ('otra llave', 'base64 mala'):
+            with self.subTest(caso=caso):
+                no_abre = medir(lambda: passwords.verify_password(no_abren[caso], 'Otra-Clave-Larga-99', ALEX))
+                self.assertLess(abs(inexistente - no_abre) / inexistente, 0.35, (inexistente, no_abre))
 
     def test_5b_y_tardan_lo_mismo(self):
         huella = passwords.hash_password(CLAVE, ALEX)
