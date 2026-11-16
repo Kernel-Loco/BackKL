@@ -14,7 +14,7 @@ sale de la fila de la llave, que se busca por su hash.
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from cirdan.auth.deps import Session, current_session
@@ -94,8 +94,13 @@ app.include_router(v1_router)
 
 # Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas
 # rutas no existen (404). Nunca true en producción.
-if config('DEMO_EXPLORER', 'false').lower() == 'true':
+EXPLORADOR = config('DEMO_EXPLORER', 'false').lower() == 'true'
+if EXPLORADOR:
     app.include_router(explorer_router)
+# Las rutas de antes de /api/v1 (/domains, /domains/{fqdn}/findings y /domains/{fqdn}/score) solo las llama demo.html,
+# que solo existe con el explorador. El portal usa /api/v1. Se registran al final del archivo y solo con
+# DEMO_EXPLORER=true (RC-58, HX6 y HX18 de la auditoría del 15 nov).
+rutas_demo = APIRouter(tags=['dominios'])
 
 
 def query(session, sql, params=()):
@@ -180,18 +185,18 @@ def health():
     return {'status': 'ok', 'postgres': row['version'], 'role': row['role']}
 
 
-@app.get('/domains', tags=['dominios'], summary='Dominios del cliente con autorización, TXT y score')
+@rutas_demo.get('/domains', summary='Dominios del cliente con autorización, TXT y score')
 def list_domains(session: Session = Depends(current_session)):
     return query(session, DOMAINS)
 
 
-@app.get('/domains/{fqdn}/findings', tags=['dominios'], summary='Hallazgos abiertos de un dominio, por severidad')
+@rutas_demo.get('/domains/{fqdn}/findings', summary='Hallazgos abiertos de un dominio, por severidad')
 def list_findings(fqdn: str, session: Session = Depends(current_session)):
     known_domain(session, fqdn)
     return query(session, FINDINGS, (fqdn,))
 
 
-@app.get('/domains/{fqdn}/score', tags=['dominios'], summary='Score de exposición por categoría con sus pesos')
+@rutas_demo.get('/domains/{fqdn}/score', summary='Score de exposición por categoría con sus pesos')
 def domain_score(fqdn: str, session: Session = Depends(current_session)):
     known_domain(session, fqdn)
     rows = query(session, SCORE, (fqdn,))
@@ -204,3 +209,7 @@ def domain_score(fqdn: str, session: Session = Depends(current_session)):
         'categories': [{'category': label, 'score': r['category_scores'][key],
                         'weight': float(r['category_weights'][key])} for key, label in CATEGORIES],
     }
+
+
+if EXPLORADOR:
+    app.include_router(rutas_demo)

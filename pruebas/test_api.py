@@ -29,37 +29,13 @@ class ApiCirdan(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(body['role'], 'cirdan_app')
 
-    def test_2_acme_ve_sus_cinco_dominios_con_score(self):
-        code, body = self.acme.get('/domains')
-        self.assertEqual(code, 200)
-        self.assertEqual([(d['domain'], d['score'], d['level']) for d in body[:3]],
-                         [('acme-demo.mx', 60, 'High'), ('acme-portal.mx', 0, 'Low'), ('acme-tienda.mx', 0, 'Low')])
-        self.assertEqual({d['domain']: d['authorization'] for d in body[3:]},
-                         {'partner-example.com': 'Pending TXT', 'old-example.net': 'Expired'})
-
-    def test_3_score_por_categoria_cuadra_con_los_pesos_y_el_piso(self):
-        code, body = self.acme.get('/domains/acme-demo.mx/score')
-        self.assertEqual(code, 200)
-        weighted = sum(c['score'] * c['weight'] for c in body['categories'])
-        self.assertAlmostEqual(weighted, 27.5)
-        self.assertEqual(body['score'], 60)  # la brecha crítica abierta pone el piso en 60
-
-    def test_4_hallazgos_ordenados_por_severidad(self):
-        code, body = self.acme.get('/domains/acme-demo.mx/findings')
-        self.assertEqual(code, 200)
-        self.assertEqual([f['severity'] for f in body], ['Critical', 'High', 'High', 'Medium'])
-
-    def test_5_beta_no_ve_los_dominios_de_acme(self):
-        code, body = self.beta.get('/domains')
-        self.assertEqual(code, 200)
-        self.assertNotIn('acme-demo.mx', [d['domain'] for d in body])
-        code, _ = self.beta.get('/domains/acme-demo.mx/findings')
-        self.assertEqual(code, 404)
-
-    def test_6_sin_sesion_no_responde_datos_aunque_mande_el_encabezado(self):
+    def test_2_las_rutas_de_antes_de_api_v1_no_dan_datos_sin_sesion(self):
+        # RC-58: /domains, /domains/{fqdn}/findings y /score solo existen con DEMO_EXPLORER=true (404 sin ella) y ahí
+        # piden sesión (401). Los dos modos y sus datos los prueba pruebas/test_explorador.py dentro del contenedor.
         anonimo = sesion.Client()
-        self.assertEqual(anonimo.get('/domains')[0], 401)
-        self.assertEqual(anonimo.get('/domains', headers={'X-Organization': ACME})[0], 401)
+        for ruta in ('/domains', '/domains/acme-demo.mx/findings', '/domains/acme-demo.mx/score'):
+            with self.subTest(ruta=ruta):
+                self.assertIn(anonimo.get(ruta, headers={'X-Organization': ACME})[0], (401, 404))
 
     def test_7_el_explorador_de_la_base_no_lee_otra_empresa_sin_sesion(self):
         # RC-58: sin DEMO_EXPLORER=true, /db no existe (404). Con ella pide sesión (401). Nunca 200 por el encabezado.
@@ -69,7 +45,7 @@ class ApiCirdan(unittest.TestCase):
 
     def test_8_toda_respuesta_trae_la_proteccion_contra_marcos_y_nosniff(self):
         # RC-283: también los errores y el 403 que da el middleware de origen antes de llegar a una ruta
-        casos = (('GET', '/health', None, 200), ('GET', '/domains', None, 401), ('GET', '/no-existe', None, 404),
+        casos = (('GET', '/health', None, 200), ('GET', '/api/v1/domains', None, 401), ('GET', '/no-existe', None, 404),
                  ('GET', '/docs', None, 200), ('POST', '/api/v1/auth/logout', 'https://otro.example', 403))
         for metodo, ruta, origen, esperado in casos:
             req = urllib.request.Request(sesion.BASE + ruta, method=metodo,

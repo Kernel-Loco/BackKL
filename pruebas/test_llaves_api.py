@@ -368,9 +368,6 @@ class LlavesApi(unittest.TestCase):
             ('PUT', '/api/v1/scoring/weights', {'category_weights': {}}),
             ('POST', '/api/v1/domains/beta-corp.mx/action-plan/simulate', {'action_ids': ['x']}),
             ('POST', '/api/v1/domains/beta-corp.mx/scans', None),
-            ('GET', '/domains', None),
-            ('GET', '/domains/beta-corp.mx/findings', None),
-            ('GET', '/domains/beta-corp.mx/score', None),
         ]
         for metodo, ruta, cuerpo in solo_sesion:
             code, error = cliente.request(metodo, ruta, cuerpo, encabezados)
