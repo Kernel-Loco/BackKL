@@ -32,9 +32,9 @@ from cirdan.db import transaction
 async def _arranque(app):
     # Sin la llave del MFA la API no arranca: con Key Vault, un error de la identidad o del rol sale aquí, en
     # `docker compose logs api`, y no en el primer inicio de sesión (#49, RC-91). Igual con la llave de las huellas de
-    # contraseña (RC-330).
-    totp.comprobar_llave()
-    passwords.comprobar_llave()
+    # contraseña (RC-330), que además tiene que ser otra que la del MFA aunque una venga del .env y la otra de Key
+    # Vault.
+    passwords.comprobar_llave(totp.comprobar_llave())
     yield
 
 
