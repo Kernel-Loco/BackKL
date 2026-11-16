@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import http.cookiejar
 import json
+import os
 import struct
 import subprocess
 import time
@@ -16,7 +17,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = 'http://127.0.0.1:8000'
+# Por omisión, la pila local. Con el compose desechable del README (paso 5) apuntan a la suya.
+BASE = os.environ.get('CIRDAN_TEST_API', 'http://127.0.0.1:8000')
+PG = os.environ.get('CIRDAN_TEST_PG', 'cirdan-pg16')
+VALKEY = os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey')
 AUTH = BASE + '/api/v1/auth'
 PASSWORD = 'Lowtide-Demo-2026'
 STEP = 30
@@ -55,7 +59,7 @@ def next_code(email):
 
 def psql(sql):
     """Corre una sentencia en la base como postgres, fuera de la API."""
-    subprocess.run(['docker', 'exec', 'cirdan-pg16', 'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c', sql],
+    subprocess.run(['docker', 'exec', PG, 'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c', sql],
                    check=True, capture_output=True)
 
 
@@ -63,7 +67,7 @@ def reset():
     """Deja las cuentas listas para la prueba: sin último código usado ni intentos fallidos, del login ni del cambio de
     contraseña (pw:fail:*, RC-290)."""
     psql('UPDATE users SET last_totp_step = NULL')
-    subprocess.run(['docker', 'exec', 'cirdan-valkey', 'sh', '-c',
+    subprocess.run(['docker', 'exec', VALKEY, 'sh', '-c',
                     'for p in "login:fail:*" "pw:fail:*"; do '
                     'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "$p" '
                     '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del; done'],
