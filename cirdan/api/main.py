@@ -21,6 +21,7 @@ from cirdan.auth.deps import Session, current_session
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
+from cirdan.api.plataforma import router as platform_router
 from cirdan.api.v1 import router as v1_router
 from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
@@ -38,8 +39,15 @@ async def _arranque(app):
     yield
 
 
+# Documentación de la API (/openapi.json, /docs y /redoc). En desarrollo queda puesta. En el despliegue va en false
+# (docker-compose.despliegue.yml) y las tres rutas no existen: LowTide escanea su propio dominio y no debe darse
+# exposed_api_docs a sí mismo (comentario 10063 de RC-91).
+API_DOCS = config('API_DOCS', 'true').lower() == 'true'
+
 app = FastAPI(
     lifespan=_arranque,
+    # Con openapi_url en None, FastAPI tampoco registra /docs ni /redoc.
+    openapi_url='/openapi.json' if API_DOCS else None,
     title='LowTide API',
     version='0.2.0',
     description='Inicio de sesión con MFA y endpoints de solo lectura sobre la base cirdan (PostgreSQL 16). '
@@ -90,6 +98,7 @@ async def error_no_manejado(request: Request, exc: Exception):
 app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(api_keys_router)
+app.include_router(platform_router)
 app.include_router(v1_router)
 
 # Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas

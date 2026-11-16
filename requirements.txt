@@ -1,6 +1,6 @@
 # Dependencias de la API (FastAPI sobre PostgreSQL). Versiones fijas para que el
 # contenedor y cualquier PC instalen exactamente lo mismo. Las actualiza Dependabot.
-fastapi==0.162.0
+fastapi==0.162.5
 # fastapi pide starlette>=0.46.0 y pydantic>=2.9.0 sin tope: se fijan para que no cambien solas.
 starlette==1.10.0
 pydantic==2.14.3
@@ -14,7 +14,14 @@ pyotp==2.10.0
 segno==1.6.6
 # Captcha del login (RC-154): retos ALTCHA firmados y revisados sin red. Sin dependencias.
 altcha==2.3.0
+# Passkeys (RC-331): py_webauthn revisa las respuestas WebAuthn. Sus dependencias no traen tope y se fijan aquí.
+# pyOpenSSL 26.4.0 pide cryptography>=49,<51: los dos van fuera del grupo pip de Dependabot y se suben juntos a mano.
 cryptography==50.0.2
+webauthn==3.0.1
+pyOpenSSL==26.4.0
+cbor2==6.3.0
+pyasn1==0.6.5
+pyasn1-modules==0.4.2
 redis==8.1.0
 dnspython==2.9.2
 maxminddb==3.2.0

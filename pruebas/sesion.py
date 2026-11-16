@@ -60,11 +60,14 @@ def psql(sql):
 
 
 def reset():
-    """Deja las cuentas listas para la prueba: sin último código usado ni intentos fallidos."""
+    """Deja las cuentas listas para la prueba: sin último código usado ni intentos fallidos, del login ni del cambio de
+    contraseña (pw:fail:*, RC-290)."""
     psql('UPDATE users SET last_totp_step = NULL')
     subprocess.run(['docker', 'exec', 'cirdan-valkey', 'sh', '-c',
-                    'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "login:fail:*" '
-                    '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del'], check=True, capture_output=True)
+                    'for p in "login:fail:*" "pw:fail:*"; do '
+                    'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "$p" '
+                    '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del; done'],
+                   check=True, capture_output=True)
     _last_step.clear()
 
 

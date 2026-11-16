@@ -39,7 +39,7 @@ La segunda línea tiene que decir 'DEMO_ACCOUNTS no es true: se apagan las cuent
 
 Ningún .env le gana a estos valores:
 
-- `DEMO_ACCOUNTS=false` y `DEMO_EXPLORER=false`.
+- `DEMO_ACCOUNTS=false` y `DEMO_EXPLORER=false`. El compose del despliegue también fija `API_DOCS=false`, así que `/openapi.json`, `/docs` y `/redoc` no existen, y la imagen corre uvicorn con `--no-server-header` (comentario 10063 de RC-91).
 - `COOKIE_SECURE=true`, porque el despliegue siempre va con HTTPS.
 - `FORWARDED_ALLOW_IPS` con las IP fijas del portal (10.249.91.10) y de cloudflared (10.249.92.11). Cloudflare agrega la IP real al final de X-Forwarded-For y Next no le agrega nada si ya viene. uvicorn toma la primera IP de la derecha que no es de confianza. Una IP falsa que mande el navegador queda a la izquierda y no cuenta. El bloqueo por intentos del login cuenta por IPv4 y, como Cloudflare también entrega visitantes por IPv6, por red /64 en IPv6 (`cirdan/auth/sessions.py`): quien tiene un /64 puede estrenar dirección en cada intento, pero todas caen en el mismo contador. Quien tiene más de un /64 (un /56 trae 256 y un /48, 65 536) sí puede repartir los intentos entre sus redes /64 y saltarse el límite por IP, pero no el de 5 fallos por correo. Varios visitantes detrás de la misma IPv4 (una red corporativa) comparten contador.
 - `UVICORN_TIMEOUT_KEEP_ALIVE=65`. El proxy de Next suelta una conexión ociosa con la API a los 5 s, lo mismo que uvicorn por omisión, y un POST que sale justo entonces termina en 500. Con 65 s la suelta siempre Next primero. Del lado del portal, la imagen de FrontKL pone `KEEP_ALIVE_TIMEOUT=95000`, por encima de los 90 s con que cloudflared reutiliza las conexiones.

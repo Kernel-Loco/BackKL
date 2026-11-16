@@ -11,7 +11,7 @@ el script no les pone credenciales aunque `DEMO_ACCOUNTS` sea true (#169, RC-287
 ruta o pegado a otro sin coma tampoco cuenta como local.
 
 En esos dos casos, sin `DEMO_ACCOUNTS=true` o con un origen publicado, el script además apaga las cuentas: les vuelve
-a poner el hash de relleno de la semilla y les quita el secreto TOTP. Así un volumen de la base que ya traía las
+a poner el hash de relleno de la semilla, les quita el secreto TOTP y les borra las passkeys (RC-331). Así un volumen de la base que ya traía las
 credenciales públicas, como el de una PC de desarrollo que se usa para el plan B del despliegue, deja de servir para
 entrar (#49, RC-91).
 
@@ -51,7 +51,8 @@ HASH_DE_RELLENO = '$argon2id$v=19$m=65536,t=3,p=4$ZGVtby1zYWx0$ZGVtby1vbmx5'
 
 
 def apagar_credenciales():
-    """Les quita a las cuentas de demo la contraseña y el MFA públicos. Idempotente.
+    """Les quita a las cuentas de demo la contraseña y el MFA públicos, y las passkeys que alguien les haya registrado con
+    esas credenciales (RC-331). Idempotente.
 
     El UPDATE va por el id, así que una cuenta inactiva o de una empresa que no está activa también se apaga. Si no
     cambia ninguna fila (no hay fila con ese id en esa empresa), se pregunta a login_lookup() (migración 004) si ese
@@ -63,7 +64,10 @@ def apagar_credenciales():
       credenciales públicas y la API, que espera a demo-accounts, no arranca (R3 de la revisión de RC-91);
     - si su huella va cifrada y la llave de las huellas está en Key Vault, este contenedor no la puede leer (en la VM
       no llega a IMDS, docs/despliegue.md). Tampoco se da por apagada: termina con error en seco, sin esperar a IMDS
-      (RC-330)."""
+      (RC-330).
+    Las passkeys se borran por el mismo id del UPDATE. Las de una fila con otro id no se tocan: esa fila no tiene la
+    contraseña de demo (si la tuviera, el script ya termina con error), así que sus passkeys no salieron de las
+    credenciales públicas."""
     sin_apagar, sin_revisar = [], []
     en_key_vault = passwords.llave_en_key_vault()
     for email, (org, user_id, _) in CUENTAS.items():
@@ -72,8 +76,15 @@ def apagar_credenciales():
                 'UPDATE users SET password_hash = %s, totp_secret_enc = NULL, last_totp_step = NULL, '
                 'mfa_enabled_at = NULL WHERE id = %s',
                 (HASH_DE_RELLENO, user_id)).rowcount
+            # Una passkey registrada con la contraseña y el TOTP públicos seguiría entrando como MFA (RC-331).
+            # Con un volumen anterior a la 018 la tabla no existe: no hay passkeys que borrar y la API debe arrancar (R2).
+            passkeys = 0
+            if conn.execute("SELECT to_regclass('public.webauthn_credentials') IS NOT NULL AS hay").fetchone()['hay']:
+                passkeys = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s', (user_id,)).rowcount
             fila = None if cambiadas else conn.execute(
                 'SELECT user_id::text, password_hash FROM login_lookup(%s)', (email,)).fetchone()
+        if passkeys:
+            print('passkeys de la cuenta de demo borradas:', email, passkeys)
         if cambiadas:
             print('cuenta de demo apagada:', email)
         elif fila is None:
