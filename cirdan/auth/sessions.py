@@ -6,12 +6,16 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
 - Verificación en dos pasos pendiente: 5 min y 5 intentos.
 - Alta de la verificación en dos pasos (RC-154): el secreto nuevo espera aquí 10 min y 5 códigos, cifrado.
 - Captcha del login (RC-154): la llave HMAC de los retos y los retos ya usados, hasta que vencen.
+- Passkeys (RC-331): el reto de registro (por usuario y por la sesión que lo pidió) y el de entrada (por un
+  token al azar), 5 min y de un solo uso: se leen y se borran en el mismo paso. /passkeys/login/options cuenta
+  300 por IP en 15 min, y los fallos de /passkeys/login/verify cuentan para la IP y el correo como en /login.
 - Bloqueo por intentos: 5 fallos por correo o 20 por IP en 15 min. Un código equivocado también
   cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Una IPv6
   cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
 - Cambio de contraseña (RC-290): 5 intentos por usuario en 15 min, contados antes de revisar la contraseña actual.
   El quinto fallo cierra la sesión que lo hizo.
 """
+import base64
 import hashlib
 import ipaddress
 import json
@@ -29,6 +33,8 @@ MFA_SECONDS = 5 * 60
 MFA_MAX_ATTEMPTS = 5
 MFA_SETUP_SECONDS = 10 * 60
 LOCK_SECONDS = 15 * 60
+PASSKEY_SECONDS = 5 * 60
+MAX_PASSKEY_OPTIONS_IP = 300  # el autollenado pide uno en cada carga del login: alcanza para una oficina tras un NAT
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
 MAX_PASSWORD_ATTEMPTS = 5  # cambio de contraseña: intentos por usuario en LOCK_SECONDS (RC-290)
@@ -97,6 +103,31 @@ def limits(created_at=None):
 def delete(token):
     if token:
         _valkey().delete('sess:' + _digest(token))
+
+
+SWITCHED, SESSION_GONE, SWITCH_CONFLICT = 'switched', 'gone', 'conflict'
+
+# Corre entera dentro de Valkey: entre leer la empresa activa y escribir la nueva no se mete otro cambio. Si la
+# sesión ya no está en la empresa de la que partió la petición, otro cambio llegó antes y este no se aplica.
+_SWITCH_ORG = '''
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 'gone' end
+local data = cjson.decode(raw)
+if data.org_id ~= ARGV[1] then return 'conflict' end
+data.org_id = ARGV[2]
+data.role = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(data), 'KEEPTTL')
+return 'switched'
+'''
+
+
+def switch_org(token, expected_org_id, org_id, role):
+    """Cambia la empresa activa y el rol de una sesión que ya existe (superadmin, RC-332), solo si sigue en
+    `expected_org_id`. Conserva su inactividad, su tope de 8 h y su lugar en el índice del usuario, y una sesión que
+    se cerró mientras tanto no revive. Devuelve SWITCHED, SESSION_GONE o SWITCH_CONFLICT (otro cambio ganó)."""
+    if not token or len(token) > 100:
+        return SESSION_GONE
+    return _valkey().eval(_SWITCH_ORG, 1, 'sess:' + _digest(token), str(expected_org_id), str(org_id), role)
 
 
 # Corre entera dentro de Valkey: una sesión creada a la vez entra al índice antes (y se borra) o después. Que no
@@ -194,6 +225,58 @@ def spend_captcha(nonce, seconds):
     return bool(_valkey().set('captcha:used:' + _digest(nonce), '1', nx=True, ex=seconds))
 
 
+# ------------------------------------------------------------------ passkeys (RC-331)
+
+def _passkey_reg_key(user_id, session_token):
+    # Por usuario y por sesión: otra sesión de la misma cuenta no puede usar ni borrar el reto de esta.
+    return 'webauthn:reg:%s:%s' % (_digest(str(user_id)), _digest(session_token))
+
+
+def password_tag(password_hash):
+    """SHA-256 de la huella guardada de la contraseña: cambia cada vez que se cambia la contraseña."""
+    return hashlib.sha256(password_hash.encode()).hexdigest()
+
+
+def create_passkey_registration(user_id, session_token, challenge, tag):
+    """Guarda el reto de un registro de passkey por PASSKEY_SECONDS. Pedir otro desde la misma sesión reemplaza al
+    anterior. Queda amarrado a la sesión que lo pidió: otra sesión de la misma cuenta no lo puede usar ni borrar.
+    Guarda también `tag`, el password_tag de la contraseña con la que se pidió: tras un cambio ya no registra."""
+    _valkey().set(_passkey_reg_key(user_id, session_token), base64.b64encode(challenge).decode() + ':' + tag,
+                  ex=PASSKEY_SECONDS)
+
+
+def take_passkey_registration(user_id, session_token):
+    """(reto, tag) del registro de esta sesión, una sola vez (GETDEL); None si no hay o venció."""
+    if not session_token:
+        return None
+    raw = _valkey().getdel(_passkey_reg_key(user_id, session_token))
+    if not raw or ':' not in raw:
+        return None
+    challenge, tag = raw.split(':', 1)
+    return base64.b64decode(challenge), tag
+
+
+def create_passkey_login(challenge):
+    """Guarda el reto de una entrada con passkey y devuelve el token que el portal manda de vuelta con la respuesta."""
+    token = secrets.token_urlsafe(32)
+    _valkey().set('webauthn:auth:' + _digest(token), base64.b64encode(challenge).decode(), ex=PASSKEY_SECONDS)
+    return token
+
+
+def take_passkey_login(token):
+    """El reto de la entrada, una sola vez (GETDEL): aunque lleguen 100 respuestas a la vez, solo una se revisa."""
+    if not token or len(token) > 100:
+        return None
+    raw = _valkey().getdel('webauthn:auth:' + _digest(token))
+    return base64.b64decode(raw) if raw else None
+
+
+def take_passkey_options(ip):
+    """Cuenta una petición de /passkeys/login/options de la IP; False si ya pasó de MAX_PASSKEY_OPTIONS_IP en 15 min."""
+    count, = _count('webauthn:opts:ip:' + _ip_bloque(ip))
+    return count <= MAX_PASSKEY_OPTIONS_IP
+
+
 # ------------------------------------------------------------------ bloqueo por intentos
 
 def _email_key(email):
@@ -230,6 +313,16 @@ def _count(*keys):
 def is_locked(email, ip):
     fails_email, fails_ip = _valkey().mget(_email_key(email), _ip_key(ip))
     return int(fails_email or 0) >= MAX_FAILS_EMAIL or int(fails_ip or 0) >= MAX_FAILS_IP
+
+
+def is_ip_locked(ip):
+    """Solo la IP: antes de saber de qué correo es una passkey."""
+    return int(_valkey().get(_ip_key(ip)) or 0) >= MAX_FAILS_IP
+
+
+def register_ip_fail(ip):
+    """Un fallo sin correo conocido (una passkey que no existe): cuenta solo para la IP."""
+    _count(_ip_key(ip))
 
 
 def register_fail(email, ip):

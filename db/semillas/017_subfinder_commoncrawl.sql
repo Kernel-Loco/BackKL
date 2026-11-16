@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/semillas/016_subfinder_commoncrawl.sql (RC-184, #14b)
+-- Cirdan · db/semillas/017_subfinder_commoncrawl.sql (RC-184, #14b)
 -- Prende la fuente subfinder (cirdan/recolectores/subfinder.py), que la
 -- semilla 005 sembró apagada, y le pone el límite diario de su única
 -- fuente, commoncrawl. La 005 no se edita: esta semilla cambia lo que

@@ -13,10 +13,11 @@ updates:
     # siguen en su propio PR. scikit-learn, joblib, numpy y scipy van aparte: modelo_v1.joblib
     # se guarda con una versión dada y al subirlas hay que volver a guardarlo y comparar las
     # predicciones. Además scipy pone tope a numpy y un numpy nuevo trabaría el grupo entero.
+    # cryptography y pyOpenSSL también van aparte (RC-331): pyOpenSSL pone tope a cryptography.
     groups:
       pip:
         patterns: ["*"]
-        exclude-patterns: ["scikit-learn", "joblib", "numpy", "scipy"]
+        exclude-patterns: ["scikit-learn", "joblib", "numpy", "scipy", "cryptography", "pyOpenSSL"]
         update-types: ["minor", "patch"]
   - package-ecosystem: docker
     directory: /

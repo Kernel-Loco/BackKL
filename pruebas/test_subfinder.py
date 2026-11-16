@@ -28,7 +28,7 @@ from cirdan.recolectores.contrato import Activo  # noqa: E402
 
 RAIZ = Path(__file__).resolve().parents[1]
 SEMILLA = RAIZ / 'db' / 'semillas' / '005_subfinder_y_limites.sql'
-SEMILLA_016 = RAIZ / 'db' / 'semillas' / '016_subfinder_commoncrawl.sql'
+SEMILLA_017 = RAIZ / 'db' / 'semillas' / '017_subfinder_commoncrawl.sql'
 
 # 14 índices válidos, más nuevos primero en collinfo.json pero mezclados aquí: el recolector toma los 12 más recientes.
 VALIDOS = ['CC-MAIN-2026-%02d' % s for s in (5, 47, 8, 43, 13, 39, 17, 35, 21, 30, 26)] + \
@@ -830,7 +830,7 @@ def fila_de_la_semilla(code):
 
 
 class Semilla(unittest.TestCase):
-    """Lectura estática de las semillas 005 y 016, sin base."""
+    """Lectura estática de las semillas 005 y 017, sin base."""
 
     def test_1_la_005_lo_siembra_apagado_con_400(self):
         fila = fila_de_la_semilla('subfinder')
@@ -839,7 +839,7 @@ class Semilla(unittest.TestCase):
         self.assertEqual(int(fila['daily_limit']), 400)  # 50 corridas de las 8 fuentes de entonces
 
     def test_2_la_016_lo_prende_con_390_por_dia_sin_pisar_un_limite_puesto_a_mano(self):
-        texto = re.sub(r'--[^\n]*', '', SEMILLA_016.read_text(encoding='utf-8'))
+        texto = re.sub(r'--[^\n]*', '', SEMILLA_017.read_text(encoding='utf-8'))
         cambios = re.findall(r"UPDATE\s+data_sources\s+SET\s+(\w+)\s*=\s*(\w+)\s+WHERE\s+code\s*=\s*'subfinder'"
                              r"\s+AND\s+(\w+)\s*=\s*(\w+)\s*;", texto, re.IGNORECASE)
         self.assertEqual(sorted(cambios), [('daily_limit', '390', 'daily_limit', '400'),
@@ -853,7 +853,7 @@ class Semilla(unittest.TestCase):
         self.assertIn("RAISE EXCEPTION", texto)   # sin la fila de la 005 falla
         self.assertRegex(texto, r'daily_limit\s*<\s*%d\b' % subfinder.MAX_CONSULTAS)
         self.assertTrue(texto.lstrip().startswith("SET client_encoding = 'UTF8';"))
-        self.assertEqual(sorted(p.name[:3] for p in SEMILLA_016.parent.glob('*.sql')).count('016'), 1)
+        self.assertEqual(sorted(p.name[:3] for p in SEMILLA_017.parent.glob('*.sql')).count('017'), 1)
 
 
 @unittest.skipUnless((RAIZ / 'Dockerfile').exists(), 'sin Dockerfile: dentro de la imagen no se copia')

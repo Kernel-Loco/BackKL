@@ -387,12 +387,13 @@ def entrar(email):
 
 
 def cambiar(client, actual, nueva):
-    """POST /auth/password. Devuelve (código, detail, cabeceras)."""
+    """POST /auth/password. Devuelve (código, cuerpo con 200 o detail con error, cabeceras)."""
     req = urllib.request.Request(PASSWORD_URL, json.dumps({'current_password': actual, 'new_password': nueva}).encode(),
                                  {'Content-Type': 'application/json'}, method='POST')
     try:
         with client.opener.open(req, timeout=15) as r:
-            return r.status, None, r.headers
+            raw = r.read()  # desde RC-331 responde 200 con passkeys_removed, no 204
+            return r.status, (json.loads(raw) if raw else None), r.headers
     except urllib.error.HTTPError as e:
         raw = e.read()
         return e.code, (json.loads(raw) if raw else {}).get('detail'), e.headers
@@ -412,7 +413,7 @@ class CambioContrasena(unittest.TestCase):
 
     def restaurar(self, client):
         # La sesión que cambió sigue abierta: con ella se vuelve a la contraseña de demo.
-        self.assertEqual(cambiar(client, NUEVA, PASSWORD)[:2], (204, None), 'no se pudo volver a la contraseña de demo')
+        self.assertEqual(cambiar(client, NUEVA, PASSWORD)[:2], (200, {'passkeys_removed': 0}), 'no se pudo volver a la contraseña de demo')
 
     def test_1_cinco_malas_dan_400_y_la_sexta_429_sin_revisar(self):
         antes = contar_eventos(DANA, 'auth.password_change_locked')
@@ -440,7 +441,7 @@ class CambioContrasena(unittest.TestCase):
         client = entrar(DANA)
         for i in range(MAX_INTENTOS - 1):
             self.assertEqual(cambiar(client, MALA, NUEVA)[:2], (400, WRONG), 'intento %d' % (i + 1))
-        self.assertEqual(cambiar(client, PASSWORD, NUEVA)[:2], (204, None))
+        self.assertEqual(cambiar(client, PASSWORD, NUEVA)[:2], (200, {'passkeys_removed': 0}))
         self.addCleanup(self.restaurar, client)
         self.assertEqual(sesion.post_login(Client(), DANA, PASSWORD)[0], 401, 'la anterior ya no entra')
         self.assertEqual(sesion.post_login(Client(), DANA, NUEVA)[0], 200, 'la nueva entra')
@@ -470,17 +471,17 @@ class CambioContrasena(unittest.TestCase):
     def test_4_cambiar_cierra_las_demas_sesiones(self):
         primera, segunda = entrar(DANA), entrar(DANA)
         self.assertEqual(segunda.get(AUTH + '/me')[0], 200)
-        self.assertEqual(cambiar(primera, PASSWORD, NUEVA)[:2], (204, None))
+        self.assertEqual(cambiar(primera, PASSWORD, NUEVA)[:2], (200, {'passkeys_removed': 0}))
         self.addCleanup(self.restaurar, primera)
         self.assertEqual(segunda.get(AUTH + '/me')[0], 401, 'la otra sesión se cierra')
         self.assertEqual(primera.get(AUTH + '/me')[0], 200, 'la que cambió sigue abierta')
 
-    def test_5_una_comun_con_otras_mayusculas_da_400_y_una_que_no_esta_204(self):
+    def test_5_una_comun_con_otras_mayusculas_da_400_y_una_que_no_esta_200(self):
         client = entrar(DANA)
         for comun in ('1Q2W3E4R5T6Y', '123QWEasdZXC'):
             self.assertEqual(cambiar(client, PASSWORD, comun)[:2], (400, COMUN), comun)
         self.assertEqual(sesion.post_login(Client(), DANA, PASSWORD)[0], 200, 'la contraseña no cambió')
-        self.assertEqual(cambiar(client, PASSWORD, NUEVA)[:2], (204, None))
+        self.assertEqual(cambiar(client, PASSWORD, NUEVA)[:2], (200, {'passkeys_removed': 0}))
         self.addCleanup(self.restaurar, client)
 
     def test_6_dos_cambios_a_la_vez_con_la_actual_solo_uno_gana(self):
@@ -495,12 +496,12 @@ class CambioContrasena(unittest.TestCase):
 
         with ThreadPoolExecutor(len(clientes)) as pool:
             respuestas = list(pool.map(intento, zip(clientes, nuevas)))
-        ganadoras = [i for i, r in enumerate(respuestas) if r == (204, None)]
+        ganadoras = [i for i, r in enumerate(respuestas) if r == (200, {'passkeys_removed': 0})]
         if len(ganadoras) == 1:
             ganadora = ganadoras[0]
             self.addCleanup(lambda: self.assertEqual(cambiar(clientes[ganadora], nuevas[ganadora], PASSWORD)[:2],
-                                                     (204, None), 'no se pudo volver a la contraseña de demo'))
-        self.assertEqual(sorted(r[0] for r in respuestas), [204, 400], respuestas)
+                                                     (200, {'passkeys_removed': 0}), 'no se pudo volver a la contraseña de demo'))
+        self.assertEqual(sorted(r[0] for r in respuestas), [200, 400], respuestas)
         self.assertEqual(respuestas[1 - ganadora], (400, WRONG), respuestas)
         self.assertEqual(sesion.post_login(Client(), DANA, nuevas[ganadora])[0], 200, 'la que ganó entra')
         self.assertEqual(sesion.post_login(Client(), DANA, nuevas[1 - ganadora])[0], 401, 'la otra no')
