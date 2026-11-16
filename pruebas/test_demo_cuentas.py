@@ -27,6 +27,7 @@ VARIABLES = ('DEMO_ACCOUNTS', 'ALLOWED_ORIGINS', 'TOTP_KEY_VAULT_SECRET_URL', 'P
 LLAVE_HUELLAS = base64.urlsafe_b64encode(os.urandom(32)).decode()
 # Id de la fila que login_lookup() devuelve cuando el UPDATE no cambió nada: otra fila con el mismo correo.
 OTRO_ID = '30000000-0000-4000-8000-0000000000aa'
+URL_KV = 'https://kv-lowtide.vault.azure.net/secrets/password-hash-key/0123456789abcdef0123456789abcdef'
 
 
 class BaseFalsa:
@@ -242,6 +243,38 @@ class Script(unittest.TestCase):
         base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': demo.HASH_DE_RELLENO})
         _, salida = correr(base, DEMO_ACCOUNTS='false')
         self.assertIn('no se toca: alex.morgan@acme-demo.mx', salida)
+
+    def test_9h_con_la_llave_en_key_vault_no_lee_key_vault_y_termina_en_seco(self):
+        # Ronda 1 de RC-330, hallazgo 1: en la VM demo-accounts no llega a IMDS. Una huella cifrada en otra fila con un
+        # correo de demo no se puede revisar: error en seco, sin pedir nada a IMDS ni a Key Vault.
+        from cirdan.auth import keyvault
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        with entorno():
+            huella = passwords.hash_password(demo.PASSWORD, OTRO_ID)
+        base, salida = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': huella}), io.StringIO()
+        red = mock.Mock(side_effect=AssertionError('no debe leer Key Vault'))
+        en_key_vault = {'PASSWORD_HASH_ENCRYPTION_KEY': '', 'PASSWORD_HASH_KEY_VAULT_SECRET_URL': URL_KV}
+        with self.assertRaises(SystemExit) as error, entorno(DEMO_ACCOUNTS='false', **en_key_vault), \
+                mock.patch.object(demo, 'transaction', base.transaction), mock.patch.object(keyvault, '_abrir', red), \
+                redirect_stdout(salida):
+            demo.main(['demo'])
+        self.assertTrue(str(error.exception.code).startswith('ERROR: '))
+        self.assertIn('No se revisó si entran con la contraseña pública: alex.morgan@acme-demo.mx',
+                      str(error.exception.code))
+        self.assertEqual(salida.getvalue().count('cuenta de demo apagada:'), len(demo.CUENTAS) - 1)
+        red.assert_not_called()
+
+    def test_9i_con_la_llave_en_key_vault_una_huella_vieja_se_revisa_sin_red(self):
+        from cirdan.auth import keyvault
+        alex = demo.CUENTAS['alex.morgan@acme-demo.mx'][1]
+        red = mock.Mock(side_effect=AssertionError('no debe leer Key Vault'))
+        for huella in (demo.HASH_DE_RELLENO, 'texto'):
+            with self.subTest(huella=huella), mock.patch.object(keyvault, '_abrir', red):
+                base = BaseFalsa(sin_fila={alex}, pueden_entrar={'alex.morgan@acme-demo.mx': huella})
+                _, salida = correr(base, DEMO_ACCOUNTS='false', PASSWORD_HASH_ENCRYPTION_KEY='',
+                                   PASSWORD_HASH_KEY_VAULT_SECRET_URL=URL_KV)
+                self.assertIn('no se toca: alex.morgan@acme-demo.mx', salida)
+        red.assert_not_called()
 
     def test_10_el_codigo_totp_sigue_saliendo_y_no_toca_la_base(self):
         base, salida = BaseFalsa(), io.StringIO()
