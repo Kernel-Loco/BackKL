@@ -63,6 +63,27 @@ Imprime el código vigente de esa cuenta. Cámbiale el correo para las otras. Es
 | La pantalla regresa al login con «Tu sesión expiró…» | Pasaron 15 minutos sin actividad, o 8 horas desde que entraste. Vuelve a iniciar sesión |
 | «Origen no permitido» o el login no responde | El portal no está en http://localhost:3000, o el backend no está corriendo (`docker compose ps` debe mostrar los contenedores `healthy`) |
 
+## Entrar con passkey (RC-331)
+
+Una passkey es otra forma de entrar, junto a la contraseña con el código. No reemplaza a ninguna de las dos: una cuenta con passkey sigue entrando con correo, contraseña y código. Las cuentas de demo no traen passkeys en la semilla. Para probar una en tu PC:
+
+1. Entra con la cuenta de demo como siempre y abre «Mi perfil», sección «Passkeys».
+2. Escribe la contraseña de demo y, como todas las cuentas de demo tienen MFA, el código de 6 dígitos de ese momento. Ponle un nombre y confirma con Windows Hello, el PIN o la huella de tu PC, o con el gestor de contraseñas que te lo ofrezca.
+3. Cierra sesión. En el login, «Entrar con passkey» o el autollenado del campo de correo abren la passkey. Entrar con ella ya cuenta como MFA: no pide el código.
+
+Ojo con lo siguiente:
+
+- En tu PC las passkeys quedan amarradas a `localhost` (`WEBAUTHN_RP_ID`, que en `docker-compose.yml` va por omisión en `localhost`) y solo sirven en http://localhost:3000. En http://127.0.0.1:3000 no aparecen. En la VM van amarradas a `lowtidesec.com` (`docker-compose.despliegue.yml`), así que una passkey de tu PC no sirve en la VM ni al revés.
+- Una cuenta tiene como máximo 10 passkeys. Se borran desde la misma sección del perfil.
+- La passkey queda en tu dispositivo o en tu gestor de contraseñas, no en la base: la base solo guarda la llave pública, el contador, el nombre y cuándo se usó por última vez. Al rehacer Docker con `down -v` la base pierde la llave pública y la passkey de tu dispositivo deja de servir. Bórrala también de tu dispositivo o gestor.
+- **Con `DEMO_ACCOUNTS=false` las cuentas de demo se apagan, pero sus passkeys siguen en la base.** Borra las passkeys que registraste antes de apagar las cuentas de demo, desde el perfil.
+
+| Mensaje en el portal | Qué pasa y qué hacer |
+|---|---|
+| «No se pudo entrar con esa passkey…» | La passkey no es de este servidor (otra base, otro RP ID), se borró del perfil, la cuenta está desactivada o el dispositivo no pidió tu huella, rostro o PIN. Cada intento cuenta para el bloqueo por IP, y si la passkey existe, también para el del correo. Entra con contraseña y código |
+| «La solicitud de la passkey venció…» | Pasaron más de 5 minutos o la solicitud ya se usó. Vuelve a dar clic en «Entrar con passkey» |
+| «Las passkeys no están disponibles en este servidor.» | `WEBAUTHN_RP_ID` no coincide con ningún origen de `ALLOWED_ORIGINS`. En tu PC deja las dos por omisión |
+
 Para desbloquear todos los correos bloqueados, desde BackKL:
 
 ```bash

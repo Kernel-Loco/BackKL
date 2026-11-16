@@ -78,6 +78,21 @@ Table api_keys [note: 'Llaves de la API REST, con alcance a un dominio o a toda 
   revoked_at timestamptz
 }
 
+Table webauthn_credentials [note: 'Passkeys (WebAuthn) de cada usuario (RC-331, migración 017). Solo la parte pública: la llave privada vive en el autenticador. Entrar con una exige verificación del usuario y cuenta como MFA. RLS ENABLE y FORCE con tenant_isolation. cirdan_app tiene SELECT y DELETE, INSERT sin id, created_at ni last_used_at, y UPDATE solo sobre sign_count, last_used_at y backed_up. Se crean, listan y borran en /api/v1/auth/passkeys (cirdan/auth/routes.py), máximo 10 por usuario.'] {
+  id uuid [pk, note: 'UNIQUE (organization_id, id)']
+  organization_id uuid [not null, ref: > organizations.id]
+  user_id uuid [not null, ref: > users.id, note: 'FK compuesta (organization_id, user_id) a users']
+  credential_id bytea [not null, unique, note: 'Id de la credencial, 1 a 1023 bytes. passkey_lookup(credential_id), de la migración 017 (SECURITY DEFINER, dueño postgres), busca por aquí antes de conocer el tenant, solo con el usuario activo y su empresa en trial o active']
+  public_key bytea [not null, note: 'Llave pública COSE, 1 a 2048 bytes']
+  sign_count bigint [not null, note: 'Contador del autenticador, 0 a 2^32 - 1. Se guarda el nuevo solo si nadie lo cambió desde la búsqueda']
+  transports "text[]" [not null, note: 'Subconjunto de {ble, cable, hybrid, internal, nfc, smart-card, usb}']
+  aaguid uuid [note: 'Modelo del autenticador, si lo da']
+  backed_up boolean [not null, note: 'El proveedor la respalda o sincroniza (passkey de Google, Apple, Microsoft o un gestor)']
+  name text [not null, note: '1 a 60 caracteres, lo pone la persona']
+  created_at timestamptz [not null]
+  last_used_at timestamptz
+}
+
 Table domains [note: 'Dominios raíz que el cliente quiere monitorear, con su token TXT de propiedad. Se podrán dar de alta desde el portal o por API (plan, #26, RC-59). Hoy en dev solo llegan por las semillas. No se escanean sin TXT verificado y autorización firmada vigente.'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
@@ -361,6 +376,7 @@ TableGroup clientes_y_acceso {
   organizations
   users
   api_keys
+  webauthn_credentials
 }
 
 TableGroup dominios_y_autorizacion {
