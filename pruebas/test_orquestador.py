@@ -1474,10 +1474,16 @@ class Orquestador(unittest.TestCase):
             orquestador.marcar_fallido(ACME, s.scan_id, KeyboardInterrupt())
         scan = self.uno('SELECT status, stats FROM scans WHERE id = %s', s.scan_id)
         self.assertEqual((scan['status'], scan['stats']['error']), ('failed', 'KeyboardInterrupt'))
+        bitacora = self.uno("SELECT details FROM audit_log WHERE action = 'scan.failed' AND entity_id = %s", s.scan_id)
+        self.assertEqual(bitacora['details'], {'error': 'KeyboardInterrupt'})  # RC-321
 
     def test_10_un_dominio_de_otra_empresa_no_existe_para_mi(self):
         s = self.solicitar('olmardo.com', responde('cirdan-verification=ab439d2b39a7'))
         self.assertEqual((s.aceptada, s.motivos), (False, ['domain_not_found']))
+        bitacora = self.uno("SELECT entity_id, details FROM audit_log WHERE organization_id = %s "
+                            "AND action = 'scan.rejected' ORDER BY chain_seq DESC LIMIT 1", ACME)  # RC-321
+        self.assertEqual(bitacora['details'], {'fqdn': 'olmardo.com', 'reasons': ['domain_not_found']})
+        self.assertIsNone(bitacora['entity_id'])
 
     # ---------------------------------------------------------------- línea de comandos
 

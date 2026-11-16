@@ -215,7 +215,8 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
     fqdn = fqdn.strip().lower().rstrip('.')
     with _tx(org, conn) as c:
         domain = c.execute('SELECT id::text, fqdn::text, status, txt_token FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
-        if not domain:
+        if not domain:  # otro dominio o uno de otra organización: el rechazo también queda en la bitácora (RC-321)
+            audit(c, org, 'scan.rejected', user_id, ip, 'domain', None, {'fqdn': fqdn, 'reasons': ['domain_not_found']})
             return Solicitud(fqdn, False, ['domain_not_found'], _texto(['domain_not_found']))
 
         motivos, authorization_id = _motivos_previos(c, domain)
@@ -740,7 +741,9 @@ def marcar_fallido(org, scan_id, error):
     """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando."""
     texto = (str(error) or type(error).__name__)[:300]  # Ctrl+C (KeyboardInterrupt) no trae texto
     with transaction(org) as c:
-        c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
-                  "WHERE id = %s AND status = 'running'", (Jsonb({'error': texto}), scan_id))
+        cerrado = c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
+                            "WHERE id = %s AND status = 'running' RETURNING id", (Jsonb({'error': texto}), scan_id)).fetchone()
+        if cerrado:  # si ya lo habían dado por caído, scan.abandoned ya quedó en la bitácora (RC-321)
+            audit(c, org, 'scan.failed', None, None, 'scan', scan_id, {'error': texto})
         # también si ya no estaba en 'running' (lo dieron por caído antes): ninguna fuente se queda esperando
         _cerrar_corridas(c, [scan_id], texto)
