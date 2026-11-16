@@ -168,7 +168,7 @@ def credenciales(entorno):
 
 def _clientes_reales(cred):
     """(athena, glue, s3, fallas) con boto3. Se importa aquí: reproducir nunca lo carga. La sesión lleva solo la llave
-    de CC_ATHENA_* y cada cliente su extremo fijo de us-east-1, con TLS verificado."""
+    de CC_ATHENA_* y cada cliente su extremo fijo de us-east-1, con TLS verificado y sin proxies."""
     import boto3
     import botocore.session
     from botocore.config import Config
@@ -182,8 +182,9 @@ def _clientes_reales(cred):
     sesion = boto3.session.Session(aws_access_key_id=cred['CC_ATHENA_ACCESS_KEY_ID'],
                                    aws_secret_access_key=cred['CC_ATHENA_SECRET_ACCESS_KEY'],
                                    aws_session_token=None, region_name=REGION, botocore_session=base)
+    # proxies={} y no None: con None botocore toma HTTPS_PROXY, HTTP_PROXY y, en Windows, el proxy del sistema.
     config = Config(region_name=REGION, connect_timeout=TIMEOUT_CONEXION, read_timeout=TIMEOUT_LECTURA,
-                    retries={'mode': 'standard', 'total_max_attempts': INTENTOS_AWS})
+                    retries={'mode': 'standard', 'total_max_attempts': INTENTOS_AWS}, proxies={})
     clientes = [sesion.client(s, config=config, verify=True, endpoint_url='https://%s.%s.amazonaws.com' % (s, REGION))
                 for s in ('athena', 'glue', 's3')]
     return clientes + [(BotoCoreError, ClientError)]

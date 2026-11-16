@@ -882,6 +882,21 @@ class ClientesReales(unittest.TestCase):
             self.assertEqual(c.meta.config.retries, {'mode': 'standard', 'total_max_attempts': 3})
             self.assertEqual(c._request_signer._credentials.access_key, LLAVE)
 
+    def test_6_los_proxies_del_entorno_no_se_usan(self):
+        """Con HTTPS_PROXY y HTTP_PROXY puestos y sin NO_PROXY, ningún cliente manda sus pedidos por un proxy."""
+        proxy = 'http://127.0.0.1:9'
+        otras = {'HTTPS_PROXY': proxy, 'HTTP_PROXY': proxy, 'https_proxy': proxy, 'http_proxy': proxy}
+        with mock.patch.dict(os.environ, otras):
+            for v in ('NO_PROXY', 'no_proxy'):
+                os.environ.pop(v, None)
+            athena, glue, s3, _ = subfinder._clientes_reales(subfinder.credenciales(ENTORNO))
+        for c in (athena, glue, s3):
+            with self.subTest(servicio=c.meta.service_model.service_name):
+                config_proxy = c._endpoint.http_session._proxy_config
+                self.assertIsNone(config_proxy.proxy_url_for(c.meta.endpoint_url))
+                self.assertEqual(config_proxy._proxies, {})
+                self.assertEqual(c.meta.config.proxies, {})
+
 
 @unittest.skipUnless(os.environ.get('INTEGRACION_SUBFINDER') == '1',
                      'corre dentro del contenedor con INTEGRACION_SUBFINDER=1')
