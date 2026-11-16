@@ -315,10 +315,13 @@ class Orquestador(unittest.TestCase):
             orden.append('candado')
             return bloquear(*a, **k)
 
-        with mock.patch.object(orquestador, 'ejecutar', put_antes),                 mock.patch.object(orquestador, '_preparar_score', preparar_anotado),                 mock.patch.object(configuracion, 'bloquear_pesos', bloquear_anotado):
+        with mock.patch.object(orquestador, 'ejecutar', put_antes), \
+                mock.patch.object(orquestador, '_preparar_score', preparar_anotado), \
+                mock.patch.object(configuracion, 'bloquear_pesos', bloquear_anotado):
             orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
         self.assertEqual(orden[-2:], ['modelo', 'candado'])
-        ultimo = 'SELECT reason, scan_id::text, computed_at FROM domain_scores ds JOIN domains d ON d.id = ds.domain_id '                  "WHERE d.fqdn = 'acme-demo.mx' ORDER BY computed_at DESC, created_at DESC, ds.id DESC LIMIT 1"
+        ultimo = 'SELECT reason, scan_id::text, computed_at FROM domain_scores ds JOIN domains d ON d.id = ds.domain_id ' \
+                 "WHERE d.fqdn = 'acme-demo.mx' ORDER BY ds.computed_at DESC, ds.created_at DESC, ds.id DESC LIMIT 1"
         del_escaneo = self.uno(ultimo)
         self.assertEqual((del_escaneo['reason'], del_escaneo['scan_id']), ('scan', s.scan_id))
         configuracion.bloquear_pesos(self.conn, ACME)  # un PUT que llega después del cierre
