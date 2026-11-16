@@ -736,12 +736,17 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     if a_medias:
         stats['sources_partial'] = a_medias
     with _tx(org, conn) as c:
-        # El modelo corre antes de bloquear la fila del escaneo y de tomar el candado de pesos (RC-62).
-        preparado = _preparar_score(c, domain['id'], scan_id)
-        cerrado = c.execute("UPDATE scans SET status = %s, finished_at = now(), stats = %s, updated_at = now() "
-                            "WHERE id = %s AND status = 'running' RETURNING id", (estado, Jsonb(stats), scan_id)).fetchone()
+        # El modelo corre antes de bloquear la fila del escaneo y de tomar el candado de pesos (RC-62). Si ya lo
+        # dieron por caído no se calcula de balde: el UPDATE de abajo sigue siendo el que decide.
+        sigue = c.execute("SELECT 1 FROM scans WHERE id = %s AND status = 'running'", (scan_id,)).fetchone()
+        preparado = _preparar_score(c, domain['id'], scan_id) if sigue else None
+        # clock_timestamp(): el cierre lleva la hora de después del modelo, no la del inicio de la transacción.
+        cerrado = sigue and c.execute(
+            "UPDATE scans SET status = %s, finished_at = clock_timestamp(), stats = %s, updated_at = clock_timestamp() "
+            "WHERE id = %s AND status = 'running' RETURNING id", (estado, Jsonb(stats), scan_id)).fetchone()
         if cerrado:  # si lo dieron por caído entre la última fuente y aquí, se queda como está
-            c.execute('UPDATE domains SET last_scan_at = now(), updated_at = now() WHERE fqdn = %s', (fqdn,))
+            c.execute('UPDATE domains SET last_scan_at = clock_timestamp(), updated_at = clock_timestamp() '
+                      'WHERE fqdn = %s', (fqdn,))
             # Si cambiaron los pesos mientras corría (PUT /scoring/weights), el score sale con el juego activo de
             # ahora, no con el del inicio. El candado es el del PUT: si el PUT va primero, aquí ya se ve su juego, y
             # si va después, su recálculo ve este score y lo copia con los pesos nuevos (RC-62). Los dos guardan con

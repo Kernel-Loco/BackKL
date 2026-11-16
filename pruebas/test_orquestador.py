@@ -330,6 +330,25 @@ class Orquestador(unittest.TestCase):
         self.assertEqual((despues['reason'], despues['scan_id']), ('rules_change', s.scan_id))
         self.assertGreater(despues['computed_at'], del_escaneo['computed_at'])
 
+    def test_2a3_si_lo_dieron_por_caido_antes_del_cierre_no_corre_el_modelo(self):
+        """RC-62: el modelo corre antes del candado, pero no si el escaneo ya no está en 'running'."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        llamadas = []
+
+        def corre_y_lo_abandonan(*a, **k):  # la última fuente terminó y otra petición lo dio por caído
+            res = contrato.ejecutar(*a, **k)
+            self.conn.execute("UPDATE scans SET updated_at = now() - interval '31 minutes' WHERE id = %s", (s.scan_id,))
+            orquestador.abandonar_vencidos(self.conn, ACME, scan_id=s.scan_id)
+            return res
+
+        with mock.patch.object(orquestador, 'ejecutar', corre_y_lo_abandonan), \
+                mock.patch.object(orquestador, '_preparar_score', lambda *a, **k: llamadas.append(a)):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        self.assertEqual(resumen['status'], 'failed')
+        self.assertEqual(llamadas, [])
+        self.assertIsNone(self.uno('SELECT 1 FROM domain_scores WHERE scan_id = %s', s.scan_id))
+
     def test_2b_lo_que_la_fuente_ya_no_encuentra_queda_resuelto_y_deja_de_sumar(self):
         _, f = self.escanear_ejemplo()
         s, _ = self.reescanear(BIEN)  # `ejemplo` respondió bien y ya no trae el hallazgo
