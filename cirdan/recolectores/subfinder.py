@@ -1,55 +1,52 @@
-"""Subdominios con subfinder en modo pasivo (#14b, RC-184).
+"""Subdominios pasivos del índice público de Common Crawl (#14b, RC-184), en la fuente subfinder.
 
-subfinder (ProjectDiscovery, MIT) junta subdominios de fuentes pasivas públicas, sin tocar los servidores del
-dominio: no resuelve DNS, no hace fuerza bruta y no prueba comodines. Este recolector lo corre como proceso aparte
-y devuelve solo activos 'subdomain', con las mismas llaves que los de ct_logs donde aplican: 'fuente' ('subfinder')
-y 'origen' (las fuentes de subfinder que vieron el nombre, en orden). No emite hallazgos (CODIGOS vacío) y no es
-complemento de ct_logs: tiene su fila en data_sources, sus reintentos y su límite diario. La semilla 005 la sembró
-apagada y la 016 la prende con una sola fuente, commoncrawl, la única de las 20 revisadas el 15 nov cuyos términos
-permiten el uso automático y mostrar sus datos a terceros (decisión 6 de docs/servicios_externos.md).
+La fuente se llama subfinder porque nació para correr el binario de ProjectDiscovery con sus fuentes pasivas. El 15 nov,
+de sus 20 fuentes solo commoncrawl pasó la revisión de términos (decisión 6 de docs/servicios_externos.md), y el
+commoncrawl de subfinder 2.17.0 revisa un solo índice por año de los últimos 5, en orden al azar, y deja de buscar en el
+primer 404 'No Captures found'. Con eso un dominio chico casi nunca daba nombres, y una corrida vacía no se distinguía
+de una que no buscó en todos los años. Desde el 15 nov este recolector ya no corre el binario: pide el CDX de Common
+Crawl directo, con transporte.py (TLS verificado, sin redirecciones, solo direcciones públicas y el puerto 443). La fila
+de data_sources, la carpeta de grabaciones y los activos siguen iguales. El binario sigue en la imagen sin usarse.
 
-Modo pasivo y nada más:
-- lista blanca fija con -s (FUENTES_SUBFINDER) y las EXCLUIDAS con -es como cinturón, por si una versión nueva cambia
-  la lista por omisión,
-- nunca -active, -nW, -oI, -ip, -all, -r, -rL ni -recursive (resolverían DNS o sumarían fuentes que no se revisaron),
-- -duc: sin la consulta de versión a api.pdtm.sh, que manda un identificador de la máquina y no es fuente pública,
-- con -v y sin -silent: subfinder 2.17.0 solo escribe 'Encountered an error with source ...' en stderr con -v. Sin él
-  una corrida sin red sale con 0 y sin ningún aviso, y pasaría por 0 subdominios (y al grabar pisaría la grabación),
-- entorno limpio: solo PATH, HOME y XDG_CONFIG_HOME en una carpeta temporal que se borra al terminar. subfinder lee
-  llaves de variables <FUENTE>_API_KEY y escribe su config.yaml al arrancar, así que no hereda nada de la API.
+Qué pide, sin tocar los servidores del dominio:
+- collinfo.json, la lista de índices de Common Crawl, y de ahí toma los INDICES más recientes (unos 12 son un año),
+- el CDX de cada uno con url=*.<dominio>, solo el campo url y a lo más LIMITE_FILAS capturas, con PAUSA segundos entre
+  petición y petición, porque Common Crawl pide bajar el ritmo y bloquea la IP 24 h si no (https://commoncrawl.org/faq).
+  La pausa y el turno (Ritmo) son de todo el proceso: dos escaneos a la vez en la API no le pegan más rápido.
+De cada captura solo se guarda el nombre del host, nunca la URL.
 
-Riesgo aceptado: subfinder 2.17.0 no verifica TLS con sus fuentes (InsecureSkipVerify en pkg/subscraping/agent.go).
-No les manda llaves ni datos de la empresa, solo el dominio, y recibe nombres. Un nombre falso solo agrega un activo
-que #23 cruzará con las demás fuentes.
+Un 404 con 'No Captures found' es un índice sin capturas del dominio y no corta la búsqueda: se revisan todos. Cualquier
+otra respuesta (un 503, un 429, un 404 sin ese texto, una red caída, una redirección, una respuesta de más de
+MAX_BYTES_CDX o un 200 sin ninguna captura legible) deja la corrida en FuenteNoResponde, sin grabar, porque faltaría un
+índice. Así una corrida que sí termina revisó los índices completos, y 0 nombres es un resultado de verdad: se graba,
+con el aviso SIN_CAPTURAS si ningún índice tenía capturas. Toda la corrida tiene MAX_SEGUNDOS, y cada petición a lo más
+TIMEOUT_PETICION.
 
-Si subfinder llega a su tiempo máximo (-max-time), corta la enumeración y sale con código 0 con lo que tenga. Por eso
-se mide cuánto tardó y, si llegó a ese tiempo, el resultado lleva el aviso INCOMPLETO.
+Modos: 'vivo' consulta; 'grabar' además guarda el resultado ya leído (líneas, avisos e índices) en
+cirdan/recolectores/respuestas_grabadas/subfinder/<dominio>/ con la Grabadora del contrato (#13); 'reproducir' solo lee
+esa grabación. Sin grabación del dominio, reproducir sale succeeded con el aviso SIN_GRABACION_DOMINIO y sin activos,
+como github.py: no es una fuente caída y el escaneo de una demo no queda partial por eso. Un archivo de la grabación
+que no se puede leer sí es FuenteNoResponde. No tiene línea de comandos propia. En la imagen, el usuario cirdan es dueño
+de respuestas_grabadas/subfinder/ y de nada más (Dockerfile), así que puede grabar dentro del contenedor.
 
-Modos: 'vivo' corre subfinder; 'grabar' además guarda la salida ya leída (líneas y avisos) en
-cirdan/recolectores/respuestas_grabadas/subfinder/<dominio>/ con la Grabadora del contrato (#13); 'reproducir' solo
-lee esa grabación y no ejecuta nada. No tiene línea de comandos propia. En la imagen, el usuario cirdan es dueño de
-respuestas_grabadas/subfinder/ y de nada más (Dockerfile), así que puede grabar subfinder dentro del contenedor.
-
-commoncrawl (pkg/subscraping/sources/commoncrawl/commoncrawl.go de v2.17.0) pide collinfo.json y luego el CDX de un
-índice por cada uno de los últimos 5 años, en un orden al azar. Si un año responde 404 ('No Captures found': ese
-índice no tiene capturas del dominio) deja de buscar en los años que faltan. Ese 404 no es una fuente caída: el
-resultado sigue, con el aviso SIN_CAPTURAS. Cualquier otro error sí lo es. Al grabar, 0 nombres con SIN_CAPTURAS no
-se guarda (FuenteNoResponde): como el orden es al azar, el primer año pudo no tener capturas aunque otros sí, y esa
-corrida vacía pisaría una grabación buena.
-
-Consultas del límite diario (#13b): peticiones HTTP, como en las demás fuentes. Cada corrida en vivo o al grabar
-cuenta MAX_CONSULTAS (las 6 de commoncrawl, el máximo, porque subfinder no dice cuántas hizo), y 0 al reproducir.
+Consultas del límite diario (#13b): peticiones HTTP, como en las demás fuentes. MAX_CONSULTAS es collinfo.json más un
+CDX por índice, sin reintentos dentro de la corrida (el orquestador la reintenta a 1, 5 y 25 minutos).
+`consultas` cuenta las que sí se hicieron, y 0 al reproducir.
 """
+import http.client
 import json
-import os
 import re
-import shutil
-import subprocess
-import tempfile
+import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
+from cirdan.recolectores import transporte
+from cirdan.recolectores.contrato import AGENTE
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
-from cirdan.recolectores.contrato import NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Resultado, en_alcance_nombre
+from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Resultado, SinGrabacion,
+                                          en_alcance_nombre)
 
 FUENTE = 'subfinder'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'subfinder'
@@ -57,127 +54,132 @@ CARPETA_GRABADAS = RAIZ_GRABADAS / 'subfinder'
 # Solo activos: ningún código de regla (pruebas/test_catalogo_reglas.py acepta el dict vacío).
 CODIGOS = {}
 
-# Fuentes pasivas sin llave que se usan: solo las que pasan la regla de la decisión 6 de docs/servicios_externos.md
-# (sus términos publicados permiten el uso automático y mostrar sus datos a terceros). commoncrawl no va por omisión
-# en subfinder (IsDefault false): solo corre porque se pide por nombre con -s.
-FUENTES_SUBFINDER = ('commoncrawl',)
-
-# Se excluyen siempre, aunque una versión nueva las ponga por omisión (subfinder acepta en -es nombres que no conoce):
-# - crtsh y certspotter: duplican a #14 (ct_logs) y se saltarían su límite diario. crtsh además abre PostgreSQL sin TLS.
-#   shodanct y merklemap también son Certificate Transparency.
-# - censys: sus términos no permiten dar sus datos a terceros.
-# - hudsonrock, intelx y leakix: datos de equipos infectados, filtraciones y fugas. Van contra las reglas 2 y 8.
-# - Revisadas el 15 nov sin pasar la regla: anubis, crtname, digitorus, hackertarget, rapiddns, subdomaincenter, submd
-#   y thc (las 8 de antes), alienvault, driftnet y urlscan (sus términos lo prohíben), waybackarchive (solo para
-#   investigación), sitedossier (sin términos) y reconcloud, riddler, threatcrowd y threatminer (sitio caído).
-EXCLUIDAS = ('crtsh', 'certspotter', 'censys', 'hudsonrock', 'intelx', 'leakix',
-             'anubis', 'crtname', 'digitorus', 'hackertarget', 'rapiddns', 'subdomaincenter', 'submd', 'thc',
-             'alienvault', 'driftnet', 'urlscan', 'waybackarchive', 'sitedossier', 'shodanct', 'merklemap',
-             'reconcloud', 'riddler', 'threatcrowd', 'threatminer')
-
-ANIOS_COMMONCRAWL = 5        # maxYearsBack de commoncrawl.go: un CDX por año
-MAX_CONSULTAS = 1 + ANIOS_COMMONCRAWL    # collinfo.json más un CDX por año: peticiones HTTP de una corrida (#13b)
-TIMEOUT_FUENTE = 30          # segundos por petición HTTP de cada fuente (-timeout)
-MAX_MINUTOS = 5              # minutos de toda la enumeración (-max-time)
-TIMEOUT = 360                # segundos del proceso completo: los 5 minutos más margen para arrancar y escribir
+# La única fuente que pasó la regla de la decisión 6 de docs/servicios_externos.md (sus términos publicados permiten el
+# uso automático y mostrar sus datos a terceros). Va en 'origen' de cada activo.
+ORIGEN = 'commoncrawl'
+COLLINFO = 'https://index.commoncrawl.org/collinfo.json'
+CDX = 'https://index.commoncrawl.org/%s-index?'   # el id del índice, que antes pasa por ID_INDICE
+ID_INDICE = re.compile(r'CC-MAIN-[0-9]{4}-[0-9]{2}')
+INDICES = 12                 # los índices más recientes que se revisan: unos 12 son un año
+LIMITE_FILAS = 5000          # capturas por índice (limit del CDX). Si llega, el aviso RECORTADO
+PAUSA = 1.0                  # segundos entre petición y petición
+TIMEOUT_PETICION = 30        # segundos de cada petición, de getaddrinfo al último bloque (transporte.descargar)
+MAX_SEGUNDOS = 300           # segundos de toda la corrida, pausas incluidas
+MAX_BYTES_COLLINFO = 1 << 20
+MAX_BYTES_CDX = 4 << 20      # 5000 capturas de solo la URL caben con holgura
+MAX_CONSULTAS = 1 + INDICES  # collinfo.json más un CDX por índice: peticiones HTTP de una corrida (#13b)
 CONSULTA = 'subfinder:'      # consulta de la grabadora: subfinder_<dominio>.json
-INCOMPLETO = 'subfinder: la lista puede estar incompleta (llegó a su tiempo máximo)'  # cortó por -max-time
-SIN_CAPTURAS = ('subfinder: commoncrawl no tiene capturas del dominio en uno de los años que revisó y no buscó en los '
-                'que faltaban (la lista puede estar incompleta)')
-
-FALLA_FUENTE = re.compile(r'Encountered an error with source ([A-Za-z0-9_-]{1,40}): ([^\n]*)')
-# El 404 del CDX de commoncrawl: el índice de ese año no tiene capturas del dominio.
-CDX_SIN_CAPTURAS = re.compile(r'unexpected status code 404 received from https://index\.commoncrawl\.org/'
-                              r'CC-MAIN-[0-9]{4}-[0-9]{2}-index\?')
+SIN_CAPTURAS = 'subfinder: Common Crawl no tiene capturas de este dominio en sus últimos %d índices'
+SIN_GRABACION_DOMINIO = 'subfinder: no hay grabación de Common Crawl de este dominio, no se revisó Common Crawl'
+RECORTADO = 'subfinder: %s al tope de %d capturas, la lista puede estar incompleta'
+NO_CAPTURAS = b'No Captures found'   # el cuerpo del 404 del CDX cuando el índice no tiene capturas del dominio
 NOMBRE_FUENTE = re.compile(r'[a-z0-9_-]{1,40}')
+FALLAS = (OSError, ValueError, http.client.HTTPException, transporte.PlazoVencido, transporte.Redirigida)
 
 
-def _binario():
-    """Ruta de subfinder en el PATH, o None si no está instalado."""
-    return shutil.which('subfinder')
+class SinCapturas(Exception):
+    """El 404 'No Captures found' del CDX: el índice no tiene capturas del dominio."""
 
 
-def _ejecutar(comando, **opciones):
-    return subprocess.run(comando, **opciones)
+class Ritmo:
+    """Una petición a la vez a Common Crawl en todo el proceso y PAUSA entre el fin de una y el inicio de la siguiente,
+    aunque sean de corridas distintas: la API corre cada escaneo en su propio hilo (cirdan/api/escaneos.py). Entre
+    procesos no se coordina: la línea de comandos que corre a la vez que la API lleva su propio ritmo."""
+
+    def __init__(self):
+        self.candado = threading.Lock()
+        self.ultima = None   # cuándo terminó la última petición, en el cronómetro del cliente (time.monotonic)
 
 
-def comando(binario, dominio):
-    """La línea de subfinder para un dominio. Siempre pasiva: lista blanca, excluidas, JSON con todas las fuentes de
-    cada nombre (-cs), sin color, sin consulta de versión y con -v para que escriba el error de cada fuente."""
-    return [binario, '-d', dominio, '-s', ','.join(FUENTES_SUBFINDER), '-es', ','.join(EXCLUIDAS), '-oJ', '-cs', '-nc',
-            '-duc', '-v', '-timeout', str(TIMEOUT_FUENTE), '-max-time', str(MAX_MINUTOS)]
+RITMO = Ritmo()   # el de todos los clientes del proceso
+
+
+def _descargar(url, plazo, tope, cronometro):
+    """El cuerpo de la respuesta a `url`, de a lo más `tope` bytes y todo antes de `plazo` (un instante de
+    `cronometro`). La única función que hace HTTP. Lanza SinCapturas con el 404 'No Captures found'. Cualquier otra
+    falla sale como la da transporte.descargar (HTTPError, OSError, PlazoVencido, Redirigida o ValueError)."""
+    req = urllib.request.Request(url, headers={'User-Agent': AGENTE})
+    try:
+        return transporte.descargar(req, plazo, tope, cronometro)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            try:
+                cuerpo = e.read(4096) or b''
+            except (OSError, ValueError, http.client.HTTPException):
+                cuerpo = b''
+            if NO_CAPTURAS in cuerpo:
+                raise SinCapturas() from None
+        raise
+
+
+def url_cdx(indice, dominio):
+    """La consulta del CDX de un índice para el dominio y sus subdominios, solo con la URL de cada captura."""
+    return CDX % indice + urllib.parse.urlencode({'url': '*.' + dominio, 'output': 'json', 'fl': 'url',
+                                                  'limit': LIMITE_FILAS})
+
+
+def indices(cuerpo):
+    """Los ids de los INDICES índices más recientes de collinfo.json, del más nuevo al más viejo. Solo los que tienen
+    la forma CC-MAIN-AAAA-SS: la URL del CDX se arma aquí, nunca se toma de la respuesta."""
+    try:
+        lista = json.loads(cuerpo.decode('utf-8', 'replace'))
+    except ValueError:
+        raise FuenteNoResponde('subfinder: collinfo.json de Common Crawl no es JSON') from None
+    if not isinstance(lista, list):
+        raise FuenteNoResponde('subfinder: collinfo.json de Common Crawl no es una lista')
+    ids = {c['id'] for c in lista if isinstance(c, dict) and isinstance(c.get('id'), str) and
+           ID_INDICE.fullmatch(c['id'])}
+    if not ids:
+        raise FuenteNoResponde('subfinder: collinfo.json de Common Crawl no trae ningún índice')
+    return sorted(ids, reverse=True)[:INDICES]
+
+
+def hosts(cuerpo):
+    """(hosts, filas, raras) de una respuesta del CDX: un JSON por línea con su 'url'. Solo el nombre del host."""
+    nombres, filas, raras = set(), 0, 0
+    for texto in cuerpo.decode('utf-8', 'replace').splitlines():
+        texto = texto.strip()
+        if not texto:
+            continue
+        filas += 1
+        try:
+            captura = json.loads(texto)
+            host = urllib.parse.urlsplit(captura['url']).hostname if isinstance(captura, dict) else None
+        except (ValueError, KeyError, TypeError, AttributeError):
+            host = None
+        if isinstance(host, str) and host:
+            nombres.add(host)
+        else:
+            raras += 1
+    return nombres, filas, raras
+
+
+def _motivo(error):
+    """Un texto corto de la falla, sin el cuerpo ni la URL de la respuesta."""
+    if isinstance(error, urllib.error.HTTPError):
+        return 'HTTP %s' % error.code
+    return type(error).__name__
 
 
 def _cuantos(n, singular, plural):
     return '%d %s' % (n, singular if n == 1 else plural)
 
 
-def _texto(valor):
-    """Un texto que se puede grabar en UTF-8 (un surrogate suelto de la salida queda como '?')."""
-    return valor.encode('utf-8', 'replace').decode('utf-8')
-
-
-def _fuentes(linea):
-    """Las fuentes de una línea: 'sources' con -cs o 'source' sin él. Solo nombres con forma de fuente."""
-    fuentes = linea.get('sources')
-    if not isinstance(fuentes, list):
-        fuentes = [linea.get('source')]
-    return [f for f in fuentes if isinstance(f, str) and NOMBRE_FUENTE.fullmatch(f)]
-
-
-def leer_salida(stdout, stderr):
-    """{'lineas': [{host, input, sources}], 'avisos': [...], 'caidas': [...]} de una corrida de subfinder.
-
-    Cada línea de stdout es un JSON con host, input y sources. Las que no son JSON se saltan con un aviso que dice
-    cuántas. De stderr solo se toma el nombre de cada fuente que no respondió, sin URLs ni el texto del error. El 404
-    del CDX de commoncrawl no la cuenta como caída: deja el aviso SIN_CAPTURAS. Con -v, stderr también trae el cuerpo
-    de cada respuesta fallida, que no se lee."""
-    lineas, raras = [], 0
-    for texto in (stdout or '').splitlines():
-        texto = texto.strip()
-        if not texto:
-            continue
-        try:
-            linea = json.loads(texto)
-        except ValueError:
-            raras += 1
-            continue
-        if not isinstance(linea, dict) or not isinstance(linea.get('host'), str):
-            raras += 1
-            continue
-        entrada = linea.get('input')
-        lineas.append({'host': _texto(linea['host']), 'input': _texto(entrada) if isinstance(entrada, str) else '',
-                       'sources': _fuentes(linea)})
-    caidas, sin_capturas = [], False
-    for nombre, error in FALLA_FUENTE.findall(stderr or ''):
-        nombre = nombre.lower()
-        if nombre == 'commoncrawl' and CDX_SIN_CAPTURAS.match(error):
-            sin_capturas = True
-        elif nombre not in caidas:
-            caidas.append(nombre)
-    avisos = ['subfinder: la fuente %s no respondió' % n for n in caidas]
-    if sin_capturas and 'commoncrawl' not in caidas:
-        avisos.append(SIN_CAPTURAS)
-    if raras:
-        avisos.append('subfinder: se %s %s que no %s JSON' % (
-            'saltó' if raras == 1 else 'saltaron', _cuantos(raras, 'línea', 'líneas'), 'es' if raras == 1 else 'son'))
-    return {'lineas': lineas, 'avisos': avisos, 'caidas': caidas}
-
-
 class ClienteSubfinder:
-    """Corre subfinder y, según el modo, graba o reproduce su salida ya leída con la Grabadora del contrato (#13).
+    """Pide el CDX de Common Crawl y, según el modo, graba o reproduce el resultado ya leído con la Grabadora (#13).
 
-    `ejecutar(comando, **opciones)`, `binario` y `cronometro` se inyectan en las pruebas. Por omisión son
-    subprocess.run, el primer subfinder del PATH y time.monotonic. `reloj` es el de la Grabadora (fecha de grabación).
-    `consultas` suma MAX_CONSULTAS cada vez que el proceso arranca."""
+    `descargar(url, plazo, tope, cronometro)`, `cronometro`, `dormir` y `ritmo` se inyectan en las pruebas. Por
+    omisión son _descargar, time.monotonic, time.sleep y RITMO. `reloj` es el de la Grabadora (fecha de grabación).
+    `consultas` suma cada petición HTTP que sí se hizo."""
 
-    def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, ejecutar=None, binario=None, nueva=False, reloj=None,
-                 timeout=TIMEOUT, cronometro=None):
-        self.modo, self.timeout = modo, timeout
+    def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, descargar=None, nueva=False, reloj=None,
+                 cronometro=None, dormir=None, ritmo=None):
+        self.modo = modo
         self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj)
-        self.ejecutar = ejecutar or _ejecutar
-        self.binario = binario
+        self.descargar = descargar or _descargar
         self.cronometro = cronometro or time.monotonic
+        self.dormir = dormir or time.sleep
+        self.ritmo = ritmo or RITMO
         self.consultas = 0
 
     @property
@@ -185,39 +187,68 @@ class ClienteSubfinder:
         """(archivo, fecha de grabación) de cada respuesta tomada del disco."""
         return self.grabadora.leidas
 
-    def _correr(self, dominio):
-        binario = self.binario or _binario()
-        if not binario:
-            raise FuenteNoResponde('subfinder no está instalado')
-        with tempfile.TemporaryDirectory(prefix='cirdan-subfinder-') as casa:
-            config = os.path.join(casa, 'config')
-            os.makedirs(config)
-            entorno = {'PATH': os.environ.get('PATH', os.defpath), 'HOME': casa, 'XDG_CONFIG_HOME': config}
-            self.consultas += MAX_CONSULTAS
-            inicio = self.cronometro()
+    def _pedir(self, url, tope, fin, que):
+        """El cuerpo de una petición, con lo que quede de la corrida como plazo. `que` nombra la petición en el error.
+        Espera su turno en `ritmo` (a lo más hasta `fin`) y, si la última petición del proceso terminó hace menos de
+        PAUSA, lo que falte para completarla."""
+        sin_tiempo = FuenteNoResponde('subfinder: Common Crawl no terminó en %d s (faltó %s)' % (MAX_SEGUNDOS, que))
+        if not self.ritmo.candado.acquire(timeout=max(0.0, fin - self.cronometro())):
+            raise sin_tiempo
+        try:
+            if self.ritmo.ultima is not None:
+                falta = self.ritmo.ultima + PAUSA - self.cronometro()
+                if falta > 0:
+                    self.dormir(min(falta, PAUSA))
+            ahora = self.cronometro()
+            if ahora >= fin:
+                raise sin_tiempo
+            self.consultas += 1
             try:
-                hecho = self.ejecutar(comando(binario, dominio), capture_output=True, text=True, encoding='utf-8',
-                                      errors='replace', timeout=self.timeout, check=False, env=entorno, cwd=casa,
-                                      stdin=subprocess.DEVNULL)
-            except subprocess.TimeoutExpired:
-                raise FuenteNoResponde('subfinder no terminó en %d s' % self.timeout) from None
-            except OSError as e:
-                raise FuenteNoResponde('no se pudo correr subfinder (%s)' % type(e).__name__) from None
-            tardo = self.cronometro() - inicio
-        if hecho.returncode != 0:
-            raise FuenteNoResponde('subfinder terminó con código %s' % hecho.returncode)
-        datos = leer_salida(hecho.stdout, hecho.stderr)
-        if set(FUENTES_SUBFINDER) <= set(datos['caidas']):
-            raise FuenteNoResponde('subfinder: ninguna de sus fuentes respondió (%s)' % ', '.join(FUENTES_SUBFINDER))
-        avisos = datos['avisos']
-        if tardo >= MAX_MINUTOS * 60:  # -max-time cortó la enumeración y salió con 0: pueden faltar nombres
-            avisos.append(INCOMPLETO)
-        return {'lineas': datos['lineas'], 'avisos': avisos}
+                return self.descargar(url, min(ahora + TIMEOUT_PETICION, fin), tope, self.cronometro)
+            except FALLAS as e:
+                raise FuenteNoResponde('subfinder: Common Crawl no respondió en %s (%s)' % (que, _motivo(e))) from None
+            finally:
+                self.ritmo.ultima = self.cronometro()
+        finally:
+            self.ritmo.candado.release()
+
+    def _consultar(self, dominio):
+        fin = self.cronometro() + MAX_SEGUNDOS
+        try:
+            ids = indices(self._pedir(COLLINFO, MAX_BYTES_COLLINFO, fin, 'collinfo.json'))
+        except SinCapturas:
+            raise FuenteNoResponde('subfinder: Common Crawl no respondió en collinfo.json (HTTP 404)') from None
+        nombres, recortados, raras, con_capturas = set(), [], 0, 0
+        for indice in ids:
+            try:
+                cuerpo = self._pedir(url_cdx(indice, dominio), MAX_BYTES_CDX, fin, indice)
+            except SinCapturas:
+                continue
+            encontrados, filas, malas = hosts(cuerpo)
+            if malas == filas:   # un 200 vacío o sin ninguna captura legible: no se sabe qué hay, no se graba
+                raise FuenteNoResponde('subfinder: Common Crawl no dio ninguna captura legible en %s' % indice)
+            con_capturas += 1
+            nombres |= encontrados
+            raras += malas
+            if filas >= LIMITE_FILAS:
+                recortados.append(indice)
+        avisos = []
+        if not con_capturas:
+            avisos.append(SIN_CAPTURAS % len(ids))
+        if recortados:
+            avisos.append(RECORTADO % ('el índice %s llegó' % recortados[0] if len(recortados) == 1 else
+                                       '%d índices llegaron' % len(recortados), LIMITE_FILAS))
+        if raras:
+            avisos.append('subfinder: se %s %s del CDX que no se %s leer' % (
+                'saltó' if raras == 1 else 'saltaron', _cuantos(raras, 'captura', 'capturas'),
+                'pudo' if raras == 1 else 'pudieron'))
+        lineas = [{'host': h, 'input': dominio, 'sources': [ORIGEN]} for h in sorted(nombres)]
+        return {'lineas': lineas, 'avisos': avisos, 'indices': ids}
 
     def enumerar(self, dominio):
-        """{'lineas', 'avisos'} de subfinder para el dominio. Sale del disco al reproducir y se graba al grabar. Si
-        subfinder no responde no se graba nada, así la grabación anterior queda intacta. Tampoco se graba una corrida
-        con 0 nombres y SIN_CAPTURAS: commoncrawl pudo cortar en un año sin capturas antes de llegar a los que sí."""
+        """{'lineas', 'avisos', 'indices'} de Common Crawl para el dominio. Sale del disco al reproducir (SinGrabacion
+        si no hay grabación) y se graba al grabar. Si Common Crawl no responde bien en alguna petición no se graba
+        nada, así la grabación anterior queda intacta."""
         consulta = CONSULTA + dominio
         del_disco, datos = self.grabadora.de_disco(consulta)
         if del_disco:
@@ -225,10 +256,7 @@ class ClienteSubfinder:
                     isinstance(datos.get('avisos'), list)):
                 raise FuenteNoResponde('la grabación de subfinder de %s no se puede leer' % dominio)
             return datos
-        datos = self._correr(dominio)
-        if self.modo == 'grabar' and not datos['lineas'] and SIN_CAPTURAS in datos['avisos']:
-            raise FuenteNoResponde('subfinder: commoncrawl no dio nombres de %s y cortó en un año sin capturas, '
-                                   'así que no se graba para no pisar la grabación anterior' % dominio)
+        datos = self._consultar(dominio)
         self.grabadora.guardar(consulta, datos)
         return datos
 
@@ -271,22 +299,27 @@ def carpeta_de(dominio):
 
 
 def crear_cliente(modo, dominio):
-    """Cliente para el orquestador (#13): 'vivo' corre subfinder, 'reproducir' usa la grabación del dominio y 'grabar'
-    empieza una grabación nueva."""
+    """Cliente para el orquestador (#13): 'vivo' consulta Common Crawl, 'reproducir' usa la grabación del dominio y
+    'grabar' empieza una grabación nueva."""
     return ClienteSubfinder(modo=modo, carpeta=carpeta_de(dominio), nueva=(modo == 'grabar'))
 
 
 def recolectar(dominio, cliente=None, ahora=None, propios=()):
-    """Subdominios de `dominio` según las fuentes pasivas de subfinder. `ahora` y `propios` no se usan: subfinder no
-    da fechas ni busca dominios parecidos."""
+    """Subdominios de `dominio` según el índice de Common Crawl. `ahora` y `propios` no se usan: Common Crawl no da
+    fechas de los nombres ni busca dominios parecidos."""
     dominio = dominio.strip().lower().rstrip('.')
     res = Resultado(dominio, FUENTE)
     if not NOMBRE_VALIDO.fullmatch(dominio):
         res.estado, res.error = 'failed', 'dominio inválido: %s' % dominio
         return res
     cliente = cliente or crear_cliente('vivo', dominio)
-    datos = cliente.enumerar(dominio)
-    res.consultas = cliente.consultas
+    try:
+        datos = cliente.enumerar(dominio)
+    except SinGrabacion:  # reproducir sin grabación del dominio: no se revisó, no es una caída
+        res.avisos.append(SIN_GRABACION_DOMINIO)
+        return res
+    finally:
+        res.consultas = cliente.consultas
     res.avisos += [a for a in datos['avisos'] if isinstance(a, str)]
     res.activos, fuera, invalidos = subdominios(dominio, datos['lineas'])
     if fuera:  # cuántos, no cuáles: pueden ser de terceros

@@ -21,7 +21,7 @@ LowTide sigue las cláusulas 4 a 10 de la norma en la medida que cabe en un proy
 |---|---|---|
 | 4. Contexto | Saber qué se protege, para quién y con qué límites | El reto IKUSI VELATIA, la sección 1 de esta política y el inventario de servicios de [`servicios_externos.md`](servicios_externos.md) |
 | 5. Liderazgo | Una política aprobada y papeles asignados | Esta política y la de #6, aprobadas por PR a `dev`. Coordinación y OSINT, Ernesto. Seguridad, QA y documentación, Germán. Backend e infraestructura, Israel. Datos, ML y portal, Emilio |
-| 6. Planificación | Evaluar riesgos y elegir controles | El modelo de amenazas STRIDE de RC-142, los riesgos aceptados que documenta el README (por ejemplo, subfinder sin verificar TLS) y la declaración de aplicabilidad de la sección 4. Reducido: no hay objetivos de seguridad medibles (cláusula 6.2) |
+| 6. Planificación | Evaluar riesgos y elegir controles | El modelo de amenazas STRIDE de RC-142, los riesgos aceptados que documenta el README (por ejemplo, las consultas DNS y WHOIS sin cifrar) y la declaración de aplicabilidad de la sección 4. Reducido: no hay objetivos de seguridad medibles (cláusula 6.2) |
 | 7. Apoyo | Recursos, competencia, comunicación y documentos | Las reglas del equipo, los README, la guía de cuentas de prueba y esta política, versionados en git |
 | 8. Operación | Aplicar los controles | Las reglas en el código de la sección 4 y el rastro de cada análisis (#6, regla 1.10) |
 | 9. Evaluación | Medir y revisar | El CI de pruebas en cada PR, CodeQL y las revisiones de PR. Las pruebas activas contra el propio despliegue llegan con #51, #58b y #85. Reducido: no hay auditoría interna (cláusula 9.2) ni revisión por la dirección (cláusula 9.3) formales |
@@ -121,7 +121,7 @@ Los controles 7.1 a 7.6, 7.11 y 7.12 (perímetro, entradas, oficinas, vigilancia
 | 8.16 Monitoreo | Alertas de presupuesto de Azure | Falta un monitoreo de la VM y de la API |
 | 8.17 Sincronización de relojes | El TOTP acepta un paso de desfase y la base exige un TXT verificado en la última hora, así que los dos dependen de la hora del servidor | Falta revisar la sincronización de hora de la VM (RC-91) |
 | 8.20 Seguridad de redes | Base, Valkey y API solo en 127.0.0.1. En el despliegue, Cloudflare Tunnel sin abrir puertos | En parte |
-| 8.24 Criptografía | argon2id, AES-256-GCM, SHA-256 y TLS hacia las fuentes externas, salvo subfinder, que es un riesgo aceptado. Van sin cifrar las consultas DNS por el puerto 53 y el WHOIS por el puerto 43, que es el camino principal para los dominios .mx | En parte. El TLS de entrada llega con RC-91 |
+| 8.24 Criptografía | argon2id, AES-256-GCM, SHA-256 y TLS hacia las fuentes externas. subfinder ya no corre el binario, que no verificaba TLS: desde el 15 nov pide Common Crawl con TLS verificado. Van sin cifrar las consultas DNS por el puerto 53 y el WHOIS por el puerto 43, que es el camino principal para los dominios .mx | En parte. El TLS de entrada llega con RC-91 |
 | 8.25 Desarrollo seguro | Ramas por tarjeta, PR a `dev`, CI de pruebas y CodeQL | Existe |
 | 8.26 Requisitos de seguridad | OWASP ASVS para sesiones y autenticación | Existe |
 | 8.27 Arquitectura segura | RLS con FORCE en las tablas por cliente, rol de la API sin privilegios y base y Valkey sin puertos públicos | Existe |
