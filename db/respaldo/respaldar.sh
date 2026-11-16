@@ -149,9 +149,16 @@ subir_uno() {
     -H 'x-ms-version: 2023-11-03' -H 'x-ms-blob-type: BlockBlob' -H 'If-None-Match: *' \
     -H "Content-MD5: $md5" -H 'Content-Type: application/octet-stream' \
     -H "x-ms-meta-sha256: $sha" -T "$archivo" "$url") || codigo=000
-  if [ "$codigo" = 409 ]; then
-    # Un reintento después de una subida que sí llegó: vale si el blob que ya está es este mismo archivo.
-    revisar_blob "$url" "$md5" && codigo=201
+  if [ "$codigo" = 409 ] || [ "$codigo" = 403 ]; then
+    # Un reintento después de una subida que sí llegó: vale si el blob que ya está es este mismo archivo. Con el
+    # rol de la VM (blobs/add/action, sin blobs/write) Azure responde 403 UnauthorizedBlobOverwrite y no 409. Un
+    # 403 con un blob que no está o que no se puede leer (falta el rol) sigue siendo error y lleva su pista.
+    estado=0
+    revisar_blob "$url" "$md5" || estado=$?
+    case $estado in
+      0) codigo=201 ;;
+      2) echo "respaldo: ERROR: en Azure hay otro blob $n" >&2; return 1 ;;
+    esac
   fi
   if [ "$codigo" != 201 ]; then
     local pista=

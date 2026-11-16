@@ -3,7 +3,7 @@
 Sacan un respaldo cifrado con age de la base `cirdan` del compose de prueba, lo restauran en una base nueva y
 comparan filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base. También revisan la
 retención por días, que la restauración nunca toque `cirdan` ni una base que ya existe, que no cree la base si no
-puede descifrar, que no muestre la llave y que una configuración mala no deje nada. No suben nada a Azure (SUBIR=0).
+puede descifrar, que no muestre la llave y que una configuración mala no deje nada. No suben nada a Azure: test_8 sube a un Azure falso en 127.0.0.1.
 
     python -m unittest -v pruebas/test_respaldo.py
 
@@ -11,13 +11,18 @@ Necesitan bash, age y age-keygen, y el contenedor de la base del compose de prue
 con RESPALDO_CONTENEDOR). Solo crean y borran bases que empiezan con `cirdan_prueba_respaldo_<pid>_`. En el CI
 fallan si falta age, para que no se salten sin aviso.
 """
+import base64
+import hashlib
+import json
 import os
 import re
 import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -245,6 +250,117 @@ class Respaldo(unittest.TestCase):
         p = self.respaldar(bien, CARPETA=bien.as_posix() + '//')
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(len(self.respaldos(bien)), 1)
+
+    def test_8_subida_que_choca_con_su_propio_blob(self):
+        # Contra un Azure falso en 127.0.0.1, con una copia del script que apunta ahí por http. Como el rol de la VM
+        # (blobs/add/action, sin blobs/write), un PUT sobre un blob que ya está responde 403, no 409.
+        falso = AzureFalso()
+        try:
+            texto = (RESPALDO / 'respaldar.sh').read_text(encoding='utf-8')
+            cambios = (('https://$CUENTA_BLOB.blob.core.windows.net', falso.url, 1),
+                       ("--proto '=https' --tlsv1.2", "--proto '=http'", 2),
+                       ('http://169.254.169.254', falso.url, 1))
+            for viejo, nuevo, veces in cambios:
+                self.assertEqual(texto.count(viejo), veces, viejo)
+                texto = texto.replace(viejo, nuevo)
+            script = self.tmp / 'respaldar_falso.sh'
+            script.write_text(texto, encoding='utf-8')
+
+            def subir(caso, modo, rol=True):
+                falso.blobs.clear()
+                falso.modo, falso.rol, falso.puts = modo, rol, 0
+                carpeta = self.tmp / ('r8_' + caso)
+                p = correr(['bash', str(script)], env={
+                    'RESPALDO_CONF': str(self.conf(carpeta, SUBIR='1', CUENTA_BLOB='falsa',
+                                                   CONTENEDOR_BLOB='respaldos')),
+                    'NO_PROXY': '127.0.0.1', 'no_proxy': '127.0.0.1'})
+                return p, self.respaldos(carpeta)
+
+            # El primer PUT llega pero su respuesta se pierde (503), curl lo reintenta y Azure da 403: vale, porque
+            # el blob que quedó es este mismo archivo.
+            p, locales = subir('reintento', 'perder')
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn('respaldo: subido a falsa/respaldos/' + locales[0], p.stdout)
+            self.assertEqual(sorted(falso.blobs), locales)
+            self.assertGreaterEqual(falso.puts, 2, 'curl no reintentó el PUT')
+            # Si lo que quedó en Azure es otro archivo, no se da por subido.
+            p, locales = subir('distinto', 'perder_distinto')
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('en Azure hay otro blob ' + locales[0], p.stderr)
+            self.assertNotIn('respaldo: subido', p.stdout)
+            # Sin el rol de crear blobs el 403 sigue siendo error, con su pista, y el respaldo local se queda.
+            p, locales = subir('sin_rol', 'normal', rol=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('respondió 403 al subir %s (falta el rol' % locales[0], p.stderr)
+            self.assertEqual((falso.blobs, len(locales)), ({}, 1))
+        finally:
+            falso.cerrar()
+
+
+class AzureFalso:
+    """Token de IMDS, HEAD y PUT de blobs. modo 'perder': el primer PUT guarda el blob y responde 503.
+    'perder_distinto': igual, pero guarda otro contenido. rol=False: todo PUT responde 403."""
+
+    def __init__(self):
+        falso = self
+        self.blobs, self.modo, self.rol, self.puts = {}, 'normal', True, 0
+
+        class Manejador(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def responder(self, codigo, cuerpo=b'', cabeceras=()):
+                self.send_response(codigo)
+                for k, v in cabeceras:
+                    self.send_header(k, v)
+                self.send_header('Content-Length', str(len(cuerpo)))
+                self.end_headers()
+                self.wfile.write(cuerpo)
+
+            def do_GET(self):
+                if self.path.startswith('/metadata/identity/oauth2/token'):
+                    self.responder(200, json.dumps({'access_token': 'tok'}).encode())
+                else:
+                    self.responder(404)
+
+            def do_HEAD(self):
+                n = self.path.rsplit('/', 1)[-1]
+                if n in falso.blobs:
+                    self.send_response(200)
+                    self.send_header('Content-MD5', falso.blobs[n])
+                else:
+                    self.send_response(404)
+                self.end_headers()
+
+            def do_PUT(self):
+                falso.puts += 1
+                n = self.path.rsplit('/', 1)[-1]
+                if self.headers.get('Expect', '').lower() == '100-continue':
+                    self.send_response_only(100)
+                    self.end_headers()
+                datos = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                md5 = base64.b64encode(hashlib.md5(datos).digest()).decode()
+                if self.headers.get('Authorization') != 'Bearer tok' or not falso.rol:
+                    self.responder(403)
+                elif n in falso.blobs:
+                    self.responder(403, cabeceras=(('x-ms-error-code', 'UnauthorizedBlobOverwrite'),))
+                elif md5 != self.headers.get('Content-MD5'):
+                    self.responder(400)
+                elif falso.modo.startswith('perder'):
+                    falso.blobs[n] = md5 if falso.modo == 'perder' else 'otro' + md5
+                    falso.modo = 'normal'
+                    self.responder(503)
+                else:
+                    falso.blobs[n] = md5
+                    self.responder(201)
+
+        self.servidor = ThreadingHTTPServer(('127.0.0.1', 0), Manejador)
+        self.url = 'http://127.0.0.1:%d' % self.servidor.server_address[1]
+        threading.Thread(target=self.servidor.serve_forever, daemon=True).start()
+
+    def cerrar(self):
+        self.servidor.shutdown()
+        self.servidor.server_close()
 
 
 if __name__ == '__main__':
