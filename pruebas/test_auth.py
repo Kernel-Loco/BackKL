@@ -2,12 +2,15 @@
 
     python -m unittest -v pruebas/test_auth.py      (con `docker compose up -d`, DEMO_ACCOUNTS=true)
 """
+import base64
+import hmac
 import http.client
 import json
 import secrets
 import threading
 import time
 import unittest
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
@@ -22,6 +25,8 @@ DANA = 'dana.cruz@beta-corp.mx'       # de Beta, para las pruebas que la dejan b
 INVALID = 'Correo o contraseña incorrectos.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
+MAX_FALLOS = 5  # MAX_FAILS_EMAIL de cirdan/auth/sessions.py
+CAPTCHA_INVALID = 'No se pudo comprobar que no eres un robot. Espera a que termine la verificación e inténtalo de nuevo.'
 
 
 def codigos_malos(email, n):
@@ -39,9 +44,11 @@ class Login(unittest.TestCase):
 
     def test_1_contrasena_mala_y_correo_inexistente_dan_el_mismo_mensaje(self):
         client = Client()
-        code_bad, body_bad = client.post(AUTH + '/login', {'email': JORDAN, 'password': 'no-es-la-contrasena'})
+        code_bad, body_bad = sesion.post_login(client, JORDAN, 'no-es-la-contrasena')
+        resuelto = sesion.captcha(client)  # fuera de la medición: resolverlo tarda más que argon2
         start = time.perf_counter()
-        code_none, body_none = client.post(AUTH + '/login', {'email': 'nadie@acme-demo.mx', 'password': 'no-es-la-contrasena'})
+        code_none, body_none = client.post(AUTH + '/login', {'email': 'nadie@acme-demo.mx', 'password': 'no-es-la-contrasena',
+                                                             'captcha': resuelto})
         elapsed = time.perf_counter() - start
         self.assertEqual((code_bad, body_bad['detail']), (401, INVALID))
         self.assertEqual((code_none, body_none['detail']), (401, INVALID))
@@ -50,7 +57,7 @@ class Login(unittest.TestCase):
 
     def test_2_la_contrasena_sola_no_da_sesion(self):
         client = Client()
-        code, body = client.post(AUTH + '/login', {'email': JORDAN, 'password': PASSWORD})
+        code, body = sesion.post_login(client, JORDAN, PASSWORD)
         self.assertEqual(code, 200)
         self.assertTrue(body['mfa_required'])
         self.assertIsNone(client.cookie(), 'sin el código no hay cookie')
@@ -71,11 +78,11 @@ class Login(unittest.TestCase):
 
     def test_4_un_codigo_no_se_puede_usar_dos_veces(self):
         first = Client()
-        _, body = first.post(AUTH + '/login', {'email': MAYA, 'password': PASSWORD})
+        _, body = sesion.post_login(first, MAYA, PASSWORD)
         code = sesion.next_code(MAYA)
         self.assertEqual(first.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': code})[0], 200)
         second = Client()
-        _, body = second.post(AUTH + '/login', {'email': MAYA, 'password': PASSWORD})
+        _, body = sesion.post_login(second, MAYA, PASSWORD)
         self.assertEqual(second.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': code})[0], 401)
 
     def test_5_cerrar_sesion_invalida_la_cookie_en_el_servidor(self):
@@ -90,8 +97,8 @@ class Login(unittest.TestCase):
         client = Client()
         email = 'bloqueo-%s@acme-demo.mx' % secrets.token_hex(4)
         for _ in range(5):
-            self.assertEqual(client.post(AUTH + '/login', {'email': email, 'password': 'x'})[0], 401)
-        code, body = client.post(AUTH + '/login', {'email': email, 'password': 'x'})
+            self.assertEqual(sesion.post_login(client, email, 'x')[0], 401)
+        code, body = sesion.post_login(client, email, 'x')
         self.assertEqual(code, 429)
         self.assertIn('Demasiados intentos', body['detail'])
 
@@ -100,7 +107,7 @@ class Login(unittest.TestCase):
         self.assertEqual((code, body['detail']), (401, 'Tu verificación expiró. Inicia sesión de nuevo.'))
 
     def test_8_un_sitio_ajeno_no_puede_mandar_el_login(self):
-        code, _ = Client().post(AUTH + '/login', {'email': JORDAN, 'password': PASSWORD}, headers={'Origin': 'https://evil.example'})
+        code, _ = sesion.post_login(Client(), JORDAN, PASSWORD, headers={'Origin': 'https://evil.example'})
         self.assertEqual(code, 403)
 
     def _sin_mfa(self, email):
@@ -120,7 +127,7 @@ class Login(unittest.TestCase):
             with self.subTest(email=email):
                 self._sin_mfa(email)
                 client = Client()
-                code, body = client.post(AUTH + '/login', {'email': email, 'password': PASSWORD})
+                code, body = sesion.post_login(client, email, PASSWORD)
                 self.assertEqual(code, 200)
                 self.assertFalse(body['mfa_required'])
                 self.assertEqual((body['user']['email'], body['user']['role']), (email, role))
@@ -136,7 +143,7 @@ class Login(unittest.TestCase):
         contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
                   "AND a.action = 'auth.login_failed' AND a.details->>'reason' = 'password';" % JORDAN)
         antes = int(scalar(contar, user='postgres'))
-        code, body = Client().post(AUTH + '/login', {'email': JORDAN, 'password': 'no-es-la-contrasena'})
+        code, body = sesion.post_login(Client(), JORDAN, 'no-es-la-contrasena')
         self.assertEqual((code, body['detail']), (401, INVALID))
         for _ in range(50):  # hasta 5 s
             if int(scalar(contar, user='postgres')) > antes:
@@ -152,11 +159,15 @@ class Login(unittest.TestCase):
         contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
                   "AND a.action = 'auth.login_failed';" % JORDAN)
         antes = int(scalar(contar, user='postgres'))
+        # Los dos captchas se resuelven antes de abrir la conexión: resolverlos entre una petición y otra la deja
+        # inactiva más que el keep-alive de uvicorn (5 s) y la cerraría la API, no la bitácora.
+        captchas = {email: sesion.captcha(Client()) for email in (JORDAN, 'nadie@acme-demo.mx')}
         url = urlsplit(sesion.BASE)
         conn = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
         self.addCleanup(conn.close)
-        for email in (JORDAN, 'nadie@acme-demo.mx'):
-            conn.request('POST', '/api/v1/auth/login', json.dumps({'email': email, 'password': 'no-es-la-contrasena'}),
+        for email, captcha in captchas.items():
+            conn.request('POST', '/api/v1/auth/login', json.dumps({'email': email, 'password': 'no-es-la-contrasena',
+                                                                   'captcha': captcha}),
                          {'Content-Type': 'application/json', 'X-Forwarded-For': 'no-es-ip'})
             r = conn.getresponse()
             self.assertEqual((r.status, json.loads(r.read())['detail']), (401, INVALID), email)
@@ -169,14 +180,14 @@ class Login(unittest.TestCase):
         # tenía la contraseña repetía el login y 5 códigos sin llegar nunca al 429.
         self.addCleanup(sesion.reset)
         client = Client()
-        _, body = client.post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+        _, body = sesion.post_login(client, DANA, PASSWORD)
         guardado = body['mfa_token']
         for i, malo in enumerate(codigos_malos(DANA, 5)):
-            code, body = client.post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+            code, body = sesion.post_login(client, DANA, PASSWORD)
             self.assertEqual((code, body.get('mfa_required')), (200, True), 'login %d' % (i + 1))
             code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': malo})
             self.assertEqual((code, body['detail']), (401, MFA_INVALID), 'código %d' % (i + 1))
-        code, body = client.post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+        code, body = sesion.post_login(client, DANA, PASSWORD)
         self.assertEqual(code, 429, 'la contraseña correcta no debe saltarse el bloqueo')
         code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': guardado, 'code': sesion.next_code(DANA)})
         self.assertEqual(code, 429, 'un mfa_token sacado antes tampoco debe saltárselo, ni con el código bueno')
@@ -189,7 +200,7 @@ class Login(unittest.TestCase):
         contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
                   "AND a.action = 'auth.mfa_failed';" % DANA)
         antes = int(scalar(contar, user='postgres'))
-        _, body = Client().post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+        _, body = sesion.post_login(Client(), DANA, PASSWORD)
         token, codigos = body['mfa_token'], codigos_malos(DANA, 30)
         salida = threading.Barrier(len(codigos))
 
@@ -210,7 +221,7 @@ class Login(unittest.TestCase):
         # Un código por mfa_token, 20 tokens a la vez. El límite de cada token no frena nada aquí: lo frena
         # el fallo del correo, que se cuenta antes de revisar el código. Los logins correctos no cuentan.
         self.addCleanup(sesion.reset)
-        tokens = [Client().post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})[1]['mfa_token'] for _ in range(20)]
+        tokens = [sesion.post_login(Client(), DANA, PASSWORD)[1]['mfa_token'] for _ in range(20)]
         salida = threading.Barrier(len(tokens))
 
         def intento(par):
@@ -233,10 +244,113 @@ class Login(unittest.TestCase):
             scalar("UPDATE users SET last_totp_step = NULL WHERE email = '%s' RETURNING 1;" % DANA, user='postgres')
             sesion._last_step.pop(DANA, None)
             client = Client()
-            code, body = client.post(AUTH + '/login', {'email': DANA, 'password': PASSWORD})
+            code, body = sesion.post_login(client, DANA, PASSWORD)
             self.assertEqual(code, 200, 'login %d' % (i + 1))
             code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': sesion.next_code(DANA)})
             self.assertEqual(code, 200, 'código %d' % (i + 1))
+
+
+def _cambiar(resuelto, cambio):
+    """El mismo captcha resuelto con un cambio aplicado a su JSON."""
+    datos = json.loads(base64.b64decode(resuelto))
+    cambio(datos)
+    return base64.b64encode(json.dumps(datos).encode()).decode()
+
+
+class Captcha(unittest.TestCase):
+    """El login pide el captcha ALTCHA (RC-154): sin él, con uno inventado, manipulado o ya usado no entra nadie."""
+
+    @classmethod
+    def setUpClass(cls):
+        sesion.reset()
+
+    def _login(self, client, email, password, resuelto):
+        body = {'email': email, 'password': password}
+        if resuelto is not None:
+            body['captcha'] = resuelto
+        return client.post(AUTH + '/login', body)
+
+    def assertRechazado(self, client, respuesta, motivo):
+        code, body = respuesta
+        self.assertEqual((code, body['detail']), (400, CAPTCHA_INVALID), motivo)
+        self.assertNotIn('mfa_token', body, motivo)
+        self.assertIsNone(client.cookie(), motivo)
+
+    def test_1_el_reto_trae_firma_vencimiento_y_no_se_guarda(self):
+        client = Client()
+        req = urllib.request.Request(AUTH + '/captcha')
+        with client.opener.open(req, timeout=10) as r:
+            self.assertEqual(r.headers['Cache-Control'], 'no-store')
+            reto = json.loads(r.read())
+        params = reto['parameters']
+        self.assertEqual((params['algorithm'], params['keyPrefix']), ('PBKDF2/SHA-256', '00'))
+        self.assertRegex(reto['signature'], r'^[0-9a-f]{64}$')
+        self.assertAlmostEqual(params['expiresAt'], time.time() + 600, delta=30)
+        self.assertNotEqual(Client().get(AUTH + '/captcha')[1]['parameters']['nonce'], params['nonce'])
+
+    def test_2_sin_captcha_o_con_uno_inventado_no_entra_ni_con_la_contrasena(self):
+        client = Client()
+        for resuelto, motivo in ((None, 'sin el campo'), ('', 'vacío'), ('no-es-base64!', 'basura'),
+                                 (base64.b64encode(b'[1, 2]').decode(), 'JSON que no es un reto'),
+                                 ('A' * 5000, 'demasiado largo')):
+            code, body = self._login(client, JORDAN, PASSWORD, resuelto)
+            if motivo == 'demasiado largo':
+                self.assertEqual(code, 422, motivo)  # ni llega a decodificarse
+                continue
+            self.assertRechazado(client, (code, body), motivo)
+
+    def test_3_un_captcha_manipulado_no_sirve(self):
+        client = Client()
+        cambios = {
+            'contador de otro': lambda d: d['solution'].update(counter=d['solution']['counter'] + 1),
+            'llave inventada': lambda d: d['solution'].update(derivedKey='00' * 32),
+            'reto más barato': lambda d: d['challenge']['parameters'].update(cost=1),
+            'vencimiento movido': lambda d: d['challenge']['parameters'].update(expiresAt=d['challenge']['parameters']['expiresAt'] + 3600),
+            'sin firma': lambda d: d['challenge'].pop('signature'),
+            'firma de otro reto': lambda d: d['challenge'].update(signature='0' * 64),
+        }
+        for motivo, cambio in cambios.items():
+            with self.subTest(motivo):
+                self.assertRechazado(client, self._login(client, JORDAN, PASSWORD, _cambiar(sesion.captcha(client), cambio)), motivo)
+
+    def test_4_un_captcha_resuelto_por_cuenta_propia_sin_reto_de_la_api_no_sirve(self):
+        # Un reto con la misma forma pero firmado con otra llave: quien no tiene la llave de la API no puede hacer los suyos.
+        client = Client()
+        reto = client.get(AUTH + '/captcha')[1]
+        reto['parameters']['nonce'] = secrets.token_hex(16)
+        reto['signature'] = hmac.new(b'otra-llave', json.dumps(reto['parameters'], sort_keys=True).encode(), 'sha256').hexdigest()
+        self.assertRechazado(client, self._login(client, JORDAN, PASSWORD, sesion.solve_captcha(reto)), 'firmado con otra llave')
+
+    def test_5_el_captcha_se_gasta_aunque_la_contrasena_falle(self):
+        client = Client()
+        resuelto = sesion.captcha(client)
+        code, body = self._login(client, JORDAN, 'no-es-la-contrasena', resuelto)
+        self.assertEqual((code, body['detail']), (401, INVALID))
+        self.assertRechazado(client, self._login(client, JORDAN, PASSWORD, resuelto), 'reusado tras un 401')
+        resuelto = sesion.captcha(client)
+        self.assertEqual(self._login(client, JORDAN, PASSWORD, resuelto)[0], 200)
+        self.assertRechazado(client, self._login(Client(), JORDAN, PASSWORD, resuelto), 'reusado tras un 200, desde otro cliente')
+
+    def test_6_el_mismo_captcha_en_paralelo_entra_una_sola_vez(self):
+        resuelto = sesion.captcha(Client())
+        salida = threading.Barrier(10)
+
+        def intento(_):
+            salida.wait()
+            return self._login(Client(), JORDAN, PASSWORD, resuelto)[0]
+
+        with ThreadPoolExecutor(10) as pool:
+            codigos = list(pool.map(intento, range(10)))
+        self.assertEqual((codigos.count(200), codigos.count(400)), (1, 9), codigos)
+
+    def test_7_el_captcha_malo_no_cuenta_para_el_bloqueo(self):
+        # Si contara, cualquiera bloquearía un correo ajeno sin hacer la prueba de trabajo.
+        client = Client()
+        email = 'captcha-%s@acme-demo.mx' % secrets.token_hex(4)
+        for _ in range(MAX_FALLOS + 2):
+            self.assertRechazado(client, self._login(client, email, 'x', 'basura'), 'sin captcha válido')
+        code, body = sesion.post_login(client, email, 'x')
+        self.assertEqual((code, body['detail']), (401, INVALID), 'el correo no debe quedar bloqueado')
 
 
 if __name__ == '__main__':

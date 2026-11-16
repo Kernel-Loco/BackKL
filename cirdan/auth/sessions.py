@@ -4,6 +4,8 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
 - Inactividad: 15 min (OWASP ASVS V3.3, igual que el aviso del portal).
 - Duración máxima: 8 h aunque haya actividad.
 - Verificación en dos pasos pendiente: 5 min y 5 intentos.
+- Alta de la verificación en dos pasos (RC-154): el secreto nuevo espera aquí 10 min y 5 códigos, cifrado.
+- Captcha del login (RC-154): la llave HMAC de los retos y los retos ya usados, hasta que vencen.
 - Bloqueo por intentos: 5 fallos por correo o 20 por IP en 15 min. Un código equivocado también
   cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Una IPv6
   cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
@@ -23,6 +25,7 @@ IDLE_SECONDS = 15 * 60
 ABSOLUTE_SECONDS = 8 * 60 * 60
 MFA_SECONDS = 5 * 60
 MFA_MAX_ATTEMPTS = 5
+MFA_SETUP_SECONDS = 10 * 60
 LOCK_SECONDS = 15 * 60
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
@@ -107,6 +110,42 @@ def take_mfa(token):
 
 def delete_mfa(token):
     _valkey().delete('mfa:' + _digest(token))
+
+
+# ------------------------------------------------------------------ alta de la verificación en dos pasos (RC-154)
+
+def _setup_key(user_id):
+    return 'mfa:setup:' + _digest(str(user_id))
+
+
+def create_mfa_setup(user_id, secret_enc):
+    """Guarda el secreto pendiente de un alta (ya cifrado, en base64) por MFA_SETUP_SECONDS. Pedir otro QR reemplaza
+    al anterior y reinicia sus intentos. En la base no se escribe nada hasta que llega un código válido."""
+    _valkey().set(_setup_key(user_id), json.dumps({'secret_enc': secret_enc, 'attempts': 0}), ex=MFA_SETUP_SECONDS)
+
+
+def take_mfa_setup(user_id):
+    """Gasta un intento del alta pendiente antes de revisar el código, como take_mfa(); None si no hay o venció."""
+    raw = _valkey().eval(_TAKE_MFA, 1, _setup_key(user_id), MFA_MAX_ATTEMPTS)
+    return json.loads(raw) if raw else None
+
+
+def delete_mfa_setup(user_id):
+    _valkey().delete(_setup_key(user_id))
+
+
+# ------------------------------------------------------------------ captcha del login (RC-154)
+
+def captcha_hmac_key(candidate):
+    """La llave HMAC de los retos: la que ya está en Valkey o, si no hay, `candidate`. SET NX GET la deja en un solo
+    paso, así que dos procesos que arrancan a la vez terminan con la misma."""
+    old = _valkey().set('captcha:hmac', candidate, nx=True, get=True)
+    return old or candidate
+
+
+def spend_captcha(nonce, seconds):
+    """Gasta el reto una sola vez: True la primera vez que llega su nonce, False las demás."""
+    return bool(_valkey().set('captcha:used:' + _digest(nonce), '1', nx=True, ex=seconds))
 
 
 # ------------------------------------------------------------------ bloqueo por intentos

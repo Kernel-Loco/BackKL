@@ -93,7 +93,8 @@ jobs:
       - name: Pruebas de la base y la API
         run: >-
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
-          pruebas/test_auth.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_llaves_api.py pruebas/test_respaldo.py
+          pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_llaves_api.py
+          pruebas/test_respaldo.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
       # porque no trae gitleaks. Aquí INTEGRACION_GITHUB=1 hace que falle si a la imagen le faltan.
@@ -105,7 +106,8 @@ jobs:
           docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -v "$PWD/pruebas:/app/pruebas:ro"
           -v "$PWD/datos/ml:/app/datos/ml:ro" -v "$PWD/db:/app/db:ro" -v "$PWD/docs:/app/docs:ro" api python -m unittest
           pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_txt.py
-          pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_llave_totp.py pruebas.test_github.Integracion
+          pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_llave_totp.py pruebas/test_captcha.py
+          pruebas.test_github.Integracion
           pruebas.test_rdap.Transporte
 
       - name: Pruebas sin base ni red

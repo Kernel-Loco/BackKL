@@ -80,20 +80,24 @@ El 19 oct 2026 pasaron las 16 (8 de aislamiento y 8 del dominio de prueba) con l
 
 ## Inicio de sesión (#25)
 
-Correo y contraseña, y después el código de 6 dígitos de una app autenticadora (TOTP). Al verificar el código, la API entrega una cookie `lt_session` (httpOnly, SameSite=Lax, Secure en producción con `COOKIE_SECURE=true`) que solo lleva un token aleatorio. La sesión vive en Valkey, guardada bajo el SHA-256 del token: expira a los 15 min sin actividad y a las 8 h aunque haya actividad, y al cerrar sesión se borra del servidor.
+Correo, contraseña y captcha, y después el código de 6 dígitos de una app autenticadora (TOTP). Al verificar el código, la API entrega una cookie `lt_session` (httpOnly, SameSite=Lax, Secure en producción con `COOKIE_SECURE=true`) que solo lleva un token aleatorio. La sesión vive en Valkey, guardada bajo el SHA-256 del token: expira a los 15 min sin actividad y a las 8 h aunque haya actividad, y al cerrar sesión se borra del servidor.
 
 | Endpoint | Qué hace |
 |---|---|
-| `POST /api/v1/auth/login` | Correo y contraseña. Con MFA activo responde `{mfa_required: true, mfa_token}` (válido 5 min y 5 intentos) |
+| `GET /api/v1/auth/captcha` | Reto ALTCHA firmado para el siguiente login (vence en 10 min, `Cache-Control: no-store`) |
+| `POST /api/v1/auth/login` | Correo, contraseña y `captcha` (el reto resuelto). Con MFA activo responde `{mfa_required: true, mfa_token}` (válido 5 min y 5 intentos) |
 | `POST /api/v1/auth/mfa/verify` | `mfa_token` y código. Crea la sesión y pone la cookie |
 | `POST /api/v1/auth/logout` | Borra la sesión en Valkey y la cookie |
 | `GET /api/v1/auth/me` | Usuario de la sesión (nunca el hash ni el secreto TOTP) |
 | `POST /api/v1/auth/password` | Cambia la contraseña (mínimo 12 caracteres) |
+| `POST /api/v1/auth/mfa/setup` | Alta de TOTP desde el perfil: con la contraseña actual da un secreto nuevo con su QR (espera 10 min y 5 códigos en Valkey, cifrado) |
+| `POST /api/v1/auth/mfa/enable` | Guarda el secreto del alta solo si llega un código válido de la app |
 
 Seguridad:
 - **Contraseñas con argon2id.** Si el correo no existe, el mensaje y el tiempo son los mismos que con una contraseña equivocada, así que no se puede saber qué correos existen. Por eso el fallo se escribe en la bitácora después de mandar el 401.
 - **Bloqueo:** 5 fallos por correo o 20 por IP en 15 min responden 429. Un código equivocado también cuenta como fallo, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Cada código gasta su intento antes de revisarse, así que las peticiones en paralelo tampoco pasan de 5.
 - **El secreto TOTP** se guarda cifrado con AES-256-GCM (llave `TOTP_ENCRYPTION_KEY`, fuera de la base). En la VM la llave vive en Azure Key Vault y la API la lee con la identidad administrada (`TOTP_KEY_VAULT_SECRET_URL`, docs/despliegue.md). `last_totp_step` impide usar dos veces el mismo código.
+- **Captcha (RC-154):** ALTCHA autohospedado, una prueba de trabajo (PBKDF2-SHA256) que el navegador resuelve sin terceros ni cookies. La API firma el reto con HMAC, lo revisa sin red con la librería `altcha` y lo gasta una sola vez en Valkey. Sin captcha válido responde 400 antes de buscar el correo, y eso no cuenta como fallo para el bloqueo. La llave HMAC no va en el `.env`: es una al azar que se guarda en Valkey la primera vez.
 - **Contra CSRF:** las escrituras con un `Origin` que no esté en `ALLOWED_ORIGINS` responden 403.
 - Cada inicio, fallo, código equivocado, cierre de sesión y cambio de contraseña queda en la bitácora (`auth.*`).
 - **La búsqueda del correo al iniciar sesión** usa `login_lookup()` (migraciones 002 y 004), porque antes del login no hay empresa para RLS. Solo devuelve el id, la empresa, el hash y si la cuenta tiene MFA. Su `search_path` termina en `pg_temp` y `cirdan_app` no puede crear objetos temporales, así que nadie puede cambiarle la tabla `users` por una vista temporal. El rol y el secreto TOTP se leen después, ya con RLS.
