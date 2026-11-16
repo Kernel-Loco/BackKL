@@ -69,8 +69,9 @@ def _key():
 
 
 def comprobar_llave():
-    """Al arrancar la API: sin llave válida no arranca, en vez de fallar en el primer inicio de sesión con MFA."""
-    _key()
+    """Al arrancar la API: sin llave válida no arranca, en vez de fallar en el primer inicio de sesión con MFA.
+    Devuelve la llave, para que cirdan/auth/passwords.py revise que la de las huellas sea otra (RC-330)."""
+    return _key()
 
 
 def encrypt_secret(secret, user_id):
