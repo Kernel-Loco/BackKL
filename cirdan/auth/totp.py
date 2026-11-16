@@ -64,7 +64,8 @@ def _key():
     global _llave_vault
     with _candado:
         if _llave_vault is None or _llave_vault[0] != url:
-            _llave_vault = (url, _decodificar(keyvault.leer_secreto(url), 'El secreto de Key Vault'))
+            _llave_vault = (url, _decodificar(keyvault.leer_secreto(url),
+                                                'El secreto de Key Vault de TOTP_KEY_VAULT_SECRET_URL'))
         return _llave_vault[1]
 
 
