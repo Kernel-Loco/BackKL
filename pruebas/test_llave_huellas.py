@@ -320,7 +320,8 @@ class Login(Base):
                                             'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
         with mock.patch.object(routes, 'transaction', base.transaction), \
                 mock.patch.object(routes, 'sessions', sesiones), \
-                mock.patch.object(routes, 'client_ip', return_value='127.0.0.1'),                 mock.patch.object(routes.captcha, 'verify', return_value=True):
+                mock.patch.object(routes, 'client_ip', return_value='127.0.0.1'), \
+                mock.patch.object(routes.captcha, 'verify', return_value=True):
             try:
                 respuesta = routes.login(routes.LoginIn(email='alex@acme-demo.mx', password=clave), None, mock.Mock())
             except routes.HTTPException as e:
