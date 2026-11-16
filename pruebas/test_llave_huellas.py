@@ -282,13 +282,15 @@ class Arranque(Base):
 
 
 class BaseFalsa:
-    """Hace de cirdan.db.transaction para el login: login_lookup() da `fila`, el SELECT del rol da 'admin' y se anota
-    cada UPDATE."""
+    """Hace de cirdan.db.transaction para el login: login_lookup() da `fila`, se anota cada UPDATE y, si el UPDATE del
+    rehash no tocó filas, la huella releída es `releida`."""
 
-    def __init__(self, fila, rowcount=1):
+    def __init__(self, fila, rowcount=1, releida=None):
         self.fila = fila
         self.rowcount = rowcount
+        self.releida = releida
         self.updates = []
+        self.relecturas = 0
 
     @contextmanager
     def transaction(self, org=None):
@@ -300,16 +302,20 @@ class BaseFalsa:
         if sql.startswith('UPDATE users SET password_hash'):
             self.updates.append(parametros)
             return mock.Mock(rowcount=self.rowcount)
+        if sql.startswith('SELECT password_hash FROM users') and self.releida is not None:
+            # releida=False: la fila ya no está cuando se relee.
+            self.relecturas += 1
+            return mock.Mock(**{'fetchone.return_value': self.releida and {'password_hash': self.releida}})
         raise AssertionError('consulta no esperada: %s' % sql)
 
 
 class Login(Base):
     """Puntos 3, 4 y 5 por la ruta de /auth/login, con base y Valkey falsos."""
 
-    def entrar(self, huella, clave=CLAVE, user_id=ALEX, existe=True, rowcount=1, sesiones=None):
+    def entrar(self, huella, clave=CLAVE, user_id=ALEX, existe=True, rowcount=1, sesiones=None, releida=None):
         from cirdan.auth import routes
         base = BaseFalsa({'user_id': user_id, 'organization_id': ORG, 'password_hash': huella, 'mfa_enabled': True}
-                         if existe else None, rowcount)
+                         if existe else None, rowcount, releida)
         sesiones = sesiones or mock.Mock(**{'is_locked.return_value': False,
                                             'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
         with mock.patch.object(routes, 'transaction', base.transaction), \
@@ -341,9 +347,25 @@ class Login(Base):
         # búsqueda y el rehash. La contraseña que se verificó ya no es la de la cuenta: 401 y ni mfa_token ni
         # sesión.
         sesiones = mock.Mock(**{'is_locked.return_value': False, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
-        respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), rowcount=0, sesiones=sesiones)
+        respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), rowcount=0, sesiones=sesiones,
+                                      releida=passwords.hash_password('Otra-Clave-De-Prueba-2', ALEX))
         self.assertEqual(respuesta.status_code, 401)
-        self.assertEqual(len(base.updates), 1)
+        self.assertEqual((len(base.updates), base.relecturas), (1, 1))
+        sesiones.create_mfa.assert_not_called()
+
+    def test_3f_dos_logins_seguidos_con_huella_vieja_entran_los_dos(self):
+        # Ronda 2, R1: doble clic. El primer login ya cifró la huella vieja, así que el UPDATE del segundo no toca
+        # filas. La huella releída es la del primero y abre con la misma contraseña: el segundo también entra.
+        vieja = PasswordHasher().hash(CLAVE)
+        respuesta, base = self.entrar(vieja, rowcount=0, releida=passwords.hash_password(CLAVE, ALEX))
+        self.assertEqual(respuesta['mfa_required'], True)
+        self.assertEqual((len(base.updates), base.relecturas), (1, 1))
+
+    def test_3g_si_la_fila_ya_no_esta_al_releer_no_entra(self):
+        sesiones = mock.Mock(**{'is_locked.return_value': False, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+        respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), rowcount=0, sesiones=sesiones, releida=False)
+        self.assertEqual(respuesta.status_code, 401)
+        self.assertEqual(base.relecturas, 1)
         sesiones.create_mfa.assert_not_called()
 
     def test_3c_el_hash_de_relleno_no_abre_ninguna_cuenta(self):
