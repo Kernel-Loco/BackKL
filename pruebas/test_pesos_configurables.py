@@ -66,6 +66,16 @@ class JuegoActivo(unittest.TestCase):
         self.assertEqual(conn.parametros, ('org-1', 'org-1'))
 
 
+class CandadoDePesos(unittest.TestCase):
+
+    def test_la_llave_pasa_por_uuid_como_la_de_los_hallazgos(self):
+        """RC-62: el uuid en mayúsculas de la línea de comandos y el de la sesión caen en el mismo candado."""
+        conn = ConexionSimulada()
+        configuracion.bloquear_pesos(conn, '20000000-0000-4000-8000-00000000000A')
+        self.assertIn('hashtextextended(%s::uuid::text, 32)', conn.sql)
+        self.assertEqual(conn.parametros, ('20000000-0000-4000-8000-00000000000A',))
+
+
 class Recalculo:
 
     def __init__(self, severidad_congelada='high'):
@@ -120,6 +130,7 @@ class RecalculoScores(unittest.TestCase):
         self.assertEqual(factores['confidence'], .91)
         self.assertEqual(factores['shap'][0]['feature'], 'sensibilidad')
         self.assertFalse(any('UPDATE domain_scores' in sql for sql, _ in conn.consultas))
+        self.assertIn('clock_timestamp()', score_sql)  # el orden de computed_at es el del candado de pesos (RC-62)
 
 
     def test_hallazgo_sin_aporte_en_el_score_ml_no_detiene_el_recalculo(self):

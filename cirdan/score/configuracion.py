@@ -46,7 +46,8 @@ def bloquear_pesos(conn, org):
     score de un escaneo. Así el score de un escaneo que termina mientras alguien cambia los pesos o sale con los
     pesos nuevos, o lo ve el recálculo y lo copia con ellos.
     """
-    conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 32))', (str(org),))
+    # org pasa por uuid para que la llave sea la misma aunque la línea de comandos la reciba en mayúsculas.
+    conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s::uuid::text, 32))', (str(org),))
 
 
 def reglas_del_juego(conn, rule_set_id):
@@ -108,7 +109,8 @@ def recalcular_scores(conn, org, rule_set_id, pesos):
         score_id = conn.execute(
             'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
             'reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) '
-            "VALUES (%s, %s, %s, %s, %s, %s, 'rules_change', %s, %s, %s, %s, now()) RETURNING id::text",
+            # clock_timestamp(), como el score del escaneo: el orden de computed_at es el del candado de pesos.
+            "VALUES (%s, %s, %s, %s, %s, %s, 'rules_change', %s, %s, %s, %s, clock_timestamp()) RETURNING id::text",
             (org, anterior['domain_id'], anterior['scan_id'], rule_set_id, calculo['score'],
              Jsonb(calculo['category_scores']), anterior['method'], anterior['model_version'],
              anterior['model_fallback_reason'], anterior['partial_coverage']),

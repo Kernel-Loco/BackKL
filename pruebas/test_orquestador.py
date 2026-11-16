@@ -293,6 +293,40 @@ class Orquestador(unittest.TestCase):
                                      score['id'], nuevo['id'])['n']
         self.assertGreater(reglas_del_aporte, 0)
 
+    def test_2a2_el_ultimo_score_es_el_del_que_tomo_el_candado_al_final(self):
+        """RC-62: un PUT antes del cierre del escaneo y otro después. computed_at sigue el orden del candado de pesos
+        y el modelo corre antes de tomarlo."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        juego = configuracion.juego_activo(self.conn, ACME)
+        pesos = configuracion.pesos_del_juego(juego)
+        orden = []
+        preparar, bloquear = orquestador._preparar_score, configuracion.bloquear_pesos
+
+        def put_antes(*a, **k):  # el recálculo de un PUT que gana el candado antes de que cierre el escaneo
+            configuracion.bloquear_pesos(self.conn, ACME)
+            configuracion.recalcular_scores(self.conn, ACME, juego['id'], pesos)
+            return contrato.ejecutar(*a, **k)
+
+        def preparar_anotado(*a, **k):
+            orden.append('modelo')
+            return preparar(*a, **k)
+
+        def bloquear_anotado(*a, **k):
+            orden.append('candado')
+            return bloquear(*a, **k)
+
+        with mock.patch.object(orquestador, 'ejecutar', put_antes),                 mock.patch.object(orquestador, '_preparar_score', preparar_anotado),                 mock.patch.object(configuracion, 'bloquear_pesos', bloquear_anotado):
+            orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
+        self.assertEqual(orden[-2:], ['modelo', 'candado'])
+        ultimo = 'SELECT reason, scan_id::text, computed_at FROM domain_scores ds JOIN domains d ON d.id = ds.domain_id '                  "WHERE d.fqdn = 'acme-demo.mx' ORDER BY computed_at DESC, created_at DESC, ds.id DESC LIMIT 1"
+        del_escaneo = self.uno(ultimo)
+        self.assertEqual((del_escaneo['reason'], del_escaneo['scan_id']), ('scan', s.scan_id))
+        configuracion.bloquear_pesos(self.conn, ACME)  # un PUT que llega después del cierre
+        configuracion.recalcular_scores(self.conn, ACME, juego['id'], pesos)
+        despues = self.uno(ultimo)
+        self.assertEqual((despues['reason'], despues['scan_id']), ('rules_change', s.scan_id))
+        self.assertGreater(despues['computed_at'], del_escaneo['computed_at'])
+
     def test_2b_lo_que_la_fuente_ya_no_encuentra_queda_resuelto_y_deja_de_sumar(self):
         _, f = self.escanear_ejemplo()
         s, _ = self.reescanear(BIEN)  # `ejemplo` respondió bien y ya no trae el hallazgo

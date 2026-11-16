@@ -455,7 +455,9 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
     return abiertos, cerrados
 
 
-def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, parcial):
+def _preparar_score(conn, domain_id, scan_id):
+    """Hallazgos puntuables y predicciones del modelo. No depende de los pesos, así que corre antes de tomar el
+    candado de pesos y no hace esperar al PUT ni a los cierres de otros escaneos de la organización (RC-62)."""
     filas = conn.execute(
         'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status, f.evidence, '
         'a.asset_type, a.first_seen_at AS asset_first_seen, f.detected_at, sc.queued_at AS scan_at, '
@@ -488,7 +490,16 @@ def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, pa
     except Exception as error:
         fallback_reason = 'inferencia_ml_no_disponible'
         log.warning('El score del escaneo %s usará reglas: %s', scan_id, type(error).__name__)
+    return {'filas': filas, 'metodo': metodo, 'model_version': model_version, 'fallback_reason': fallback_reason,
+            'predicciones': predicciones, 'explicaciones_ml': explicaciones_ml,
+            'version_explicacion': version_explicacion}
 
+
+def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, parcial, preparado=None):
+    p = preparado or _preparar_score(conn, domain_id, scan_id)
+    filas, predicciones, explicaciones_ml = p['filas'], p['predicciones'], p['explicaciones_ml']
+    metodo, model_version, fallback_reason = p['metodo'], p['model_version'], p['fallback_reason']
+    version_explicacion = p['version_explicacion']
     hallazgos_score = []
     for hallazgo in filas:
         copia = dict(hallazgo)
@@ -507,7 +518,9 @@ def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, pa
     score_id = conn.execute(
         'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
         'reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) '
-        "VALUES (%s, %s, %s, %s, %s, %s, 'scan', %s, %s, %s, %s, now()) "
+        # clock_timestamp() y no now(): se guarda después de tomar el candado de pesos, así que un rules_change del
+        # PUT que corrió antes queda con hora menor y uno que corre después con hora mayor (RC-62).
+        "VALUES (%s, %s, %s, %s, %s, %s, 'scan', %s, %s, %s, %s, clock_timestamp()) "
         'RETURNING id::text',
         (org, domain_id, scan_id, rule_set_id, calculo['score'], Jsonb(calculo['category_scores']), metodo,
          model_version, fallback_reason, parcial),
@@ -723,20 +736,24 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     if a_medias:
         stats['sources_partial'] = a_medias
     with _tx(org, conn) as c:
+        # El modelo corre antes de bloquear la fila del escaneo y de tomar el candado de pesos (RC-62).
+        preparado = _preparar_score(c, domain['id'], scan_id)
         cerrado = c.execute("UPDATE scans SET status = %s, finished_at = now(), stats = %s, updated_at = now() "
                             "WHERE id = %s AND status = 'running' RETURNING id", (estado, Jsonb(stats), scan_id)).fetchone()
         if cerrado:  # si lo dieron por caído entre la última fuente y aquí, se queda como está
             c.execute('UPDATE domains SET last_scan_at = now(), updated_at = now() WHERE fqdn = %s', (fqdn,))
             # Si cambiaron los pesos mientras corría (PUT /scoring/weights), el score sale con el juego activo de
             # ahora, no con el del inicio. El candado es el del PUT: si el PUT va primero, aquí ya se ve su juego, y
-            # si va después, su recálculo ve este score y lo copia con los pesos nuevos (RC-62).
+            # si va después, su recálculo ve este score y lo copia con los pesos nuevos (RC-62). Los dos guardan con
+            # clock_timestamp(), tomado ya con el candado, para que el orden de computed_at sea el del candado.
             configuracion.bloquear_pesos(c, org)
             vigente = configuracion.juego_activo(c, org)
             if vigente and vigente['id'] != rule_set['id']:
                 rule_set = vigente
                 reglas = configuracion.reglas_del_juego(c, rule_set['id'])
                 pesos = configuracion.pesos_del_juego(rule_set)
-            _guardar_score(c, org, domain['id'], scan_id, rule_set['id'], reglas, pesos, estado != 'completed')
+            _guardar_score(c, org, domain['id'], scan_id, rule_set['id'], reglas, pesos, estado != 'completed',
+                           preparado)
             audit(c, org, 'scan.finished', None, None, 'scan', scan_id, {'fqdn': fqdn, 'status': estado, **stats})
     if not cerrado:
         return _ya_no_corre(org, scan_id, conn, corridas)
