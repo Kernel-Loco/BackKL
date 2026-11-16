@@ -424,6 +424,9 @@ class ApiV1(unittest.TestCase):
         self.assertIn("default-src 'none'", headers['Content-Security-Policy'])
         self.assertIn("frame-ancestors 'none'", headers['Content-Security-Policy'])
         self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        _, cabeceras_json, _ = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/report')
+        self.assertEqual(cabeceras_json['Cache-Control'], 'no-store')
         self.assertIn('Have I Been Pwned', texto)
         for h in datos['findings']:
             self.assertIn(h['asset'], texto)

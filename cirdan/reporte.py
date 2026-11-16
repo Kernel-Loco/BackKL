@@ -6,6 +6,7 @@ Aquí no se lee la base: la ruta junta los datos (con la carta vigente revisada)
 """
 from datetime import date, datetime
 from html import escape
+from zoneinfo import ZoneInfo
 
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
 CATEGORIAS = ('infrastructure', 'digital_identity', 'configuration', 'data_leaks')
@@ -16,6 +17,12 @@ CSP_HTML = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none
 # Para que quepa en 2 páginas: los más severos, con la primera frase de qué hacer. Los conteos sí cuentan todos.
 MAX_HALLAZGOS = 8
 MAX_ACCION = 220
+# El título y el activo no tienen tope en el contrato. Con estos topes 8 hallazgos caben en 2 páginas (RC-70).
+MAX_TITULO = 160
+MAX_ACTIVO = 120
+
+# La misma zona que la base (db.py) y el portal: el contenedor de la API corre en UTC.
+ZONA = ZoneInfo('America/Mexico_City')
 
 ETIQUETA_SEVERIDAD = {'critical': 'Crítico', 'high': 'Alto', 'medium': 'Medio', 'low': 'Bajo'}
 ETIQUETA_CATEGORIA = {'infrastructure': 'Infraestructura', 'digital_identity': 'Identidad digital',
@@ -36,15 +43,30 @@ ATRIBUCIONES = (
 )
 
 
+def tope(texto, maximo):
+    """El texto en una línea, con tope de `maximo` caracteres (el último es '…')."""
+    texto = ' '.join((texto or '').split())
+    if len(texto) > maximo:
+        texto = texto[:maximo - 1].rstrip() + '…'
+    return texto
+
+
 def accion_corta(texto):
     """Primera frase de la recomendación, con tope de MAX_ACCION caracteres."""
     texto = ' '.join((texto or '').split())
     corte = texto.find('. ')
     if corte != -1:
         texto = texto[:corte + 1]
-    if len(texto) > MAX_ACCION:
-        texto = texto[:MAX_ACCION - 1].rstrip() + '…'
-    return texto
+    return tope(texto, MAX_ACCION)
+
+
+def activo(h):
+    """El activo como sale del reporte. Un correo sale solo con su dominio, como la salida a SIEM, que lo anula
+    (v1.py, SIEM_FINDINGS_SQL): el reporte es un documento para salir de la plataforma (README, recolector de GitHub)."""
+    valor = h.get('asset') or ''
+    if h.get('asset_type') == 'email':
+        valor = 'Correo de %s' % valor.rpartition('@')[2] if '@' in valor else 'Correo'
+    return tope(valor, MAX_ACTIVO)
 
 
 def armar(dominio, organizacion, autorizacion, score, ultimo_escaneo, hallazgos, recomendaciones, generado=None):
@@ -55,13 +77,13 @@ def armar(dominio, organizacion, autorizacion, score, ultimo_escaneo, hallazgos,
         por_severidad[h['severity']] = por_severidad.get(h['severity'], 0) + 1
         por_categoria[h['category']] = por_categoria.get(h['category'], 0) + 1
     principales = [{
-        'title': h['title'], 'severity': h['severity'], 'category': h['category'], 'asset': h['asset'],
+        'title': tope(h['title'], MAX_TITULO), 'severity': h['severity'], 'category': h['category'], 'asset': activo(h),
         'source': h['source'], 'detected_at': h['detected_at'], 'recurrence': h['recurrence'],
         'action': accion_corta(recomendaciones.get(h['rule_code'])),
     } for h in hallazgos[:MAX_HALLAZGOS]]
     return {
         'domain': dominio, 'organization': organizacion,
-        'generated_at': generado or datetime.now().astimezone(),
+        'generated_at': generado or datetime.now(ZONA),
         'authorization': autorizacion, 'score': score, 'last_scan_at': ultimo_escaneo,
         'open_findings': por_severidad, 'by_category': por_categoria, 'total_open': len(hallazgos),
         'findings': principales, 'findings_omitted': max(0, len(hallazgos) - MAX_HALLAZGOS),
@@ -95,7 +117,9 @@ def lectura(r):
     frases.append('%s es la categoría con más hallazgos abiertos (%d).' % (ETIQUETA_CATEGORIA[cat], r['by_category'][cat]))
     nuevos = sum(1 for h in r['findings'] if h['recurrence'] == 'new')
     if r['findings_omitted'] == 0:
-        frases.append('%d de los %d hallazgos abiertos aparecieron en el último escaneo.' % (nuevos, r['total_open']))
+        # recurrence se calcula contra el último escaneo de cada hallazgo (FINDINGS_SQL), no el del dominio.
+        frases.append('%d de los %d hallazgos abiertos son nuevos en el escaneo más reciente que los revisó.'
+                      % (nuevos, r['total_open']))
     return frases
 
 

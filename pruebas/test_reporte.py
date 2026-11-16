@@ -4,12 +4,19 @@ Uso, desde la raíz del repo:
   python -m unittest pruebas/test_reporte.py
 
 La ruta, el 403 sin carta vigente y la descarga en HTML se prueban contra la API en test_api_v1.py (test_9f).
+Ruta importa la API (FastAPI, psycopg y dnspython) y corre dentro del contenedor, como pruebas.test_rdap.Transporte:
+  docker compose run --rm -e RUTA_REPORTE=1 -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest pruebas.test_reporte.Ruta
+Fuera del contenedor se salta. RUTA_REPORTE=1 hace que falle si no puede importar la API.
 """
+import os
 import re
 import sys
 import unittest
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cirdan import reporte  # noqa: E402
@@ -18,9 +25,10 @@ AHORA = datetime(2026, 11, 15, 12, 0, tzinfo=timezone.utc)
 SEV = ('critical', 'high', 'medium', 'low')
 
 
-def hallazgo(i, severidad='high', categoria='configuration', regla='dmarc_missing', titulo=None, recurrencia='new'):
+def hallazgo(i, severidad='high', categoria='configuration', regla='dmarc_missing', titulo=None, recurrencia='new',
+             activo=None, tipo='subdomain'):
     return {'id': 'f%d' % i, 'title': titulo or 'Hallazgo %d' % i, 'severity': severidad, 'category': categoria,
-            'rule_code': regla, 'asset': 'a%d.olmardo.com' % i, 'source': 'dns',
+            'rule_code': regla, 'asset': activo or 'a%d.olmardo.com' % i, 'asset_type': tipo, 'source': 'dns',
             'detected_at': datetime(2026, 11, 3, tzinfo=timezone.utc), 'recurrence': recurrencia}
 
 
@@ -64,6 +72,45 @@ class Armado(unittest.TestCase):
         self.assertEqual(r['findings'], [])
         self.assertEqual(reporte.lectura(r), ['El dominio no tiene hallazgos abiertos.'])
 
+    def test_5_un_correo_sale_solo_con_su_dominio(self):
+        # Como la salida a SIEM, que anula los activos de tipo email: el reporte se comparte fuera del portal.
+        r = armar([hallazgo(1, regla='email_in_public_commits', activo='juan.perez@olmardo.com', tipo='email'),
+                   hallazgo(2, activo='raro-sin-arroba', tipo='email'), hallazgo(3)])
+        self.assertEqual([h['asset'] for h in r['findings']], ['Correo de olmardo.com', 'Correo', 'a3.olmardo.com'])
+        self.assertNotIn('juan.perez', reporte.html(r))
+        self.assertNotIn('raro-sin-arroba', reporte.html(r))
+
+    def test_6_titulo_y_activo_con_tope(self):
+        # Sin tope, 8 títulos o activos muy largos abren una tercera página en el PDF del portal.
+        r = armar([hallazgo(i, titulo='CVE-2026-%04d ' % i * 80, activo='n%d.' % i * 200 + 'olmardo.com')
+                   for i in range(reporte.MAX_HALLAZGOS)])
+        for h in r['findings']:
+            self.assertEqual(len(h['title']), reporte.MAX_TITULO)
+            self.assertEqual(len(h['asset']), reporte.MAX_ACTIVO)
+            self.assertTrue(h['title'].endswith('…') and h['asset'].endswith('…'))
+        self.assertEqual(armar([hallazgo(1, titulo='Corto')])['findings'][0]['title'], 'Corto')
+
+    def test_7_generado_en_la_hora_de_mexico(self):
+        # El contenedor corre en UTC: a las 19:00 de México el HTML decía el día siguiente y el PDF no.
+        r = reporte.armar('olmardo.com', 'Grupo Olmardo', {}, None, None, [], {})
+        self.assertEqual(getattr(r['generated_at'].tzinfo, 'key', None), 'America/Mexico_City')
+        noche = datetime(2026, 11, 16, 1, 0, tzinfo=timezone.utc)  # 19:00 del 15 nov en México
+
+        class Reloj(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return noche.astimezone(tz) if tz else noche.replace(tzinfo=None)
+
+        with mock.patch.object(reporte, 'datetime', Reloj):
+            r = reporte.armar('olmardo.com', 'Grupo Olmardo', {}, None, None, [], {})
+        self.assertIn('Generado: 15/11/2026', reporte.html(r))
+
+    def test_8_nuevos_desde_su_ultimo_escaneo_no_del_dominio(self):
+        # recurrence se calcula contra el último escaneo de cada hallazgo, no el último del dominio (FINDINGS_SQL).
+        frases = reporte.lectura(armar([hallazgo(1), hallazgo(2, recurrencia='recurring')]))
+        self.assertIn('1 de los 2 hallazgos abiertos son nuevos en el escaneo más reciente que los revisó.', frases)
+        self.assertFalse(any('aparecieron en el último escaneo' in f for f in frases))
+
 
 class Html(unittest.TestCase):
 
@@ -102,6 +149,42 @@ class Html(unittest.TestCase):
     def test_4_cobertura_parcial_lleva_el_aviso(self):
         r = armar([], score={'score': 30, 'band': 'low', 'grade': 'B', 'partial_coverage': True, 'computed_at': AHORA})
         self.assertIn('Cobertura parcial', reporte.html(r))
+
+
+def _api():
+    try:
+        from cirdan.api import v1
+    except (ImportError, RuntimeError) as e:  # RuntimeError: sin las variables del .env (config.required)
+        if os.environ.get('RUTA_REPORTE') == '1':
+            raise
+        raise unittest.SkipTest('Sin FastAPI, psycopg, dnspython o .env: corre dentro del contenedor (%s)' % e)
+    return v1
+
+
+class Ruta(unittest.TestCase):
+
+    def test_1_una_sola_foto_con_repeatable_read(self):
+        # En READ COMMITTED un escaneo que cierra entre SCORES_SQL y FINDINGS_SQL mezcla el score de uno con los
+        # hallazgos del otro. La salida a SIEM ya fija REPEATABLE_READ.
+        v1 = _api()
+        llamadas = []
+
+        class Conn:
+            def execute(self, sql, params=None):
+                fila = {'last_scan_at': None, 'organization': 'Acme', 'valid_from': date(2026, 1, 1),
+                        'valid_until': date(2027, 1, 1)}
+                return SimpleNamespace(fetchone=lambda: fila, fetchall=lambda: [])
+
+        @contextmanager
+        def transaccion(org=None, isolation=None):
+            llamadas.append(isolation)
+            yield Conn()
+
+        with mock.patch.object(v1, '_dominio_autorizado', return_value='d1'), \
+                mock.patch.object(v1, 'transaction', transaccion):
+            r = v1._reporte(SimpleNamespace(org_id='o1'), 'acme-demo.mx')
+        self.assertEqual(llamadas, [v1.IsolationLevel.REPEATABLE_READ])
+        self.assertEqual(r['organization'], 'Acme')
 
 
 if __name__ == '__main__':

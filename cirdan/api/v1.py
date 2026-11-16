@@ -447,7 +447,9 @@ SELECT d.last_scan_at, o.name AS organization, a.valid_from, a.valid_until
 
 def _reporte(session, fqdn):
     domain_id = _dominio_autorizado(session, fqdn)
-    with transaction(session.org_id) as conn:  # una sola transacción: score, hallazgos y carta del mismo momento
+    # REPEATABLE READ, como la salida a SIEM: score, hallazgos y carta salen de una sola foto de la base, así un
+    # escaneo que cierra a la mitad no mezcla el score de uno con los hallazgos del otro.
+    with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
         dominio = conn.execute(REPORTE_DOMINIO_SQL, (domain_id,)).fetchone()
         if dominio is None:  # la carta venció o se revocó entre las dos lecturas
             raise HTTPException(403, 'El dominio no tiene una autorización firmada vigente')
@@ -467,15 +469,19 @@ def _reporte(session, fqdn):
 
 
 @router.get('/domains/{fqdn}/report', summary='Reporte ejecutivo del dominio en JSON (para el PDF del portal) o en HTML')
-def executive_report(fqdn: str, formato: str = Query(default='json'), session: Session = Depends(session_or_api_key)):
+def executive_report(response: Response, fqdn: str, formato: str = Query(default='json'),
+                     session: Session = Depends(session_or_api_key)):
     if formato not in ('json', 'html'):
         raise HTTPException(422, "El formato debe ser 'json' o 'html'")
     datos = _reporte(session, fqdn)
+    # Trae hallazgos, activos, empresa y fechas de la carta: ni el navegador ni un proxy lo guardan, como la SIEM.
     if formato == 'json':
+        response.headers['Cache-Control'] = 'no-store'
         return datos
     # Sin scripts ni recursos externos. La CSP lleva frame-ancestors para que el middleware de RC-283 la conserve.
     respuesta = _descarga(reporte.html(datos), 'text/html; charset=utf-8', '%s-resumen-ejecutivo.html' % fqdn)
     respuesta.headers['Content-Security-Policy'] = reporte.CSP_HTML
+    respuesta.headers['Cache-Control'] = 'no-store'
     return respuesta
 
 
