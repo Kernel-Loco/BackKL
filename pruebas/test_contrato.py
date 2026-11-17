@@ -19,7 +19,7 @@ from pruebas.test_certspotter import RespaldoSimulado, emision  # noqa: E402
 from pruebas.test_crtsh import AHORA, SUBDOMINIOS, CrtshSimulado, cert  # noqa: E402
 from pruebas.test_registros_dns import DnsSimulado, zona  # noqa: E402
 from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa: E402
-from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a, bases_por_defecto  # noqa: E402
+from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a, bases_por_defecto, sin_llave  # noqa: E402
 from pruebas.test_subfinder import CdxSimulado, con_cdx  # noqa: E402
 from pruebas.test_rdap import HttpSimulado as RdapSimulado, respuesta as respuesta_rdap  # noqa: E402
 from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, rdap,  # noqa: E402
@@ -27,6 +27,10 @@ from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contra
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
+
+
+def setUpModule():
+    sin_llave()   # RC-337: la SHODAN_API_KEY del .env de la PC no llega a las pruebas
 
 
 def hallazgo(**cambios):
@@ -452,7 +456,7 @@ class Ejecutar(unittest.TestCase):
             self.assertGreaterEqual(maximo, 0, fuente)
         self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, shodan.MAX_CONSULTAS,
                           rdap.MAX_CONSULTAS, visita.MAX_CONSULTAS, api_docs.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS),
-                         (36, 25, 16, 184, 10, 184, 264, 0))
+                         (36, 25, 16, 214, 10, 184, 264, 0))
 
     def test_15c_el_respaldo_de_ct_logs_no_pasa_de_su_maximo(self):
         """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento: 18
