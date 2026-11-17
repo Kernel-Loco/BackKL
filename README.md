@@ -159,7 +159,7 @@ Son 13 pruebas contra la API y la base levantadas por `docker compose`, con las 
 
 `cirdan/api/explorer.py` agrega la página `/demo` y los 2 endpoints que usa, `GET /db/tables` y `GET /db/tables/{table}/rows`. Solo existen con `DEMO_EXPLORER=true` (ver Vista visual de la base). Piden sesión y toman la empresa de la sesión, como el resto de la API. Las tablas solo las ve el rol Admin, como `GET /api/v1/domains/txt`, porque traen usuarios, bitácora y valores TXT. Ninguna ruta acepta ya `X-Organization` (RC-58).
 
-Con `docker compose up -d` la API ya está corriendo; su documentación está en http://127.0.0.1:8000/docs.
+Con `docker compose up -d` la API ya está corriendo. Su documentación (/docs, /redoc y /openapi.json) no existe por omisión: para verla en tu PC pon `API_DOCS=true` en el `.env` y vuelve a crear la API con `docker compose up -d api` (RC-303).
 
 ```bash
 python -m unittest -v pruebas/test_aislamiento.py pruebas/test_api.py pruebas/test_auth.py

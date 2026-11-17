@@ -1,8 +1,9 @@
 """Documentación de la API y encabezado Server (comentario 10063 de RC-91).
 
-API_DOCS se lee al arrancar la API. Por eso estas pruebas levantan dentro del contenedor dos API propias, una con
-API_DOCS=false, como la fija el despliegue, y otra con API_DOCS=true, como queda en desarrollo. Las dos corren con el
-CMD del Dockerfile, que se lee del propio Dockerfile, así que la del despliegue manda el mismo `--no-server-header`:
+API_DOCS se lee al arrancar la API. Por eso estas pruebas levantan dentro del contenedor tres API propias: una sin
+API_DOCS, que por omisión no publica la documentación (RC-303), otra con API_DOCS=false, como la fija el despliegue, y
+otra con API_DOCS=true, como se pone en una PC para ver /docs. Las tres corren con el CMD del Dockerfile, que se lee
+del propio Dockerfile, así que la del despliegue manda el mismo `--no-server-header`:
 
     docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" -v "$PWD/Dockerfile:/app/Dockerfile:ro" api python -m unittest -v pruebas/test_documentacion_api.py
 
@@ -21,6 +22,7 @@ import urllib.request
 from pathlib import Path
 
 DOCKERFILE = Path(__file__).resolve().parents[1] / 'Dockerfile'
+ENV_LOCAL = Path(__file__).resolve().parents[1] / '.env'
 # Lo que pruebas/test_despliegue.py exige en el CMD del Dockerfile.
 CMD_ESPERADO = ['python', '-m', 'uvicorn', 'cirdan.api.main:app', '--host', '0.0.0.0', '--port', '8000',
                 '--proxy-headers', '--no-server-header']
@@ -46,7 +48,11 @@ class Api:
         cmd[cmd.index('--host') + 1] = '127.0.0.1'
         cmd[cmd.index('--port') + 1] = str(puerto)
         entorno = dict(os.environ, DEMO_EXPLORER='false')
-        entorno.update(variables)
+        for nombre, valor in variables.items():   # None quita la variable: la API usa su valor por omisión
+            if valor is None:
+                entorno.pop(nombre, None)
+            else:
+                entorno[nombre] = valor
         self.proc = subprocess.Popen([sys.executable] + cmd[1:] + ['--log-level', 'warning'], env=entorno)
         for _ in range(100):
             if self.proc.poll() is not None:
@@ -73,6 +79,28 @@ class Api:
                 return e.code, e.headers
 
 
+def api_docs_en_env_local():
+    """Si el .env de la raíz trae API_DOCS: cirdan/config.py lo lee cuando la variable no está en el entorno. En el
+    contenedor no hay .env (.dockerignore)."""
+    return ENV_LOCAL.exists() and any(l.startswith('API_DOCS=') for l in ENV_LOCAL.read_text(encoding='utf-8').split())
+
+
+@unittest.skipIf(api_docs_en_env_local(), 'el .env de la raíz trae API_DOCS: no se puede ver el valor por omisión')
+class DocumentacionPorOmision(unittest.TestCase):
+    """Sin API_DOCS en el entorno las tres rutas no existen (RC-303)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api = Api(8105, API_DOCS=None)
+        cls.addClassCleanup(cls.api.cerrar)
+
+    def test_1_sin_rutas_de_documentacion(self):
+        for ruta in RUTAS_DOCS:
+            code, _ = self.api.get(ruta)
+            self.assertEqual(code, 404, ruta)
+        self.assertEqual(self.api.get('/health')[0], 200)
+
+
 class DocumentacionApagada(unittest.TestCase):
     """Con API_DOCS=false, como en el despliegue."""
 
@@ -97,7 +125,7 @@ class DocumentacionApagada(unittest.TestCase):
 
 
 class DocumentacionPuesta(unittest.TestCase):
-    """Con API_DOCS=true, como en desarrollo: las tres rutas siguen, también sin encabezado Server."""
+    """Con API_DOCS=true, como se pone en una PC: las tres rutas existen, también sin encabezado Server."""
 
     @classmethod
     def setUpClass(cls):

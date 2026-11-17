@@ -74,9 +74,8 @@ def get(llave, url):
 
 
 def rutas_get_con_dominio():
-    """Los GET con {fqdn} que publica la API, tomados de /openapi.json para que una ruta nueva también se pruebe."""
-    code, spec = Client().get('/openapi.json')
-    assert code == 200, code
+    """Los GET con {fqdn} que publica la API, tomados de su esquema para que una ruta nueva también se pruebe."""
+    spec = sesion.esquema()
     return sorted(ruta for ruta, metodos in spec['paths'].items() if '{fqdn}' in ruta and 'get' in metodos)
 
 
@@ -376,7 +375,7 @@ class LlavesApi(unittest.TestCase):
             code, error = cliente.request(metodo, ruta, cuerpo, encabezados)
             self.assertEqual((code, error['detail']), (401, SIN_SESION), '%s %s' % (metodo, ruta))
         # Toda escritura publicada responde 401 solo con la llave (las de iniciar sesión no piden sesión).
-        _, spec = Client().get('/openapi.json')
+        spec = sesion.esquema()
         escrituras = [(m.upper(), ruta) for ruta, metodos in spec['paths'].items() for m in metodos
                       if m in ('post', 'put', 'patch', 'delete') and not ruta.startswith('/api/v1/auth/')]
         self.assertGreaterEqual(len(escrituras), 5)
