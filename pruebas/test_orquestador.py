@@ -104,7 +104,7 @@ def resultado_shodan(*puertos, revisados=None, sin_revisar=None, cves=(), omitid
         res.hallazgos.append(shodan.hallazgo_puerto(shodan.codigo_de_puerto(puerto), 'acme-demo.mx', servicio, ip,
                                                     puerto, hosts, datos, AHORA))
     con_hallazgos = {h.codigo for h in res.hallazgos}
-    res.sin_cobertura = [] if revisados is None else [c for c in shodan.CODIGOS if c not in con_hallazgos]
+    res.sin_cobertura = [] if revisados is None else [c for c in shodan.CODIGOS_PUERTOS if c not in con_hallazgos]
     res.sin_cobertura += list(shodan.SIN_LLAVE)
     return res
 
