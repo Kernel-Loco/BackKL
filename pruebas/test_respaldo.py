@@ -29,10 +29,15 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parent.parent
 RESPALDO = RAIZ / 'db' / 'respaldo'
 
+def en_ci(env):
+    """GitHub Actions pone CI=true. CI=false o CI=0 en una terminal no cuentan."""
+    return (env.get('CI') or '').strip().lower() in ('true', '1')
+
+
 def contenedor(env):
     """La base contra la que corren. En el CI el compose de prueba se llama cirdan-pg16, pero en una PC ese nombre es
     la base de desarrollo: ahí hay que nombrar el contenedor de una pila aislada con RESPALDO_CONTENEDOR."""
-    return (env.get('RESPALDO_CONTENEDOR') or '').strip() or ('cirdan-pg16' if env.get('CI') else None)
+    return (env.get('RESPALDO_CONTENEDOR') or '').strip() or ('cirdan-pg16' if en_ci(env) else None)
 
 
 CONTENEDOR = contenedor(os.environ)
@@ -81,10 +86,12 @@ class Contenedor(unittest.TestCase):
         self.assertIsNone(contenedor({'RESPALDO_CONTENEDOR': '  '}))
         self.assertEqual(contenedor({'RESPALDO_CONTENEDOR': 'lote14-x-pg16'}), 'lote14-x-pg16')
         self.assertEqual(contenedor({'CI': 'true'}), 'cirdan-pg16')
+        for valor in ('false', '0', '', 'no'):
+            self.assertIsNone(contenedor({'CI': valor}), valor)
         self.assertEqual(contenedor({'CI': 'true', 'RESPALDO_CONTENEDOR': 'otra-pg16'}), 'otra-pg16')
 
 
-@unittest.skipIf(FALTAN and not os.environ.get('CI'), 'faltan %s' % ', '.join(FALTAN))
+@unittest.skipIf(FALTAN and not en_ci(os.environ), 'faltan %s' % ', '.join(FALTAN))
 @unittest.skipIf(not CONTENEDOR, 'sin RESPALDO_CONTENEDOR: fuera del CI se nombra la base de una pila aislada')
 class Respaldo(unittest.TestCase):
 
