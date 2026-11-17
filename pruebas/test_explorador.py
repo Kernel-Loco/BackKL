@@ -106,10 +106,15 @@ class ExploradorApagado(Explorador):
                     self.assertEqual(self.api.get(ruta, sesion, org=BETA)[0], 404)
 
     def test_2_tampoco_salen_en_la_documentacion(self):
-        code, body = self.api.get('/openapi.json')
-        self.assertEqual(code, 200)
-        self.assertEqual([p for p in body['paths'] if p.startswith('/db')], [])
-        self.assertIn('/domains', body['paths'])
+        # /openapi.json no existe por omisión (API_DOCS, RC-303): el esquema sale de app.openapi() en otro proceso con
+        # el mismo DEMO_EXPLORER=false de esta API.
+        r = subprocess.run([sys.executable, '-c',
+                            'import json; from cirdan.api.main import app; print(json.dumps(app.openapi()))'],
+                           env=dict(os.environ, DEMO_EXPLORER='false'), check=True, capture_output=True, text=True,
+                           encoding='utf-8', timeout=60)
+        paths = json.loads(r.stdout.strip().splitlines()[-1])['paths']
+        self.assertEqual([p for p in paths if p.startswith('/db')], [])
+        self.assertIn('/domains', paths)
         self.assertEqual(self.api.get('/domains', self.acme)[0], 200, 'el resto de la API sigue igual')
 
 

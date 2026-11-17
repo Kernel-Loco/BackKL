@@ -255,6 +255,14 @@ class ImagenDeLaApi(unittest.TestCase):
         self.assertEqual(json.loads(cmds[-1]), ['python', '-m', 'uvicorn', 'cirdan.api.main:app', '--host', '0.0.0.0',
                                                 '--port', '8000', '--proxy-headers', '--no-server-header'])
 
+    def test_2_documentacion_apagada_por_omision_en_desarrollo(self):
+        # RC-303: sin API_DOCS en el .env la API de la PC tampoco publica /openapi.json, /docs ni /redoc. Que la API
+        # use false cuando no le llega la variable lo prueba pruebas/test_documentacion_api.py. No necesita docker.
+        compose = (RAIZ / 'docker-compose.yml').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^\s*API_DOCS:\s*(.+?)\s*$', compose, re.M), ['${API_DOCS:-false}'])
+        ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^API_DOCS=(.*)$', ejemplo, re.M), ['false'])
+
 
 if __name__ == '__main__':
     unittest.main()
