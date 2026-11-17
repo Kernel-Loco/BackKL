@@ -71,6 +71,15 @@ def reset():
     _last_step.clear()
 
 
+def esquema():
+    """El esquema OpenAPI de la API que corre, con app.openapi() dentro de su contenedor y con su mismo entorno.
+    /openapi.json no existe por omisión (API_DOCS, RC-303), así que no se pide por HTTP."""
+    r = subprocess.run(['docker', 'exec', 'cirdan-api', 'python', '-c',
+                        'import json; from cirdan.api.main import app; print(json.dumps(app.openapi()))'],
+                       check=True, capture_output=True, text=True, encoding='utf-8')
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
 class Client:
     """Cliente HTTP con su propia cookie de sesión."""
 

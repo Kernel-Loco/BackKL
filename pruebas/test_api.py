@@ -68,9 +68,10 @@ class ApiCirdan(unittest.TestCase):
         self.assertIn(code, (401, 404), body)
 
     def test_8_toda_respuesta_trae_la_proteccion_contra_marcos_y_nosniff(self):
-        # RC-283: también los errores y el 403 que da el middleware de origen antes de llegar a una ruta
+        # RC-283: también los errores y el 403 que da el middleware de origen antes de llegar a una ruta. /docs no
+        # existe con el API_DOCS por omisión (RC-303).
         casos = (('GET', '/health', None, 200), ('GET', '/domains', None, 401), ('GET', '/no-existe', None, 404),
-                 ('GET', '/docs', None, 200), ('POST', '/api/v1/auth/logout', 'https://otro.example', 403))
+                 ('GET', '/docs', None, 404), ('POST', '/api/v1/auth/logout', 'https://otro.example', 403))
         for metodo, ruta, origen, esperado in casos:
             req = urllib.request.Request(sesion.BASE + ruta, method=metodo,
                                          headers={'Origin': origen} if origen else {})

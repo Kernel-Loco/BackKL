@@ -87,9 +87,9 @@ services:
       # Explorador de la base para la demo (/demo y /db), siempre con sesión (RC-58). Con false
       # esas rutas no existen. Nunca true en producción.
       DEMO_EXPLORER: ${DEMO_EXPLORER:-false}
-      # Documentación de la API en /openapi.json, /docs y /redoc. Con false esas rutas no existen. El despliegue la
-      # fija en false (comentario 10063 de RC-91).
-      API_DOCS: ${API_DOCS:-true}
+      # Documentación de la API en /openapi.json, /docs y /redoc. Por omisión esas rutas no existen (RC-303). Con
+      # API_DOCS=true en el .env se ven en la PC. El despliegue la fija en false (comentario 10063 de RC-91).
+      API_DOCS: ${API_DOCS:-false}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

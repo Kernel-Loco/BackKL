@@ -9,7 +9,7 @@ y /db solo existe con DEMO_EXPLORER=true y también pide sesión (RC-58). Los GE
 sale de la fila de la llave, que se busca por su hash.
 
     docker compose up -d            (o, fuera de Docker: python -m uvicorn cirdan.api.main:app --port 8000)
-    Documentación: http://127.0.0.1:8000/docs
+    Documentación: con API_DOCS=true en el .env, http://127.0.0.1:8000/docs (por omisión no existe, RC-303).
 """
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
@@ -39,10 +39,10 @@ async def _arranque(app):
     yield
 
 
-# Documentación de la API (/openapi.json, /docs y /redoc). En desarrollo queda puesta. En el despliegue va en false
-# (docker-compose.despliegue.yml) y las tres rutas no existen: LowTide escanea su propio dominio y no debe darse
-# exposed_api_docs a sí mismo (comentario 10063 de RC-91).
-API_DOCS = config('API_DOCS', 'true').lower() == 'true'
+# Documentación de la API (/openapi.json, /docs y /redoc). Por omisión no existe: LowTide escanea su propio dominio y
+# no debe darse exposed_api_docs a sí mismo (comentario 10063 de RC-91, RC-303). Solo API_DOCS=true la pone, para verla
+# en una PC de desarrollo. El despliegue además la fija en false (docker-compose.despliegue.yml).
+API_DOCS = config('API_DOCS', 'false').lower() == 'true'
 
 app = FastAPI(
     lifespan=_arranque,
