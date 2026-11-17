@@ -7,8 +7,9 @@ puede descifrar, que no muestre la llave y que una configuración mala no deje n
 
     python -m unittest -v pruebas/test_respaldo.py
 
-Necesitan bash, age y age-keygen, y el contenedor de la base del compose de prueba (`cirdan-pg16` en el CI, otro
-con RESPALDO_CONTENEDOR). Solo crean y borran bases que empiezan con `cirdan_prueba_respaldo_<pid>_`. En el CI
+Necesitan bash, age y age-keygen, y el contenedor de la base del compose de prueba: `cirdan-pg16` en el CI y, en una
+PC, el de una pila aislada con RESPALDO_CONTENEDOR. Sin esa variable fuera del CI se saltan, para no tocar la base de
+desarrollo. Solo crean y borran bases que empiezan con `cirdan_prueba_respaldo_<pid>_`. En el CI
 fallan si falta age, para que no se salten sin aviso.
 """
 import base64
@@ -27,7 +28,14 @@ from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
 RESPALDO = RAIZ / 'db' / 'respaldo'
-CONTENEDOR = os.environ.get('RESPALDO_CONTENEDOR', 'cirdan-pg16')
+
+def contenedor(env):
+    """La base contra la que corren. En el CI el compose de prueba se llama cirdan-pg16, pero en una PC ese nombre es
+    la base de desarrollo: ahí hay que nombrar el contenedor de una pila aislada con RESPALDO_CONTENEDOR."""
+    return (env.get('RESPALDO_CONTENEDOR') or '').strip() or ('cirdan-pg16' if env.get('CI') else None)
+
+
+CONTENEDOR = contenedor(os.environ)
 PATRON = re.compile(r'^cirdan_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}\.dump\.age$')
 PREFIJO = 'cirdan_prueba_respaldo_%d_' % os.getpid()
 HERRAMIENTAS = ('bash', 'age', 'age-keygen', 'docker')
@@ -66,7 +74,18 @@ def existe(base):
     return psql("SELECT count(*) FROM pg_database WHERE datname = '%s';" % base) == '1'
 
 
+class Contenedor(unittest.TestCase):
+
+    def test_fuera_del_ci_no_toma_la_base_de_desarrollo(self):
+        self.assertIsNone(contenedor({}))
+        self.assertIsNone(contenedor({'RESPALDO_CONTENEDOR': '  '}))
+        self.assertEqual(contenedor({'RESPALDO_CONTENEDOR': 'lote14-x-pg16'}), 'lote14-x-pg16')
+        self.assertEqual(contenedor({'CI': 'true'}), 'cirdan-pg16')
+        self.assertEqual(contenedor({'CI': 'true', 'RESPALDO_CONTENEDOR': 'otra-pg16'}), 'otra-pg16')
+
+
 @unittest.skipIf(FALTAN and not os.environ.get('CI'), 'faltan %s' % ', '.join(FALTAN))
+@unittest.skipIf(not CONTENEDOR, 'sin RESPALDO_CONTENEDOR: fuera del CI se nombra la base de una pila aislada')
 class Respaldo(unittest.TestCase):
 
     @classmethod
