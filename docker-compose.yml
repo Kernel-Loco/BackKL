@@ -79,6 +79,13 @@ services:
       # comas (#16, RC-50). Solo se revisan los repos públicos de la declarada. Un dominio sin par, o con
       # 'ninguna', no consulta GitHub y queda sin cobertura. Hace de campo de la carta hasta la tabla de #64.
       ORGS_GITHUB_DECLARADAS: ${ORGS_GITHUB_DECLARADAS:-olmardo.com=olmardo}
+      # Athena sobre el URL Index de Common Crawl para subfinder (RC-184): la llave de un usuario de IAM que solo
+      # consulta el workgroup, el workgroup y su carpeta de resultados en S3 (s3://<bucket>/athena/). Sin las 4,
+      # subfinder queda en FuenteNoResponde en vivo y al grabar, y reproducir sigue igual.
+      CC_ATHENA_ACCESS_KEY_ID: ${CC_ATHENA_ACCESS_KEY_ID:-}
+      CC_ATHENA_SECRET_ACCESS_KEY: ${CC_ATHENA_SECRET_ACCESS_KEY:-}
+      CC_ATHENA_WORKGROUP: ${CC_ATHENA_WORKGROUP:-}
+      CC_ATHENA_SALIDA: ${CC_ATHENA_SALIDA:-}
       # Explorador de la base para la demo (/demo y /db), siempre con sesión (RC-58). Con false
       # esas rutas no existen. Nunca true en producción.
       DEMO_EXPLORER: ${DEMO_EXPLORER:-false}

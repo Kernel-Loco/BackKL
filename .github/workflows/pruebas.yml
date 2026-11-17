@@ -116,7 +116,7 @@ jobs:
           pruebas/test_captcha.py pruebas/test_documentacion_api.py
           pruebas.test_github.Integracion
           pruebas.test_rdap.Transporte pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
-          pruebas.test_subfinder.Integracion
+          pruebas.test_subfinder.Integracion pruebas.test_subfinder.ClientesReales
 
       - name: Pruebas sin base ni red
         run: >-

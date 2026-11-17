@@ -25,6 +25,9 @@ pyasn1-modules==0.4.2
 redis==8.1.0
 dnspython==2.9.2
 maxminddb==3.2.0
+# Athena, Glue y S3 de AWS para el URL Index de Common Crawl (subfinder, RC-184). boto3 fija su botocore, que
+# trae jmespath, python-dateutil y urllib3 sin compilador. Va en el grupo pip de Dependabot.
+boto3==1.44.3
 pandas==3.1.1
 scikit-learn==1.9.1
 shap==0.54.1
