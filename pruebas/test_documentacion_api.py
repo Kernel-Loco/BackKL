@@ -22,6 +22,7 @@ import urllib.request
 from pathlib import Path
 
 DOCKERFILE = Path(__file__).resolve().parents[1] / 'Dockerfile'
+ENV_LOCAL = Path(__file__).resolve().parents[1] / '.env'
 # Lo que pruebas/test_despliegue.py exige en el CMD del Dockerfile.
 CMD_ESPERADO = ['python', '-m', 'uvicorn', 'cirdan.api.main:app', '--host', '0.0.0.0', '--port', '8000',
                 '--proxy-headers', '--no-server-header']
@@ -78,6 +79,13 @@ class Api:
                 return e.code, e.headers
 
 
+def api_docs_en_env_local():
+    """Si el .env de la raíz trae API_DOCS: cirdan/config.py lo lee cuando la variable no está en el entorno. En el
+    contenedor no hay .env (.dockerignore)."""
+    return ENV_LOCAL.exists() and any(l.startswith('API_DOCS=') for l in ENV_LOCAL.read_text(encoding='utf-8').split())
+
+
+@unittest.skipIf(api_docs_en_env_local(), 'el .env de la raíz trae API_DOCS: no se puede ver el valor por omisión')
 class DocumentacionPorOmision(unittest.TestCase):
     """Sin API_DOCS en el entorno las tres rutas no existen (RC-303)."""
 
