@@ -1,8 +1,8 @@
 -- =====================================================================
--- Cirdan · db/semillas/021_reglas_tls_sitio.sql (RC-239, #121)
--- Reglas 32 y 33 del juego v1: tls_certificate_invalid y tls_legacy_only,
+-- Cirdan · db/semillas/022_reglas_tls_sitio.sql (RC-239, #121)
+-- Reglas 34 y 35 del juego v1: tls_certificate_invalid y tls_legacy_only,
 -- las 2 del saludo TLS de la visita web (cirdan/recolectores/visita.py).
--- Necesita la migración 020, que trae sus textos y su mapeo.
+-- Necesita la migración 021, que trae sus textos y su mapeo.
 --
 -- Van en los juegos que ya existen y no en un juego nuevo
 -- (db/README.md, desviación 15): ningún hallazgo guardado usa estos
@@ -18,7 +18,7 @@
 -- El LOCK espera a un cambio de pesos que esté en curso y frena los
 -- nuevos hasta el COMMIT: así ningún juego se queda sin las 2
 -- reglas por copiarse de otro mientras esto corre.
--- En una base que ya existe se aplica a mano después de la 020 y antes
+-- En una base que ya existe se aplica a mano después de la 021 y antes
 -- de reconstruir la API (ver db/README.md).
 -- =====================================================================
 
@@ -31,8 +31,8 @@ BEGIN;
 LOCK TABLE scoring_rule_sets IN SHARE ROW EXCLUSIVE MODE;
 
 INSERT INTO scoring_rules (id, rule_set_id, code, category, base_severity, weight, max_penalty) VALUES
- ('91000000-0000-4000-8000-000000000032','90000000-0000-4000-8000-000000000001','tls_certificate_invalid',     'infrastructure',   'medium',   1.000, 10.00),
- ('91000000-0000-4000-8000-000000000033','90000000-0000-4000-8000-000000000001','tls_legacy_only',             'infrastructure',   'medium',   1.000, 10.00)
+ ('91000000-0000-4000-8000-000000000034','90000000-0000-4000-8000-000000000001','tls_certificate_invalid',     'infrastructure',   'medium',   1.000, 10.00),
+ ('91000000-0000-4000-8000-000000000035','90000000-0000-4000-8000-000000000001','tls_legacy_only',             'infrastructure',   'medium',   1.000, 10.00)
 ON CONFLICT (rule_set_id, code) DO NOTHING;
 
 -- Cada otro juego que ya existe, activo o no, con la misma regla de v1.

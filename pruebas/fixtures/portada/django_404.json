@@ -1,0 +1,11 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de Django con DEBUG = True (404), no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 404,
+ "cabeceras": [
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\">\n  <title>Page not found at /</title>\n  <meta name=\"robots\" content=\"NONE,NOARCHIVE\">\n</head>\n<body>\n  <div id=\"summary\">\n    <h1>Page not found <span>(404)</span></h1>\n    <table class=\"meta\"><tr><th>Request URL:</th><td>https://www.acme-demo.mx/</td></tr></table>\n  </div>\n  <div id=\"info\">\n    <p>Using the URLconf defined in <code>acme.urls</code>, Django tried these URL patterns, in this order:</p>\n    <ol><li>admin/</li><li>api/</li></ol>\n  </div>\n  <div id=\"explanation\"><p>You're seeing this error because you have <code>DEBUG = True</code> in your Django settings file.</p></div>\n</body>\n</html>\n"
+}

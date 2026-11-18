@@ -3,8 +3,10 @@
 Pide la página principal de cada sitio del dominio por https, como un navegador, y saca de la respuesta sus
 tecnologías (huellas.py), el CDN o WAF que tiene delante (borde.py), si la versión ya no tiene soporte
 (outdated_software, con endoflife.date, soporte.py), las CVE conocidas de esa versión (known_vulnerability, con la
-API 2.0 de la NVD, nvd.py) y si sus cabeceras Server o X-Powered-By dicen la versión (server_version_disclosed).
-Las CVE van además en Resultado.cves, que el orquestador guarda en la tabla cves.
+API 2.0 de la NVD, nvd.py), si sus cabeceras Server o X-Powered-By dicen la versión (server_version_disclosed) y,
+con el título y el primer encabezado de la misma página (portada.py, #111, RC-228), si es un listado de directorio
+(directory_listing) o una página de depuración (debug_page_exposed), también la de un 4xx o un 5xx, sin ninguna
+petición más. Las CVE van además en Resultado.cves, que el orquestador guarda en la tabla cves.
 
 Qué se pide, todo pasivo o dentro del Anexo A:
 1. Los nombres del dominio en Cert Spotter (las mismas PAGINAS_CT de shodan.py) más la raíz, hasta MAX_SITIOS.
@@ -69,7 +71,8 @@ import urllib.request
 from datetime import datetime, timezone
 
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import borde, certspotter, contrato, geoip, huellas, nvd, shodan, soporte, transporte
+from cirdan.recolectores import (borde, certspotter, contrato, geoip, huellas, nvd, portada, shodan, soporte,
+                                 transporte)
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Hallazgo, Resultado, SinGrabacion,
                                           en_alcance_nombre)
@@ -78,10 +81,10 @@ from cirdan.recolectores.shodan import LimiteAlcanzado, RespuestaIlegible, SinTi
 FUENTE = 'web'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'web'
 
-# Código de regla -> severidad base. Los tres primeros existen en el catálogo de reglas (semillas 001 y 004) y los dos
-# del saludo TLS en la semilla 021 (#121, RC-239).
-CODIGOS = dict(soporte.CODIGOS, **nvd.CODIGOS, server_version_disclosed='low', tls_certificate_invalid='medium',
-               tls_legacy_only='medium')
+# Código de regla -> severidad base. Los tres primeros existen en el catálogo de reglas (semillas 001 y 004), los dos
+# de portada.py en la semilla 021 (RC-228) y los dos del saludo TLS en la semilla 022 (#121, RC-239).
+CODIGOS = dict(soporte.CODIGOS, **nvd.CODIGOS, server_version_disclosed='low', **portada.CODIGOS,
+               tls_certificate_invalid='medium', tls_legacy_only='medium')
 
 # El saludo TLS de la visita (#121, RC-239): el mismo de la petición, con el contexto de transporte.py, que revisa el
 # certificado y el nombre y pide TLS 1.2 como mínimo. No hay otro saludo para confirmar nada: ni sin revisar el
@@ -174,7 +177,8 @@ MOTIVOS = {'tiempo': 'no respondió a tiempo', 'red': 'la conexión falló', 'ce
            'puede leer', 'grabacion': 'la grabación no trae su visita', 'dns': 'el DNS no respondió a su A',
            'huellas': 'las huellas no vieron toda la respuesta', 'eol': 'faltó la respuesta de endoflife.date',
            'nvd_falta': 'faltó la respuesta de la NVD', 'tope': 'una de sus tecnologías quedó fuera del tope de '
-           'consultas', 'reto': 'respondió con un reto o bloqueo', 'error_http': 'respondió con un error del servidor (5xx)', 'borde': 'no se pudieron leer sus datos de borde',
+           'consultas', 'reto': 'respondió con un reto o bloqueo', 'error_http': 'respondió con un error del servidor (5xx)',
+           'portada': 'no se pudieron leer el título y el encabezado de su página', 'borde': 'no se pudieron leer sus datos de borde',
            'sin_tiempo': 'se acabó el tiempo de la corrida'}
 
 SIN_GRABACION_DOMINIO = 'web: no hay grabación de la visita web de este dominio, no se visitaron sus sitios'
@@ -623,6 +627,25 @@ def _saludo_fallido(sitio, dominio, ahora):
                     partes=[PARTE_TLS + sitio.nombre])
 
 
+def _de_portada(sitio, candidato, dominio, ahora):
+    """directory_listing o debug_page_exposed del sitio, uno por código. La evidencia lleva la firma de portada.py que
+    coincidió y el título de la página sin secretos, nunca el HTML. La huella no lleva la firma, así el hallazgo es el
+    mismo si cambia el programa que lo muestra."""
+    codigo = candidato['codigo']
+    tipo = 'domain' if sitio.nombre == dominio else 'subdomain'
+    if codigo == 'directory_listing':
+        titulo = 'El sitio %s muestra la lista de sus archivos' % sitio.nombre
+    else:
+        titulo = 'El sitio %s muestra una página de depuración de %s' % (sitio.nombre, candidato['servidor'])
+    evidencia = {'title': titulo, 'firma': candidato['firma'], 'servidor': candidato['servidor'],
+                 'firmas_version': portada.VERSION, 'titulo_pagina': candidato['titulo_pagina'],
+                 'cwe': portada.CWE[codigo], 'estado_http': sitio.web['estado_http'], 'host': sitio.nombre,
+                 'url': sitio.url}
+    return Hallazgo(codigo, CODIGOS[codigo], sitio.nombre, titulo, evidencia,
+                    rubrica.calcular(codigo, tipo, evidencia, ahora), _huella(codigo, dominio, sitio.nombre),
+                    partes=[sitio.nombre])
+
+
 def _huella(codigo, dominio, activo, clave=''):
     """No lleva lo observado (la versión ni las señales), así el hallazgo no se duplica entre escaneos."""
     return hashlib.sha256('|'.join((FUENTE, codigo, dominio, activo, clave)).encode('utf-8')).hexdigest()
@@ -683,6 +706,7 @@ class _Sitio:
         self.tecnologias = None  # las de huellas.analizar(), si el análisis terminó completo
         self.url = None          # la URL de la página que se analizó
         self.expuestas = []      # las cabeceras Server y X-Powered-By con versión, si el análisis terminó completo
+        self.portada = []        # lo que portada.revisar() vio en su página: listado de directorio o depuración
         self.falta = None        # el motivo de MOTIVOS si quedó sin revisar
         self.saludo = None       # {'certificado': verify_code} o {'tls_viejo': True} si el saludo TLS falló así
         self.tls_visto = False   # True si se sabe cómo quedó su saludo TLS: terminó, falló por el certificado o la
@@ -823,6 +847,10 @@ def _revisar(res, cliente, dominio, ahora):
             res.hallazgos.append(_version_expuesta(sitios[host], dominio, ahora))
         if sitios[host].saludo:
             res.hallazgos.append(_saludo_fallido(sitios[host], dominio, ahora))
+        # Lo de la portada va aunque el sitio quede sin revisar (un 5xx con la página de depuración): se vio en la
+        # página que llegó. Un sitio sin revisar no cierra lo que ya estaba abierto (paso 6).
+        for candidato in sitios[host].portada:
+            res.hallazgos.append(_de_portada(sitios[host], candidato, dominio, ahora))
 
     # 5. Activos
     for host in sorted(sitios, key=lambda h: (h != dominio, h)):
@@ -936,6 +964,11 @@ def _registrar(res, sitios, sitio, host, url, visita, otro, dominio):
     if analisis['reto']:
         res.avisos.append(borde.aviso(FUENTE, sitio.nombre, analisis['reto']))
         sitio.sin_revisar('reto')
+        return
+    try:   # antes del 5xx: la página de depuración suele llegar con un 500
+        sitio.portada = portada.revisar(visita['estado'], visita['cuerpo'])
+    except Exception:   # una página rara no tumba la corrida: ese sitio queda sin revisar
+        sitio.sin_revisar('portada')
         return
     if _error_servidor(visita):   # la página de error no muestra lo que hay detrás
         sitio.sin_revisar('error_http')

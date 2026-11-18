@@ -144,11 +144,13 @@ HUELLAS_DB = {
     'db/migraciones/017_superadmin_plataforma.sql': '4848215e21f0237565c87616256e4ebf5b79c78e498aace44f71062f5a52c04f',
     'db/migraciones/018_passkeys.sql': 'f8c60af6e20dfdc26954be4f5dda214e9557ea65847434d9d2dd5b18634139f2',
     'db/migraciones/019_texto_contenedores_internetdb.sql': 'c3136449c26b85c632294799efb11d5819377e3f5e8a8c12403dbc48264085b3',
-    'db/migraciones/020_textos_tls_sitio.sql': '9c221e03cc38fc76742f2685c19363932e5c27b264200112ae647616d960ca39',
+    'db/migraciones/020_textos_reglas_portada.sql': 'f15b71a5f16c23fe0cc5aa38f1415b0e172b3fc342e0132b9bc97e147939d736',
+    'db/migraciones/021_textos_tls_sitio.sql': '6160f534f3228be34c08335b1fdbd52774dcd4354e1451c3522484253dcf16fe',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',
-    'db/semillas/021_reglas_tls_sitio.sql': '33b3728a4e5d37ed2ad151fccfe275e3ab1c0aaaa5bb17bff3f2fd3db01cf9e5',
+    'db/semillas/021_reglas_portada.sql': 'e87fd42714bda77d75f031eb6a48d1b25e1d72e6808a41a0fcd4863ef66ede21',
+    'db/semillas/022_reglas_tls_sitio.sql': 'b5d5f68783ac942369afcde7c60f1af610ec97641393ad80fe59086392378b6b',
 }
 
 

@@ -33,7 +33,7 @@ from pruebas import test_rdap, test_subfinder  # noqa: E402
 from pruebas.test_geoip import bases as bases_geo  # noqa: E402
 from pruebas.test_huellas import FIXTURES_BORDE, fixture  # noqa: E402
 from pruebas.test_shodan import ResolvedorSimulado, a, error_http, paginas  # noqa: E402
-from cirdan.recolectores import REGISTRO, contrato, rdap, shodan, transporte, visita  # noqa: E402
+from cirdan.recolectores import REGISTRO, contrato, portada, rdap, shodan, transporte, visita  # noqa: E402
 
 DOMINIO = 'acme-demo.mx'
 WWW = 'www.acme-demo.mx'
@@ -261,6 +261,20 @@ class Peticion(unittest.TestCase):
         with mock.patch.object(transporte, 'abrir', abrir):
             r = visita._visitar('https://%s/' % DOMINIO, 5)
         self.assertEqual((r['estado'], r['cortado'], len(r['cuerpo'])), (403, True, visita.MAX_BYTES_SITIO))
+
+    def test_2b_un_500_con_pagina_de_depuracion_se_lee_con_el_mismo_tope(self):
+        """Punto 3 de RC-228: el cuerpo del HTTPError de un 500 se lee con el tope de una 200 y portada.py lo ve."""
+        werkzeug = pagina_portada('werkzeug_500')['cuerpo'].encode('utf-8')
+        for cuerpo, cortado in ((werkzeug, False), (werkzeug + b' ' * visita.MAX_BYTES_SITIO, True)):
+            with self.subTest(cortado=cortado):
+                def abrir(req, plazo, cronometro, *_):
+                    raise urllib.error.HTTPError(req.full_url, 500, 'Internal Server Error',
+                                                 email.message.Message(), __import__('io').BytesIO(cuerpo))
+                with mock.patch.object(transporte, 'abrir', abrir):
+                    r = visita._visitar('https://%s/' % DOMINIO, 5)
+                self.assertEqual((r['estado'], r['cortado']), (500, cortado))
+                self.assertLessEqual(len(r['cuerpo']), visita.MAX_BYTES_SITIO)
+                self.assertEqual([v['firma'] for v in portada.revisar(r['estado'], r['cuerpo'])], ['werkzeug'])
 
     def test_3_motivos_de_lo_que_no_termino(self):
         casos = ((urllib.error.URLError(transporte.NoPublica('x')), {'sin_respuesta': 'no_publica'}),
@@ -705,6 +719,7 @@ class Contrato(unittest.TestCase):
         self.assertEqual(visita.MAX_CONSULTAS, 2 * 2 + 20 * 3 + 20 * 4 + 10 * 2 + 10 * 2)
         self.assertEqual(visita.MAX_CONSULTAS, 184)
         self.assertEqual(set(visita.CODIGOS), {'outdated_software', 'known_vulnerability', 'server_version_disclosed',
+                                               'directory_listing', 'debug_page_exposed',
                                                'tls_certificate_invalid', 'tls_legacy_only'})
 
 
@@ -1459,6 +1474,241 @@ class SaludoReal(unittest.TestCase):
                 except (ValueError, ssl.SSLError) as e:   # un OpenSSL sin TLS 1.0 ni 1.1 ni con SECLEVEL=0
                     self.fail('el OpenSSL de la imagen no arma un servidor %s: %s' % (maximo, e))
                 self.assertEqual(self.visitar(ca, servidor_ctx), {'sin_respuesta': 'tls_viejo'})
+
+
+FIXTURES_PORTADA = RAIZ / 'pruebas' / 'fixtures' / 'portada'
+SEMILLA_PORTADA = RAIZ / 'db' / 'semillas' / '021_reglas_portada.sql'
+MIGRACION_PORTADA = RAIZ / 'db' / 'migraciones' / '020_textos_reglas_portada.sql'
+
+# (fixture, código, firma) de cada respuesta armada a mano de pruebas/fixtures/portada/
+ESPERADO_PORTADA = (
+    ('apache_listado', 'directory_listing', 'index_of'),
+    ('nginx_listado', 'directory_listing', 'index_of'),
+    ('iis_listado', 'directory_listing', 'iis_listado'),
+    ('django_500', 'debug_page_exposed', 'django'),
+    ('django_404', 'debug_page_exposed', 'django'),
+    ('werkzeug_500', 'debug_page_exposed', 'werkzeug'),
+    ('laravel_whoops_500', 'debug_page_exposed', 'laravel_whoops'),
+    ('laravel_ignition_500', 'debug_page_exposed', 'laravel_ignition'),
+    ('symfony_500', 'debug_page_exposed', 'symfony'),
+    ('aspnet_500', 'debug_page_exposed', 'aspnet'),
+    ('php_fatal_500', 'debug_page_exposed', 'php'),
+    ('php_xdebug_200', 'debug_page_exposed', 'php'),
+)
+SIN_HALLAZGO_PORTADA = ('blog_index_of', 'aspnet_runtime_error', 'nginx_por_omision')
+
+
+def pagina_portada(nombre):
+    """La respuesta de pruebas/fixtures/portada/<nombre>.json, en la forma de limpiar_visita."""
+    datos = json.loads((FIXTURES_PORTADA / (nombre + '.json')).read_text(encoding='utf-8'))
+    return {'estado': datos['estado'], 'cabeceras': datos['cabeceras'], 'cuerpo': datos['cuerpo']}
+
+
+class Portada(unittest.TestCase):
+    """Listado de directorio y página de depuración en la portada (cirdan/recolectores/portada.py, #111, RC-228)."""
+
+    def test_1_cada_servidor_y_cada_pagina_de_depuracion(self):
+        for nombre, codigo, firma in ESPERADO_PORTADA:
+            with self.subTest(nombre):
+                pagina = pagina_portada(nombre)
+                vistos = portada.revisar(pagina['estado'], pagina['cuerpo'])
+                self.assertEqual([(v['codigo'], v['firma']) for v in vistos], [(codigo, firma)])
+
+    def test_2_un_blog_que_dice_index_of_en_su_texto_no_da_hallazgo(self):
+        for nombre in SIN_HALLAZGO_PORTADA:
+            with self.subTest(nombre):
+                pagina = pagina_portada(nombre)
+                self.assertEqual(portada.revisar(pagina['estado'], pagina['cuerpo']), [])
+
+    def test_3_solo_miran_el_titulo_el_primer_encabezado_y_el_inicio(self):
+        listado = pagina_portada('nginx_listado')['cuerpo']
+        # El listado en el texto del cuerpo, en un segundo encabezado o en el <title> de un <svg> no cuenta
+        self.assertEqual(portada.revisar(200, '<html><head><title>Acme</title></head><body><h1>Acme</h1>'
+                                              '<h2>Index of /</h2><p>Index of /</p></body></html>'), [])
+        self.assertEqual(portada.revisar(200, '<html><body><svg><title>Index of /</title></svg>'
+                                              '<h1>Acme</h1></body></html>'), [])
+        # Un título que pasa del tope de lectura no se ve
+        self.assertEqual(portada.revisar(200, ' ' * portada.MAX_LEIDO + listado), [])
+        # Lo que sigue a un HTML no es el inicio de PHP
+        self.assertEqual(portada.revisar(500, '<!doctype html><p>Fatal error: x in /a.php on line 3</p>'), [])
+        # Un HTML roto o algo que no es texto no lanza
+        for cuerpo in ('<title>Index of /', '<<<>>>&#xffffffff;<title', None, b'Index of /', 12):
+            with self.subTest(cuerpo=cuerpo):
+                self.assertEqual(portada.revisar(200, cuerpo), [])
+
+    def test_4_el_listado_solo_en_un_2xx_y_la_depuracion_en_cualquier_estado(self):
+        listado = pagina_portada('apache_listado')['cuerpo']
+        for estado in (200, 203):
+            self.assertEqual([v['codigo'] for v in portada.revisar(estado, listado)], ['directory_listing'])
+        for estado in (301, 403, 404, 500, None):
+            with self.subTest(estado):
+                self.assertEqual(portada.revisar(estado, listado), [])
+        django = pagina_portada('django_500')['cuerpo']
+        for estado in (200, 404, 500, 503):
+            with self.subTest(estado):
+                self.assertEqual([v['codigo'] for v in portada.revisar(estado, django)], ['debug_page_exposed'])
+
+    def test_5_el_titulo_va_sin_secretos_y_cortado(self):
+        werkzeug = pagina_portada('werkzeug_500')
+        symfony = pagina_portada('symfony_500')
+        titulos = [portada.revisar(p['estado'], p['cuerpo'])[0]['titulo_pagina'] for p in (werkzeug, symfony)]
+        for titulo in titulos:
+            self.assertNotIn('CIRDAN_FAKE_', titulo)
+        self.assertIn('postgresql://***@db', titulos[0])
+        self.assertIn('token=***', titulos[1])
+        largo = '<title>%s at /</title>' % ('E' * (portada.MAX_ZONA + 100))
+        self.assertEqual(portada.revisar(500, largo), [])   # pasa del tope de la zona y ya no cumple la firma
+        largo = '<title>Whoops! There was an error.</title>'
+        self.assertLessEqual(len(portada.revisar(500, largo)[0]['titulo_pagina']), portada.MAX_TITULO)
+        self.assertEqual(portada.sin_secretos('https://u:p@x/ password = abc, api_key: def'),
+                         'https://***@x/ password = ***, api_key: ***')
+
+    def test_6_firmas_versionadas_y_codigos_de_la_visita(self):
+        self.assertIsInstance(portada.VERSION, int)
+        ids = [f['id'] for f in portada.FIRMAS]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertLessEqual(len(ids), 12)   # una lista corta
+        zonas = {'titulo', 'encabezado', 'titulo_o_encabezado', 'iguales', 'inicio'}
+        for firma in portada.FIRMAS:
+            self.assertIn(firma['zona'], zonas)
+            self.assertIn(firma['codigo'], portada.CODIGOS)
+        self.assertEqual({f['codigo'] for f in portada.FIRMAS}, set(portada.CODIGOS))
+        for codigo, severidad in portada.CODIGOS.items():
+            self.assertEqual(visita.CODIGOS[codigo], severidad)
+        self.assertEqual(portada.CWE, {'directory_listing': 'CWE-548', 'debug_page_exposed': 'CWE-215'})
+
+    def test_7_un_500_con_pagina_de_depuracion_da_hallazgo_y_el_sitio_queda_sin_revisar(self):
+        sitios = {'https://%s/' % DOMINIO: pagina_portada('django_500')}
+        res, cliente, _ = correr(sitios)
+        self.assertEqual(cliente.visitar.urls, ['https://%s/' % DOMINIO])   # ninguna petición nueva
+        self.assertEqual([h.codigo for h in res.hallazgos], ['debug_page_exposed'])
+        hallazgo = res.hallazgos[0]
+        self.assertEqual((hallazgo.severidad, hallazgo.partes), ('high', [DOMINIO]))
+        self.assertEqual(hallazgo.evidencia, {
+            'title': 'El sitio %s muestra una página de depuración de Django' % DOMINIO, 'firma': 'django',
+            'servidor': 'Django', 'firmas_version': portada.VERSION, 'titulo_pagina': 'OperationalError at /',
+            'cwe': 'CWE-215', 'estado_http': 500, 'host': DOMINIO, 'url': 'https://%s/' % DOMINIO})
+        self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['error_http'])
+        # Con un hallazgo y sin ningún sitio revisado la corrida queda parcial y no cierra nada (#23), salvo la parte
+        # del saludo TLS, que terminó aunque la página fuera un 500 (RC-239)
+        self.assertEqual((res.revisados, res.sin_cobertura), (['tls:' + DOMINIO], []))
+        self.assertEqual(res.sin_revisar, [DOMINIO])
+        self.assertEqual(contrato.validar(res, visita.CODIGOS), [])
+
+    def test_8_un_listado_en_la_raiz_y_la_evidencia_sin_html(self):
+        www = 'https://%s/' % WWW
+        sitios = {'https://%s/' % DOMINIO: pagina_portada('nginx_listado'), www: pagina_portada('iis_listado')}
+        res, cliente, _ = correr(sitios, zona={DOMINIO: a(IP), WWW: a(IP)}, apis=Apis(ct=paginas(WWW)))
+        self.assertEqual(sorted(cliente.visitar.urls), sorted(sitios))
+        por_host = {h.activo: h for h in res.hallazgos if h.codigo == 'directory_listing'}
+        self.assertEqual(sorted(por_host), sorted([DOMINIO, WWW]))
+        self.assertEqual((por_host[DOMINIO].evidencia['firma'], por_host[WWW].evidencia['firma']),
+                         ('index_of', 'iis_listado'))
+        self.assertEqual(por_host[DOMINIO].evidencia['title'], 'El sitio %s muestra la lista de sus archivos' % DOMINIO)
+        self.assertNotEqual(por_host[DOMINIO].huella, por_host[WWW].huella)
+        for hallazgo in res.hallazgos:
+            texto = json.dumps(hallazgo.evidencia, ensure_ascii=False)
+            self.assertNotIn('<', texto)
+            self.assertNotIn('respaldo', texto)   # nada del listado, solo la firma y el título
+        # Los dos sitios quedaron revisados completos: la corrida es completa y no hay nada sin cobertura
+        self.assertEqual((res.revisados, res.sin_revisar, res.sin_cobertura), (None, None, []))
+        self.assertEqual(contrato.validar(res, visita.CODIGOS), [])
+
+    def test_9_sin_hallazgo_el_codigo_se_cierra_y_un_error_del_lector_deja_el_sitio_sin_revisar(self):
+        res, _, _ = correr({'https://%s/' % DOMINIO: pagina_portada('blog_index_of')})
+        self.assertEqual([h for h in res.hallazgos if h.codigo in portada.CODIGOS], [])
+        self.assertNotIn('debug_page_exposed', res.sin_cobertura)
+        with mock.patch.object(visita.portada, 'revisar', side_effect=ValueError('raro')):
+            res, _, _ = correr({'https://%s/' % DOMINIO: pagina_portada('nginx_listado')})
+        self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['portada'])
+        self.assertEqual(res.hallazgos, [])
+
+    def test_10_la_misma_pagina_al_reproducir(self):
+        sitios = {'https://%s/' % DOMINIO: pagina_portada('werkzeug_500')}
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            grabada, _, _ = correr(sitios, modo='grabar', carpeta=carpeta)
+            res, _, _ = correr({}, zona={}, modo='reproducir', carpeta=carpeta)
+        self.assertEqual([(h.codigo, h.huella, h.evidencia) for h in res.hallazgos],
+                         [(h.codigo, h.huella, h.evidencia) for h in grabada.hallazgos])
+        self.assertEqual([h.codigo for h in res.hallazgos], ['debug_page_exposed'])
+
+    def test_11_migracion_y_semilla_de_las_reglas(self):
+        migracion = MIGRACION_PORTADA.read_text(encoding='utf-8')
+        semilla = SEMILLA_PORTADA.read_text(encoding='utf-8')
+        for sql in (migracion, semilla):
+            self.assertLess(sql.index("SET client_encoding = 'UTF8';"), sql.index('BEGIN;'))
+            self.assertTrue(sql.rstrip().endswith('COMMIT;'))
+        for codigo in portada.CODIGOS:
+            self.assertIn("WHERE code = '%s';" % codigo, migracion)
+            self.assertIn(portada.CWE[codigo], migracion)
+        # La semilla también las pone en los juegos de cada organización: sin ellas, contrato.validar tumbaría la
+        # fuente web entera al primer hallazgo de la portada
+        self.assertIn('FROM scoring_rule_sets s', semilla)
+        self.assertIn("WHERE s.id <> '90000000-0000-4000-8000-000000000001'", semilla)
+        self.assertEqual(semilla.count('ON CONFLICT (rule_set_id, code) DO NOTHING;'), 2)
+        # Un juego que se crea mientras corre la semilla no se queda sin las dos reglas
+        self.assertLess(semilla.index('LOCK TABLE scoring_rule_sets IN SHARE ROW EXCLUSIVE MODE;'),
+                        semilla.index('INSERT INTO scoring_rules'))
+
+    def test_12_secretos_de_otras_formas_fuera_de_la_evidencia(self):
+        casos = (
+            ('mysql://root:ab/cd@db/x', 'ab/cd'), ('postgresql://acme:p@ss@db', 'p@ss'),
+            ('password="abc def"', 'abc def'), ("password='ab,cd'", 'ab,cd'), ('"password": "hunter2"', 'hunter2'),
+            ('PASS=hunter2', 'hunter2'), ('DB_PASSWORD=hunter2', 'hunter2'), ('secret => hunter2', 'hunter2'),
+            ('Authorization: Bearer CIRDAN_FAKE_eyJ', 'CIRDAN_FAKE_eyJ'), ('password%3Dhunter2', 'hunter2'),
+            ('client_secret:hunter2', 'hunter2'), ('X-Api-Key: hunter2', 'hunter2'))
+        for texto, secreto in casos:
+            with self.subTest(texto):
+                limpio = portada.sin_secretos('Error: %s // Werkzeug Debugger' % texto)
+                self.assertNotIn(secreto, limpio)
+                self.assertIn('***', limpio)
+                self.assertTrue(limpio.endswith('// Werkzeug Debugger'), limpio)
+        # Un 'usuario:contraseña' que quedó sin su '@' porque se cortó la zona
+        self.assertEqual(portada.sin_secretos('Error: postgresql://acme:CIRDAN_FAKE_x'), 'Error: postgresql://***')
+
+    def test_13_el_titulo_va_sin_marcas_ni_caracteres_que_la_base_no_acepta(self):
+        for titulo in ('&lt;img src=x onerror=alert(1)&gt; // Werkzeug Debugger', 'a\x00b // Werkzeug Debugger',
+                       'a&#0;b // Werkzeug Debugger', '﻿a\x07b // Werkzeug Debugger'):
+            with self.subTest(titulo):
+                vistos = portada.revisar(500, '<title>%s</title>' % titulo)
+                self.assertEqual([v['firma'] for v in vistos], ['werkzeug'])
+                for caracter in '<>\x00\x07﻿':
+                    self.assertNotIn(caracter, vistos[0]['titulo_pagina'])
+        # Por la visita entera: contrato.validar acepta el hallazgo
+        pagina = dict(pagina_portada('werkzeug_500'), cuerpo='<title>a\x00&lt;b&gt; // Werkzeug Debugger</title>')
+        res, _, _ = correr({'https://%s/' % DOMINIO: pagina})
+        self.assertEqual([h.codigo for h in res.hallazgos], ['debug_page_exposed'])
+        self.assertEqual(contrato.validar(res, visita.CODIGOS), [])
+
+    def test_14_un_mensaje_largo_y_los_avisos_de_php_antes_del_fatal(self):
+        sql = 'SELECT ' + ', '.join('columna_%d' % i for i in range(60)) + ' FROM tabla'
+        self.assertGreater(len(sql), 300)
+        for cuerpo, firma in (
+                ('<title>OperationalError: %s // Werkzeug Debugger</title>' % sql, 'werkzeug'),
+                ('<title>An exception occurred while executing a query: %s (500 Internal Server Error)</title>'
+                 % sql, 'symfony'),
+                ('<br />\n<b>Warning</b>:  require(/var/www/vendor/autoload.php): Failed to open stream: No such '
+                 'file or directory in <b>/var/www/index.php</b> on line <b>3</b><br />\n<br />\n<b>Fatal error</b>'
+                 ':  Uncaught Error: Failed opening required in /var/www/index.php:3', 'php'),
+                ('﻿<br /><b>Fatal error</b>: x in <b>/a.php</b> on line <b>3</b>', 'php')):
+            with self.subTest(firma=firma, cuerpo=cuerpo[:40]):
+                self.assertEqual([v['firma'] for v in portada.revisar(500, cuerpo)], [firma])
+        # Un aviso solo, sin el Fatal error, no es la página de depuración
+        self.assertEqual(portada.revisar(200, '<b>Warning</b>: x in <b>/a.php</b> on line <b>3</b>'), [])
+
+    def test_15_el_lector_es_lineal_y_salta_comentarios_y_scripts(self):
+        for cuerpo in ('<a ' * 20000, '<' * 60000, '<svg ' * 12000, '<title>' + '<a ' * 20000, '<!--' * 15000):
+            with self.subTest(cuerpo=cuerpo[:12]):
+                antes = time.monotonic()
+                portada.revisar(200, cuerpo)
+                self.assertLess(time.monotonic() - antes, 1.0)
+        for cuerpo in ('<!-- <title>Index of /</title> --><title>Acme</title><h1>Acme</h1>',
+                       '<script>var t = "<title>Index of /</title>";</script><title>Acme</title><h1>Acme</h1>',
+                       '<style>h1:after{content:"<h1>Index of /</h1>"}</style><h1>Acme</h1>'):
+            with self.subTest(cuerpo=cuerpo[:20]):
+                self.assertEqual(portada.revisar(200, cuerpo), [])
+        self.assertEqual(portada.zonas('<svg/><title>Index of /</title>')['titulo'], 'Index of /')
 
 
 if __name__ == '__main__':

@@ -297,11 +297,11 @@ class MapeoMarcos(unittest.TestCase):
                 raise AssertionError(err)
             return out.splitlines()
 
-        # Los 33 textos y los 33 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 33 son
+        # Los 35 textos y los 35 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 35 son
         # las reglas de docs/codigos_reglas.md: una regla nueva lo sube.
         self.assertEqual(scalar("SELECT (SELECT count(*) FROM scoring_rule_texts) || ',' ||"
                                 " (SELECT count(*) FROM scoring_rule_framework_mappings) || ',' ||"
-                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '33,33,33')
+                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '35,35,35')
         self.assertEqual(filas("SELECT coalesce(t.code, m.rule_code) FROM scoring_rule_texts t"
                                " FULL JOIN scoring_rule_framework_mappings m ON m.rule_code = t.code"
                                " WHERE t.code IS NULL OR m.rule_code IS NULL"
@@ -355,13 +355,13 @@ class MapeoMarcos(unittest.TestCase):
                          ['scoring_rule_texts FOREIGN KEY (code) REFERENCES scoring_rule_framework_mappings(rule_code)'
                           ' DEFERRABLE INITIALLY DEFERRED true'], 'la FK de la 012 no está o no es diferida')
 
-    def test_16_la_semilla_021_llega_a_cada_juego(self):
+    def test_16_la_semilla_022_llega_a_cada_juego(self):
         # RC-239, desviación 15 de db/README.md: el orquestador rechaza un hallazgo cuyo código no está en el juego
-        # activo, así que la 021 agrega las 2 reglas del saludo TLS a cada juego que no es v1, activo o no, también
+        # activo, así que la 022 agrega las 2 reglas del saludo TLS a cada juego que no es v1, activo o no, también
         # al de una organización que cambió sus pesos, con la severidad, el peso y el tope de v1, como la 020 de los
         # contenedores. Los juegos de ACME (activo) y BETA (inactivo) se arman con las reglas de v1 sin esas 2, la
-        # 021 corre otra vez y el ROLLBACK lo deshace todo.
-        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '021_reglas_tls_sitio.sql').read_text(
+        # 022 corre otra vez y el ROLLBACK lo deshace todo.
+        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '022_reglas_tls_sitio.sql').read_text(
             encoding='utf-8')
         cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
         tls = "('tls_certificate_invalid', 'tls_legacy_only')"

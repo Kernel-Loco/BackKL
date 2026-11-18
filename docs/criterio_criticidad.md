@@ -70,7 +70,7 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 | Identidad digital | Suplantación | `impersonation` | `lookalike_domain` |
 | Identidad digital | Correos expuestos | `exposed_emails` | `email_in_public_commits`, `personal_email_exposed`, `email_pattern_exposed` |
 | Configuración | Correo | `email` | `spf_missing`, `spf_allow_all`, `dmarc_missing`, `dmarc_policy_none` |
-| Configuración | Configuración de servidores | `server_configuration` | `server_version_disclosed`, `subdomain_takeover_risk` |
+| Configuración | Configuración de servidores | `server_configuration` | `server_version_disclosed`, `subdomain_takeover_risk`, `directory_listing`, `debug_page_exposed` |
 | Fugas de datos | Brechas de datos | `breaches` | `breach_exposure`, `breach_exposure_old`, `breach_exposure_no_passwords` |
 | Fugas de datos | Secretos expuestos | `exposed_secrets` | `secret_in_public_repo`, `secret_in_container_image` |
 | Fugas de datos | Almacenamiento público | `public_storage` | `public_bucket` |
@@ -99,7 +99,7 @@ Cuatro límites de los estados:
 - Con una fuente caída el KRI sale `no_coverage` aunque otra fuente suya sí haya encontrado algo. Así lo pide la tarjeta: una fuente que no respondió sale sin cobertura.
 - Exposición de servicios no sale `ok` mientras `shodan.py` no tenga la API de host de Shodan o `api_docs` siga apagada. `exposed_iot_device` y `exposed_ot_device` quedan sin cobertura en todo escaneo, con la llave de Shodan o sin ella (`SIN_LLAVE` en `cirdan/recolectores/shodan.py`. La llave sola no los prende, ver `docs/servicios_externos.md`), así que lo más que alcanza es `partial`.
 - `sources_partial` va por fuente y no por regla. Si a `ct_logs` solo le faltó la respuesta de una variante de dominios parecidos, Certificados también sale `partial`, aunque sus reglas se revisaron completas. Lo mismo con `web`: un sitio que quedó sin revisar por otra cosa (un reto, un 5xx, la NVD, o el sitio de un hallazgo TLS, que no da página) deja a `web` en `sources_partial` y Certificados sale `partial`, aunque el saludo TLS de cada sitio sí se revisó. `scans.stats` no guarda a qué regla le faltó la parte.
-- El mapa se aplica al leer. Un score de un escaneo de antes de RC-239 se lee con el mapa 3 (`kri_map_version` 3): con `web` completo Certificados sale `ok` aunque ese escaneo no revisó `tls_certificate_invalid` ni `tls_legacy_only`, y con `web` caído sale `no_coverage`. Se corrige solo con el siguiente escaneo.
+- El mapa se aplica al leer. Un score de un escaneo de antes de RC-239 se lee con el mapa 4 (`kri_map_version` 4): con `web` completo Certificados sale `ok` aunque ese escaneo no revisó `tls_certificate_invalid` ni `tls_legacy_only`, y con `web` caído sale `no_coverage`. Se corrige solo con el siguiente escaneo.
 
 Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado. Si un aporte es de una regla que el mapa no conoce, o que otro juego de reglas puso en otra categoría, va en una fila `other` (Sin clasificar) de la categoría de su regla, para que las subcategorías sigan sumando la nota. Los KRI juntan sus aportes por código de regla: el de una regla que el mapa no conoce no cuenta en ningún KRI, y el de una regla de un KRI que otro juego puso en otra categoría sigue contando en su KRI.
 

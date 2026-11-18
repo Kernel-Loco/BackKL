@@ -8,7 +8,9 @@ las corridas de `scan_source_runs` de su escaneo. El documento está en docs/cri
 
 Al cambiar el mapa (una regla nueva, otra subcategoría u otro KRI) sube VERSION.
 """
-VERSION = 3   # 2: exposed_container_api (RC-224). 3: tls_certificate_invalid y tls_legacy_only (RC-239)
+VERSION = 4   # 2: exposed_container_api (RC-224). 3: directory_listing y debug_page_exposed en
+              # server_configuration (#111, RC-228). 4: tls_certificate_invalid y tls_legacy_only en
+              # certificates (RC-239)
 
 # (clave, categoría, nombre, códigos de regla). El orden es el que muestra el portal.
 SUBCATEGORIAS = (
@@ -26,7 +28,7 @@ SUBCATEGORIAS = (
      ('email_in_public_commits', 'personal_email_exposed', 'email_pattern_exposed')),
     ('email', 'configuration', 'Correo', ('spf_missing', 'spf_allow_all', 'dmarc_missing', 'dmarc_policy_none')),
     ('server_configuration', 'configuration', 'Configuración de servidores',
-     ('server_version_disclosed', 'subdomain_takeover_risk')),
+     ('server_version_disclosed', 'subdomain_takeover_risk', 'directory_listing', 'debug_page_exposed')),
     ('breaches', 'data_leaks', 'Brechas de datos',
      ('breach_exposure', 'breach_exposure_old', 'breach_exposure_no_passwords')),
     ('exposed_secrets', 'data_leaks', 'Secretos expuestos', ('secret_in_public_repo', 'secret_in_container_image')),
