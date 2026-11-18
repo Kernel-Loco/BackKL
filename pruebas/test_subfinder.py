@@ -29,6 +29,7 @@ from cirdan.recolectores.contrato import Activo  # noqa: E402
 RAIZ = Path(__file__).resolve().parents[1]
 SEMILLA = RAIZ / 'db' / 'semillas' / '005_subfinder_y_limites.sql'
 SEMILLA_017 = RAIZ / 'db' / 'semillas' / '017_subfinder_commoncrawl.sql'
+SEMILLA_019 = RAIZ / 'db' / 'semillas' / '019_subfinder_apagado.sql'
 
 # 14 índices válidos, más nuevos primero en collinfo.json pero mezclados aquí: el recolector toma los 12 más recientes.
 VALIDOS = ['CC-MAIN-2026-%02d' % s for s in (5, 47, 8, 43, 13, 39, 17, 35, 21, 30, 26)] + \
@@ -854,6 +855,48 @@ class Semilla(unittest.TestCase):
         self.assertRegex(texto, r'daily_limit\s*<\s*%d\b' % subfinder.MAX_CONSULTAS)
         self.assertTrue(texto.lstrip().startswith("SET client_encoding = 'UTF8';"))
         self.assertEqual(sorted(p.name[:3] for p in SEMILLA_017.parent.glob('*.sql')).count('017'), 1)
+
+    def test_3_la_019_lo_apaga_sin_tocar_el_limite_y_se_puede_correr_otra_vez(self):
+        texto = re.sub(r'--[^\n]*', '', SEMILLA_019.read_text(encoding='utf-8'))
+        self.assertTrue(texto.lstrip().startswith("SET client_encoding = 'UTF8';"))
+        self.assertLess(texto.index('client_encoding'), texto.index('BEGIN;'))
+        self.assertIn("RAISE EXCEPTION", texto)   # sin la fila de la 005 falla
+        self.assertEqual(cambios_de_subfinder(texto), [('enabled', 'false', 'enabled', 'true')])
+        self.assertEqual(len(re.findall(r'\b(?:UPDATE|INSERT|DELETE)\b', texto, re.IGNORECASE)), 1)
+        self.assertEqual(sorted(p.name[:3] for p in SEMILLA_019.parent.glob('*.sql')).count('019'), 1)
+
+    def test_4_con_todas_las_semillas_en_orden_queda_apagado_con_390(self):
+        # Lo que hace db/init/cargar_cirdan.sh con una base nueva: todas las semillas en orden de nombre.
+        fila = fila_de_la_semilla('subfinder')
+        estado = {'enabled': fila['enabled'].lower(), 'daily_limit': fila['daily_limit']}
+        semillas = sorted(SEMILLA.parent.glob('*.sql'))
+
+        def aplicar(ruta):
+            for columna, valor, condicion, antes in cambios_de_subfinder(re.sub(r'--[^\n]*', '',
+                                                                               ruta.read_text(encoding='utf-8'))):
+                if estado[condicion] == antes.lower():
+                    estado[columna] = valor.lower()
+
+        for ruta in semillas:
+            aplicar(ruta)
+        self.assertEqual(estado, {'enabled': 'false', 'daily_limit': '390'})
+        aplicar(SEMILLA_019)   # correrla otra vez no cambia nada
+        self.assertEqual(estado, {'enabled': 'false', 'daily_limit': '390'})
+        # Ninguna semilla cambia la fila de subfinder de otra forma que la que lee cambios_de_subfinder.
+        for ruta in semillas:
+            sql = re.sub(r'--[^\n]*', '', ruta.read_text(encoding='utf-8'))
+            sueltos = [s for s in re.findall(r'\b(?:UPDATE|DELETE\s+FROM)\s+data_sources\b[^;]*;', sql, re.IGNORECASE)
+                       if 'subfinder' in s and not RE_CAMBIO.fullmatch(s.strip())]
+            self.assertEqual(sueltos, [], ruta.name)
+
+
+RE_CAMBIO = re.compile(r"UPDATE\s+data_sources\s+SET\s+(\w+)\s*=\s*(\w+)\s+WHERE\s+code\s*=\s*'subfinder'"
+                       r"\s+AND\s+(\w+)\s*=\s*(\w+)\s*;", re.IGNORECASE)
+
+
+def cambios_de_subfinder(sql):
+    """[(columna, valor, columna de la condición, valor de antes)] de los UPDATE de subfinder, sin comentarios."""
+    return [m.groups() for m in RE_CAMBIO.finditer(sql)]
 
 
 @unittest.skipUnless((RAIZ / 'Dockerfile').exists(), 'sin Dockerfile: dentro de la imagen no se copia')
