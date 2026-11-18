@@ -465,6 +465,17 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
                                 'vuelve la regla vieja: la carta no termina con la pausa ni deja iniciar análisis '
                                 'sin carta vigente (r11-1, r12-2, r12-9, r13-8)')
 
+    def test_11_correo_de_quien_firma_ya_no_es_pendiente(self):
+        # RC-274: GET /api/v1/domains da el correo de quien firma solo con su carta vigente (pruebas/test_api_v1.py,
+        # test_1d). La fila sale de la sección 9 y la fila de la carta de la sección 5.6 ya no lo nombra.
+        pendientes = _seccion(self.texto, '9. Pendientes')
+        self.assertNotIn('correo de quien firma solo mientras su carta esté vigente', pendientes)
+        fila = [f for f in _seccion(self.texto, '5.6 Retención y borrado').splitlines()
+                if f.startswith('| Carta, datos de quien firma, verificaciones del TXT y bitácora |')]
+        self.assertEqual(len(fila), 1)
+        self.assertNotIn('GET /api/v1/domains', fila[0])
+        self.assertIn('así que en la práctica se guardan para siempre |', fila[0])
+
 
 if __name__ == '__main__':
     unittest.main()

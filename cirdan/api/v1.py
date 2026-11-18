@@ -132,9 +132,13 @@ def _domain_id(session, fqdn):
 
 # ---------------------------------------------------------------- dominios
 
+# El correo de quien firma sale solo con la carta vigente. Revocada, vencida o sin empezar, sus datos están en bloqueo
+# (sección 5.6 de docs/politica_seguridad_privacidad.md) y la base da NULL, con su fecha de México (RC-274).
 DOMAINS_SQL = '''
 SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
-       a.valid_from, a.valid_until, a.revoked_at, a.signer_email::text,
+       a.valid_from, a.valid_until, a.revoked_at,
+       CASE WHEN a.revoked_at IS NULL AND current_date BETWEEN a.valid_from AND a.valid_until
+            THEN a.signer_email::text END AS signer_email,
        (a.id IS NOT NULL AND a.revoked_at IS NULL AND current_date BETWEEN a.valid_from AND a.valid_until) AS auth_valid,
        (a.valid_from > current_date) AS auth_not_started,
        t.result AS txt_result, t.checked_at AS txt_checked_at,

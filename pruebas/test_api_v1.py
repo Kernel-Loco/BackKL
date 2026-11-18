@@ -101,6 +101,7 @@ class ApiV1(unittest.TestCase):
         old = v1['old-example.net']
         self.assertEqual(old['authorization']['valid_from'], manana.isoformat(), contexto)
         self.assertEqual(old['authorization']['status'], 'missing', contexto)
+        self.assertIsNone(old['authorization']['signer_email'], contexto)   # sin empezar, RC-274
         self.assertEqual(old['scan_eligibility']['reasons'], ['authorization_not_started', 'domain_paused'], contexto)
         self.assertEqual((viejo['old-example.net']['authorization'], viejo['old-example.net']['valid_until']),
                          ('Not authorized', (manana + timedelta(days=59)).isoformat()), contexto)
@@ -109,8 +110,58 @@ class ApiV1(unittest.TestCase):
             self.skipTest('La carta 41...01 de acme-demo.mx ya no está vigente (%s a %s)' % (acme_desde, acme_hasta))
         acme = v1['acme-demo.mx']['authorization']
         self.assertEqual((acme['status'], acme['valid_from']), ('valid', acme_desde), contexto)
+        self.assertEqual(acme['signer_email'], 'security@acme-demo.mx', contexto)
         self.assertEqual((viejo['acme-demo.mx']['authorization'], viejo['acme-demo.mx']['valid_until']),
                          ('Authorized', acme_hasta), contexto)
+
+    def test_1d_correo_de_quien_firma_solo_con_la_carta_vigente(self):
+        # RC-274. Al terminar la carta, los datos de quien firma pasan a bloqueo (sección 5.6 de la política): con
+        # 'revoked', 'expired' o 'missing' signer_email sale null y los demás campos no cambian. Cartas con correos que
+        # no están en la semilla y fechas relativas a la fecha de México de la base, así la prueba no depende de que
+        # siga vigente la 41...01 de la semilla (vence 2026-12-31). acme-demo.mx suma una vigente propia que vence
+        # después que la de la semilla, una vencida y una revocada que vence después que la vigente, así la vigente gana
+        # aunque no sea la de valid_until más lejano. partner-example.com, sin carta en la semilla, suma solo una
+        # revocada. old-example.net sigue con su carta vencida de la semilla.
+        hoy = "(now() AT TIME ZONE 'America/Mexico_City')::date"
+        acme_dom, partner_dom = '40000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000004'
+        cartas = (('41000000-0000-4000-8000-0000000000f6', acme_dom, 'vigente.rc274@acme-demo.mx',
+                   '%s - 10' % hoy, '%s + 400' % hoy, 'NULL'),
+                  ('41000000-0000-4000-8000-0000000000f3', acme_dom, 'vencida.rc274@acme-demo.mx',
+                   "DATE '2025-01-01'", "DATE '2025-06-30'", 'NULL'),
+                  ('41000000-0000-4000-8000-0000000000f4', acme_dom, 'revocada.rc274@acme-demo.mx',
+                   '%s - 10' % hoy, '%s + 800' % hoy, 'now()'),
+                  ('41000000-0000-4000-8000-0000000000f5', partner_dom, 'revocada.rc274@partner-example.com',
+                   '%s - 10' % hoy, '%s + 100' % hoy, 'now()'))
+        sql = 'BEGIN;'
+        for nueva, dominio, correo, desde, hasta, revocada in cartas:
+            sql += ('INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, '
+                    'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, revoked_at, '
+                    "accepted_by) SELECT '%s', organization_id, '%s', 'Firma RC-274', 'Prueba', '%s', "
+                    "signed_document_key || '.rc274-%s', signed_document_sha256, %s, %s, %s, accepted_by "
+                    "FROM domain_authorizations WHERE id = '41000000-0000-4000-8000-000000000001';"
+                    % (nueva, dominio, correo, nueva[-2:], desde, hasta, revocada))
+        ok, _, err = psql(sql + 'COMMIT;', user='postgres')
+        self.assertTrue(ok, err)
+        self.addCleanup(self.psql_o_falla, 'BEGIN; SET LOCAL session_replication_role = replica; '
+                        'DELETE FROM domain_authorizations WHERE id IN (%s); COMMIT;'
+                        % ', '.join("'%s'" % c[0] for c in cartas), 'quedaron las cartas de prueba de RC-274')
+        cuerpo = self.get(self.acme, '/api/v1/domains')
+        v1 = {x['fqdn']: x['authorization'] for x in cuerpo['items']}
+        esperado = {
+            'acme-demo.mx': ('valid', 'vigente.rc274@acme-demo.mx'),
+            'old-example.net': ('expired', None),
+            'partner-example.com': ('revoked', None),
+        }
+        for fqdn, (estado, correo) in esperado.items():
+            with self.subTest(fqdn=fqdn):
+                self.assertEqual((v1[fqdn]['status'], v1[fqdn]['signer_email']), (estado, correo), v1[fqdn])
+                self.assertEqual(set(v1[fqdn]), {'status', 'valid_from', 'valid_until', 'signer_email'})
+        self.assertEqual((v1['old-example.net']['valid_from'], v1['old-example.net']['valid_until']),
+                         ('2025-08-15', '2026-08-15'), 'los demás campos no cambian')
+        self.assertIsNotNone(v1['partner-example.com']['valid_until'], 'la revocada sigue dando sus fechas')
+        texto = json.dumps(cuerpo)
+        for correo in ('it@old-example.net', 'vencida.rc274@', 'revocada.rc274@'):
+            self.assertNotIn(correo, texto, 'el correo de una carta que no está vigente no sale en ningún campo')
 
     @unittest.skipUnless(os.environ.get('HORA_BASE_FIJA') == '1',
                          'solo con la base en libfaketime (pruebas/hora_base, paso del CI de RC-313)')

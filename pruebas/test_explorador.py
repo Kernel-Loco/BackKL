@@ -211,6 +211,18 @@ class ExploradorEncendido(Explorador):
             self.assertEqual(self.api.get('/api/v1/domains/txt', token)[0], 403, 'la misma regla que la API v1')
             self.assertEqual(self.api.get('/domains', token)[0], 200, 'los dominios de la página sí le responden')
 
+    def test_8_las_cartas_no_dan_los_datos_de_quien_firma(self):
+        # RC-274. El explorador no sabe si una carta sigue vigente, y los datos de quien firma una revocada o vencida
+        # están en bloqueo (sección 5.6 de la política). La semilla de Acme trae old-example.net, vencida el 15 ago.
+        code, body = self.api.get('/db/tables/domain_authorizations/rows', self.acme)
+        self.assertEqual(code, 200, body)
+        self.assertEqual(len(body['rows']), 4, body)
+        self.assertEqual([c for c in body['columns'] if c.startswith('signer_')], [], body['columns'])
+        self.assertIn('valid_until', body['columns'])
+        texto = json.dumps(body, ensure_ascii=False)
+        for dato in ('it@old-example.net', 'security@acme-demo.mx', 'Old Example IT', 'Acme Demo Security'):
+            self.assertNotIn(dato, texto)
+
 
 class ErrorSinManejar(unittest.TestCase):
     """RC-283: el 500 de un error que ninguna ruta maneja también sale con las tres cabeceras.
