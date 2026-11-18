@@ -4,6 +4,8 @@
   "activated_at": "2026-09-01T08:00:00-06:00",
   "validated_by": "Emilio",
   "category_weights": {"infrastructure": 0.30, "digital_identity": 0.20, "configuration": 0.20, "data_leaks": 0.30},
+  "band_cutoffs": {"medium": 40, "high": 60, "critical": 80},
+  "band_cutoffs_template": {"medium": 40, "high": 60, "critical": 80},
   "bands": [
     {"band": "low", "from": 0, "to": 39},
     {"band": "medium", "from": 40, "to": 59},

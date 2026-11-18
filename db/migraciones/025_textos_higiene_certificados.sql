@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/024_textos_higiene_certificados.sql (RC-218, #14)
+-- Cirdan · db/migraciones/025_textos_higiene_certificados.sql (RC-218, #14)
 -- Texto, firma y mapeo a marcos de las 3 reglas de higiene de
 -- certificados que ct_logs saca de los mismos registros de Certificate
 -- Transparency que ya lee (cirdan/recolectores/crtsh.py), sin otra
@@ -58,7 +58,7 @@ DECLARE
   distintos text;
 BEGIN
   IF current_setting('server_encoding') <> 'UTF8' THEN
-    RAISE EXCEPTION 'La 024 compara los textos en UTF8 y esta base usa %.', current_setting('server_encoding');
+    RAISE EXCEPTION 'La 025 compara los textos en UTF8 y esta base usa %.', current_setting('server_encoding');
   END IF;
   SELECT string_agg(e.code, ', ') FILTER (WHERE t.code IS NULL
            OR md5(t.title || E'\n' || t.meaning || E'\n' || t.recommendation) <> e.texto
@@ -71,7 +71,7 @@ BEGIN
     ) AS e(code, texto, revisor)
     LEFT JOIN scoring_rule_texts t ON t.code = e.code;
   IF distintos IS NOT NULL THEN
-    RAISE EXCEPTION 'Estos textos no son los de la 024, o ya los firmó otra persona: %. Revísalos antes de firmar.', distintos;
+    RAISE EXCEPTION 'Estos textos no son los de la 025, o ya los firmó otra persona: %. Revísalos antes de firmar.', distintos;
   END IF;
 END $$;
 

@@ -26,6 +26,7 @@ from unittest import mock
 import psycopg
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from cirdan import orquestador
 from cirdan.api import v1 as api_v1
@@ -34,7 +35,9 @@ from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
 from cirdan.recolectores import api_docs, certspotter, crtsh, ejemplo, github, shodan
+from cirdan.recolectores import contrato
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado
+from cirdan.score import configuracion, criterio
 from pruebas.test_certspotter import AHORA, EMISIONES, RespaldoSimulado, emision
 from pruebas.test_certspotter import recolectar as recolectar_ct
 from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado, cert
@@ -257,6 +260,137 @@ class Orquestador(unittest.TestCase):
 
     def estado(self, finding_id):
         return self.uno('SELECT status, resolved_at, last_scan_id::text FROM findings WHERE id = %s', finding_id)
+
+    def test_2a_si_los_pesos_cambian_a_mitad_del_escaneo_el_score_sale_con_los_nuevos(self):
+        """RC-62: un PUT /scoring/weights mientras corre la fuente. El score del escaneo usa el juego activo al guardar."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        inicial = configuracion.juego_activo(self.conn, ACME)
+        pesos = {categoria: 0.25 for categoria in criterio.CATEGORIAS}
+        nuevo = {}
+
+        def cambia_pesos_y_corre(*a, **k):  # lo que deja el PUT, en la misma transacción de la prueba
+            self.conn.execute('UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = %s AND is_active',
+                              (ACME,))
+            nuevo['id'] = self.uno(
+                'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, '
+                "activated_at) VALUES (%s, %s, %s, true, 'prueba', now()) RETURNING id::text",
+                ACME, int(inicial['version']) + 50, Jsonb(pesos))['id']
+            self.conn.execute(
+                'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
+                'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
+                (nuevo['id'], inicial['id']))
+            return contrato.ejecutar(*a, **k)
+
+        with mock.patch.object(orquestador, 'ejecutar', cambia_pesos_y_corre):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        self.assertEqual(resumen['status'], 'completed')
+        score = self.uno('SELECT id::text, rule_set_id::text FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertNotEqual(nuevo['id'], inicial['id'])
+        self.assertEqual(score['rule_set_id'], nuevo['id'])
+        reglas_del_aporte = self.uno('SELECT count(*) AS n FROM score_contributions sc JOIN scoring_rules r '
+                                     'ON r.id = sc.rule_id WHERE sc.score_id = %s AND r.rule_set_id = %s',
+                                     score['id'], nuevo['id'])['n']
+        self.assertGreater(reglas_del_aporte, 0)
+
+    def test_2a1_si_los_cortes_cambian_a_mitad_del_escaneo_el_score_sale_con_los_nuevos(self):
+        """RC-237: un PUT que solo cambia los cortes de bandas mientras corre la fuente. El score del escaneo guarda el
+        juego nuevo, así su banda, su letra y su piso salen de los cortes nuevos y no de los del inicio."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        inicial = configuracion.juego_activo(self.conn, ACME)
+        cortes = {'medium': 50, 'high': 70, 'critical': 85}
+        self.assertNotEqual(configuracion.cortes_de_fila(inicial), cortes)
+        nuevo = {}
+
+        def cambia_cortes_y_corre(*a, **k):  # lo que deja el PUT con los mismos pesos y otros cortes
+            self.conn.execute('UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = %s AND is_active',
+                              (ACME,))
+            nuevo['id'] = self.uno(
+                'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, '
+                'activated_at, band_medium_from, band_high_from, band_critical_from) '
+                "VALUES (%s, %s, %s, true, 'prueba', now(), %s, %s, %s) RETURNING id::text",
+                ACME, int(inicial['version']) + 50, Jsonb(inicial['category_weights']), cortes['medium'],
+                cortes['high'], cortes['critical'])['id']
+            self.conn.execute(
+                'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
+                'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
+                (nuevo['id'], inicial['id']))
+            return contrato.ejecutar(*a, **k)
+
+        usados = []
+        calcular = orquestador.motor.calcular
+
+        def calcular_anotado(*a, **k):
+            usados.append(a[3] if len(a) > 3 else k.get('cortes'))
+            return calcular(*a, **k)
+
+        with mock.patch.object(orquestador, 'ejecutar', cambia_cortes_y_corre), \
+                mock.patch.object(orquestador.motor, 'calcular', calcular_anotado):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        self.assertEqual(resumen['status'], 'completed')
+        score = self.uno('SELECT rule_set_id::text FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertEqual(score['rule_set_id'], nuevo['id'])
+        self.assertEqual(configuracion.cortes_del_juego(self.conn, score['rule_set_id']), cortes)
+        self.assertEqual(usados, [cortes])  # el piso y la banda del cálculo salieron de los cortes nuevos
+
+    def test_2a2_el_ultimo_score_es_el_del_que_tomo_el_candado_al_final(self):
+        """RC-62: un PUT antes del cierre del escaneo y otro después. computed_at sigue el orden del candado de pesos
+        y el modelo corre antes de tomarlo."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        juego = configuracion.juego_activo(self.conn, ACME)
+        pesos = configuracion.pesos_del_juego(juego)
+        orden = []
+        preparar, bloquear = orquestador._preparar_score, configuracion.bloquear_pesos
+
+        def put_antes(*a, **k):  # el recálculo de un PUT que gana el candado antes de que cierre el escaneo
+            configuracion.bloquear_pesos(self.conn, ACME)
+            configuracion.recalcular_scores(self.conn, ACME, juego['id'], pesos)
+            return contrato.ejecutar(*a, **k)
+
+        def preparar_anotado(*a, **k):
+            orden.append('modelo')
+            return preparar(*a, **k)
+
+        def bloquear_anotado(*a, **k):
+            orden.append('candado')
+            return bloquear(*a, **k)
+
+        with mock.patch.object(orquestador, 'ejecutar', put_antes), \
+                mock.patch.object(orquestador, '_preparar_score', preparar_anotado), \
+                mock.patch.object(configuracion, 'bloquear_pesos', bloquear_anotado):
+            orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
+        self.assertEqual(orden[-2:], ['modelo', 'candado'])
+        ultimo = 'SELECT reason, scan_id::text, computed_at FROM domain_scores ds JOIN domains d ON d.id = ds.domain_id ' \
+                 "WHERE d.fqdn = 'acme-demo.mx' ORDER BY ds.computed_at DESC, ds.created_at DESC, ds.id DESC LIMIT 1"
+        del_escaneo = self.uno(ultimo)
+        self.assertEqual((del_escaneo['reason'], del_escaneo['scan_id']), ('scan', s.scan_id))
+        configuracion.bloquear_pesos(self.conn, ACME)  # un PUT que llega después del cierre
+        configuracion.recalcular_scores(self.conn, ACME, juego['id'], pesos)
+        despues = self.uno(ultimo)
+        self.assertEqual((despues['reason'], despues['scan_id']), ('rules_change', s.scan_id))
+        self.assertGreater(despues['computed_at'], del_escaneo['computed_at'])
+
+    def test_2a3_si_lo_dieron_por_caido_antes_del_cierre_no_corre_el_modelo(self):
+        """RC-62: el modelo corre antes del candado, pero no si el escaneo ya no está en 'running'."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        llamadas, abandonados = [], []
+        guardar = orquestador._guardar_resultado
+
+        def guarda_y_lo_abandonan(*a, **k):  # la última fuente ya pasó su latido y otra petición lo da por caído
+            cambios = guardar(*a, **k)
+            self.conn.execute("UPDATE scans SET updated_at = now() - interval '31 minutes' WHERE id = %s", (s.scan_id,))
+            abandonados.extend(orquestador.abandonar_vencidos(self.conn, ACME, scan_id=s.scan_id))
+            return cambios
+
+        with mock.patch.object(orquestador, '_guardar_resultado', guarda_y_lo_abandonan), \
+                mock.patch.object(orquestador, '_preparar_score', lambda *a, **k: llamadas.append(a)):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        self.assertEqual(abandonados, [s.scan_id])  # se abandonó después del último latido, no antes
+        self.assertEqual(resumen['status'], 'failed')
+        self.assertEqual(llamadas, [])
+        self.assertIsNone(self.uno('SELECT 1 FROM domain_scores WHERE scan_id = %s', s.scan_id))
 
     def test_2b_lo_que_la_fuente_ya_no_encuentra_queda_resuelto_y_deja_de_sumar(self):
         _, f = self.escanear_ejemplo()

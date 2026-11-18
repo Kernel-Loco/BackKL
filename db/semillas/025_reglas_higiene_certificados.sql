@@ -2,7 +2,7 @@
 -- Cirdan · db/semillas/025_reglas_higiene_certificados.sql (RC-218, #14)
 -- Reglas 38 a 40 del juego v1: cert_internal_name, cert_broad_wildcard y
 -- cert_new_issuer, las 3 de higiene de certificados de ct_logs
--- (cirdan/recolectores/crtsh.py). Necesita la migración 024, que trae
+-- (cirdan/recolectores/crtsh.py). Necesita la migración 025, que trae
 -- sus textos y su mapeo.
 --
 -- Van en los juegos que ya existen y no en un juego nuevo
@@ -19,7 +19,7 @@
 -- El LOCK espera a un cambio de pesos que esté en curso y frena los
 -- nuevos hasta el COMMIT: así ningún juego se queda sin las 3
 -- reglas por copiarse de otro mientras esto corre.
--- En una base que ya existe se aplica a mano después de la 024 y antes
+-- En una base que ya existe se aplica a mano después de la migración 025 y antes
 -- de reconstruir la API (ver db/README.md).
 -- =====================================================================
 

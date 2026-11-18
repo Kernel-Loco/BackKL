@@ -37,7 +37,8 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/021_textos_tls_sitio.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `tls_certificate_invalid` y `tls_legacy_only`, las 2 reglas del saludo TLS de la visita web (#121, RC-239). Sin técnica de ATT&CK, con ISO A.8.24 y CIS 3.10 como `cert_expired`. Va antes de la semilla 022 |
 | `migraciones/022_texto_enlaces_nube_repos.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `file_share_link_in_repo`, un enlace para compartir de Google Drive, OneDrive o SharePoint, o Dropbox, en un repo público (#16, RC-247). ATT&CK T1593.003 como `secret_in_public_repo` e ISO A.8.3 y CIS 3.3 como `public_bucket`. Va antes de la semilla 023 |
 | `migraciones/023_texto_ia_internetdb.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `exposed_ai_service` (sin técnica de ATT&CK, ISO A.8.20, CIS 4.4), la regla de los puertos por omisión de Ollama, LM Studio, Gradio, ComfyUI, Ray Dashboard, Qdrant y Milvus que ve Shodan InternetDB (#144, RC-262). Va antes de la semilla 024. Se puede correr otra vez sin error, pero vuelve a firmar el texto: no se corre otra vez si una migración posterior cambió el texto |
-| `migraciones/024_textos_higiene_certificados.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `cert_internal_name` (T1596.003, ISO A.8.31, CIS 16.8), `cert_broad_wildcard` (sin técnica de ATT&CK, ISO A.8.24, CIS 3.10) y `cert_new_issuer` (T1588.004, ISO A.8.24, CIS 3.10), las 3 reglas de higiene de certificados de `ct_logs` (#14, RC-218). Va antes de la semilla 025. Se puede correr otra vez sin error |
+| `migraciones/024_bandas_por_organizacion.sql` | Bandas de riesgo por cliente (RC-237, #118): `band_medium_from`, `band_high_from` y `band_critical_from` en `scoring_rule_sets`, NOT NULL, con 40, 60 y 80 en los juegos que ya existen. CHECK `scoring_rule_sets_band_cutoffs_ck`: medio desde 10, al menos 10 valores por banda y crítico a más tardar en 91. Trigger `scoring_rule_sets_copiar_cortes_bi`: un juego nuevo sin cortes copia los de la última versión de su organización o los del global activo. `cirdan_app` no recibe permisos nuevos: sigue solo con UPDATE de `is_active`, así los cortes de una versión no cambian. Va antes de reconstruir la API. Solo se corre una vez: la segunda falla en el ADD COLUMN |
+| `migraciones/025_textos_higiene_certificados.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `cert_internal_name` (T1596.003, ISO A.8.31, CIS 16.8), `cert_broad_wildcard` (sin técnica de ATT&CK, ISO A.8.24, CIS 3.10) y `cert_new_issuer` (T1588.004, ISO A.8.24, CIS 3.10), las 3 reglas de higiene de certificados de `ct_logs` (#14, RC-218). Va antes de la semilla 025. Se puede correr otra vez sin error |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -126,7 +127,8 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/021_textos_tls_sitio.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/022_texto_enlaces_nube_repos.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/023_texto_ia_internetdb.sql
-docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/024_textos_higiene_certificados.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/024_bandas_por_organizacion.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/025_textos_higiene_certificados.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -449,10 +451,19 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT (SELECT count(*)
 
 Da `t`.
 
-Para las 3 reglas de higiene de certificados de `ct_logs` (RC-218, #14) van la migración 024 y la semilla 025, en ese orden, después de la 023 y la 024 de los servicios de inteligencia artificial (RC-262), y las dos antes de reconstruir la API. El recolector nuevo emite `cert_internal_name`, `cert_broad_wildcard` y `cert_new_issuer`, y el orquestador rechaza un hallazgo cuyo código no está en el juego activo: sin la 025, el escaneo de un dominio con un nombre interno, un comodín o una autoridad nueva en sus certificados hace fallar `ct_logs` entera. La API anterior no emite esos códigos y con las dos ya aplicadas sigue igual. La 025 agrega las reglas a v1 y a cada otro juego que ya existe, activo o no, también los de una organización, sin crear un juego nuevo (desviación 15), con el mismo `LOCK` que la 022, la 023 y la 024. Las dos se pueden correr otra vez sin error:
+Para las bandas por cliente (RC-237, #118) va la migración 024 antes de reconstruir la API: la API nueva lee `band_medium_from`, `band_high_from` y `band_critical_from` en cada consulta de score y sin ellas falla. La API anterior no las lee y con la 024 ya aplicada sigue igual. No trae semilla. Solo se corre una vez:
 
 ```bash
-docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/024_textos_higiene_certificados.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/024_bandas_por_organizacion.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM scoring_rule_sets WHERE (band_medium_from, band_high_from, band_critical_from) <> (40, 60, 80)"
+```
+
+Da `0` justo después de aplicarla: todos los juegos con los cortes de la plantilla.
+
+Para las 3 reglas de higiene de certificados de `ct_logs` (RC-218, #14) van la migración 025 y la semilla 025, en ese orden, después de la 023 y la 024 de los servicios de inteligencia artificial (RC-262) y de la migración 024 de las bandas por cliente (RC-237), y las dos antes de reconstruir la API. El recolector nuevo emite `cert_internal_name`, `cert_broad_wildcard` y `cert_new_issuer`, y el orquestador rechaza un hallazgo cuyo código no está en el juego activo: sin la semilla 025, el escaneo de un dominio con un nombre interno, un comodín o una autoridad nueva en sus certificados hace fallar `ct_logs` entera. La API anterior no emite esos códigos y con las dos ya aplicadas sigue igual. La semilla 025 agrega las reglas a v1 y a cada otro juego que ya existe, activo o no, también los de una organización, sin crear un juego nuevo (desviación 15), con el mismo `LOCK` que la 022, la 023 y la 024. Las dos se pueden correr otra vez sin error:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/025_textos_higiene_certificados.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/025_reglas_higiene_certificados.sql
 docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM scoring_rule_sets s WHERE (SELECT count(*) FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code IN ('cert_internal_name', 'cert_broad_wildcard', 'cert_new_issuer')) <> 3"
 ```
@@ -473,7 +484,7 @@ La prueba 4b de `pruebas/test_catalogo_reglas.py` corre sin base y no sabe qué 
 - Las migraciones y las semillas que nombran `scoring_rules`, `scoring_rule_texts` o `scoring_rule_framework_mappings`, o un objeto (una tabla, una vista, una función) que crea o renombra un archivo que nombra los textos o el mapeo. Los nombres de las tablas se buscan en todo el texto, con comentarios y cadenas, también entre comillas y sin distinguir mayúsculas. Los de esos objetos se buscan en el SQL sin comentarios, y una función solo cuando se llama (su nombre y un paréntesis), así una función de nombre corto no hace entrar archivos que solo traen esa palabra. Lo que se crea TEMP no cuenta, porque `cargar_cirdan.sh` corre cada archivo en su propio `psql` y lo TEMP se borra al terminar.
 - Las que traen algo que arma SQL que no se ve o cambia cómo corre: `EXECUTE`, `format(`, `U&`, un `DO` con el cuerpo entre comillas simples, `set_config`, `search_path`, `session_replication_role`, `standard_conforming_strings`, `SET NAMES`, un `client_encoding` que no es UTF8, `CREATE TRIGGER` o `RULE`, `ALTER TABLE ... USING`, `COPY`, `CALL`, `CASCADE`, `dblink`, `DROP` o `ALTER SCHEMA`, `DROP` o `REASSIGN OWNED`, una escritura en las tablas `pg_` de Postgres o un meta-comando de psql (`\i`, `\set`, `\gexec`).
 
-Hoy entran 27: `db/init/cargar_cirdan.sh`, las migraciones 001 a 008, 011 a 013 y 016 a 023, y las semillas 001, 004 y 020 a 024. La 016 no nombra el catálogo: entra porque trae `search_path` y un trigger. La 018 tampoco: entra por el `search_path` de `passkey_lookup()`. Las demás no necesitan huella mientras no nombren esas tablas ni traigan nada de la lista.
+Hoy entran 30: `db/init/cargar_cirdan.sh`, las migraciones 001 a 008, 011 a 013 y 016 a 025, y las semillas 001, 004 y 020 a 025. La 016 no nombra el catálogo: entra porque trae `search_path` y un trigger. La 018 tampoco: entra por el `search_path` de `passkey_lookup()`. La 024 tampoco: entra por su trigger y el `search_path` de `scoring_rule_sets_copiar_cortes()`. Las demás no necesitan huella mientras no nombren esas tablas ni traigan nada de la lista.
 
 Cómo se agrega una huella:
 

@@ -329,6 +329,129 @@ class ApiV1(unittest.TestCase):
         for campo in ('rule_set_version', 'category_weights', 'bands', 'floor', 'alert_threshold_default', 'rules'):
             self.assertEqual(pesos[campo], esperado[campo], campo)
 
+    def test_4c_cortes_de_bandas_por_cliente_solo_admin_y_con_auditoria(self):
+        # RC-237. Acme cambia sus cortes a 50, 70 y 85. acme-demo.mx tiene un crítico abierto: su piso pasa de 60 a 70,
+        # que es banda alto y letra D. Al final se borra lo que dejó el PUT (juego de Acme, scores rules_change y la cola
+        # de su audit_log), sin triggers y solo en esa transacción, y el global vuelve a ser el único juego.
+        acme = '20000000-0000-4000-8000-000000000001'
+        ok, seq, err = psql("SELECT coalesce(max(chain_seq), 0) FROM audit_log WHERE organization_id = '%s';" % acme,
+                            user='postgres')
+        self.assertTrue(ok, err)
+        antes_pesos = self.get(self.acme, '/api/v1/scoring/weights')
+        antes_score = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+        self.addCleanup(self.psql_o_falla,
+                        "BEGIN; SET LOCAL session_replication_role = replica; "
+                        "DELETE FROM score_contributions WHERE score_id IN (SELECT id FROM domain_scores "
+                        "WHERE organization_id = '{o}' AND reason = 'rules_change'); "
+                        "DELETE FROM domain_scores WHERE organization_id = '{o}' AND reason = 'rules_change'; "
+                        "DELETE FROM scoring_rules WHERE rule_set_id IN (SELECT id FROM scoring_rule_sets "
+                        "WHERE organization_id = '{o}'); "
+                        "DELETE FROM scoring_rule_sets WHERE organization_id = '{o}'; "
+                        "DELETE FROM audit_log WHERE organization_id = '{o}' AND chain_seq > {s}; COMMIT;"
+                        .format(o=acme, s=int(seq)), 'quedó el juego de reglas de prueba de Acme (RC-237)')
+        self.assertEqual((antes_pesos['band_cutoffs'], antes_score['score'], antes_score['grade']),
+                         ({'medium': 40, 'high': 60, 'critical': 80}, 60, 'D'))
+        pesos = dict(antes_pesos['category_weights'])
+        nuevos = {'medium': 50, 'high': 70, 'critical': 85}
+
+        # Solo admin: el analista y el gerente reciben 403 y no se crea nada.
+        for correo in ('jordan.tate@acme-demo.mx', 'maya.reed@acme-demo.mx'):
+            otro = sesion.login(correo)
+            code, _ = otro.request('PUT', '/api/v1/scoring/weights',
+                                   {'category_weights': pesos, 'band_cutoffs': nuevos})
+            self.assertEqual(code, 403, correo)
+        # Cortes que el CHECK rechaza: 422 y tampoco se crea nada.
+        for malos in ({'medium': 9, 'high': 60, 'critical': 80}, {'medium': 40, 'high': 49, 'critical': 80},
+                      {'medium': 40, 'high': 60, 'critical': 92}, {'medium': 60, 'high': 40, 'critical': 80},
+                      {'medium': 40, 'high': 60}, {'medium': 40.5, 'high': 60, 'critical': 80},
+                      {'medium': '40', 'high': 60, 'critical': 80}, {'medium': True, 'high': 60, 'critical': 80}):
+            code, body = self.acme.request('PUT', '/api/v1/scoring/weights',
+                                           {'category_weights': pesos, 'band_cutoffs': malos})
+            self.assertEqual(code, 422, (malos, body))
+        ok, juegos, err = psql("SELECT count(*) FROM scoring_rule_sets WHERE organization_id = '%s';" % acme,
+                               user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(int(juegos), 0)
+
+        code, body = self.acme.request('PUT', '/api/v1/scoring/weights',
+                                       {'category_weights': pesos, 'band_cutoffs': nuevos})
+        self.assertEqual(code, 200, body)
+        self.assertEqual((body['band_cutoffs'], body['unchanged'], body['recalculated_domains']), (nuevos, False, 3))
+        score = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+        self.assertEqual((score['score'], score['band'], score['grade']), (70, 'high', 'D'))
+        for c in score['categories']:   # cada categoría con los cortes del cliente
+            self.assertEqual(c['band'], criterio.banda(c['score'], nuevos), c)
+        demo = next(d for d in self.get(self.acme, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
+        self.assertEqual((demo['score'], demo['band'], demo['grade']), (70, 'high', 'D'))
+        plan = self.get(self.acme, '/api/v1/domains/acme-demo.mx/action-plan')
+        self.assertEqual((plan['score_before'], plan['band_before']), (70, 'high'))
+        # El después del plan también usa el piso del cliente: si el crítico sigue abierto, no baja de 70.
+        ok, criticos, err = psql("SELECT DISTINCT r.code FROM findings f JOIN scoring_rules r ON r.id = f.rule_id "
+                                 "JOIN domains d ON d.id = f.domain_id WHERE d.fqdn = 'acme-demo.mx' "
+                                 "AND f.severity = 'critical' AND f.status = 'open';", user='postgres')
+        self.assertTrue(ok, err)
+        sin_critico = [a['id'] for a in plan['actions'] if a['id'] not in criticos.splitlines()]
+        self.assertTrue(sin_critico, plan['actions'])
+        code, simulado = self.acme.request('POST', '/api/v1/domains/acme-demo.mx/action-plan/simulate',
+                                           {'action_ids': sin_critico})
+        self.assertEqual(code, 200, simulado)
+        self.assertEqual((simulado['score_before'], simulado['band_before'], simulado['score_after'],
+                          simulado['band_after']), (70, 'high', 70, 'high'))
+        activos =self.get(self.acme, '/api/v1/scoring/weights')
+        self.assertEqual((activos['band_cutoffs'], activos['floor']['one_critical'],
+                          activos['floor']['two_or_more_critical']), (nuevos, 70, 85))
+        self.assertEqual([(b['band'], b['from'], b['to']) for b in activos['bands']],
+                         [('low', 0, 49), ('medium', 50, 69), ('high', 70, 84), ('critical', 85, 100)])
+        self.assertEqual([(g['grade'], g['from'], g['to']) for g in activos['grades']],
+                         [('A', 0, 24), ('B', 25, 49), ('C', 50, 69), ('D', 70, 84), ('F', 85, 100)])
+        self.assertEqual(activos['band_cutoffs_template'], {'medium': 40, 'high': 60, 'critical': 80})
+        # El histórico se explica con los cortes de su propio juego: el 68 del escaneo sigue en D (con 50/70/85 sería C).
+        hist = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')['items']
+        self.assertCountEqual([(p['score'], p['reason'], p['grade']) for p in hist],
+                              [(70, 'rules_change', 'D'), (68, 'scan', 'D'), (60, 'correction', 'D')])
+        # Beta no ve el cambio de Acme: sigue con la plantilla.
+        self.assertEqual(self.get(self.beta, '/api/v1/scoring/weights')['band_cutoffs'],
+                         {'medium': 40, 'high': 60, 'critical': 80})
+        ok, salida, err = psql(
+            "SELECT details->'band_cutoffs', details->'previous_band_cutoffs' FROM audit_log "
+            "WHERE organization_id = '%s' AND action = 'scoring.weights_changed' AND chain_seq > %d;" % (acme, int(seq)),
+            user='postgres')
+        self.assertTrue(ok, err)
+        filas = [linea.split('|') for linea in salida.splitlines()]
+        self.assertEqual(len(filas), 1, salida)
+        self.assertEqual((json.loads(filas[0][0]), json.loads(filas[0][1])),
+                         (nuevos, {'medium': 40, 'high': 60, 'critical': 80}))
+        # El mismo PUT otra vez no crea versión; sin band_cutoffs la versión nueva copia los de la anterior.
+        code, body = self.acme.request('PUT', '/api/v1/scoring/weights',
+                                       {'category_weights': pesos, 'band_cutoffs': nuevos})
+        self.assertEqual((code, body['unchanged']), (200, True), body)
+        otros = dict(zip(criterio.CATEGORIAS, (0.4, 0.2, 0.2, 0.2)))
+        self.assertNotEqual(otros, pesos)
+        code, body = self.acme.request('PUT', '/api/v1/scoring/weights', {'category_weights': otros})
+        self.assertEqual((code, body['band_cutoffs'], body['unchanged']), (200, nuevos, False), body)
+        ok, salida, err = psql("SELECT version, band_medium_from, band_high_from, band_critical_from "
+                               "FROM scoring_rule_sets WHERE organization_id = '%s' ORDER BY version;" % acme,
+                               user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual([linea.split('|')[1:] for linea in salida.splitlines()],
+                         [['50', '70', '85'], ['50', '70', '85']])
+        # Con 50, 80 y 90 el piso de un crítico es 80: alto y D para Acme, crítico y F con la plantilla. Así /domains,
+        # /score y el histórico no pasan si usaran la plantilla.
+        altos = {'medium': 50, 'high': 80, 'critical': 90}
+        code, body = self.acme.request('PUT', '/api/v1/scoring/weights', {'category_weights': otros,
+                                                                          'band_cutoffs': altos})
+        self.assertEqual(code, 200, body)
+        demo = next(d for d in self.get(self.acme, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
+        score = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+        ultimo = [p for p in self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')['items']
+                  if p['score_id'] == score['score_id']]
+        self.assertEqual((demo['score'], demo['band'], demo['grade']), (80, 'high', 'D'))
+        self.assertEqual((score['score'], score['band'], score['grade']), (80, 'high', 'D'))
+        self.assertEqual([(p['score'], p['grade']) for p in ultimo], [(80, 'D')])
+        reporte = self.get(self.acme, '/api/v1/domains/acme-demo.mx/report?formato=json')['score']
+        self.assertEqual((reporte['score'], reporte['band'], reporte['grade']), (80, 'high', 'D'))
+        self.assertEqual((criterio.banda(80), criterio.letra(80)), ('critical', 'F'))
+
     def test_5_historico_activos_y_escaneos(self):
         hist = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')
         self.assertEqual([(p['score'], p['reason'], p['new_findings']) for p in hist['items']],
