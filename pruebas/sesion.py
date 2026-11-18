@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import http.cookiejar
 import json
+import os
 import struct
 import subprocess
 import time
@@ -63,12 +64,20 @@ def reset():
     """Deja las cuentas listas para la prueba: sin último código usado ni intentos fallidos, del login ni del cambio de
     contraseña (pw:fail:*, RC-290)."""
     psql('UPDATE users SET last_totp_step = NULL')
-    subprocess.run(['docker', 'exec', 'cirdan-valkey', 'sh', '-c',
+    subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey'), 'sh', '-c',
                     'for p in "login:fail:*" "pw:fail:*"; do '
                     'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "$p" '
                     '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del; done'],
                    check=True, capture_output=True)
     _last_step.clear()
+
+
+def valkey(*argumentos):
+    """Corre valkey-cli en el contenedor de Valkey y da su salida, una línea por valor."""
+    r = subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey'), 'sh', '-c',
+                        'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning "$@"', 'sh', *argumentos],
+                       check=True, capture_output=True, text=True)
+    return r.stdout.splitlines()
 
 
 def esquema():
@@ -82,7 +91,8 @@ def esquema():
 
 def en_api(codigo):
     """Corre código de Python dentro del contenedor de la API, con su mismo entorno, y da la última línea que imprime."""
-    r = subprocess.run(['docker', 'exec', 'cirdan-api', 'python', '-c', codigo],
+    contenedor = os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api')
+    r = subprocess.run(['docker', 'exec', contenedor, 'python', '-c', codigo],
                        check=True, capture_output=True, text=True, encoding='utf-8')
     return r.stdout.strip().splitlines()[-1]
 

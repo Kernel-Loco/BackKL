@@ -297,11 +297,11 @@ class MapeoMarcos(unittest.TestCase):
                 raise AssertionError(err)
             return out.splitlines()
 
-        # Los 32 textos y los 32 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 32 son
+        # Los 33 textos y los 33 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 33 son
         # las reglas de docs/codigos_reglas.md: una regla nueva lo sube.
         self.assertEqual(scalar("SELECT (SELECT count(*) FROM scoring_rule_texts) || ',' ||"
                                 " (SELECT count(*) FROM scoring_rule_framework_mappings) || ',' ||"
-                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '32,32,32')
+                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '33,33,33')
         self.assertEqual(filas("SELECT coalesce(t.code, m.rule_code) FROM scoring_rule_texts t"
                                " FULL JOIN scoring_rule_framework_mappings m ON m.rule_code = t.code"
                                " WHERE t.code IS NULL OR m.rule_code IS NULL"
@@ -309,13 +309,13 @@ class MapeoMarcos(unittest.TestCase):
                                " LEFT JOIN scoring_rule_framework_mappings m ON m.rule_code = r.code"
                                " WHERE m.rule_code IS NULL ORDER BY 1;"), [],
                          'códigos con texto y sin mapeo, con mapeo y sin texto, o reglas sin mapeo')
-        # Las 25 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
+        # Las 26 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
         # como quedan después de todos los UPDATE. test_10 de pruebas/test_catalogo_reglas.py lo lee del SQL sin saber
         # qué corre.
         doc = (Path(__file__).resolve().parent.parent / 'docs' / 'codigos_reglas.md').read_text(encoding='utf-8')
         filas_doc = re.findall(r'^\|\s*\d{2}\s*\|\s*`([a-z0-9_]+)`\s*\|(?:[^|\n]*\|){3}\s*#(\d+)', doc, re.MULTILINE)
         osint = [code for code, recolector in filas_doc if 14 <= int(recolector) <= 20]
-        self.assertEqual(len(osint), 25, 'docs/codigos_reglas.md ya no tiene 25 reglas de #14 a #20')
+        self.assertEqual(len(osint), 26, 'docs/codigos_reglas.md ya no tiene 26 reglas de #14 a #20')
         self.assertEqual(filas("SELECT unnest(ARRAY[%s]) EXCEPT SELECT code FROM scoring_rule_texts"
                                " WHERE reviewed_by = 'ErnestoDL' ORDER BY 1;" % ', '.join("'%s'" % c for c in osint)),
                          [], 'reglas OSINT sin texto o con un texto que no firmó ErnestoDL')
@@ -355,12 +355,13 @@ class MapeoMarcos(unittest.TestCase):
                          ['scoring_rule_texts FOREIGN KEY (code) REFERENCES scoring_rule_framework_mappings(rule_code)'
                           ' DEFERRABLE INITIALLY DEFERRED true'], 'la FK de la 012 no está o no es diferida')
 
-    def test_16_la_semilla_020_llega_a_cada_juego_activo(self):
-        # RC-239, desviación 18 de db/README.md: el orquestador rechaza un hallazgo cuyo código no está en el juego
-        # activo, así que la 020 agrega las 2 reglas del saludo TLS también al juego activo de una organización que
-        # cambió sus pesos, con la severidad, el peso y el tope de v1, y no a uno inactivo. Los juegos de ACME y BETA
-        # se arman con las reglas de v1 sin esas 2, la 020 corre otra vez y el ROLLBACK lo deshace todo.
-        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '020_reglas_tls_sitio.sql').read_text(
+    def test_16_la_semilla_021_llega_a_cada_juego(self):
+        # RC-239, desviación 15 de db/README.md: el orquestador rechaza un hallazgo cuyo código no está en el juego
+        # activo, así que la 021 agrega las 2 reglas del saludo TLS a cada juego que no es v1, activo o no, también
+        # al de una organización que cambió sus pesos, con la severidad, el peso y el tope de v1, como la 020 de los
+        # contenedores. Los juegos de ACME (activo) y BETA (inactivo) se arman con las reglas de v1 sin esas 2, la
+        # 021 corre otra vez y el ROLLBACK lo deshace todo.
+        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '021_reglas_tls_sitio.sql').read_text(
             encoding='utf-8')
         cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
         tls = "('tls_certificate_invalid', 'tls_legacy_only')"
@@ -380,14 +381,16 @@ SELECT s.organization_id || ' ' || s.is_active || ' ' || r.code || ' ' || r.cate
        || ' ' || r.weight || ' ' || r.max_penalty
   FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id
  WHERE s.organization_id IN ('%s', '%s') AND r.code IN %s ORDER BY 1;
-SELECT 'sin las 2: ' || count(*) FROM scoring_rule_sets s WHERE s.is_active
-   AND (SELECT count(*) FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code IN %s) <> 2;
+SELECT 'sin las 2: ' || count(*) FROM scoring_rule_sets s
+   WHERE (SELECT count(*) FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code IN %s) <> 2;
 ROLLBACK;""" % (ACME, BETA, tls, tls))
         ok, out, err = psql(sql, user='postgres')
         self.assertTrue(ok, err)
-        self.assertEqual(out.splitlines()[-3:],
+        self.assertEqual(out.splitlines()[-5:],
                          ['%s true tls_certificate_invalid infrastructure medium 1.000 10.00' % ACME,
                           '%s true tls_legacy_only infrastructure medium 1.000 10.00' % ACME,
+                          '%s false tls_certificate_invalid infrastructure medium 1.000 10.00' % BETA,
+                          '%s false tls_legacy_only infrastructure medium 1.000 10.00' % BETA,
                           'sin las 2: 0'])
 
 

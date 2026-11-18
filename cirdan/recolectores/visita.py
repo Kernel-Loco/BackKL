@@ -79,7 +79,7 @@ FUENTE = 'web'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'web'
 
 # Código de regla -> severidad base. Los tres primeros existen en el catálogo de reglas (semillas 001 y 004) y los dos
-# del saludo TLS en la semilla 020 (#121, RC-239).
+# del saludo TLS en la semilla 021 (#121, RC-239).
 CODIGOS = dict(soporte.CODIGOS, **nvd.CODIGOS, server_version_disclosed='low', tls_certificate_invalid='medium',
                tls_legacy_only='medium')
 

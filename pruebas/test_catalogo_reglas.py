@@ -143,10 +143,12 @@ HUELLAS_DB = {
     'db/migraciones/016_api_key_lookup.sql': '4f665442ba0e0d340f120d39baac57348cd8048e9f7051cd8a3dd4e61affa6c0',
     'db/migraciones/017_superadmin_plataforma.sql': '4848215e21f0237565c87616256e4ebf5b79c78e498aace44f71062f5a52c04f',
     'db/migraciones/018_passkeys.sql': 'f8c60af6e20dfdc26954be4f5dda214e9557ea65847434d9d2dd5b18634139f2',
-    'db/migraciones/019_textos_tls_sitio.sql': 'f3f1c2ec3c99b454991b457a97ffccdc81f70303434c5bc5ce3d83213067371f',
+    'db/migraciones/019_texto_contenedores_internetdb.sql': 'c3136449c26b85c632294799efb11d5819377e3f5e8a8c12403dbc48264085b3',
+    'db/migraciones/020_textos_tls_sitio.sql': '9c221e03cc38fc76742f2685c19363932e5c27b264200112ae647616d960ca39',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
-    'db/semillas/020_reglas_tls_sitio.sql': '7931a7803f765b4f54ec1e63690cfc8ef8c4ed7f27cb6e0a5514f27649d3e969',
+    'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',
+    'db/semillas/021_reglas_tls_sitio.sql': '33b3728a4e5d37ed2ad151fccfe275e3ab1c0aaaa5bb17bff3f2fd3db01cf9e5',
 }
 
 
@@ -519,7 +521,7 @@ class Reglas(unittest.TestCase):
             self.assertIsNotNone(numero, '%r: su recolector en docs/codigos_reglas.md no empieza con #' % fila[1])
             if 14 <= int(numero.group(1)) <= 20:
                 osint.append(fila[1])
-        self.assertEqual(len(osint), 25, 'docs/codigos_reglas.md ya no tiene 25 reglas de #14 a #20')
+        self.assertEqual(len(osint), 26, 'docs/codigos_reglas.md ya no tiene 26 reglas de #14 a #20')
         self.assertEqual([c for c in sorted(osint) if revisor.get(c) != 'ErnestoDL'], [],
                          'reglas OSINT cuyo texto final no firmó ErnestoDL en las migraciones de db/')
 
