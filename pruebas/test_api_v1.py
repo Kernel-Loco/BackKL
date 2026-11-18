@@ -216,8 +216,9 @@ class ApiV1(unittest.TestCase):
 
     def test_3a_el_piso_se_explica_con_los_criticos_del_snapshot(self):
         # RC-316. El score de acme-demo.mx se guardó con 1 crítico (la brecha 80…01). Primero se abre otro crítico
-        # después del score y luego se resuelve a mano la brecha. En los dos casos el piso, su mensaje y el score
-        # son los del snapshot, critical_open cuenta los de ahora y needs_rescan sale en true. Todo se regresa.
+        # después del score, luego se resuelve a mano la brecha y al final se juntan los dos (1 contra 1). En los tres
+        # casos el piso, su mensaje y el score son los del snapshot, critical_open cuenta los de ahora y needs_rescan
+        # sale en true, porque compara cuáles críticos y no cuántos. Todo se regresa.
         url = '/api/v1/domains/acme-demo.mx/score'
         antes = self.get(self.acme, url)
         self.assertEqual((antes['critical_open'], antes['critical_at_time'], antes['needs_rescan']), (1, 1, False))
@@ -226,7 +227,7 @@ class ApiV1(unittest.TestCase):
         self.assertEqual(antes['floor_message'], 'Subido a 60 por 1 hallazgo crítico vigente; la suma ponderada da 28.')
         nuevo = '80000000-0000-4000-8000-000000000316'
         brecha = '80000000-0000-4000-8000-000000000001'
-        ok, _, err = psql('''
+        insertar = '''
             INSERT INTO findings (id, organization_id, domain_id, asset_id, rule_id, source_id, fingerprint,
                                   severity, status, evidence, detected_at)
             SELECT '%s', d.organization_id, d.id,
@@ -236,7 +237,9 @@ class ApiV1(unittest.TestCase):
                    (SELECT s.id FROM data_sources s WHERE s.code = 'dns'),
                    sha256('rc316-critico-nuevo'), 'critical', 'open', '{"title": "Crítico nuevo de prueba"}', now()
               FROM domains d WHERE d.fqdn = 'acme-demo.mx';
-        ''' % nuevo, user='postgres')
+        ''' % nuevo
+        borrar = "DELETE FROM findings WHERE id = '%s';" % nuevo
+        ok, _, err = psql(insertar, user='postgres')
         self.assertTrue(ok, err)
         try:
             con_nuevo = self.get(self.acme, url)
@@ -244,7 +247,7 @@ class ApiV1(unittest.TestCase):
                              (2, 1, True))
             self.assertEqual({c: con_nuevo[c] for c in del_snapshot}, del_snapshot)
         finally:
-            self.psql_o_falla("DELETE FROM findings WHERE id = '%s';" % nuevo, 'no se borró el crítico de prueba')
+            self.psql_o_falla(borrar, 'no se borró el crítico de prueba')
         self.psql_o_falla("UPDATE findings SET status = 'resolved', resolved_at = now() WHERE id = '%s';" % brecha,
                           'no se resolvió la brecha')
         try:
@@ -252,6 +255,16 @@ class ApiV1(unittest.TestCase):
             self.assertEqual((resuelto['critical_open'], resuelto['critical_at_time'], resuelto['needs_rescan']),
                              (0, 1, True))
             self.assertEqual({c: resuelto[c] for c in del_snapshot}, del_snapshot)
+            # Brecha resuelta más un crítico nuevo: la cuenta queda 1 contra 1, pero ya no es el mismo hallazgo.
+            ok, _, err = psql(insertar, user='postgres')
+            self.assertTrue(ok, err)
+            try:
+                cambiado = self.get(self.acme, url)
+                self.assertEqual((cambiado['critical_open'], cambiado['critical_at_time'], cambiado['needs_rescan']),
+                                 (1, 1, True))
+                self.assertEqual({c: cambiado[c] for c in del_snapshot}, del_snapshot)
+            finally:
+                self.psql_o_falla(borrar, 'no se borró el crítico de prueba')
         finally:
             self.psql_o_falla("UPDATE findings SET status = 'open', resolved_at = NULL WHERE id = '%s';" % brecha,
                               'no se regresó la brecha a open')

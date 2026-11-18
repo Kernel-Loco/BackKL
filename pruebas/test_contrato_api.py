@@ -70,7 +70,9 @@ class Score(unittest.TestCase):
         self.assertEqual((SCORE['weighted'], SCORE['floor'], SCORE['score'], SCORE['band'], SCORE['floor_applied']),
                          (r['ponderado'], r['piso'], r['score'], r['banda'], r['piso_aplicado']))
         self.assertEqual(SCORE['floor_message'], motor.mensaje_piso(r, SCORE['critical_at_time']))
-        self.assertEqual(SCORE['needs_rescan'], SCORE['critical_open'] != SCORE['critical_at_time'])
+        # needs_rescan compara cuáles críticos, no cuántos, así que la cuenta sola no lo decide. El ejemplo es la semilla
+        # sin cambios desde su score: misma cuenta y false. Los casos en true van en test_3a de test_api_v1 (RC-316).
+        self.assertEqual((SCORE['critical_open'], SCORE['needs_rescan']), (SCORE['critical_at_time'], False))
 
     def test_2_categorias_con_su_peso_y_banda(self):
         self.assertEqual([c['category'] for c in SCORE['categories']], list(criterio.CATEGORIAS))
