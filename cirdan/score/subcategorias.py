@@ -8,14 +8,16 @@ las corridas de `scan_source_runs` de su escaneo. El documento está en docs/cri
 
 Al cambiar el mapa (una regla nueva, otra subcategoría u otro KRI) sube VERSION.
 """
-VERSION = 4   # 2: exposed_container_api (RC-224). 3: directory_listing y debug_page_exposed en
+VERSION = 5   # 2: exposed_container_api (RC-224). 3: directory_listing y debug_page_exposed en
               # server_configuration (#111, RC-228). 4: tls_certificate_invalid y tls_legacy_only en
-              # certificates (RC-239)
+              # certificates (RC-239). 5: cert_internal_name, cert_broad_wildcard y cert_new_issuer en
+              # certificates (RC-218)
 
 # (clave, categoría, nombre, códigos de regla). El orden es el que muestra el portal.
 SUBCATEGORIAS = (
     ('certificates', 'infrastructure', 'Certificados',
-     ('cert_expired', 'cert_expiring_soon', 'tls_certificate_invalid', 'tls_legacy_only')),
+     ('cert_expired', 'cert_expiring_soon', 'tls_certificate_invalid', 'tls_legacy_only', 'cert_internal_name',
+      'cert_broad_wildcard', 'cert_new_issuer')),
     ('exposed_services', 'infrastructure', 'Exposición de servicios',
      ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database', 'exposed_container_api',
       'exposed_ot_device', 'exposed_iot_device', 'exposed_service')),
@@ -48,7 +50,8 @@ KRIS = (
 # Qué fuente revisa cada regla de un KRI, para saber cuáles quedaron sin revisar cuando la fuente no corrió.
 # Trae también las reglas que shodan no puede revisar sin su llave (SIN_LLAVE de shodan.py).
 EMITEN = (
-    ('ct_logs', ('cert_expired', 'cert_expiring_soon', 'lookalike_domain')),
+    ('ct_logs', ('cert_expired', 'cert_expiring_soon', 'lookalike_domain', 'cert_internal_name', 'cert_broad_wildcard',
+                 'cert_new_issuer')),
     ('shodan', ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database',
                 'exposed_container_api', 'exposed_ot_device', 'exposed_iot_device', 'exposed_service')),
     ('api_docs', ('exposed_api_docs', 'api_auth_not_declared')),
