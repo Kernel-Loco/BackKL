@@ -1,6 +1,6 @@
 # Política de seguridad y privacidad de LowTide
 
-Tarjeta #78 (RC-39). Versión 2.0 del 8 nov 2026: suma la matriz de responsable y encargado (sección 5.1), el responsable del aviso, el buzón ARCO y los términos de uso del portal (sección 11) de la tarjeta #96g (RC-207).
+Tarjeta #78 (RC-39). Versión 2.2 del 17 nov 2026: suma los objetivos de seguridad medibles con su primer resultado (sección 2.1, cláusula 6.2, RC-275). La versión 2.1 del 16 nov dejó la llave de API solo para los sistemas de la propia empresa (sección 11, punto 2, RC-129), cifró la huella de la contraseña con AES-256-GCM y una llave fuera de la base (controles 5.17 y 8.24 y sección 5.2, RC-330) y anotó que rotar una llave todavía no tiene herramienta (control 8.24). La versión 2.0 del 8 nov sumó la matriz de responsable y encargado (sección 5.1), el responsable del aviso, el buzón ARCO y los términos de uso del portal (sección 11) de la tarjeta #96g (RC-207).
 
 Esta política integra las reglas de la [política de uso ético y alcance](politica_uso_etico.md) de la tarjeta #6 (RC-36) en un sistema de gestión con la metodología de ISO/IEC 27001:2022 y los controles de ISO/IEC 27002:2022, y trae el aviso de privacidad conforme a la Ley Federal de Protección de Datos Personales en Posesión de los Particulares (LFPDPPP, DOF 20 de marzo de 2025, última reforma DOF 14 de noviembre de 2025). Va junto con la [plantilla de carta de autorización](plantilla_carta_autorizacion.md), que remite a esta política en su sección 6.
 
@@ -21,13 +21,55 @@ LowTide sigue las cláusulas 4 a 10 de la norma en la medida que cabe en un proy
 |---|---|---|
 | 4. Contexto | Saber qué se protege, para quién y con qué límites | El reto IKUSI VELATIA, la sección 1 de esta política y el inventario de servicios de [`servicios_externos.md`](servicios_externos.md) |
 | 5. Liderazgo | Una política aprobada y papeles asignados | Esta política y la de #6, aprobadas por PR a `dev`. Coordinación y OSINT, Ernesto. Seguridad, QA y documentación, Germán. Backend e infraestructura, Israel. Datos, ML y portal, Emilio |
-| 6. Planificación | Evaluar riesgos y elegir controles | El modelo de amenazas STRIDE de RC-142, los riesgos aceptados que documenta el README (por ejemplo, las consultas DNS y WHOIS sin cifrar) y la declaración de aplicabilidad de la sección 4. Reducido: no hay objetivos de seguridad medibles (cláusula 6.2) |
+| 6. Planificación | Evaluar riesgos y elegir controles | El modelo de amenazas STRIDE de RC-142, los riesgos aceptados que documenta el README (por ejemplo, las consultas DNS y WHOIS sin cifrar) y la declaración de aplicabilidad de la sección 4. Los objetivos de seguridad medibles, con su meta, su fuente y su medición, están en la sección 2.1 (cláusula 6.2) |
 | 7. Apoyo | Recursos, competencia, comunicación y documentos | Las reglas del equipo, los README, la guía de cuentas de prueba y esta política, versionados en git |
 | 8. Operación | Aplicar los controles | Las reglas en el código de la sección 4 y el rastro de cada análisis (#6, regla 1.10) |
 | 9. Evaluación | Medir y revisar | El CI de pruebas en cada PR, CodeQL y las revisiones de PR. Las pruebas activas contra el propio despliegue llegan con #51, #58b y #85. Reducido: no hay auditoría interna (cláusula 9.2) ni revisión por la dirección (cláusula 9.3) formales |
 | 10. Mejora | Corregir y aprender | Las retrospectivas de cada sprint y la sección 8 de #6 para cuando alguien rompe una regla |
 
 Un riesgo nuevo se trata así: se anota en la tarjeta que lo encuentra, se decide si se corrige, se acepta o se evita, y si se acepta se documenta en el README o en esta política con su porqué.
+
+### 2.1 Objetivos de seguridad medibles (cláusula 6.2)
+
+Estos objetivos siguen a esta política y se miden con datos que GitHub o Jira ya registran para LowTide. La línea base y el primer resultado se tomaron el 17 nov 2026, antes de la sesión S16 del 27 nov. Se miden antes de cada entrega con el socio y en cada revisión por la dirección (cláusula 9.3, RC-296), que hace la siguiente medición antes del congelamiento del 25 nov y suma su resultado a esta sección. Los recursos son los que ya usa el proyecto: GitHub Actions, CodeQL y Dependabot de GitHub, Jira y esta política. Se comunican con esta política, que cambia solo por PR a `dev` (sección 10). Responde Ernesto, que coordina el equipo (fila 5 de la tabla de arriba).
+
+1. Pruebas en cada cambio de BackKL y FrontKL.
+   - Métrica: de los PR fusionados en `dev` desde que cada repo tiene CI de pruebas, cuántos tienen en verde el job `pruebas` del flujo 'Pruebas' (`.github/workflows/pruebas.yml`) en su último commit. En BackKL cuenta desde el PR 77 del 29 oct y en FrontKL desde el PR 85 del 16 nov (RC-332), que trajo el suyo. En los dos repos el flujo corre en cada PR a `dev` o `main` y en cada push a esas ramas.
+   - Meta y fecha: 100 % al 24 nov 2026, el día antes del congelamiento.
+   - Fuente: `gh pr list --state merged --base dev` con el campo `statusCheckRollup` de cada repo. Esa lista también trae los PR que entraron sin merge commit, como el BackKL PR 84, que `git log --first-parent` no muestra como merge.
+   - Responsable: Ernesto.
+   - Cómo se evalúa: cumple si ningún PR fusionado tiene el job `pruebas` en rojo o sin correr. Cada uno que falle lleva una tarjeta con la causa.
+   - Resultado del 17 nov: 98 de 98 (100 %). En BackKL, 93 de 93, del PR 77 al 195. En FrontKL, 5 de 5, del PR 85 al 96.
+2. Alertas de seguridad de GitHub atendidas.
+   - Métrica: alertas abiertas de CodeQL (análisis del código) y de Dependabot (dependencias con una vulnerabilidad conocida) en BackKL y FrontKL, y alertas descartadas sin motivo escrito, es decir, con el comentario del descarte vacío.
+   - Meta y fecha: 0 abiertas y 0 descartadas sin motivo al 24 nov 2026.
+   - Fuente: la API de GitHub, `code-scanning/alerts` y `dependabot/alerts` de cada repo, con `state=open`, `dismissed` y `fixed`. Los dos repos tienen CodeQL configurado y las alertas de Dependabot prendidas.
+   - Responsable: Ernesto.
+   - Cómo se evalúa: cumple si las dos cuentas dan 0. Una alerta que no se corrige a tiempo se descarta con su motivo en GitHub o se acepta en la sección 9 con su porqué.
+   - Resultado del 17 nov: 0 abiertas en los dos repos. En BackKL, CodeQL tiene 2 alertas descartadas el 19 oct con su motivo (un falso positivo y una comparación dentro de una prueba, RC-41) y Dependabot tiene 1 corregida. En FrontKL, CodeQL tiene 1 corregida.
+3. Parches de dependencias al día (control 8.8).
+   - Métrica: PR de Dependabot abiertos desde hace más de 7 días en BackKL y FrontKL.
+   - Meta y fecha: 0 al 24 nov 2026 y en cada medición.
+   - Fuente: `gh pr list --state open --author app/dependabot` de cada repo, con su fecha de creación.
+   - Responsable: Ernesto.
+   - Cómo se evalúa: cumple si ninguno pasa de 7 días. Uno que no se puede fusionar se cierra con su motivo escrito en el PR o se reemplaza por otro PR.
+   - Resultado del 17 nov: 1 abierto, el BackKL PR 196 del 17 nov, que reemplazó al PR 170 del 16 nov, y ninguno de más de 7 días.
+4. Pendientes de la sección 9 con decisión.
+   - Métrica: filas de la tabla de la sección 9 cerradas (la fila se quita y su control de la sección 4 cambia) o aceptadas (la fila dice quién la aceptó, cuándo, por qué y hasta cuándo), sobre el total.
+   - Meta y fecha: todas al 24 nov 2026, antes del congelamiento del 25 nov.
+   - Fuente: la tabla de la sección 9 de este archivo y su historial en git.
+   - Responsable: Ernesto.
+   - Cómo se evalúa: cumple si no queda ninguna fila que solo diga de qué depende. Las filas se aceptan en la revisión por la dirección (cláusula 9.3, RC-296).
+   - Resultado del 17 nov: 19 filas, 0 cerradas y 0 aceptadas (0 %).
+5. Revisión de accesos de las cuentas reales (control 5.18).
+   - Métrica: revisiones de accesos registradas de las cuentas reales del despliegue.
+   - Meta y fecha: la primera antes del 25 nov 2026, y después una cada mes y antes de cada entrega, como pide RC-259.
+   - Fuente: todavía no hay. La ruta del Admin que registra la revisión en `audit_log` llega con RC-259, que hoy está en To Do. Mientras no exista, la única fuente es el estado de RC-259 en Jira.
+   - Responsable: Ernesto hace la revisión y la mide, porque hoy las cuentas solo llegan por las semillas o por SQL (control 5.18). Cuando exista la ruta de RC-259, la revisión pasa al Admin de cada empresa y Ernesto la sigue midiendo.
+   - Cómo se evalúa: cumple si `audit_log` trae la revisión de cada empresa con cuentas reales antes del 25 nov. Si RC-259 toma su opción más chica, la revisión queda escrita en esta política con su fecha.
+   - Resultado del 17 nov: 0 revisiones.
+
+El monitoreo de RC-260 todavía no es un objetivo porque aún no manda datos. Entra en la revisión por la dirección que siga a su primer mes de datos.
 
 ## 3. Reglas que se integran de la política de uso ético (#6)
 
@@ -292,7 +334,7 @@ Si una vulneración afecta datos de una empresa, el equipo le avisa en [24] hora
 | Que Cloudflare, Groq y Microsoft (Azure y Microsoft 365 del Tec) sean personas encargadas según sus términos, qué papel tiene el Tec como administrador del tenant del buzón de destino y si recibir ahí las solicitudes ARCO es una transferencia, qué retención aplica el Tec a los buzones @tec.mx (Elementos recuperables, directivas de retención y eDiscovery), cómo se califica mandar correos de empleados a Have I Been Pwned, cómo se tratan las brechas que revelan datos sensibles (sección 5.3, punto 5) y si basta el texto modelo de la sección 5.4, si comunicar a la empresa los datos y la revocación de quien firma es una transferencia y con qué fundamento (arts. 35 y 36), y si la revocación de quien firma alcanza los datos de una carta que sigue vigente (sección 5.2, punto 7). Además, falta que la carta mueva la fecha prevista de la actividad 7 de su Anexo A (Have I Been Pwned, #19), hoy el 6 nov 2026, a después de esta revisión. Esas fechas son informativas y una actividad no se realiza antes de estar disponible (Anexo A de la carta) | Revisión legal, antes del primer cliente real y de #19 (RC-54) |
 | Campo en la carta para nombrar a un integrador, como prevé la sección 6 de #6. Mientras no exista, el portal solo lo usan el equipo y las empresas con carta (sección 11, punto 2) | Un cambio a la carta, cuando un integrador lo pida |
 | Página del aviso de privacidad, del aviso simplificado y de los términos de uso de la sección 11 en el portal, y el enlace al aviso en la sección 6 de la carta | Tarjeta de FrontKL por crear |
-| Revisión periódica de accesos, monitoreo, respaldo automático y prueba de recuperación | El despliegue de RC-91 |
+| Revisión periódica de accesos (control 5.18 y objetivo 5 de la sección 2.1), monitoreo, respaldo automático y prueba de recuperación | RC-259 para la revisión de accesos y el despliegue de RC-91 para lo demás |
 | Documentos del RGPD del punto 4 de la sección 1 | Solo si una empresa de la Unión Europea lo pide |
 
 ## 10. Cambios a esta política
