@@ -3,6 +3,7 @@
     python -m unittest -v pruebas/test_auth.py      (con `docker compose up -d`, DEMO_ACCOUNTS=true)
 """
 import base64
+import hashlib
 import hmac
 import http.client
 import json
@@ -15,7 +16,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
-from pruebas import sesion
+from pruebas import sesion, test_aislamiento
 from pruebas.sesion import AUTH, PASSWORD, Client
 from pruebas.test_aislamiento import scalar
 
@@ -27,6 +28,7 @@ INVALID = 'Correo o contraseña incorrectos.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MAX_FALLOS = 5  # MAX_FAILS_EMAIL de cirdan/auth/sessions.py
+MAX_FALLOS_IP = 20  # MAX_FAILS_IP de cirdan/auth/sessions.py
 CAPTCHA_INVALID = 'No se pudo comprobar que no eres un robot. Espera a que termine la verificación e inténtalo de nuevo.'
 
 
@@ -275,6 +277,167 @@ class Login(unittest.TestCase):
             self.assertEqual(code, 422, ascii(codigo))
         code, _ = client.post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': sesion.next_code(MAYA)})
         self.assertEqual(code, 200, 'el 422 sale antes de revisar el token, así que el token sigue sirviendo')
+
+    def test_17_treinta_contrasenas_en_paralelo_solo_revisan_cinco(self):
+        # RC-270: /login cuenta el intento antes de revisar la contraseña, en un solo paso de Valkey. Antes revisaba el
+        # bloqueo, luego la contraseña y contaba el fallo al final, así que las 30 leían el contador en 0 y se revisaban.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                  "AND a.action = 'auth.login_failed' AND a.details->>'reason' = 'password';" % DANA)
+        antes = int(scalar(contar, user='postgres'))
+        resueltos = [sesion.captcha(Client()) for _ in range(30)]  # fuera de la carrera: resolverlos tarda
+        salida = threading.Barrier(len(resueltos))
+
+        def intento(par):
+            n, resuelto = par
+            salida.wait()
+            code, body = Client().post(AUTH + '/login', {'email': DANA, 'password': 'CIRDAN_FAKE_mala-%d' % n,
+                                                          'captcha': resuelto})
+            return code, (body or {}).get('detail')
+
+        with ThreadPoolExecutor(len(resueltos)) as pool:
+            respuestas = list(pool.map(intento, enumerate(resueltos)))
+        self.assertEqual(respuestas.count((401, INVALID)), MAX_FALLOS, respuestas)
+        self.assertEqual([r[0] for r in respuestas].count(429), len(resueltos) - MAX_FALLOS, respuestas)
+        for _ in range(50):  # la bitácora del 401 se escribe después de responder: hasta 5 s
+            if int(scalar(contar, user='postgres')) - antes >= MAX_FALLOS:
+                break
+            time.sleep(0.1)
+        time.sleep(0.5)  # por si llegara una de más
+        self.assertEqual(int(scalar(contar, user='postgres')) - antes, MAX_FALLOS, 'solo 5 contraseñas se revisaron')
+        self.assertEqual(_fallos(_llave_correo(DANA)), MAX_FALLOS)
+        ip, = _llaves_ip()
+        self.assertEqual(_fallos(ip), MAX_FALLOS, 'los 25 que recibieron 429 no le suman a la IP')
+        sesion.valkey('DEL', ip)  # así el 429 que sigue solo puede salir por el correo
+        code, _ = sesion.post_login(Client(), DANA, PASSWORD)
+        self.assertEqual(code, 429, 'después de la carrera el correo sigue bloqueado, también con la contraseña buena')
+
+    def test_18_el_mismo_codigo_con_dos_tokens_a_la_vez_abre_una_sola_sesion(self):
+        # RC-270 (el arreglo es de RC-331): /mfa/verify lee last_totp_step sin bloquear la fila y solo guarda el paso si
+        # sigue siendo menor. Para que las dos lecturas lleguen antes que cualquier escritura, una transacción aparte
+        # tiene la fila bloqueada 3 s: las dos peticiones leen el mismo last_totp_step y esperan en el UPDATE. Con el
+        # UPDATE sin condición, como antes, las dos abrían sesión.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                  "AND a.action = '%%s';" % MAYA)
+        antes = {a: int(scalar(contar % a, user='postgres')) for a in ('auth.mfa_failed', 'auth.login_succeeded')}
+        clientes = [Client(), Client()]
+        tokens = [sesion.post_login(c, MAYA, PASSWORD)[1]['mfa_token'] for c in clientes]
+        codigo = sesion.next_code(MAYA)
+        candado = threading.Thread(target=test_aislamiento.psql, kwargs={'user': 'postgres', 'sql': (
+            "BEGIN; SELECT 1 FROM users WHERE email = '%s' FOR UPDATE; SELECT pg_sleep(3) AS rc270_candado; COMMIT;"
+            % MAYA)})
+        candado.start()
+        self.addCleanup(candado.join)
+        esperando = "SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%rc270_candado%' AND pid <> pg_backend_pid();"
+        for _ in range(100):  # hasta 10 s a que la fila quede bloqueada
+            if int(scalar(esperando, user='postgres')):
+                break
+            time.sleep(0.1)
+        else:
+            self.fail('la transacción que bloquea la fila no empezó')
+        salida = threading.Barrier(2)
+
+        def intento(par):
+            client, token = par
+            salida.wait()
+            return client.post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': codigo})
+
+        with ThreadPoolExecutor(2) as pool:
+            respuestas = list(pool.map(intento, zip(clientes, tokens)))
+        self.assertEqual(sorted(r[0] for r in respuestas), [200, 401], respuestas)
+        self.assertIn((401, {'detail': MFA_INVALID}), respuestas)
+        self.assertEqual([c.cookie() is not None for c in clientes].count(True), 1, 'una sola cookie de sesión')
+        self.assertEqual(int(scalar(contar % 'auth.login_succeeded', user='postgres')) - antes['auth.login_succeeded'], 1)
+        self.assertEqual(int(scalar(contar % 'auth.mfa_failed', user='postgres')) - antes['auth.mfa_failed'], 1,
+                         'el código usado queda en la bitácora como auth.mfa_failed')
+
+    def test_19_veintiuna_entradas_buenas_no_bloquean_la_ip(self):
+        # RC-270: /login cuenta cada intento antes de revisar la contraseña y lo devuelve si fue correcta. Sin esa
+        # devolución, la entrada 21 de la misma IP en 15 min respondería 429, aunque todas fueran buenas.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        self._sin_mfa(JORDAN)
+        for i in range(MAX_FALLOS_IP + 1):
+            code, body = sesion.post_login(Client(), JORDAN, PASSWORD)
+            self.assertEqual((code, body.get('mfa_required')), (200, False), 'entrada %d' % (i + 1))
+
+    def test_20_un_429_no_le_suma_al_otro_contador(self):
+        # RC-270: con la IP en su máximo, un login a otro correo responde 429 sin subir ese correo, y con el correo en
+        # su máximo el 429 no sube la IP. Si contara, una IP bloqueada seguiría bloqueando correos ajenos sin límite.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        self.assertEqual(sesion.post_login(Client(), DANA, 'CIRDAN_FAKE_mala')[0], 401)
+        ip, = _llaves_ip()
+        sesion.valkey('SET', ip, str(MAX_FALLOS_IP), 'KEEPTTL')
+        self.assertEqual(sesion.post_login(Client(), MAYA, 'CIRDAN_FAKE_mala')[0], 429)
+        self.assertEqual(sesion.valkey('EXISTS', _llave_correo(MAYA)), ['0'], 'el 429 de la IP no cuenta para el correo')
+        self.assertEqual(_fallos(ip), MAX_FALLOS_IP)
+        sesion.reset()
+        for _ in range(MAX_FALLOS):
+            self.assertEqual(sesion.post_login(Client(), DANA, 'CIRDAN_FAKE_mala')[0], 401)
+        ip, = _llaves_ip()
+        self.assertEqual(sesion.post_login(Client(), DANA, PASSWORD)[0], 429)
+        self.assertEqual((_fallos(_llave_correo(DANA)), _fallos(ip)), (MAX_FALLOS, MAX_FALLOS),
+                         'el 429 del correo no cuenta para la IP')
+
+    def test_21_tres_malas_y_una_buena_dejan_tres_con_vencimiento(self):
+        # RC-270, con Valkey real: con TOTP la contraseña buena no borra los fallos del correo, solo devuelve su
+        # intento. Los dos contadores quedan en 3 y vencen en 15 min como mucho, contados desde el primer fallo.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        for _ in range(3):
+            self.assertEqual(sesion.post_login(Client(), MAYA, 'CIRDAN_FAKE_mala')[0], 401)
+        correo, (ip,) = _llave_correo(MAYA), _llaves_ip()
+        vence = {llave: int(sesion.valkey('PEXPIRETIME', llave)[0]) for llave in (correo, ip)}
+        code, body = sesion.post_login(Client(), MAYA, PASSWORD)
+        self.assertEqual((code, body.get('mfa_required')), (200, True))
+        for llave in (correo, ip):
+            self.assertEqual(_fallos(llave), 3, llave)
+            self.assertIn(int(sesion.valkey('TTL', llave)[0]), range(1, 901), llave)
+            self.assertEqual(int(sesion.valkey('PEXPIRETIME', llave)[0]), vence[llave], 'el login bueno no lo renueva')
+
+    def test_22_la_devolucion_no_crea_llaves_ni_baja_una_ventana_nueva(self):
+        # RC-270, con el Valkey y el código de la API: refund_login_attempt solo baja el contador de la misma ventana
+        # que subió take_login_attempt. Si el contador desapareció no lo crea, y si venció y otro fallo abrió una
+        # ventana nueva, ese fallo sigue contando.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        salida = sesion.en_api(
+            'import json, time\n'
+            'from cirdan.auth import sessions as s\n'
+            "e, ip, v = 'rc270-ventana@ejemplo.test', '198.51.100.70', s._valkey()\n"
+            'llaves = (s._email_key(e), s._ip_key(ip))\n'
+            't = s.take_login_attempt(e, ip)\n'
+            'v.delete(*llaves)\n'
+            's.refund_login_attempt(e, ip, t)\n'
+            'sin = v.exists(*llaves)\n'
+            't = s.take_login_attempt(e, ip)\n'
+            'for k in llaves: v.pexpire(k, 1)\n'
+            'time.sleep(0.05)\n'
+            's.register_fail(e, ip)\n'
+            's.refund_login_attempt(e, ip, t)\n'
+            'print(json.dumps([sin] + [int(v.get(k) or 0) for k in llaves] + [v.ttl(k) for k in llaves]))')
+        sin, correo, ip, *ttl = json.loads(salida)
+        self.assertEqual(sin, 0, 'sin contadores, la devolución no los crea')
+        self.assertEqual((correo, ip), (1, 1), 'el fallo de la ventana nueva sigue contando')
+        for segundos in ttl:
+            self.assertIn(segundos, range(1, 901))
+
+
+def _llave_correo(email):
+    return 'login:fail:email:' + hashlib.sha256(email.lower().encode()).hexdigest()  # _email_key de sessions.py
+
+
+def _llaves_ip():
+    """Los contadores de IP que hay en Valkey. La IP con la que llegan las pruebas depende de Docker: se buscan."""
+    return sesion.valkey('--scan', '--pattern', 'login:fail:ip:*')
+
+
+def _fallos(llave):
+    return int(sesion.valkey('GET', llave)[0] or 0)
 
 
 def _cambiar(resuelto, cambio):
