@@ -2,6 +2,8 @@
 
 Backend de LowTide (nombre clave Cirdan, que sigue en el paquete, la base y los contenedores), la plataforma de gestión de la superficie de ataque externa con OSINT pasivo del reto IKUSI VELATIA: la base de datos, la API, los recolectores OSINT y el criterio de criticidad. El portal web (Next.js) está en [FrontKL](https://github.com/Kernel-Loco/FrontKL). Desde el 14 y 15 oct 2026 inicia sesión con esta API (#25) y lee sus datos de la API v1 con esa sesión. Siguen simulados en el portal el alta de dominios y la verificación TXT (#26), los reportes, usuarios, llaves de API, webhooks, alertas y bitácora.
 
+LowTide es el nombre del producto desde el 13 oct 2026 y Cirdan es el nombre clave del código. El paquete `cirdan/`, la base `cirdan` y su rol `cirdan_app`, los contenedores `cirdan-*`, la variable `CIRDAN_APP_PASSWORD`, el registro TXT `cirdan-verification=<token>` y el prefijo `CIRDAN_FAKE_` siguen así a propósito (RC-209): renombrarlos pedía una migración del rol y de la base que ya tienen datos reales y que los clientes volvieran a publicar su TXT, a días del congelado del 25 nov.
+
 ## Carpetas
 
 | Carpeta | Qué tiene |
