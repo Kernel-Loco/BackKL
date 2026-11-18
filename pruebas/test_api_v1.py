@@ -10,7 +10,7 @@ import csv
 import io
 import json
 import unittest
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from cirdan.score import criterio, subcategorias
@@ -60,6 +60,55 @@ class ApiV1(unittest.TestCase):
         for real, ej in zip(body['items'], esperado['items']):
             for campo in ('id', 'status', 'authorization', 'scan_eligibility', 'score', 'band', 'open_findings'):
                 self.assertEqual(real[campo], ej[campo], (real['fqdn'], campo))
+
+    def test_1b_carta_que_empieza_manana_no_cuenta_como_vigente(self):
+        # RC-313. La API va en UTC y la base decide con la fecha de México (cirdan/db.py). De 18:00 a 24:00 de México
+        # el reloj de la API ya va en el día siguiente: una carta que empieza ese día salía 'expired'. Dos renovaciones
+        # empiezan mañana en México y vencen después que su carta de la semilla. La de old-example.net (41...05,
+        # vencida) es la que se muestra y sale 'missing' en /api/v1/domains y 'Not authorized' en GET /domains. La de
+        # acme-demo.mx (41...01, vigente) no le quita la vigencia en ninguna de las dos. La tabla es inmutable: las filas
+        # se borran al final sin triggers, solo en esa transacción.
+        cartas = (('41000000-0000-4000-8000-0000000000f1', '41000000-0000-4000-8000-000000000005', 60),
+                  ('41000000-0000-4000-8000-0000000000f2', '41000000-0000-4000-8000-000000000001', 400))
+        hoy = "(now() AT TIME ZONE 'America/Mexico_City')::date"
+        sql = ("BEGIN; SELECT %s, (now() AT TIME ZONE 'UTC')::date, valid_from, valid_until, "
+               '%s BETWEEN valid_from AND valid_until AND revoked_at IS NULL FROM domain_authorizations '
+               "WHERE id = '41000000-0000-4000-8000-000000000001';" % (hoy, hoy))
+        for nueva, base, dias in cartas:
+            sql += ('INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, '
+                    'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+                    "SELECT '%s', organization_id, domain_id, signer_name, signer_title, signer_email, "
+                    "signed_document_key || '.rc313', signed_document_sha256, %s + 1, %s + %d, accepted_by "
+                    "FROM domain_authorizations WHERE id = '%s';" % (nueva, hoy, hoy, dias, base))
+        ok, salida, err = psql(sql + 'COMMIT;', user='postgres')
+        self.assertTrue(ok, err)
+        self.addCleanup(self.psql_o_falla, 'BEGIN; SET LOCAL session_replication_role = replica; '
+                        'DELETE FROM domain_authorizations WHERE id IN (%s); COMMIT;'
+                        % ', '.join("'%s'" % c[0] for c in cartas), 'quedaron las cartas de prueba de RC-313')
+        hoy_antes, utc, acme_desde, acme_hasta, acme_vigente = salida.splitlines()[0].split('|')
+        v1 = {x['fqdn']: x for x in self.get(self.acme, '/api/v1/domains')['items']}
+        viejo = {x['domain']: x for x in self.get(self.acme, '/domains')}
+        ok, hoy_despues, err = psql('SELECT %s;' % hoy, user='postgres')
+        self.assertTrue(ok, err)
+        if hoy_despues != hoy_antes:
+            # Si cruzó las 00:00 de México entre el INSERT y los GET, la carta ya empezó y 'valid' sería correcto.
+            self.skipTest('Cruzó las 00:00 de México (%s a %s): se corre otra vez' % (hoy_antes, hoy_despues))
+        manana = date.fromisoformat(hoy_antes) + timedelta(days=1)
+        contexto = ('fecha en México %s, en UTC %s' % (hoy_antes, utc), v1['old-example.net'], viejo['old-example.net'],
+                    v1['acme-demo.mx']['authorization'], viejo['acme-demo.mx'])
+        old = v1['old-example.net']
+        self.assertEqual(old['authorization']['valid_from'], manana.isoformat(), contexto)
+        self.assertEqual(old['authorization']['status'], 'missing', contexto)
+        self.assertEqual(old['scan_eligibility']['reasons'], ['authorization_not_started', 'domain_paused'], contexto)
+        self.assertEqual((viejo['old-example.net']['authorization'], viejo['old-example.net']['valid_until']),
+                         ('Not authorized', (manana + timedelta(days=59)).isoformat()), contexto)
+        if acme_vigente != 't':
+            # Desde que vence la carta de la semilla (2026-12-31) no hay vigente que proteger.
+            self.skipTest('La carta 41...01 de acme-demo.mx ya no está vigente (%s a %s)' % (acme_desde, acme_hasta))
+        acme = v1['acme-demo.mx']['authorization']
+        self.assertEqual((acme['status'], acme['valid_from']), ('valid', acme_desde), contexto)
+        self.assertEqual((viejo['acme-demo.mx']['authorization'], viejo['acme-demo.mx']['valid_until']),
+                         ('Authorized', acme_hasta), contexto)
 
     def test_2_hallazgos_como_el_contrato(self):
         body = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')

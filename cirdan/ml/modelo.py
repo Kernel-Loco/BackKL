@@ -1,4 +1,5 @@
 """Entrenamiento y evaluación del clasificador v1 (#34)."""
+import hashlib
 import json
 from pathlib import Path
 
@@ -111,11 +112,21 @@ def _clases_presentes(dataset):
     return sorted(set(dataset['etiqueta']))
 
 
-def guardar(bundle, artefacto=ARTEFACTO, ficha=FICHA):
+def guardar(bundle, artefacto=ARTEFACTO, ficha=FICHA, huella=None):
+    """Escribe el modelo, su sha256 junto a él y la ficha con ese sha256.
+
+    La huella va en cirdan/ml/ (modelo_v1.joblib.sha256), que entra en la imagen, y es la que revisa
+    inferencia.cargar_modelo antes de cargar. docs/ no entra en la imagen (RC-305).
+    """
+    huella = huella or artefacto.with_name(artefacto.name + '.sha256')
     artefacto.parent.mkdir(parents=True, exist_ok=True)
     ficha.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(bundle, artefacto, compress=3)
-    ficha.write_text(json.dumps(bundle['metrics'], ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    sha256 = hashlib.sha256(artefacto.read_bytes()).hexdigest()
+    huella.write_text('%s  %s\n' % (sha256, artefacto.name), encoding='ascii', newline='\n')
+    ficha.write_text(json.dumps({**bundle['metrics'], 'sha256': sha256}, ensure_ascii=False, indent=2) + '\n',
+                     encoding='utf-8')
+    return sha256
 
 
 def main():

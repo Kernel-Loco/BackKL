@@ -63,5 +63,6 @@
   },
   "supera_reglas": true,
   "supera_sensibilidad": true,
-  "integrable": true
+  "integrable": true,
+  "sha256": "3c289d68303f213586409858d658e0a61afc641edd5509a822c8157fdd1387ec"
 }
