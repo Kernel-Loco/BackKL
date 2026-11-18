@@ -1,13 +1,13 @@
 -- =====================================================================
--- Cirdan · db/semillas/020_reglas_portada.sql (#111, RC-228)
+-- Cirdan · db/semillas/021_reglas_portada.sql (#111, RC-228)
 -- Las reglas directory_listing y debug_page_exposed de la portada de la
 -- visita web (cirdan/recolectores/portada.py), en la categoría
 -- configuration, con weight 1.000 y el tope de su severidad como las 23
 -- reglas de la 004: medium 10 y high 25.
--- Necesita la migración 019, que va ANTES que esta semilla: trae sus
+-- Necesita la migración 020, que va ANTES que esta semilla: trae sus
 -- textos y su mapeo, y la FK de scoring_rules.code pide el texto.
 --
--- 1. Las dos reglas en el juego v1 global (ids 31 y 32 de
+-- 1. Las dos reglas en el juego v1 global (ids 32 y 33 de
 --    docs/codigos_reglas.md).
 -- 2. Las mismas dos en cada otro juego que ya existe, también los de una
 --    organización (migración 013): un juego nuevo copia las reglas del
@@ -31,8 +31,8 @@ BEGIN;
 LOCK TABLE scoring_rule_sets IN SHARE ROW EXCLUSIVE MODE;
 
 INSERT INTO scoring_rules (id, rule_set_id, code, category, base_severity, weight, max_penalty) VALUES
- ('91000000-0000-4000-8000-000000000031','90000000-0000-4000-8000-000000000001','directory_listing',           'configuration',    'medium',   1.000, 10.00),
- ('91000000-0000-4000-8000-000000000032','90000000-0000-4000-8000-000000000001','debug_page_exposed',          'configuration',    'high',     1.000, 25.00)
+ ('91000000-0000-4000-8000-000000000032','90000000-0000-4000-8000-000000000001','directory_listing',           'configuration',    'medium',   1.000, 10.00),
+ ('91000000-0000-4000-8000-000000000033','90000000-0000-4000-8000-000000000001','debug_page_exposed',          'configuration',    'high',     1.000, 25.00)
 ON CONFLICT (rule_set_id, code) DO NOTHING;
 
 INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty)

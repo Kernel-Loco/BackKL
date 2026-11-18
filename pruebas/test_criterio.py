@@ -101,7 +101,8 @@ class SubcategoriasYKri(unittest.TestCase):
         # Huella de SUBCATEGORIAS, KRIS y EMITEN por versión. Si cambias el mapa, sube VERSION y agrega aquí su
         # huella nueva (la que imprime el mensaje de esta prueba), sin borrar las anteriores.
         huellas = {1: '21dcfebaeb77bdcadd33c3342b5f34cffa11c2be9ac7b50252d52d368994a8cb',
-                   2: 'bb7c062b5f21551c625fe23cd7e6e77a5066c3a0d8ccd9e78dda3661cd46e00f'}   # 2: RC-228
+                   2: '9975c93f5a65ec3d73bd7a47c44da9bb067cd817e13fb91ad419762fa19278f8',
+                   3: 'c939b876df9892c32d9227df4313dca74c435538f573f7a3dfb06ac589afcf64'}   # 3: RC-228
         mapa = json.dumps([sub.SUBCATEGORIAS, sub.KRIS, sub.EMITEN], ensure_ascii=False, sort_keys=True)
         huella = hashlib.sha256(mapa.encode('utf-8')).hexdigest()
         self.assertIn(sub.VERSION, huellas, 'VERSION %d no tiene huella en esta prueba: %s' % (sub.VERSION, huella))
@@ -202,13 +203,13 @@ class SubcategoriasYKri(unittest.TestCase):
     def test_8f_reglas_de_una_fuente_que_no_corrio_cuentan_como_sin_revisar(self):
         # shodan respondió sin poder revisar nada (reproducir sin grabación) y api_docs no corrió: ningún dato real
         de_shodan = ['exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database',
-                     'exposed_service', 'known_vulnerability', 'exposed_iot_device', 'exposed_ot_device',
+                     'exposed_container_api', 'exposed_service', 'known_vulnerability', 'exposed_iot_device', 'exposed_ot_device',
                      'outdated_software']
         _, kris = sub.resumen([], {'shodan': 'succeeded'}, sin_cobertura=de_shodan)
         k = self.kri(kris, 'service_exposure')
         self.assertEqual((k['status'], k['findings'], k['max_severity'], k['penalty'], k['sources_not_run']),
                          ('no_coverage', None, None, None, ['api_docs']))
-        self.assertEqual(len(k['rules_without_coverage']), 7)   # solo las que dio el escaneo, no las de api_docs
+        self.assertEqual(len(k['rules_without_coverage']), 8)   # solo las que dio el escaneo, no las de api_docs
         # con una sola regla de shodan revisada ya hay un dato: a medias
         _, kris = sub.resumen([], {'shodan': 'succeeded'}, sin_cobertura=de_shodan[1:])
         k = self.kri(kris, 'service_exposure')

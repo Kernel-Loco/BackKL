@@ -81,7 +81,7 @@ FUENTE = 'web'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'web'
 
 # Código de regla -> severidad base. Los tres primeros existen en el catálogo de reglas (semillas 001 y 004) y los dos
-# de portada.py en la semilla 020 (RC-228).
+# de portada.py en la semilla 021 (RC-228).
 CODIGOS = dict(soporte.CODIGOS, **nvd.CODIGOS, server_version_disclosed='low', **portada.CODIGOS)
 
 # Cabeceras que revelan el programa del servidor y una versión: 'nginx/1.24.0 (Ubuntu)', 'PHP/8.1.2'. Sin número de

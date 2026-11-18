@@ -1140,8 +1140,8 @@ class Confirmados(unittest.TestCase):
 
 
 FIXTURES_PORTADA = RAIZ / 'pruebas' / 'fixtures' / 'portada'
-SEMILLA_PORTADA = RAIZ / 'db' / 'semillas' / '020_reglas_portada.sql'
-MIGRACION_PORTADA = RAIZ / 'db' / 'migraciones' / '019_textos_reglas_portada.sql'
+SEMILLA_PORTADA = RAIZ / 'db' / 'semillas' / '021_reglas_portada.sql'
+MIGRACION_PORTADA = RAIZ / 'db' / 'migraciones' / '020_textos_reglas_portada.sql'
 
 # (fixture, código, firma) de cada respuesta armada a mano de pruebas/fixtures/portada/
 ESPERADO_PORTADA = (

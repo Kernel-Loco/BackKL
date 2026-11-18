@@ -33,7 +33,9 @@ TABLES = [t for _, ts in GROUPS for t in ts]
 # empresa diría qué software tiene. El explorador da solo las que nombran los hallazgos de la empresa de la sesión
 # (findings sí tiene RLS).
 FILTERS = {'cves': sql.SQL(' WHERE cve_id IN (SELECT cve_id FROM findings WHERE cve_id IS NOT NULL)')}
-HIDDEN = ('hash', 'secret', '_enc', 'token', 'password', 'raw_payload')
+# signer_: nombre, cargo y correo de quien firma la carta. El explorador no sabe si la carta sigue vigente, y los de una
+# carta revocada o vencida están en bloqueo (sección 5.6 de la política, RC-274).
+HIDDEN = ('hash', 'secret', '_enc', 'token', 'password', 'raw_payload', 'signer_')
 
 
 def _source(table):

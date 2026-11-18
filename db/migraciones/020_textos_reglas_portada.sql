@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/019_textos_reglas_portada.sql (#111, RC-228)
+-- Cirdan · db/migraciones/020_textos_reglas_portada.sql (#111, RC-228)
 -- Textos, firma y mapeo a marcos de las dos reglas que da la portada de
 -- la visita web (cirdan/recolectores/portada.py), con la misma página que
 -- ya baja la visita, sin ninguna petición nueva:
@@ -7,7 +7,7 @@
 --     Apache, nginx, lighttpd o IIS. CWE-548.
 --   debug_page_exposed (high): la página es una página de depuración de
 --     Django, Werkzeug, Laravel, Symfony, ASP.NET o PHP. CWE-215.
--- Las reglas van en la semilla 020, que se aplica DESPUÉS de esta
+-- Las reglas van en la semilla 021, que se aplica DESPUÉS de esta
 -- migración: la FK de scoring_rules.code pide que el texto exista, y el
 -- juego v1 lo crea la semilla 001, que se carga después de las
 -- migraciones (db/init/cargar_cirdan.sh). Así lo pide docs/codigos_reglas.md

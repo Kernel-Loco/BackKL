@@ -297,11 +297,11 @@ class MapeoMarcos(unittest.TestCase):
                 raise AssertionError(err)
             return out.splitlines()
 
-        # Los 32 textos y los 32 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 32 son
+        # Los 33 textos y los 33 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 33 son
         # las reglas de docs/codigos_reglas.md: una regla nueva lo sube.
         self.assertEqual(scalar("SELECT (SELECT count(*) FROM scoring_rule_texts) || ',' ||"
                                 " (SELECT count(*) FROM scoring_rule_framework_mappings) || ',' ||"
-                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '32,32,32')
+                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '33,33,33')
         self.assertEqual(filas("SELECT coalesce(t.code, m.rule_code) FROM scoring_rule_texts t"
                                " FULL JOIN scoring_rule_framework_mappings m ON m.rule_code = t.code"
                                " WHERE t.code IS NULL OR m.rule_code IS NULL"
@@ -309,13 +309,13 @@ class MapeoMarcos(unittest.TestCase):
                                " LEFT JOIN scoring_rule_framework_mappings m ON m.rule_code = r.code"
                                " WHERE m.rule_code IS NULL ORDER BY 1;"), [],
                          'códigos con texto y sin mapeo, con mapeo y sin texto, o reglas sin mapeo')
-        # Las 25 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
+        # Las 26 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
         # como quedan después de todos los UPDATE. test_10 de pruebas/test_catalogo_reglas.py lo lee del SQL sin saber
         # qué corre.
         doc = (Path(__file__).resolve().parent.parent / 'docs' / 'codigos_reglas.md').read_text(encoding='utf-8')
         filas_doc = re.findall(r'^\|\s*\d{2}\s*\|\s*`([a-z0-9_]+)`\s*\|(?:[^|\n]*\|){3}\s*#(\d+)', doc, re.MULTILINE)
         osint = [code for code, recolector in filas_doc if 14 <= int(recolector) <= 20]
-        self.assertEqual(len(osint), 25, 'docs/codigos_reglas.md ya no tiene 25 reglas de #14 a #20')
+        self.assertEqual(len(osint), 26, 'docs/codigos_reglas.md ya no tiene 26 reglas de #14 a #20')
         self.assertEqual(filas("SELECT unnest(ARRAY[%s]) EXCEPT SELECT code FROM scoring_rule_texts"
                                " WHERE reviewed_by = 'ErnestoDL' ORDER BY 1;" % ', '.join("'%s'" % c for c in osint)),
                          [], 'reglas OSINT sin texto o con un texto que no firmó ErnestoDL')
