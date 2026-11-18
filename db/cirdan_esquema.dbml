@@ -102,7 +102,7 @@ Table domains [note: 'Dominios raíz que el cliente quiere monitorear, con su to
   verified_at timestamptz [note: 'Primera verificación TXT exitosa']
   next_scan_at timestamptz [note: 'Lo fijará el scheduler de #27 (RC-52) con plans.scan_interval. Índice parcial (next_scan_at) WHERE status = \'verified\', que leerá cirdan_dispatcher entre clientes']
   last_scan_at timestamptz
-  added_by uuid [ref: > users.id, note: 'NULL si el alta llegó por API con llave. El actor exacto (actor_api_key_id) queda en audit_log, igual que en scans.requested_by']
+  added_by uuid [ref: > users.id, note: 'NULL si el alta llegó por API con llave. El actor exacto queda en audit_log con actor_type api_key y el id de la llave en details.api_key_id, igual que en scans.requested_by (desviación 17 de db/README.md)']
 }
 
 Table domain_authorizations [note: 'Autorización firmada por quien tiene facultad sobre el dominio, con vigencia. Solo se cargará desde el portal (plan, #26, RC-59). Hoy en dev solo llegan por las semillas. Inmutable salvo revoked_at: renovar crea otra fila.'] {
@@ -360,7 +360,7 @@ Table audit_log [note: 'Bitácora de solo inserción con cadena de hashes SHA-25
   chain_seq bigint [not null, note: 'Consecutivo por cadena. El trigger toma pg_advisory_xact_lock con llave fija por cadena (constante para la de plataforma) y busca el anterior con IS NOT DISTINCT FROM. UNIQUE NULLS NOT DISTINCT (organization_id, chain_seq)']
   actor_type text [not null, note: 'CHECK IN (\'user\',\'api_key\',\'system\')']
   actor_user_id uuid [ref: > users.id]
-  actor_api_key_id uuid [ref: > api_keys.id]
+  actor_api_key_id uuid [ref: > api_keys.id, note: 'Siempre NULL: con esta FK y audit_log de solo inserción la llave ya no se podría borrar. El id de la llave va en details.api_key_id (RC-312, desviación 17 de db/README.md)']
   action text [not null, note: 'Ej. auth.login_failed, authorization.uploaded, domain.added, scan.blocked, finding.status_changed, finding.severity_changed, secret.rotated, report.downloaded, retention.purged, chain.verified']
   entity_type text
   entity_id uuid
