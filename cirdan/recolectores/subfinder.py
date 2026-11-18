@@ -18,7 +18,9 @@ De cada captura solo se guarda el nombre del host, nunca la URL.
 Un 404 con 'No Captures found' es un índice sin capturas del dominio y no corta la búsqueda: se revisan todos. Un
 índice cuyo CDX da 500, 502 o 504 se pide otra vez tras ESPERAS (15 s y luego 30 s). El 16 nov el nginx de
 index.commoncrawl.org cortó a los ~10 s con 504 o 502 porque los procesos del índice estaban llenos, incluso en una
-consulta que no lee S3, y la misma consulta respondió 15 s después: la falla va y viene y no depende de la consulta.
+consulta que no lee S3. No depende de la consulta y casi nunca se recupera: el 16 nov desde una PC y el 17 nov desde
+la VM, 11 de 12 primeros intentos dieron 504, y el escaneo de olmardo.com del 17 nov saltó 7 de 12 índices. Por eso
+la semilla 019 apaga la fuente (decisión 6 de docs/servicios_externos.md), y este código queda para cuando responda.
 Toda la corrida tiene a lo más REINTENTOS reintentos del CDX, así una caída total no pide 3 veces cada índice ni gasta
 el cupo diario sin datos. Si se acaban los intentos del índice o la bolsa de la corrida, si el reintento ya no cabe en
 MAX_SEGUNDOS con MINIMO_INTENTO por delante, o si el CDX no termina en TIMEOUT_PETICION (eso no se reintenta: ya gastó
