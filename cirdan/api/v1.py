@@ -388,7 +388,7 @@ def score_history(fqdn: str, session: Session = Depends(session_or_api_key)):
 
 
 # ---------------------------------------------------------------- comparación y exportaciones (#24, RC-57)
-# Las dos piden autorización firmada vigente (retro-11), como la exportación del plan de acción (RC-307): un dominio
+# Las tres piden autorización firmada vigente (retro-11), como la exportación del plan de acción (RC-307): un dominio
 # de otra empresa responde 404, como en el resto de la API, y uno de la empresa sin autorización vigente responde 403.
 
 def _dominio_autorizado(session, fqdn):
@@ -680,6 +680,8 @@ def _plan_data(session, fqdn, descargar=None):
     transacción que leyó los datos, como en _comparacion()."""
     domain_id = _domain_id(session, fqdn)
     with transaction(session.org_id) as conn:
+        if descargar:
+            _carta_vigente(conn, domain_id)  # si venció o se revocó tras _dominio_autorizado, 403 y sin evento (RC-312)
         _, reglas, pesos, hallazgos, method, severidades, parcial, guardado, cortes = _leer_contexto_plan(
             conn, session, domain_id)
         try:
@@ -719,7 +721,6 @@ def export_action_plan(request: Request, fqdn: str, formato: str = Query(default
     _dominio_autorizado(session, fqdn)  # 404 de otra empresa y 403 sin carta vigente, antes de leer el plan (RC-307)
 
     def descargar(conn, data, domain_id):
-        _carta_vigente(conn, domain_id)  # si venció o se revocó mientras se leía, 403 y sin evento (RC-312)
         if formato == 'csv':
             respuesta = _descarga(plan_accion.exportar_csv(data), 'text/csv; charset=utf-8', '%s-plan.csv' % fqdn)
         else:
