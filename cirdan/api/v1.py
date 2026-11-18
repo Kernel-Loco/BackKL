@@ -388,8 +388,8 @@ def score_history(fqdn: str, session: Session = Depends(session_or_api_key)):
 
 
 # ---------------------------------------------------------------- comparación y exportaciones (#24, RC-57)
-# Las dos piden autorización firmada vigente (retro-11): un dominio de otra empresa responde 404, como
-# en el resto de la API, y uno de la empresa sin autorización vigente responde 403.
+# Las dos piden autorización firmada vigente (retro-11), como la exportación del plan de acción (RC-307): un dominio
+# de otra empresa responde 404, como en el resto de la API, y uno de la empresa sin autorización vigente responde 403.
 
 def _dominio_autorizado(session, fqdn):
     rows = _query(session, '''
@@ -716,8 +716,10 @@ def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
 def export_action_plan(request: Request, fqdn: str, formato: str = Query(default='json'),
                        session: Session = Depends(session_or_api_key)):
     formato = _formato(formato)
+    _dominio_autorizado(session, fqdn)  # 404 de otra empresa y 403 sin carta vigente, antes de leer el plan (RC-307)
 
     def descargar(conn, data, domain_id):
+        _carta_vigente(conn, domain_id)  # si venció o se revocó mientras se leía, 403 y sin evento (RC-312)
         if formato == 'csv':
             respuesta = _descarga(plan_accion.exportar_csv(data), 'text/csv; charset=utf-8', '%s-plan.csv' % fqdn)
         else:
