@@ -43,6 +43,10 @@ Devuelve:
     (alta, RC-224), con el servicio que suele escuchar ahí (SERVICIO_CONTENEDORES) y NOTA_CONTENEDORES en la
     evidencia: InternetDB solo da el número del puerto, así que no se sabe si el servicio pide autenticación. Saberlo
     pediría conectarse al servidor, y eso no se hace.
+  - 11434 (Ollama), 1234 (LM Studio), 7860 (Gradio), 8188 (ComfyUI), 8265 (Ray Dashboard), 6333 y 6334 (Qdrant) y
+    19530 (Milvus): exposed_ai_service (alta, RC-262), con el producto que suele escuchar ahí (SERVICIO_IA) y NOTA_IA
+    en la evidencia, por la misma razón. Los puertos genéricos que también usan servicios de IA (3000, 5000, 8000,
+    8080 y 8888) siguen en exposed_service, y el 80 y el 443 en el activo web sin hallazgo.
   - 80 y 443, y los de correo (25, 110, 143, 465, 587, 993 y 995): activo service sin hallazgo.
   - los industriales (102, 502, 789, 1911, 2404, 4911, 9600, 20000, 44818 y 47808): exposed_service con
     puerto_industrial en la evidencia. exposed_ot_device sale de la etiqueta 'ics', no del puerto.
@@ -113,7 +117,7 @@ respuesta, el tope de tiempo, una respuesta que no se puede leer, un 4xx, una p�
 o campos rotos de InternetDB) deja intacta la grabación anterior, como github.py con SIN_CUOTA, con el aviso NO_SE_GRABO
 al principio de los avisos. Una grabación fallida tampoco la toca. 'reproducir' solo lee esa grabación, sin llave: usa la API de host solo si la grabación trae alguna respuesta suya
 (una grabación hecha sin llave reproduce como antes de RC-337). Sin grabación
-del dominio, reproducir da los 10 códigos en sin_cobertura y un aviso, no failed, para que la demo no muestre la fuente
+del dominio, reproducir da los 11 códigos en sin_cobertura y un aviso, no failed, para que la demo no muestre la fuente
 caída. dnspython se importa solo al consultar de verdad (_resolver_a), como registros_dns.py.
 
     python -m cirdan.recolectores.shodan olmardo.com --reproducir
@@ -152,7 +156,8 @@ CARPETA_GRABADAS = RAIZ_GRABADAS / 'shodan'
 # Código de regla -> severidad base, la del catálogo de reglas (semillas 001 y 004). Los de puertos y CVE salen de los
 # puertos y las CVE de InternetDB.
 CODIGOS_PUERTOS = {'exposed_rdp': 'high', 'exposed_remote_admin': 'high', 'exposed_file_sharing': 'high',
-                   'exposed_database': 'high', 'exposed_container_api': 'high', 'exposed_service': 'low',
+                   'exposed_database': 'high', 'exposed_container_api': 'high', 'exposed_ai_service': 'high',
+                   'exposed_service': 'low',
                    'known_vulnerability': 'medium'}
 # Los de etiquetas salen de las etiquetas que Shodan pone a la IP (RC-220 y RC-337).
 CODIGOS_ETIQUETA = {'exposed_iot_device': 'high', 'exposed_ot_device': 'critical', 'outdated_software': 'high'}
@@ -214,11 +219,29 @@ PUERTOS = {
     'exposed_file_sharing': (21, 139, 445, 548, 873, 2049),
     'exposed_database': (1433, 1521, 3306, 5432, 5984, 6379, 9042, 9200, 11211, 27017),
     'exposed_container_api': (2375, 2376, 2379, 2380, 6443, 10250, 10255),
+    # Servidores de modelos, interfaces y bases de vectores de IA (RC-262). Cada uno es el puerto por omisión de la
+    # documentación oficial del producto, revisada el 18 nov 2026:
+    'exposed_ai_service': (
+        11434,   # Ollama: 'Ollama binds 127.0.0.1 port 11434 by default', https://docs.ollama.com/faq
+        1234,    # LM Studio: servidor en http://localhost:1234, https://lmstudio.ai/docs/developer/rest/quickstart
+        7860,    # Gradio: GRADIO_SERVER_PORT, por omisión 7860, https://www.gradio.app/guides/environment-variables
+        8188,    # ComfyUI: --port, por omisión 8188, https://docs.comfy.org/development/comfyui-server/startup-flags
+        8265,    # Ray Dashboard: puerto 8265 del nodo principal,
+                 # https://docs.ray.io/en/latest/cluster/configure-manage-dashboard.html
+        6333,    # Qdrant: service.http_port, por omisión 6333,
+                 # https://qdrant.tech/documentation/ops-configuration/configuration/
+        6334,    # Qdrant: service.grpc_port, por omisión 6334,
+                 # https://qdrant.tech/documentation/ops-configuration/configuration/
+        19530,   # Milvus: proxy.port, por omisión 19530, https://milvus.io/docs/configure_proxy.md
+    ),
 }
 # Qué servicio suele escuchar en cada puerto de exposed_container_api (RC-224). Es lo que suele ser, no lo que es:
 # InternetDB solo da el número del puerto.
 SERVICIO_CONTENEDORES = {2375: 'Docker', 2376: 'Docker', 2379: 'etcd', 2380: 'etcd', 6443: 'Kubernetes',
                          10250: 'kubelet', 10255: 'kubelet'}
+# Lo mismo para exposed_ai_service (RC-262): el producto cuyo puerto por omisión es ese, no el que de verdad escucha.
+SERVICIO_IA = {11434: 'Ollama', 1234: 'LM Studio', 7860: 'Gradio', 8188: 'ComfyUI', 8265: 'Ray Dashboard',
+               6333: 'Qdrant', 6334: 'Qdrant', 19530: 'Milvus'}
 PUERTOS_WEB = (80, 443)
 PUERTOS_CORREO = (25, 110, 143, 465, 587, 993, 995)   # exposed_service habla de 'entradas distintas de sitios web y correo'
 PUERTOS_INDUSTRIALES = (102, 502, 789, 1911, 2404, 4911, 9600, 20000, 44818, 47808)
@@ -293,6 +316,12 @@ NOTA_SIN_FECHA = ('InternetDB no dice cuándo vio este dato: puede ser viejo o d
 NOTA_CONTENEDORES = ('InternetDB solo dice que el puerto estaba abierto: no dice si el servicio pide autenticación ni '
                      'cuándo lo vio. Si no la pide, puede permitir a cualquiera manejar los contenedores o leer la '
                      'configuración y las claves que guarda.')
+# La de exposed_ai_service (RC-262), con la misma regla: InternetDB no dice si pide autenticación ni qué responde.
+NOTA_IA = ('InternetDB solo dice que el puerto estaba abierto: no dice si el servicio pide autenticación, qué responde '
+           'ni cuándo lo vio. Si no la pide, puede permitir a cualquiera usar los modelos o leer los datos que guarda.')
+# Código con servicio probable -> (producto que suele escuchar en cada puerto, nota de autenticación de la evidencia).
+PROBABLES = {'exposed_container_api': (SERVICIO_CONTENEDORES, NOTA_CONTENEDORES),
+             'exposed_ai_service': (SERVICIO_IA, NOTA_IA)}
 
 TITULOS = {
     'exposed_rdp': 'Shodan vio abierto el escritorio remoto (puerto %d) en %s',
@@ -300,6 +329,7 @@ TITULOS = {
     'exposed_file_sharing': 'Shodan vio abierto un servicio para compartir archivos (puerto %d) en %s',
     'exposed_database': 'Shodan vio abierta una base de datos (puerto %d) en %s',
     'exposed_container_api': 'Shodan vio abierto el puerto %d, que suele ser de %s, en %s',
+    'exposed_ai_service': 'Shodan vio abierto el puerto %d, que suele ser de %s, en %s',
     'exposed_service': 'Shodan vio abierto el puerto %d en %s',
 }
 TITULO_CVE = 'Vulnerabilidad conocida %s por la versión que Shodan vio en %s'
@@ -1020,18 +1050,20 @@ def _evidencia(titulo, ip, hosts, datos):
 
 def hallazgo_puerto(codigo, dominio, servicio, ip, puerto, hosts, datos, ahora):
     """Un hallazgo de puerto sobre su activo service. Las características salen de la rúbrica (caracteristicas.py)."""
-    if codigo == 'exposed_container_api':
-        titulo = TITULOS[codigo] % (puerto, SERVICIO_CONTENEDORES[puerto], _donde(hosts))
+    if codigo in PROBABLES:
+        titulo = TITULOS[codigo] % (puerto, PROBABLES[codigo][0][puerto], _donde(hosts))
     else:
         titulo = TITULOS[codigo] % (puerto, _donde(hosts))
     evidencia = dict(_evidencia(titulo, ip, hosts, datos), puerto=puerto, protocolo=protocolo(puerto),
                      protocolo_supuesto=True)
     if puerto in PUERTOS_INDUSTRIALES:
         evidencia['puerto_industrial'] = True
-    if codigo == 'exposed_container_api':
-        # Lo que suele ser y no lo que es: sin conectarse no se sabe el servicio ni si pide autenticación (RC-224)
-        evidencia.update(servicio_probable=SERVICIO_CONTENEDORES[puerto], servicio_supuesto=True,
-                         autenticacion='desconocida', nota_autenticacion=NOTA_CONTENEDORES)
+    if codigo in PROBABLES:
+        # Lo que suele ser y no lo que es: sin conectarse no se sabe el servicio ni si pide autenticación (RC-224 y
+        # RC-262)
+        servicios, nota = PROBABLES[codigo]
+        evidencia.update(servicio_probable=servicios[puerto], servicio_supuesto=True,
+                         autenticacion='desconocida', nota_autenticacion=nota)
     return Hallazgo(codigo, CODIGOS[codigo], servicio, titulo, evidencia,
                     rubrica.calcular(codigo, 'service', evidencia, ahora), _huella(codigo, dominio, servicio),
                     partes=[ip])

@@ -129,7 +129,7 @@ Los textos de la regla salen del catálogo `scoring_rule_texts` (#30), uno por c
 Los del juego de reglas v1 de la base: infraestructura 30 %, identidad digital 20 %, configuración 20 % y fugas de datos 30 %, con las bandas, las letras (`grades`, #114), el piso y el umbral de `cirdan/score/criterio.py`. Emilio los confirmó para este contrato, por eso `validated_by` dice `Emilio`. Si cambian, se crea el juego v2 (#32) y se actualizan este archivo y la semilla.
 La API real devuelve `validated_by` en `null`, porque la semilla no lo llena.
 
-`rules` trae las 38 reglas del juego v1 en orden de id: las 7 de la semilla 001, las 23 de la semilla 004 (#14 a #20 y las previstas de #62 a #64), la de la semilla 020 (contenedores de Shodan InternetDB, #17 RC-224), las 2 de la semilla 021 (portada de la visita web, #111 RC-228), las 2 de la semilla 022 (saludo TLS de la visita web, #121 RC-239) y las 3 de la semilla 023 (higiene de certificados de `ct_logs`, #14 RC-218). `pruebas/test_api_v1.py` las compara una por una con la API.
+`rules` trae las 40 reglas del juego v1 en orden de id: las 7 de la semilla 001, las 23 de la semilla 004 (#14 a #20 y las previstas de #62 a #64), la de la semilla 020 (contenedores de Shodan InternetDB, #17 RC-224), las 2 de la semilla 021 (portada de la visita web, #111 RC-228) las 2 de la semilla 022 (saludo TLS de la visita web, #121 RC-239), la de la semilla 023 (enlaces para compartir archivos de la nube en repos, #16 RC-247) la de la semilla 024 (servicios de inteligencia artificial de Shodan InternetDB, #144 RC-262) y las 3 de la semilla 025 (higiene de certificados de `ct_logs`, #14 RC-218). `pruebas/test_api_v1.py` las compara una por una con la API.
 
 | Campo | Qué es |
 |---|---|

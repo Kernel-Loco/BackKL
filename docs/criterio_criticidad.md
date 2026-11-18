@@ -56,14 +56,14 @@ El ponderado es un promedio. Un dominio con todas sus categorías limpias y una 
 
 ## Subcategorías y KRI (#114)
 
-Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: se calculan al leer con los aportes que el score guardó en `score_contributions` y con las corridas de `scan_source_runs` de su escaneo. El mapa vive en `cirdan/score/subcategorias.py` y lleva versión (`VERSION`, hoy 2).
+Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: se calculan al leer con los aportes que el score guardó en `score_contributions` y con las corridas de `scan_source_runs` de su escaneo. El mapa vive en `cirdan/score/subcategorias.py` y lleva versión (`VERSION`, hoy 6).
 
 **Subcategorías.** Cada código de regla del catálogo (#30) cae en una subcategoría de su categoría. De cada una, la API da cuántos hallazgos vigentes tiene y cuánto suman sus aportes. Las subcategorías de una categoría suman su nota, salvo que la nota haya llegado al tope de 100.
 
 | Categoría | Subcategoría | Clave | Reglas |
 |---|---|---|---|
 | Infraestructura | Certificados | `certificates` | `cert_expired`, `cert_expiring_soon`, `tls_certificate_invalid`, `tls_legacy_only`, `cert_internal_name`, `cert_broad_wildcard`, `cert_new_issuer` |
-| Infraestructura | Exposición de servicios | `exposed_services` | `exposed_rdp`, `exposed_remote_admin`, `exposed_file_sharing`, `exposed_database`, `exposed_container_api`, `exposed_ot_device`, `exposed_iot_device`, `exposed_service` |
+| Infraestructura | Exposición de servicios | `exposed_services` | `exposed_rdp`, `exposed_remote_admin`, `exposed_file_sharing`, `exposed_database`, `exposed_container_api`, `exposed_ai_service`, `exposed_ot_device`, `exposed_iot_device`, `exposed_service` |
 | Infraestructura | Documentación de APIs expuesta | `exposed_apis` | `exposed_api_docs`, `api_auth_not_declared` |
 | Infraestructura | Software vulnerable o sin soporte | `vulnerable_software` | `outdated_software`, `known_vulnerability` |
 | Infraestructura | Registro del dominio | `domain_registration` | `domain_expiring_soon` |
@@ -73,7 +73,7 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 | Configuración | Configuración de servidores | `server_configuration` | `server_version_disclosed`, `subdomain_takeover_risk`, `directory_listing`, `debug_page_exposed` |
 | Fugas de datos | Brechas de datos | `breaches` | `breach_exposure`, `breach_exposure_old`, `breach_exposure_no_passwords` |
 | Fugas de datos | Secretos expuestos | `exposed_secrets` | `secret_in_public_repo`, `secret_in_container_image` |
-| Fugas de datos | Almacenamiento público | `public_storage` | `public_bucket` |
+| Fugas de datos | Almacenamiento público | `public_storage` | `public_bucket`, `file_share_link_in_repo` |
 
 **KRI.** Encima de las 4 categorías van 5 indicadores clave de riesgo. Cada uno junta subcategorías, aunque sean de categorías distintas, y dice qué fuentes lo alimentan. De cada KRI la API da sus hallazgos vigentes, su severidad más alta, que le da el color en el portal, y lo que suman sus aportes.
 
@@ -99,7 +99,7 @@ Cuatro límites de los estados:
 - Con una fuente caída el KRI sale `no_coverage` aunque otra fuente suya sí haya encontrado algo. Así lo pide la tarjeta: una fuente que no respondió sale sin cobertura.
 - Exposición de servicios no sale `ok` mientras `shodan.py` no tenga la API de host de Shodan o `api_docs` siga apagada. `exposed_iot_device` y `exposed_ot_device` quedan sin cobertura en todo escaneo, con la llave de Shodan o sin ella (`SIN_LLAVE` en `cirdan/recolectores/shodan.py`. La llave sola no los prende, ver `docs/servicios_externos.md`), así que lo más que alcanza es `partial`.
 - `sources_partial` va por fuente y no por regla. Si a `ct_logs` solo le faltó la respuesta de una variante de dominios parecidos, Certificados también sale `partial`, aunque sus reglas se revisaron completas. Lo mismo con `web`: un sitio que quedó sin revisar por otra cosa (un reto, un 5xx, la NVD, o el sitio de un hallazgo TLS, que no da página) deja a `web` en `sources_partial` y Certificados sale `partial`, aunque el saludo TLS de cada sitio sí se revisó. `scans.stats` no guarda a qué regla le faltó la parte.
-- El mapa se aplica al leer. Un score de un escaneo de antes de RC-239 se lee con el mapa 4 (`kri_map_version` 4): con `web` completo Certificados sale `ok` aunque ese escaneo no revisó `tls_certificate_invalid` ni `tls_legacy_only`, y con `web` caído sale `no_coverage`. Igual con el mapa 5 (RC-218): un score de un escaneo de antes de RC-218 sale `ok` con `ct_logs` completo aunque ese escaneo no revisó `cert_internal_name`, `cert_broad_wildcard` ni `cert_new_issuer`. Se corrige solo con el siguiente escaneo.
+- El mapa se aplica al leer. Un score de un escaneo de antes de RC-239 se lee con el mapa vigente, el 7 (`kri_map_version` 7): con `web` completo Certificados sale `ok` aunque ese escaneo no revisó `tls_certificate_invalid` ni `tls_legacy_only`, y con `web` caído sale `no_coverage`. Lo mismo con uno de antes de RC-262: si `shodan` respondió sin poder revisar nada, su `rules_without_coverage` trae los 10 códigos de entonces y no `exposed_ai_service`, así que esa regla cuenta como revisada y Exposición de servicios sale `partial` con 0 hallazgos en vez de `no_coverage` con `null`. Y uno de antes de RC-218 sale `ok` en Certificados con `ct_logs` completo aunque ese escaneo no revisó `cert_internal_name`, `cert_broad_wildcard` ni `cert_new_issuer`. Los tres casos se corrigen solos con el siguiente escaneo.
 
 Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado. Si un aporte es de una regla que el mapa no conoce, o que otro juego de reglas puso en otra categoría, va en una fila `other` (Sin clasificar) de la categoría de su regla, para que las subcategorías sigan sumando la nota. Los KRI juntan sus aportes por código de regla: el de una regla que el mapa no conoce no cuenta en ningún KRI, y el de una regla de un KRI que otro juego puso en otra categoría sigue contando en su KRI.
 

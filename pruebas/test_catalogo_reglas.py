@@ -146,13 +146,17 @@ HUELLAS_DB = {
     'db/migraciones/019_texto_contenedores_internetdb.sql': 'c3136449c26b85c632294799efb11d5819377e3f5e8a8c12403dbc48264085b3',
     'db/migraciones/020_textos_reglas_portada.sql': 'f15b71a5f16c23fe0cc5aa38f1415b0e172b3fc342e0132b9bc97e147939d736',
     'db/migraciones/021_textos_tls_sitio.sql': '6160f534f3228be34c08335b1fdbd52774dcd4354e1451c3522484253dcf16fe',
-    'db/migraciones/022_textos_higiene_certificados.sql': '53cc16feab3ba259643ab0974a89480673fc1e2da51e1c8a60399290131a0eda',
+    'db/migraciones/022_texto_enlaces_nube_repos.sql': '6a97d1aa68668ad8758e37b499010686baf4c91bfaede39f021d44f82eecdfc7',
+    'db/migraciones/023_texto_ia_internetdb.sql': '21023fdae76fb51919a6e6edce31468b9e2d6e3fb637897441d76cf35f46e7ee',
+    'db/migraciones/024_textos_higiene_certificados.sql': '7514e73f32350d9398ca3ed5bbfdd2adbc8bbce88f814b39e520df5538f0a693',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',
     'db/semillas/021_reglas_portada.sql': 'e87fd42714bda77d75f031eb6a48d1b25e1d72e6808a41a0fcd4863ef66ede21',
     'db/semillas/022_reglas_tls_sitio.sql': 'b5d5f68783ac942369afcde7c60f1af610ec97641393ad80fe59086392378b6b',
-    'db/semillas/023_reglas_higiene_certificados.sql': 'a05253fca9d39ed9189398ddaa74bef1eeb06ba1bd6dbfe448a321fb9094a351',
+    'db/semillas/023_regla_enlaces_nube_repos.sql': '4e0ddb21fde173c25db7b5e1c141db1ca009c71c906cc958f223603ce5280666',
+    'db/semillas/024_regla_ia.sql': '6285af52ddd661d21e25cc5d46a8b1fda97c5c0cd3f22ad86394cd7850ec516f',
+    'db/semillas/025_reglas_higiene_certificados.sql': '73371486841c6883ac8c94d6cbfae4f6a2e66a5ff9ded2975d76bc0c87cbba2a',
 }
 
 
@@ -525,7 +529,7 @@ class Reglas(unittest.TestCase):
             self.assertIsNotNone(numero, '%r: su recolector en docs/codigos_reglas.md no empieza con #' % fila[1])
             if 14 <= int(numero.group(1)) <= 20:
                 osint.append(fila[1])
-        self.assertEqual(len(osint), 29, 'docs/codigos_reglas.md ya no tiene 29 reglas de #14 a #20')
+        self.assertEqual(len(osint), 31, 'docs/codigos_reglas.md ya no tiene 31 reglas de #14 a #20')
         self.assertEqual([c for c in sorted(osint) if revisor.get(c) != 'ErnestoDL'], [],
                          'reglas OSINT cuyo texto final no firmó ErnestoDL en las migraciones de db/')
 

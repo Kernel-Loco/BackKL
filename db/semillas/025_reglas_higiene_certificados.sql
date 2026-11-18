@@ -1,8 +1,8 @@
 -- =====================================================================
--- Cirdan · db/semillas/023_reglas_higiene_certificados.sql (RC-218, #14)
--- Reglas 36 a 38 del juego v1: cert_internal_name, cert_broad_wildcard y
+-- Cirdan · db/semillas/025_reglas_higiene_certificados.sql (RC-218, #14)
+-- Reglas 38 a 40 del juego v1: cert_internal_name, cert_broad_wildcard y
 -- cert_new_issuer, las 3 de higiene de certificados de ct_logs
--- (cirdan/recolectores/crtsh.py). Necesita la migración 022, que trae
+-- (cirdan/recolectores/crtsh.py). Necesita la migración 024, que trae
 -- sus textos y su mapeo.
 --
 -- Van en los juegos que ya existen y no en un juego nuevo
@@ -19,7 +19,7 @@
 -- El LOCK espera a un cambio de pesos que esté en curso y frena los
 -- nuevos hasta el COMMIT: así ningún juego se queda sin las 3
 -- reglas por copiarse de otro mientras esto corre.
--- En una base que ya existe se aplica a mano después de la 022 y antes
+-- En una base que ya existe se aplica a mano después de la 024 y antes
 -- de reconstruir la API (ver db/README.md).
 -- =====================================================================
 
@@ -32,9 +32,9 @@ BEGIN;
 LOCK TABLE scoring_rule_sets IN SHARE ROW EXCLUSIVE MODE;
 
 INSERT INTO scoring_rules (id, rule_set_id, code, category, base_severity, weight, max_penalty) VALUES
- ('91000000-0000-4000-8000-000000000036','90000000-0000-4000-8000-000000000001','cert_internal_name',          'infrastructure',   'low',      1.000,  8.00),
- ('91000000-0000-4000-8000-000000000037','90000000-0000-4000-8000-000000000001','cert_broad_wildcard',         'infrastructure',   'low',      1.000,  8.00),
- ('91000000-0000-4000-8000-000000000038','90000000-0000-4000-8000-000000000001','cert_new_issuer',             'infrastructure',   'medium',   1.000, 10.00)
+ ('91000000-0000-4000-8000-000000000038','90000000-0000-4000-8000-000000000001','cert_internal_name',          'infrastructure',   'low',      1.000,  8.00),
+ ('91000000-0000-4000-8000-000000000039','90000000-0000-4000-8000-000000000001','cert_broad_wildcard',         'infrastructure',   'low',      1.000,  8.00),
+ ('91000000-0000-4000-8000-000000000040','90000000-0000-4000-8000-000000000001','cert_new_issuer',             'infrastructure',   'medium',   1.000, 10.00)
 ON CONFLICT (rule_set_id, code) DO NOTHING;
 
 -- Cada otro juego que ya existe, activo o no, con la misma regla de v1.

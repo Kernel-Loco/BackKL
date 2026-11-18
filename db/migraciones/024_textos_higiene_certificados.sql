@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/022_textos_higiene_certificados.sql (RC-218, #14)
+-- Cirdan · db/migraciones/024_textos_higiene_certificados.sql (RC-218, #14)
 -- Texto, firma y mapeo a marcos de las 3 reglas de higiene de
 -- certificados que ct_logs saca de los mismos registros de Certificate
 -- Transparency que ya lee (cirdan/recolectores/crtsh.py), sin otra
@@ -12,7 +12,7 @@
 -- - cert_new_issuer: un certificado vigente de los últimos 90 días de una
 --   organización emisora que no está en ningún certificado anterior del
 --   dominio, cuando hay al menos 3 anteriores.
--- Las reglas de scoring_rules van en la semilla 023, que necesita esta
+-- Las reglas de scoring_rules van en la semilla 025, que necesita esta
 -- migración antes (la FK de scoring_rules.code a scoring_rule_texts).
 -- El texto y su mapeo entran en la misma transacción por la FK diferida
 -- de la 012. Los textos los revisa y los firma ErnestoDL.
@@ -24,7 +24,7 @@
 -- Se puede correr otra vez sin error: lo que ya está no cambia, pero
 -- vuelve a mover updated_at de los 3 textos. Si un texto guardado no es
 -- el de esta migración o lo firmó otra persona, se detiene sin firmar.
--- En una base que ya existe se aplica a mano antes de la semilla 023 y
+-- En una base que ya existe se aplica a mano antes de la semilla 025 y
 -- antes de reconstruir la API (ver db/README.md).
 -- =====================================================================
 
@@ -58,7 +58,7 @@ DECLARE
   distintos text;
 BEGIN
   IF current_setting('server_encoding') <> 'UTF8' THEN
-    RAISE EXCEPTION 'La 022 compara los textos en UTF8 y esta base usa %.', current_setting('server_encoding');
+    RAISE EXCEPTION 'La 024 compara los textos en UTF8 y esta base usa %.', current_setting('server_encoding');
   END IF;
   SELECT string_agg(e.code, ', ') FILTER (WHERE t.code IS NULL
            OR md5(t.title || E'\n' || t.meaning || E'\n' || t.recommendation) <> e.texto
@@ -71,7 +71,7 @@ BEGIN
     ) AS e(code, texto, revisor)
     LEFT JOIN scoring_rule_texts t ON t.code = e.code;
   IF distintos IS NOT NULL THEN
-    RAISE EXCEPTION 'Estos textos no son los de la 022, o ya los firmó otra persona: %. Revísalos antes de firmar.', distintos;
+    RAISE EXCEPTION 'Estos textos no son los de la 024, o ya los firmó otra persona: %. Revísalos antes de firmar.', distintos;
   END IF;
 END $$;
 
