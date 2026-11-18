@@ -1,0 +1,11 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de Symfony en modo debug, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 500,
+ "cabeceras": [
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!-- An exception occurred in driver: SQLSTATE[HY000] [2002] Connection refused (500 Internal Server Error) -->\n<!DOCTYPE html>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"UTF-8\" />\n        <meta name=\"robots\" content=\"noindex,nofollow\" />\n        <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />\n        <title>An exception occurred in driver: SQLSTATE[HY000] [2002] Connection refused token=CIRDAN_FAKE_token_de_api_42 (500 Internal Server Error)</title>\n        <link rel=\"icon\" type=\"image/png\" href=\"data:image/png;base64,iVBORw0KGgo=\" />\n    </head>\n    <body>\n        <svg style=\"display: none\"><title>Symfony</title></svg>\n        <header><div class=\"container\"><h1 class=\"logo\">Symfony Exception</h1></div></header>\n        <div class=\"exception-summary\"><div class=\"exception-message-wrapper\"><h2 class=\"exception-message\">An exception occurred in driver</h2></div></div>\n    </body>\n</html>\n"
+}

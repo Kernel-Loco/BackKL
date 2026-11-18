@@ -297,11 +297,11 @@ class MapeoMarcos(unittest.TestCase):
                 raise AssertionError(err)
             return out.splitlines()
 
-        # Los 30 textos y los 30 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 30 son
+        # Los 32 textos y los 32 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 32 son
         # las reglas de docs/codigos_reglas.md: una regla nueva lo sube.
         self.assertEqual(scalar("SELECT (SELECT count(*) FROM scoring_rule_texts) || ',' ||"
                                 " (SELECT count(*) FROM scoring_rule_framework_mappings) || ',' ||"
-                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '30,30,30')
+                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '32,32,32')
         self.assertEqual(filas("SELECT coalesce(t.code, m.rule_code) FROM scoring_rule_texts t"
                                " FULL JOIN scoring_rule_framework_mappings m ON m.rule_code = t.code"
                                " WHERE t.code IS NULL OR m.rule_code IS NULL"

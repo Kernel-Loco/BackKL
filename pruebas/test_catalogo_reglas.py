@@ -143,8 +143,10 @@ HUELLAS_DB = {
     'db/migraciones/016_api_key_lookup.sql': '4f665442ba0e0d340f120d39baac57348cd8048e9f7051cd8a3dd4e61affa6c0',
     'db/migraciones/017_superadmin_plataforma.sql': '4848215e21f0237565c87616256e4ebf5b79c78e498aace44f71062f5a52c04f',
     'db/migraciones/018_passkeys.sql': 'f8c60af6e20dfdc26954be4f5dda214e9557ea65847434d9d2dd5b18634139f2',
+    'db/migraciones/019_textos_reglas_portada.sql': 'd9f3b5f900b0319b436d08e9dd04b9a8b0544e4aa8b17e2c6f3fc1f36ca896d3',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
+    'db/semillas/020_reglas_portada.sql': 'a0f4f9b6b2115a96d46f69e56900248be3dae6293ca551b2a8bf95ae2125351c',
 }
 
 
