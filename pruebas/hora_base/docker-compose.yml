@@ -1,0 +1,20 @@
+# Solo para la prueba de la hora de la base (RC-313, punto 3b), encima de docker-compose.yml:
+#   docker compose -f docker-compose.yml -f pruebas/hora_base/docker-compose.yml up -d --build --wait db
+# La base corre con libfaketime y su reloj movido FAKETIME_BASE segundos (por ejemplo -43200s). La API no cambia:
+# sigue en UTC con el reloj real. PG_IMAGE es la imagen de la base de docker-compose.yml, para no repetir la versión.
+# Conserva el volumen de la base. Nunca en la VM ni en la pila local: solo en el CI y en pilas aisladas.
+services:
+  db:
+    image: cirdan-pg16-hora:prueba
+    build:
+      context: ./pruebas/hora_base  # con varios -f, las rutas van desde la carpeta del primero
+      args:
+        PG_IMAGE: ${PG_IMAGE:?Falta PG_IMAGE, la imagen de la base de docker-compose.yml}
+    environment:
+      LD_PRELOAD: /usr/local/lib/libfaketime.so.1
+      FAKETIME: ${FAKETIME_BASE:?Falta FAKETIME_BASE, segundos que se mueve el reloj de la base}
+      # Solo se mueve la hora del día. El reloj monotónico, que PostgreSQL usa para esperas y tiempos, queda real.
+      FAKETIME_DONT_FAKE_MONOTONIC: "1"
+      # Con la memoria compartida de libfaketime el proceso 1 del contenedor se quedaba colgado antes de arrancar
+      # PostgreSQL. Con un desplazamiento fijo no hace falta.
+      FAKETIME_DISABLE_SHM: "1"

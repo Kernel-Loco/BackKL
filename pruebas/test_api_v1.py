@@ -9,6 +9,8 @@ textos que todavía no calcula el motor de score (#31). Los textos de cada regla
 import csv
 import io
 import json
+import os
+import subprocess
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -109,6 +111,27 @@ class ApiV1(unittest.TestCase):
         self.assertEqual((acme['status'], acme['valid_from']), ('valid', acme_desde), contexto)
         self.assertEqual((viejo['acme-demo.mx']['authorization'], viejo['acme-demo.mx']['valid_until']),
                          ('Authorized', acme_hasta), contexto)
+
+    @unittest.skipUnless(os.environ.get('HORA_BASE_FIJA') == '1',
+                         'solo con la base en libfaketime (pruebas/hora_base, paso del CI de RC-313)')
+    def test_1c_carta_que_empieza_manana_con_la_base_a_las_20(self):
+        # RC-313, punto 3b. test_1b usa el reloj real y solo ejercita el caso de 18:00 a 24:00 de México. Aquí la base
+        # corre con libfaketime a las 20:00 de México, que son las 02:00 UTC del día en que va la API, y la API sigue en
+        # UTC con el reloj real. Así la API va un día delante de la base a cualquier hora en que corra el CI.
+        ok, salida, err = psql("SELECT to_char(now() AT TIME ZONE 'America/Mexico_City', 'YYYY-MM-DD HH24:MI');",
+                               user='postgres')
+        self.assertTrue(ok, err)
+        mexico = datetime.strptime(salida.strip(), '%Y-%m-%d %H:%M')
+        self.assertEqual(mexico.hour, 20, 'la base no está fijada a las 20:00 de México: %s' % salida)
+        api = subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api'), 'python',
+                              '-c', 'import datetime, time; print(time.tzname[0], datetime.date.today())'],
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(api.returncode, 0, api.stderr)
+        zona, hoy_api = api.stdout.split()
+        self.assertEqual(zona, 'UTC', 'la API debe ir en UTC')
+        self.assertGreater(date.fromisoformat(hoy_api), mexico.date(),
+                           'la API debe ir un día delante de la base (API %s, México %s)' % (hoy_api, mexico))
+        self.test_1b_carta_que_empieza_manana_no_cuenta_como_vigente()
 
     def test_2_hallazgos_como_el_contrato(self):
         body = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
