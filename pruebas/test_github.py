@@ -99,7 +99,10 @@ EJEMPLOS = ('https://drive.google.com/file/d/<ID>/view\n'
             'https://www.dropbox.com/s/TU_ID_AQUI/archivo.pdf\n'
             'https://www.dropbox.com/scl/fi/YOUR_FILE_ID/reporte.xlsx?dl=0\n'
             'https://www.dropbox.com/scl/fo/EXAMPLE-FOLDER-0123/h?dl=0\n'
-            'https://www.dropbox.com/home/Documentos\n')
+            'https://www.dropbox.com/home/Documentos\n'
+            '[la carpeta](https://www.dropbox.com/s/YOUR_SHARE_ID)\n'
+            '`https://drive.google.com/drive/folders/YOUR_GOOGLE_DRIVE_FOLDER_ID`\n'
+            'Usa https://www.dropbox.com/s/SHARED_FOLDER_ID_HERE.\n')
 
 
 def commit(autor, quien, cuando):
@@ -489,9 +492,9 @@ class Enlaces(unittest.TestCase):
                 self.assertTrue(github.REGLA_VALIDA.fullmatch(id_))
         self.assertTrue(set(github.SERVICIOS_ENLACE).isdisjoint({'cirdan-fake-token'}))
 
-    def test_2_reconocen_la_forma_de_cada_servicio_y_no_la_de_un_ejemplo(self):
-        """Con el re de Python en modo ASCII, como el \\b de Go, y la allowlist sobre el secreto, que es lo que casa. Las
-        de Google Drive y Dropbox se llevan el enlace completo. Lo que gitleaks halla de verdad lo prueba Integracion."""
+    def buscadores(self):
+        """{id de la regla: buscar(texto)} con el re de Python en modo ASCII, como el \\b de Go, y la allowlist sobre el
+        secreto, que es lo que casa. buscar da el Match o None."""
         plantilla = re.compile(gitleaks_reglas.PLANTILLA, re.ASCII)
 
         def buscador(regex):
@@ -499,7 +502,13 @@ class Enlaces(unittest.TestCase):
                 m = re.compile(regex, re.ASCII).search(texto)
                 return m if m and not plantilla.search(m.group(0)) else None
             return buscar
-        reglas = {id_: buscador(regla['regex']) for id_, regla in self.reglas().items()}
+        return {id_: buscador(regla['regex']) for id_, regla in self.reglas().items()}
+
+    def test_2_reconocen_la_forma_de_cada_servicio_y_no_la_de_un_ejemplo(self):
+        """Las de Google Drive y Dropbox se llevan el enlace completo. La plantilla solo cuenta en el identificador: un
+        your, tu, example o ejemplo en el nombre del archivo o en la ruta de SharePoint no salta el enlace. Lo que
+        gitleaks halla de verdad lo prueba Integracion."""
+        reglas = self.buscadores()
         i = 'CIRDAN_FAKE_' + secrets.token_hex(16)
         positivos = {
             'cirdan-enlace-google-drive': [
@@ -518,14 +527,22 @@ class Enlaces(unittest.TestCase):
                 'https://onedrive.live.com/?redeem=%s' % i,
                 'https://onedrive.live.com/redir?resid=ABC123!105&authkey=!%s' % i,
                 'https://acmedemo.sharepoint.com/:w:/s/Ventas/%s?e=Xy12' % i,
-                'https://acmedemo-my.sharepoint.com/:x:/g/personal/ana_acme_mx/%s' % i],
+                'https://acmedemo-my.sharepoint.com/:x:/g/personal/ana_acme_mx/%s' % i,
+                'https://acmedemo-my.sharepoint.com/:w:/g/personal/tu_nguyen_acme_com/%s' % i,
+                'https://tuberlin-my.sharepoint.com/:x:/g/personal/ana_tu-berlin_de/%s?e=Ab12' % i,
+                'https://acmedemo.sharepoint.com/:w:/s/Example-Team/Your_Docs/%s' % i,
+                'https://onedrive.live.com/redir?resid=ABC123!105&tu_ref=1&authkey=!%s' % i],
             'cirdan-enlace-dropbox': [
                 'https://www.dropbox.com/s/%s/reporte.pdf?dl=0' % i,
                 'https://www.dropbox.com/sh/%s/AAB?dl=0' % i,
                 'https://www.dropbox.com/scl/fi/%s/reporte.xlsx?rlkey=abc&dl=0' % i,
                 'https://dropbox.com/scl/fo/%s/h?dl=0' % i,
                 'https://dl.dropboxusercontent.com/s/%s/a.zip' % i,
-                'https://db.tt/%s' % i],
+                'https://db.tt/%s' % i,
+                'https://www.dropbox.com/s/%s/Tu_reporte.pdf?dl=0' % i,
+                'https://www.dropbox.com/scl/fi/%s/Example-report.xlsx?rlkey=abc&dl=0' % i,
+                'https://www.dropbox.com/sh/%s/ejemplo_final?dl=0' % i,
+                'https://www.dropbox.com/s/%s/datos-here.csv' % i],
         }
         for esperada, enlaces in positivos.items():
             for enlace in enlaces:
@@ -538,10 +555,34 @@ class Enlaces(unittest.TestCase):
         negativos = EJEMPLOS.splitlines() + [
             'https://notdrive.google.com/file/d/%s/view' % i, 'https://evildropbox.com/s/%s' % i,
             'https://1drv.ms/u/s!corto', 'https://drive.google.com/file/d/corto123/view',
-            'https://www.dropbox.com/s/corto/a.pdf', 'https://acmedemo.sharepoint.com/:x:/g/corto']
+            'https://www.dropbox.com/s/corto/a.pdf', 'https://acmedemo.sharepoint.com/:x:/g/corto',
+            # plantilla en el identificador, con el largo de uno real
+            'https://drive.google.com/file/d/EXAMPLE-FILE-ID-0123456789ABC/view',
+            'https://docs.google.com/document/d/ID_DEL_DOCUMENTO_DE_TU_EQUIPO/edit',
+            'https://www.dropbox.com/s/ID_DE_TU_ARCHIVO/a.pdf',
+            'https://www.dropbox.com/scl/fi/SHARED-FILE-ID-HERE/a.pdf?dl=0',
+            'https://acmedemo.sharepoint.com/:w:/g/personal/ana_acme_mx/TU_TOKEN_DE_SHAREPOINT_AQUI',
+            'https://onedrive.live.com/redir?resid=ABC123!105&authkey=!YOUR_AUTH_KEY',
+            'https://1drv.ms/f/c/0123456789abcdef/TU_TOKEN_AQUI']
         for texto in negativos:
             with self.subTest(texto=texto.replace(i, '<id>')):
                 self.assertEqual([id_ for id_, buscar in reglas.items() if buscar(texto)], [])
+
+    def test_2b_la_cola_de_google_drive_y_dropbox_corta_en_punto_y_coma_y_barra(self):
+        """Una clave pegada después del enlace con ; o | queda fuera del secreto del enlace, así que generic-api-key
+        la halla aparte. Con gitleaks real lo prueba test_12 de Integracion."""
+        reglas = self.buscadores()
+        i = 'CIRDAN_FAKE_' + secrets.token_hex(16)
+        enlaces = {'cirdan-enlace-google-drive': 'drive.google.com/file/d/%s/view?usp=sharing' % i,
+                   'cirdan-enlace-dropbox': 'www.dropbox.com/scl/fi/%s/a.xlsx?dl=0' % i}
+        for id_, enlace in enlaces.items():
+            for separador in (';', '|', ' ;', '|;'):
+                with self.subTest(regla=id_, separador=separador):
+                    m = reglas[id_]('URL=https://%s%sAPI_KEY=0123456789abcdef' % (enlace, separador))
+                    self.assertEqual(m.group(0), enlace)
+            with self.subTest(regla=id_, separador='&amp;'):   # el ; de un &amp; de HTML no corta
+                m = reglas[id_]('<a href="https://%s&amp;resourcekey=0-Ab12Cd">' % enlace)
+                self.assertEqual(m.group(0), enlace + '&amp;resourcekey=0-Ab12Cd')
 
     def test_3_cada_enlace_da_file_share_link_in_repo_sin_el_enlace(self):
         reporte = [hallazgo_gitleaks(regla, 'README.md', Match='REDACTED') for regla in github.SERVICIOS_ENLACE]
@@ -1530,6 +1571,52 @@ class Integracion(unittest.TestCase):
             ('wiki/Inicio.md', 'cirdan-enlace-dropbox'), ('README.md', 'cirdan-fake-token'),
             ('docs/config.json', 'cirdan-fake-token'), ('wiki/Inicio.md', 'cirdan-fake-token')]))
         self.assertNotIn(clave, json.dumps(datos))
+
+    def clave_generica(self):
+        """Un valor al azar que generic-api-key halla en API_KEY=<valor>: 32 caracteres de token_urlsafe sin ninguna de
+        sus stopwords ni lo que salta su allowlist. Como en test_11, no lleva CIRDAN_FAKE_ porque 'fake' es una de esas
+        stopwords, y solo vive en el clon temporal."""
+        regla = next(r for r in tomllib.loads(github.REGLAS.read_text(encoding='utf-8'))['rules']
+                     if r['id'] == 'generic-api-key')
+        salta = [re.compile(r) for r in regla['allowlist']['regexes']]
+        while True:
+            clave = secrets.token_urlsafe(24)
+            if (any(c.isdigit() for c in clave)     # gitleaks descarta un generic-* sin dígito
+                    and not any(p in clave.lower() for p in regla['allowlist']['stopwords'])
+                    and not any(r.search('API_KEY=' + clave) for r in salta)):
+                return clave
+
+    def test_12_la_plantilla_solo_cuenta_en_el_identificador_y_una_clave_tras_un_punto_y_coma_o_una_barra_sale(self):
+        """Un tu_ o un Tu_ en la ruta de SharePoint o en el nombre del archivo de Dropbox no salta el enlace, y la
+        clave pegada después del enlace con ; o | queda fuera de su secreto: gitleaks no la quita y da su
+        generic-api-key, que github.py vuelve secret_in_public_repo."""
+        marca = 'CIRDAN_FAKE_' + secrets.token_hex(16)
+        claves = [self.clave_generica(), self.clave_generica()]
+        textos = {'README.md': 'URL=https://drive.google.com/file/d/%s/view;API_KEY=%s\n' % (marca, claves[0]),
+                  'docs/config.txt': 'https://www.dropbox.com/scl/fi/%s/a.xlsx?dl=0|API_KEY=%s\n' % (marca, claves[1]),
+                  'wiki/Inicio.md': '* Descarga: https://www.dropbox.com/s/%s/Tu_reporte.pdf?dl=0\n' % marca,
+                  'docs/equipo.md': 'https://acmedemo-my.sharepoint.com/:w:/g/personal/tu_nguyen_acme_com/%s\n'
+                                    % marca,
+                  # el ; de un &amp; no corta: el resourcekey= y el rlkey= quedan dentro del enlace, sin genérico
+                  'docs/pagina.html': '<a href="https://drive.google.com/file/d/%s/view?usp=sharing&amp;'
+                                      'resourcekey=0-%s">x</a>\n' % (marca, secrets.token_hex(16)),
+                  'docs/feed.xml': '<link>https://www.dropbox.com/scl/fi/%s/a.xlsx?dl=0&amp;rlkey=%s</link>\n'
+                                   % (marca, secrets.token_hex(16))}
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, textos=textos)
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        secretos = [s for s in datos['secretos'] if s['ruta'] in textos]
+        self.assertEqual(sorted((s['ruta'], s['regla']) for s in secretos), sorted([
+            ('README.md', 'cirdan-enlace-google-drive'), ('README.md', 'generic-api-key'),
+            ('docs/config.txt', 'cirdan-enlace-dropbox'), ('docs/config.txt', 'generic-api-key'),
+            ('wiki/Inicio.md', 'cirdan-enlace-dropbox'), ('docs/equipo.md', 'cirdan-enlace-onedrive'),
+            ('docs/pagina.html', 'cirdan-enlace-google-drive'), ('docs/feed.xml', 'cirdan-enlace-dropbox')]
+            + [(ruta, 'cirdan-fake-token') for ruta in textos]))
+        codigos = sorted(github.hallazgo_de_gitleaks(DOMINIO, '%s/sitio' % ORG, s, AHORA).codigo for s in secretos
+                         if s['regla'] == 'generic-api-key')
+        self.assertEqual(codigos, ['secret_in_public_repo', 'secret_in_public_repo'])
+        for clave in claves:
+            self.assertNotIn(clave, json.dumps(datos))
 
 
 if __name__ == '__main__':

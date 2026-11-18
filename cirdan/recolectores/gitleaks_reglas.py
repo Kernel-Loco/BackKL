@@ -14,13 +14,14 @@ Es la config por omisión que gitleaks trae embebida, copiada sin herencia y con
   sería usar un acceso filtrado. No tienen capturas, así que el secreto es el enlace entero y --redact lo tapa todo.
   Las de Google Drive y Dropbox se llevan también el resto del enlace: así el valor de un resourcekey= o un rlkey=,
   que generic-api-key halla aparte, queda dentro de su secreto y gitleaks quita el genérico, que github.py volvería
-  secret_in_public_repo. Su allowlist propia solo lleva regexes, nunca paths: en gitleaks las paths y las regexes de
-  una allowlist se unen con OR, así que una ruta de documentación (README.md, docs/, wiki/) saltaría el enlace aunque
-  ninguna regex lo permita. Esas regexes (PLANTILLA) saltan el texto de plantilla, como TU_ID_AQUI, YOUR_SHARE_ID o
-  FOLDER_ID_HERE. Fuera de eso les aplica la allowlist global, como a las demás reglas, que no salta Markdown,
-  AsciiDoc ni texto. Lo demás que no tiene forma de enlace real, como drive.google.com/file/d/<ID>/view, no da
-  hallazgo porque el identificador pide un largo mínimo y no admite < ni >. github.py da file_share_link_in_repo con
-  ellas y no secret_in_public_repo.
+  secret_in_public_repo. Ese resto corta en un ; (salvo el de un &amp;) o un |, así que una clave pegada después
+  del enlace en la misma línea sí sale aparte. Su allowlist propia solo lleva regexes, nunca paths: en gitleaks las
+  paths y las regexes de una allowlist se unen con OR, así que una ruta de documentación (README.md, docs/, wiki/)
+  saltaría el enlace aunque ninguna regex lo permita. Esas regexes (PLANTILLA) saltan el texto de plantilla en el
+  identificador, como TU_ID_AQUI, YOUR_SHARE_ID o FOLDER_ID_HERE, y no en el nombre del archivo ni en la ruta. Fuera
+  de eso les aplica la allowlist global, como a las demás reglas, que no salta Markdown, AsciiDoc ni texto. Lo demás
+  que no tiene forma de enlace real, como drive.google.com/file/d/<ID>/view, no da hallazgo porque el identificador
+  pide un largo mínimo y no admite < ni >. github.py da file_share_link_in_repo con ellas y no secret_in_public_repo.
 - Cambian el encabezado y el título. El encabezado trae la licencia MIT de gitleaks, porque las reglas son suyas.
 Se copia en vez de heredarla con [extend] useDefault porque en 8.21.2 la allowlist heredada se suma a la propia y no
 se le puede quitar nada.
@@ -102,12 +103,27 @@ keywords = ["cirdan_fake_"]
 #   authkey=, y <empresa>.sharepoint.com/:<tipo>:/g/ o /s/ con su token. Los /:<tipo>:/r/ no: llevan a la ruta y
 #   piden permiso.
 # - Dropbox: dropbox.com/s/, /sh/, /scl/fi/ y /scl/fo/, dl.dropboxusercontent.com/s/ y db.tt/.
-# Las de Google Drive y Dropbox terminan en [^\s"'<>]*, el resto del enlace hasta un espacio, una comilla o un < o >.
+# Las de Google Drive y Dropbox terminan en (?:&amp;|[^\s"'<>;|])*, el resto del enlace hasta un espacio, una comilla,
+# un < o >, un ; o un |. Así en un URL=<enlace>;API_KEY=<valor> o un <enlace>|<valor> el valor queda fuera del secreto
+# del enlace y generic-api-key lo halla aparte. El ; de un &amp; de HTML o XML no corta: un resourcekey= o un rlkey=
+# que va después sigue dentro del enlace.
 
-# Texto de plantilla en lugar del identificador: una palabra your, tu, example o ejemplo al inicio de un tramo del
-# enlace (después de /, !, = o del inicio) o entre guiones, o here o aqui al final de un tramo, como TU_ID_AQUI,
-# YOUR_SHARE_ID o FOLDER_ID_HERE. Se compara con el secreto, que es el enlace.
-PLANTILLA = r'(?i)(?:^|[/!=_-])(?:your|tu|example|ejemplo)(?:[_-]|[/?&#]|$)|[_-](?:here|aqui)(?:[/?&#]|$)'
+# Texto de plantilla en lugar del identificador. Se compara con el secreto, que es el enlace desde su dominio, y solo
+# mira el identificador: el tramo justo después de su prefijo (/d/, folders/, id=, s!, /c/<cid>/, redeem= o authkey=,
+# /s/, /sh/, /scl/fi/ o /scl/fo/ y db.tt/) o, en SharePoint, el último tramo, que es el token. Es plantilla si una de
+# sus palabras (separadas por _ o -) es your, tu, example o ejemplo, o si la última es here o aqui, como TU_ID_AQUI,
+# YOUR_SHARE_ID, ID_DE_TU_CARPETA o FOLDER_ID_HERE. El nombre del archivo, la ruta de SharePoint y el resto del enlace
+# no cuentan: un Tu_reporte.pdf de Dropbox o un /personal/tu_nguyen_acme_com/ de SharePoint sí se reportan.
+_ID_PLANTILLA = (r'(?:(?:[a-z0-9_!%-]*[_-])?(?:your|tu|example|ejemplo)(?:[_-][a-z0-9_!%-]*)?'
+                 r'|[a-z0-9_!%-]*[_-](?:here|aqui))')
+PLANTILLA = (r'(?i)^(?:(?:drive|docs)\.google\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/'
+             r'(?:u/\d{1,2}/)?d/(?:e/)?|drive/(?:u/\d{1,2}/)?folders/|(?:open|uc)\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)'
+             r'|1drv\.ms/[a-z]{1,2}/(?:s!|c/[a-z0-9]{8,20}/)'
+             '|onedrive\\.live\\.com/[^\\s"\'<>]{0,200}?[?&](?:redeem|authkey)=!?'
+             r'|(?:www\.|dl\.)?dropbox\.com/(?:s|sh|scl/f[io])/|dl\.dropboxusercontent\.com/(?:s|scl/f[io])/|db\.tt/)'
+             + _ID_PLANTILLA + r'(?:[^a-z0-9_!%-]|$)'
+             r'|^[a-z0-9-]{1,63}\.sharepoint\.com/:[a-z]{1,2}:/[gs]/(?:[a-z0-9_.%~-]{1,80}/){0,6}' + _ID_PLANTILLA
+             + r'$')
 _ALLOWLIST_ENLACE = '''
 [rules.allowlist]
 regexes = [
@@ -119,7 +135,7 @@ REGLAS_ENLACES = '''
 [[rules]]
 id = "cirdan-enlace-google-drive"
 description = "Enlace para compartir un archivo o una carpeta de Google Drive (RC-247). Solo se reconoce su forma"
-regex = \'\'\'(?i)\\b(?:drive|docs)\\.google\\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/(?:u/\\d{1,2}/)?d/(?:e/)?|drive/(?:u/\\d{1,2}/)?folders/|(?:open|uc)\\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)[a-z0-9_-]{25,}[^\\s"'<>]*\'\'\'
+regex = \'\'\'(?i)\\b(?:drive|docs)\\.google\\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/(?:u/\\d{1,2}/)?d/(?:e/)?|drive/(?:u/\\d{1,2}/)?folders/|(?:open|uc)\\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)[a-z0-9_-]{25,}(?:&amp;|[^\\s"'<>;|])*\'\'\'
 keywords = ["drive.google.com", "docs.google.com"]
 ''' + _ALLOWLIST_ENLACE + '''
 [[rules]]
@@ -131,7 +147,7 @@ keywords = ["1drv.ms", "onedrive.live.com", "sharepoint.com"]
 [[rules]]
 id = "cirdan-enlace-dropbox"
 description = "Enlace para compartir un archivo o una carpeta de Dropbox (RC-247). Solo se reconoce su forma"
-regex = \'\'\'(?i)\\b(?:(?:www\\.|dl\\.)?dropbox\\.com/(?:s|sh|scl/f[io])/|dl\\.dropboxusercontent\\.com/(?:s|scl/f[io])/|db\\.tt/)[a-z0-9_-]{10,}[^\\s"'<>]*\'\'\'
+regex = \'\'\'(?i)\\b(?:(?:www\\.|dl\\.)?dropbox\\.com/(?:s|sh|scl/f[io])/|dl\\.dropboxusercontent\\.com/(?:s|scl/f[io])/|db\\.tt/)[a-z0-9_-]{10,}(?:&amp;|[^\\s"'<>;|])*\'\'\'
 keywords = ["dropbox.com", "dropboxusercontent.com", "db.tt"]
 ''' + _ALLOWLIST_ENLACE
 
