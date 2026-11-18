@@ -134,7 +134,7 @@ Table dns_txt_verifications [note: 'Evidencia de cada consulta del registro TXT:
 
 Table data_sources [note: 'Catálogo de fuentes externas: plugins OSINT que corren en cada escaneo y feeds de inteligencia diarios. Guardará cifradas las llaves de API de la plataforma (plan, #8, RC-40. Hoy en dev api_key_enc está vacío) y decide si se conserva la respuesta cruda. Desde la migración 008 (RC-184, #13b) lleva también el límite diario de consultas de cada fuente, de toda la plataforma.'] {
   id uuid [pk]
-  code text [not null, unique, note: 'ct_logs, subfinder, dns, whois, shodan, censys, hibp, nvd, first_epss, cisa_kev, api_docs, más ejemplo (solo pruebas, deshabilitada). subfinder (semilla 005), censys y api_docs (semilla 013, #63) se siembran deshabilitadas. La semilla 017 (RC-184) prende subfinder con una sola fuente, el índice de Common Crawl']
+  code text [not null, unique, note: 'ct_logs, subfinder, dns, whois, shodan, censys, hibp, nvd, first_epss, cisa_kev, api_docs, más ejemplo (solo pruebas, deshabilitada). subfinder (semilla 005), censys y api_docs (semilla 013, #63) se siembran deshabilitadas. La semilla 017 (RC-184) prende subfinder con una sola fuente, el índice de Common Crawl, y la semilla 019 (RC-337) la vuelve a apagar el 17 nov porque el índice da 504 casi siempre']
   kind text [not null, note: 'CHECK IN (\'osint\',\'intel\'). osint corre por escaneo, intel se carga una vez al día']
   enabled boolean [not null]
   keep_raw_payload boolean [not null, note: 'false para hibp. Un trigger en scan_source_runs exige raw_payload IS NULL cuando es false']
