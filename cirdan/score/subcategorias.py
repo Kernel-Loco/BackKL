@@ -8,14 +8,14 @@ las corridas de `scan_source_runs` de su escaneo. El documento está en docs/cri
 
 Al cambiar el mapa (una regla nueva, otra subcategoría u otro KRI) sube VERSION.
 """
-VERSION = 1
+VERSION = 2
 
 # (clave, categoría, nombre, códigos de regla). El orden es el que muestra el portal.
 SUBCATEGORIAS = (
     ('certificates', 'infrastructure', 'Certificados', ('cert_expired', 'cert_expiring_soon')),
     ('exposed_services', 'infrastructure', 'Exposición de servicios',
-     ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database', 'exposed_ot_device',
-      'exposed_iot_device', 'exposed_service')),
+     ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database', 'exposed_container_api',
+      'exposed_ot_device', 'exposed_iot_device', 'exposed_service')),
     ('exposed_apis', 'infrastructure', 'Documentación de APIs expuesta', ('exposed_api_docs', 'api_auth_not_declared')),
     ('vulnerable_software', 'infrastructure', 'Software vulnerable o sin soporte',
      ('outdated_software', 'known_vulnerability')),
@@ -46,8 +46,8 @@ KRIS = (
 # Trae también las reglas que shodan no puede revisar sin su llave (SIN_LLAVE de shodan.py).
 EMITEN = (
     ('ct_logs', ('cert_expired', 'cert_expiring_soon', 'lookalike_domain')),
-    ('shodan', ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database', 'exposed_ot_device',
-                'exposed_iot_device', 'exposed_service')),
+    ('shodan', ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database',
+                'exposed_container_api', 'exposed_ot_device', 'exposed_iot_device', 'exposed_service')),
     ('api_docs', ('exposed_api_docs', 'api_auth_not_declared')),
     ('dns', ('spf_missing', 'spf_allow_all', 'dmarc_missing', 'dmarc_policy_none')),
 )

@@ -39,6 +39,10 @@ Devuelve:
   - 22, 23, 5900, 5901, 5985 y 5986: exposed_remote_admin (alta).
   - 21, 139, 445, 548, 873 y 2049: exposed_file_sharing (alta).
   - 1433, 1521, 3306, 5432, 5984, 6379, 9042, 9200, 11211 y 27017: exposed_database (alta).
+  - 2375 y 2376 (Docker), 6443 (Kubernetes), 10250 y 10255 (kubelet) y 2379 y 2380 (etcd): exposed_container_api
+    (alta, RC-224), con el servicio que suele escuchar ahí (SERVICIO_CONTENEDORES) y NOTA_CONTENEDORES en la
+    evidencia: InternetDB solo da el número del puerto, así que no se sabe si el servicio pide autenticación. Saberlo
+    pediría conectarse al servidor, y eso no se hace.
   - 80 y 443, y los de correo (25, 110, 143, 465, 587, 993 y 995): activo service sin hallazgo.
   - los industriales (102, 502, 789, 1911, 2404, 4911, 9600, 20000, 44818 y 47808): exposed_service con
     puerto_industrial en la evidencia. exposed_ot_device sale de la etiqueta 'ics', no del puerto.
@@ -109,7 +113,7 @@ respuesta, el tope de tiempo, una respuesta que no se puede leer, un 4xx, una p�
 o campos rotos de InternetDB) deja intacta la grabación anterior, como github.py con SIN_CUOTA, con el aviso NO_SE_GRABO
 al principio de los avisos. Una grabación fallida tampoco la toca. 'reproducir' solo lee esa grabación, sin llave: usa la API de host solo si la grabación trae alguna respuesta suya
 (una grabación hecha sin llave reproduce como antes de RC-337). Sin grabación
-del dominio, reproducir da los 9 códigos en sin_cobertura y un aviso, no failed, para que la demo no muestre la fuente
+del dominio, reproducir da los 10 códigos en sin_cobertura y un aviso, no failed, para que la demo no muestre la fuente
 caída. dnspython se importa solo al consultar de verdad (_resolver_a), como registros_dns.py.
 
     python -m cirdan.recolectores.shodan olmardo.com --reproducir
@@ -148,7 +152,8 @@ CARPETA_GRABADAS = RAIZ_GRABADAS / 'shodan'
 # Código de regla -> severidad base, la del catálogo de reglas (semillas 001 y 004). Los de puertos y CVE salen de los
 # puertos y las CVE de InternetDB.
 CODIGOS_PUERTOS = {'exposed_rdp': 'high', 'exposed_remote_admin': 'high', 'exposed_file_sharing': 'high',
-                   'exposed_database': 'high', 'exposed_service': 'low', 'known_vulnerability': 'medium'}
+                   'exposed_database': 'high', 'exposed_container_api': 'high', 'exposed_service': 'low',
+                   'known_vulnerability': 'medium'}
 # Los de etiquetas salen de las etiquetas que Shodan pone a la IP (RC-220 y RC-337).
 CODIGOS_ETIQUETA = {'exposed_iot_device': 'high', 'exposed_ot_device': 'critical', 'outdated_software': 'high'}
 CODIGOS = dict(CODIGOS_PUERTOS, **CODIGOS_ETIQUETA)
@@ -208,7 +213,12 @@ PUERTOS = {
     'exposed_remote_admin': (22, 23, 5900, 5901, 5985, 5986),
     'exposed_file_sharing': (21, 139, 445, 548, 873, 2049),
     'exposed_database': (1433, 1521, 3306, 5432, 5984, 6379, 9042, 9200, 11211, 27017),
+    'exposed_container_api': (2375, 2376, 2379, 2380, 6443, 10250, 10255),
 }
+# Qué servicio suele escuchar en cada puerto de exposed_container_api (RC-224). Es lo que suele ser, no lo que es:
+# InternetDB solo da el número del puerto.
+SERVICIO_CONTENEDORES = {2375: 'Docker', 2376: 'Docker', 2379: 'etcd', 2380: 'etcd', 6443: 'Kubernetes',
+                         10250: 'kubelet', 10255: 'kubelet'}
 PUERTOS_WEB = (80, 443)
 PUERTOS_CORREO = (25, 110, 143, 465, 587, 993, 995)   # exposed_service habla de 'entradas distintas de sitios web y correo'
 PUERTOS_INDUSTRIALES = (102, 502, 789, 1911, 2404, 4911, 9600, 20000, 44818, 47808)
@@ -279,12 +289,17 @@ NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiemp
                'sin ASN), '
                'no se grabó y se conserva la grabación anterior')
 NOTA_SIN_FECHA = ('InternetDB no dice cuándo vio este dato: puede ser viejo o de quien tuvo la IP antes que el dominio')
+# La de exposed_container_api (RC-224): 'puede permitir', nunca 'permite', porque no se sabe si pide autenticación.
+NOTA_CONTENEDORES = ('InternetDB solo dice que el puerto estaba abierto: no dice si el servicio pide autenticación ni '
+                     'cuándo lo vio. Si no la pide, puede permitir a cualquiera manejar los contenedores o leer la '
+                     'configuración y las claves que guarda.')
 
 TITULOS = {
     'exposed_rdp': 'Shodan vio abierto el escritorio remoto (puerto %d) en %s',
     'exposed_remote_admin': 'Shodan vio abierta una entrada de administración remota (puerto %d) en %s',
     'exposed_file_sharing': 'Shodan vio abierto un servicio para compartir archivos (puerto %d) en %s',
     'exposed_database': 'Shodan vio abierta una base de datos (puerto %d) en %s',
+    'exposed_container_api': 'Shodan vio abierto el puerto %d, que suele ser de %s, en %s',
     'exposed_service': 'Shodan vio abierto el puerto %d en %s',
 }
 TITULO_CVE = 'Vulnerabilidad conocida %s por la versión que Shodan vio en %s'
@@ -1005,11 +1020,18 @@ def _evidencia(titulo, ip, hosts, datos):
 
 def hallazgo_puerto(codigo, dominio, servicio, ip, puerto, hosts, datos, ahora):
     """Un hallazgo de puerto sobre su activo service. Las características salen de la rúbrica (caracteristicas.py)."""
-    titulo = TITULOS[codigo] % (puerto, _donde(hosts))
+    if codigo == 'exposed_container_api':
+        titulo = TITULOS[codigo] % (puerto, SERVICIO_CONTENEDORES[puerto], _donde(hosts))
+    else:
+        titulo = TITULOS[codigo] % (puerto, _donde(hosts))
     evidencia = dict(_evidencia(titulo, ip, hosts, datos), puerto=puerto, protocolo=protocolo(puerto),
                      protocolo_supuesto=True)
     if puerto in PUERTOS_INDUSTRIALES:
         evidencia['puerto_industrial'] = True
+    if codigo == 'exposed_container_api':
+        # Lo que suele ser y no lo que es: sin conectarse no se sabe el servicio ni si pide autenticación (RC-224)
+        evidencia.update(servicio_probable=SERVICIO_CONTENEDORES[puerto], servicio_supuesto=True,
+                         autenticacion='desconocida', nota_autenticacion=NOTA_CONTENEDORES)
     return Hallazgo(codigo, CODIGOS[codigo], servicio, titulo, evidencia,
                     rubrica.calcular(codigo, 'service', evidencia, ahora), _huella(codigo, dominio, servicio),
                     partes=[ip])
