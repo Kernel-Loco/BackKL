@@ -393,7 +393,7 @@ class ClienteCrtsh:
         Lo que sale del disco no gasta tiempo y siempre se lee.
         `ultima` queda con (intentos, segundos que tardó la respuesta) si respondió por la red, y con None si no."""
         self.ultima = None
-        del_disco, datos = (False, None) if consulta.startswith(SAN) else self._de_disco(consulta)
+        del_disco, datos = self._de_disco(consulta)
         if del_disco:
             return datos
         if plazo is not None and plazo - self.cronometro() < pausa + MINIMO_VARIANTE:
