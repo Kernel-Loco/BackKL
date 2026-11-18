@@ -297,11 +297,11 @@ class MapeoMarcos(unittest.TestCase):
                 raise AssertionError(err)
             return out.splitlines()
 
-        # Los 36 textos y los 36 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 36 son
+        # Los 37 textos y los 37 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 37 son
         # las reglas de docs/codigos_reglas.md: una regla nueva lo sube.
         self.assertEqual(scalar("SELECT (SELECT count(*) FROM scoring_rule_texts) || ',' ||"
                                 " (SELECT count(*) FROM scoring_rule_framework_mappings) || ',' ||"
-                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '36,36,36')
+                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '37,37,37')
         self.assertEqual(filas("SELECT coalesce(t.code, m.rule_code) FROM scoring_rule_texts t"
                                " FULL JOIN scoring_rule_framework_mappings m ON m.rule_code = t.code"
                                " WHERE t.code IS NULL OR m.rule_code IS NULL"
@@ -309,13 +309,13 @@ class MapeoMarcos(unittest.TestCase):
                                " LEFT JOIN scoring_rule_framework_mappings m ON m.rule_code = r.code"
                                " WHERE m.rule_code IS NULL ORDER BY 1;"), [],
                          'códigos con texto y sin mapeo, con mapeo y sin texto, o reglas sin mapeo')
-        # Las 27 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
+        # Las 28 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
         # como quedan después de todos los UPDATE. test_10 de pruebas/test_catalogo_reglas.py lo lee del SQL sin saber
         # qué corre.
         doc = (Path(__file__).resolve().parent.parent / 'docs' / 'codigos_reglas.md').read_text(encoding='utf-8')
         filas_doc = re.findall(r'^\|\s*\d{2}\s*\|\s*`([a-z0-9_]+)`\s*\|(?:[^|\n]*\|){3}\s*#(\d+)', doc, re.MULTILINE)
         osint = [code for code, recolector in filas_doc if 14 <= int(recolector) <= 20]
-        self.assertEqual(len(osint), 27, 'docs/codigos_reglas.md ya no tiene 27 reglas de #14 a #20')
+        self.assertEqual(len(osint), 28, 'docs/codigos_reglas.md ya no tiene 28 reglas de #14 a #20')
         self.assertEqual(filas("SELECT unnest(ARRAY[%s]) EXCEPT SELECT code FROM scoring_rule_texts"
                                " WHERE reviewed_by = 'ErnestoDL' ORDER BY 1;" % ', '.join("'%s'" % c for c in osint)),
                          [], 'reglas OSINT sin texto o con un texto que no firmó ErnestoDL')
@@ -393,7 +393,6 @@ ROLLBACK;""" % (ACME, BETA, tls, tls))
                           '%s false tls_legacy_only infrastructure medium 1.000 10.00' % BETA,
                           'sin las 2: 0'])
 
-
     def test_17_la_semilla_023_llega_a_cada_juego(self):
         # RC-247, como la test_16: la 023 agrega file_share_link_in_repo a cada juego que no es v1, activo o no,
         # también al de una organización que cambió sus pesos, con la severidad, el peso y el tope de v1. Los juegos
@@ -428,6 +427,47 @@ ROLLBACK;""" % (ACME, BETA, enlace, enlace))
                          ['%s true file_share_link_in_repo data_leaks medium 1.000 10.00' % ACME,
                           '%s false file_share_link_in_repo data_leaks medium 1.000 10.00' % BETA,
                           'sin la regla: 0'])
+
+    def test_18_la_semilla_024_llega_a_cada_juego(self):
+        # RC-262, desviación 15 de db/README.md: como la 023, la 024 agrega exposed_ai_service a cada juego que no es
+        # v1, activo o no, también al de una organización que cambió sus pesos, con la severidad, el peso y el tope de
+        # v1. Los juegos de ACME (activo) y BETA (inactivo) se arman con las reglas de v1 sin ella, la 024 corre otra
+        # vez y el ROLLBACK lo deshace todo.
+        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '024_regla_ia.sql').read_text(
+            encoding='utf-8')
+        cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
+        juego = """
+UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
+WITH j AS (
+  INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active)
+  SELECT '%(org)s', COALESCE((SELECT max(version) FROM scoring_rule_sets WHERE organization_id = '%(org)s'), 0) + 1,
+         category_weights, %(activo)s FROM scoring_rule_sets WHERE id = '90000000-0000-4000-8000-000000000001'
+  RETURNING id)
+INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty)
+SELECT j.id, r.code, r.category, r.base_severity, r.weight, r.max_penalty FROM j CROSS JOIN scoring_rules r
+ WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001' AND r.code <> 'exposed_ai_service';"""
+        sql = ('BEGIN;' + juego % {'org': ACME, 'activo': 'true'} + juego % {'org': BETA, 'activo': 'false'}
+               + "\nSELECT 'antes: ' || count(*) FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id"
+               " WHERE s.organization_id IN ('%s', '%s') AND r.code = 'exposed_ai_service';\n" % (ACME, BETA)
+               + cuerpo + """
+SELECT s.organization_id || ' ' || s.is_active || ' ' || r.code || ' ' || r.category || ' ' || r.base_severity
+       || ' ' || r.weight || ' ' || r.max_penalty
+  FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id
+ WHERE s.organization_id IN ('%s', '%s') AND r.code = 'exposed_ai_service' ORDER BY 1;
+SELECT 'v1: ' || id FROM scoring_rules WHERE rule_set_id = '90000000-0000-4000-8000-000000000001'
+   AND code = 'exposed_ai_service';
+SELECT 'sin ella: ' || count(*) FROM scoring_rule_sets s
+   WHERE NOT EXISTS (SELECT 1 FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code = 'exposed_ai_service');
+ROLLBACK;""" % (ACME, BETA))
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        lineas = out.splitlines()
+        self.assertIn('antes: 0', lineas)
+        self.assertEqual(lineas[-4:],
+                         ['%s true exposed_ai_service infrastructure high 1.000 25.00' % ACME,
+                          '%s false exposed_ai_service infrastructure high 1.000 25.00' % BETA,
+                          'v1: 91000000-0000-4000-8000-000000000037',
+                          'sin ella: 0'])
 
 
 if __name__ == '__main__':
