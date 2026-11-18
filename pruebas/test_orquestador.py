@@ -487,7 +487,8 @@ class Orquestador(unittest.TestCase):
                          {'config/.env': 'open', 'web/.env': 'open', 'web/viejo.env': 'resolved'})
         self.assertEqual([self.abiertos('title', h).popitem()[1] for h in (de_sitio, de_los_dos)], ['resolved', 'open'])
         self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['github']))
-        self.assertEqual(resumen['stats']['rules_without_coverage'], ['email_in_public_commits'])   # sin hallazgos
+        self.assertEqual(resumen['stats']['rules_without_coverage'],
+                         ['email_in_public_commits', 'file_share_link_in_repo'])   # sin hallazgos
         self.assertTrue(resumen['sources'][0]['cobertura_parcial'])
         self.assertTrue(self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s',
                                  s.scan_id)['partial_coverage'])

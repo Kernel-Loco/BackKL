@@ -103,7 +103,8 @@ class SubcategoriasYKri(unittest.TestCase):
         huellas = {1: '21dcfebaeb77bdcadd33c3342b5f34cffa11c2be9ac7b50252d52d368994a8cb',
                    2: '9975c93f5a65ec3d73bd7a47c44da9bb067cd817e13fb91ad419762fa19278f8',
                    3: 'c939b876df9892c32d9227df4313dca74c435538f573f7a3dfb06ac589afcf64',   # 3: RC-228
-                   4: '977cc23dc8c4496c1d6e93f5265a8c66d4e5c60879e70a7efd57a177ae55d7d1'}   # 4: RC-239
+                   4: '977cc23dc8c4496c1d6e93f5265a8c66d4e5c60879e70a7efd57a177ae55d7d1',   # 4: RC-239
+                   5: 'f88721b474d494569497549077c1a9fa11c4f4c0e0ea25407a1c2b6d2db95b19'}   # 5: RC-247
         mapa = json.dumps([sub.SUBCATEGORIAS, sub.KRIS, sub.EMITEN], ensure_ascii=False, sort_keys=True)
         huella = hashlib.sha256(mapa.encode('utf-8')).hexdigest()
         self.assertIn(sub.VERSION, huellas, 'VERSION %d no tiene huella en esta prueba: %s' % (sub.VERSION, huella))

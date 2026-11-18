@@ -32,7 +32,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-title = "LowTide: reglas de omisión de gitleaks y tokens falsos CIRDAN_FAKE_"
+title = "LowTide: reglas de omisión de gitleaks, tokens falsos CIRDAN_FAKE_ y enlaces para compartir de la nube"
 
 [allowlist]
 description = "global allow lists"
@@ -3024,3 +3024,36 @@ id = "cirdan-fake-token"
 description = "Token falso de LowTide (prefijo CIRDAN_FAKE_), de la siembra o de las pruebas"
 regex = '''CIRDAN_FAKE_[A-Za-z0-9_-]{8,}'''
 keywords = ["cirdan_fake_"]
+
+[[rules]]
+id = "cirdan-enlace-google-drive"
+description = "Enlace para compartir un archivo o una carpeta de Google Drive (RC-247). Solo se reconoce su forma"
+regex = '''(?i)\b(?:drive|docs)\.google\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/(?:u/\d{1,2}/)?d/(?:e/)?|drive/(?:u/\d{1,2}/)?folders/|(?:open|uc)\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)[a-z0-9_-]{25,}[^\s"'<>]*'''
+keywords = ["drive.google.com", "docs.google.com"]
+
+[rules.allowlist]
+regexes = [
+    '''(?i)(?:^|[/!=_-])(?:your|tu|example|ejemplo)(?:[_-]|[/?&#]|$)|[_-](?:here|aqui)(?:[/?&#]|$)''',
+]
+
+[[rules]]
+id = "cirdan-enlace-onedrive"
+description = "Enlace para compartir de OneDrive o SharePoint (RC-247). Solo se reconoce su forma"
+regex = '''(?i)\b(?:1drv\.ms/[a-z]{1,2}/(?:s![a-z0-9_-]{10,}|c/[a-z0-9]{8,20}/[a-z0-9_-]{10,})|onedrive\.live\.com/[^\s"'<>]{0,200}?[?&](?:redeem|authkey)=[a-z0-9_!%.-]{8,}|[a-z0-9-]{1,63}\.sharepoint\.com/:[a-z]{1,2}:/[gs]/(?:[a-z0-9_.%~-]{1,80}/){0,6}[a-z0-9_-]{20,})'''
+keywords = ["1drv.ms", "onedrive.live.com", "sharepoint.com"]
+
+[rules.allowlist]
+regexes = [
+    '''(?i)(?:^|[/!=_-])(?:your|tu|example|ejemplo)(?:[_-]|[/?&#]|$)|[_-](?:here|aqui)(?:[/?&#]|$)''',
+]
+
+[[rules]]
+id = "cirdan-enlace-dropbox"
+description = "Enlace para compartir un archivo o una carpeta de Dropbox (RC-247). Solo se reconoce su forma"
+regex = '''(?i)\b(?:(?:www\.|dl\.)?dropbox\.com/(?:s|sh|scl/f[io])/|dl\.dropboxusercontent\.com/(?:s|scl/f[io])/|db\.tt/)[a-z0-9_-]{10,}[^\s"'<>]*'''
+keywords = ["dropbox.com", "dropboxusercontent.com", "db.tt"]
+
+[rules.allowlist]
+regexes = [
+    '''(?i)(?:^|[/!=_-])(?:your|tu|example|ejemplo)(?:[_-]|[/?&#]|$)|[_-](?:here|aqui)(?:[/?&#]|$)''',
+]

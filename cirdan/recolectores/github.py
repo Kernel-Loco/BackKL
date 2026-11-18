@@ -5,6 +5,10 @@ Revisa los repositorios públicos de la organización de GitHub que la empresa d
   de un repo. La busca gitleaks 8.21.2 con gitleaks_cirdan.toml: sus reglas de omisión más una para los tokens falsos
   CIRDAN_FAKE_ de la siembra y de las pruebas, copiadas sin las rutas de su allowlist que saltan archivos del cliente,
   como los lock files (ver gitleaks_reglas.py). Un secreto que ya solo vive en el historial también es crítico.
+- file_share_link_in_repo (medio, sobre el activo domain, RC-247): un enlace para compartir de Google Drive, OneDrive o
+  SharePoint, o Dropbox, en la versión actual o en el historial de un repo. Lo reconocen las 3 reglas cirdan-enlace-*
+  de gitleaks_cirdan.toml solo por su forma: nada abre, sigue ni valida el enlace, que sería usar un acceso filtrado.
+  La evidencia guarda el servicio, el repo, la ruta y la huella, nunca el enlace.
 - email_in_public_commits (bajo, sobre un activo email por correo): un correo del dominio, o de un subdominio, como
   autor o como quien subió un commit.
 - el activo domain con atributos['github']: la organización, si su perfil enlaza al dominio, si GitHub la verificó y
@@ -14,7 +18,7 @@ Organización declarada. Solo se revisa la organización que la empresa declara 
 'Organización de GitHub de la empresa' de la carta. Hasta la tabla de #64 la declaración vive en la variable
 ORGS_GITHUB_DECLARADAS, con pares dominio=org separados por comas (por omisión olmardo.com=olmardo), y es de toda la
 plataforma, no de cada carta. Sin declaración, con 'ninguna' o con un nombre inválido no se consulta nada: la fuente
-queda succeeded, con sus 2 códigos en sin_cobertura y un aviso, así el portal dice 'sin cobertura' y no 0. Deducir la
+queda succeeded, con sus 3 códigos en sin_cobertura y un aviso, así el portal dice 'sin cobertura' y no 0. Deducir la
 organización del nombre del dominio (GET /orgs/<etiqueta>) va apagado: la política de uso ético prohíbe adivinar
 nombres de recursos.
 
@@ -58,7 +62,7 @@ no está, como uno borrado o que se hizo privado (#23). Si no se pudo revisar ni
 la fuente no respondió. Sin git o gitleaks instalados tampoco responde, y se sabe antes de consultar la API.
 
 Cuota de GitHub sin token: 60 consultas por hora por IP. Un 403 o 429 no se reintenta en la corrida ni la deja failed,
-porque el orquestador la reintentaría a 1, 5 y 25 minutos reservando MAX_CONSULTAS cada vez: queda succeeded con sus 2
+porque el orquestador la reintentaría a 1, 5 y 25 minutos reservando MAX_CONSULTAS cada vez: queda succeeded con sus 3
 códigos en sin_cobertura y un aviso. Un clon no gasta esa cuota, pero cuenta como consulta del límite diario (#13b).
 
 Modos: 'vivo' consulta GitHub; 'grabar' además guarda lo ya limpio en
@@ -103,9 +107,14 @@ FUENTE = 'github'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'github'
 REGLAS = Path(__file__).resolve().parent / 'gitleaks_cirdan.toml'
 
-# Código de regla -> severidad base. Los dos existen en el catálogo de reglas (semilla 004).
-CODIGOS = {'secret_in_public_repo': 'critical', 'email_in_public_commits': 'low'}
-TIPOS = {'secret_in_public_repo': 'secreto_en_repositorio', 'email_in_public_commits': 'correo_en_commits'}
+# Código de regla -> severidad base. Los tres existen en el catálogo de reglas (semilla 004 y, el de los enlaces, 023).
+CODIGOS = {'secret_in_public_repo': 'critical', 'file_share_link_in_repo': 'medium', 'email_in_public_commits': 'low'}
+TIPOS = {'secret_in_public_repo': 'secreto_en_repositorio', 'file_share_link_in_repo': 'enlace_compartido_en_repositorio',
+         'email_in_public_commits': 'correo_en_commits'}
+# Regla de gitleaks (gitleaks_reglas.REGLAS_ENLACES) -> servicio. Lo que sale de ellas da file_share_link_in_repo y no
+# secret_in_public_repo.
+SERVICIOS_ENLACE = {'cirdan-enlace-google-drive': 'google_drive', 'cirdan-enlace-onedrive': 'onedrive',
+                    'cirdan-enlace-dropbox': 'dropbox'}
 
 DECLARADAS = 'ORGS_GITHUB_DECLARADAS'          # dominio=org,dominio=org
 DECLARADAS_OMISION = 'olmardo.com=olmardo'
@@ -865,6 +874,30 @@ def hallazgo_secreto(dominio, repo, secreto, ahora, aviso=None):
                     clave='%s:%s:%s' % (repo, secreto['ruta'], secreto['regla']), partes=[repo])
 
 
+def hallazgo_enlace(dominio, repo, enlace, ahora, aviso=None):
+    """file_share_link_in_repo sobre el dominio (RC-247), de una regla de SERVICIOS_ENLACE. La evidencia lleva repo,
+    ruta, tipo (el servicio: google_drive, onedrive o dropbox) y huella, nunca el enlace, que gitleaks ya tapó con
+    --redact y que nadie abre. La huella es la de hallazgo_secreto con este código: no depende del enlace. La
+    sensibilidad sale de la rúbrica (media): no se sabe qué hay detrás del enlace. `aviso` como en hallazgo_secreto."""
+    codigo = 'file_share_link_in_repo'
+    titulo = 'Enlace para compartir archivos de la nube publicado en GitHub: %s, archivo %s' % (repo, enlace['ruta'])
+    huella = _huella(codigo, repo, enlace['ruta'], enlace['regla'])
+    evidencia = {'title': titulo, 'repo': repo, 'ruta': enlace['ruta'], 'tipo': SERVICIOS_ENLACE[enlace['regla']],
+                 'huella': huella, 'primera_vez': enlace['primera_vez']}
+    if aviso:
+        evidencia['aviso'] = aviso
+    return Hallazgo(codigo, CODIGOS[codigo], dominio, titulo, evidencia,
+                    _caracteristicas(codigo, 'domain', evidencia, ahora, rubrica.sensibilidad(codigo, evidencia, ahora)),
+                    huella, clave='%s:%s:%s' % (repo, enlace['ruta'], enlace['regla']), partes=[repo])
+
+
+def hallazgo_de_gitleaks(dominio, repo, secreto, ahora, aviso=None):
+    """Lo que halló gitleaks: un enlace para compartir si su regla es de SERVICIOS_ENLACE y si no, un secreto."""
+    if secreto['regla'] in SERVICIOS_ENLACE:
+        return hallazgo_enlace(dominio, repo, secreto, ahora, aviso)
+    return hallazgo_secreto(dominio, repo, secreto, ahora, aviso)
+
+
 def hallazgo_correo(correo, datos, ahora, partes=None):
     """email_in_public_commits sobre el activo email. La sensibilidad sale de la rúbrica (media: el correo). El título
     no lleva el correo, que ya es el activo: el título puede salir de la plataforma (politica_uso_etico.md). `partes`
@@ -961,7 +994,7 @@ def _revisar(res, cliente, org, dominio, ahora):
     for nombre, datos in revisados:
         repo = '%s/%s' % (login, nombre)
         aviso = SIN_ENTORNOS % datos['sin_entornos'] if datos.get('sin_entornos') else None
-        res.hallazgos += [hallazgo_secreto(res.dominio, repo, s, ahora, aviso) for s in datos['secretos']]
+        res.hallazgos += [hallazgo_de_gitleaks(res.dominio, repo, s, ahora, aviso) for s in datos['secretos']]
         if aviso:
             sin_entornos.append(aviso)
         ajenos += datos['ajenos']
