@@ -1,0 +1,11 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de Django con DEBUG = True, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 500,
+ "cabeceras": [
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\">\n  <meta name=\"robots\" content=\"NONE,NOARCHIVE\">\n  <title>OperationalError\n          at /</title>\n  <style type=\"text/css\">html * { padding:0; margin:0; }</style>\n</head>\n<body>\n<div id=\"summary\">\n  <h1>OperationalError\n       at /</h1>\n  <pre class=\"exception_value\">connection to server at &quot;db&quot; failed: password authentication failed for user &quot;acme&quot;</pre>\n  <table class=\"meta\">\n    <tr><th>Django Version:</th><td>4.2.7</td></tr>\n    <tr><th>Exception Location:</th><td>/srv/acme/venv/lib/python3.11/site-packages/psycopg2/__init__.py, line 122, in connect</td></tr>\n  </table>\n</div>\n<div id=\"traceback\"><h2>Traceback</h2></div>\n</body>\n</html>\n"
+}

@@ -101,7 +101,8 @@ class SubcategoriasYKri(unittest.TestCase):
         # Huella de SUBCATEGORIAS, KRIS y EMITEN por versión. Si cambias el mapa, sube VERSION y agrega aquí su
         # huella nueva (la que imprime el mensaje de esta prueba), sin borrar las anteriores.
         huellas = {1: '21dcfebaeb77bdcadd33c3342b5f34cffa11c2be9ac7b50252d52d368994a8cb',
-                   2: '9975c93f5a65ec3d73bd7a47c44da9bb067cd817e13fb91ad419762fa19278f8'}
+                   2: '9975c93f5a65ec3d73bd7a47c44da9bb067cd817e13fb91ad419762fa19278f8',
+                   3: 'c939b876df9892c32d9227df4313dca74c435538f573f7a3dfb06ac589afcf64'}   # 3: RC-228
         mapa = json.dumps([sub.SUBCATEGORIAS, sub.KRIS, sub.EMITEN], ensure_ascii=False, sort_keys=True)
         huella = hashlib.sha256(mapa.encode('utf-8')).hexdigest()
         self.assertIn(sub.VERSION, huellas, 'VERSION %d no tiene huella en esta prueba: %s' % (sub.VERSION, huella))

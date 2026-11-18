@@ -1,0 +1,19 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de PHP con display_errors y html_errors, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 500,
+ "cabeceras": [
+  [
+   "Server",
+   "Apache"
+  ],
+  [
+   "X-Powered-By",
+   "PHP/8.2.12"
+  ],
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<br />\n<b>Fatal error</b>:  Uncaught PDOException: SQLSTATE[HY000] [1045] Access denied for user 'acme'@'localhost' (using password: YES) in /var/www/html/conexion.php:12\nStack trace:\n#0 /var/www/html/conexion.php(12): PDO->__construct('mysql:host=loca...', 'acme', Object(SensitiveParameterValue))\n#1 /var/www/html/index.php(3): require('/var/www/html/c...')\n#2 {main}\n  thrown in <b>/var/www/html/conexion.php</b> on line <b>12</b><br />\n"
+}

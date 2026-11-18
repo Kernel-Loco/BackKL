@@ -1,0 +1,11 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de Laravel con Ignition, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 500,
+ "cabeceras": [
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!doctype html>\n<html class=\"theme-light\">\n<!--\nUndefined variable $usuario\n-->\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <meta name=\"robots\" content=\"noindex, nofollow\">\n    <title>🧨 Undefined variable $usuario</title>\n    <script>window.ignite = { config: {\"editor\":\"phpstorm\",\"theme\":\"light\"} };</script>\n</head>\n<body class=\"scrollbar-lg\">\n<div id=\"app\"></div>\n</body>\n</html>\n"
+}

@@ -1,0 +1,11 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de el depurador de Werkzeug (Flask), no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 500,
+ "cabeceras": [
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!doctype html>\n<html lang=en>\n  <head>\n    <title>sqlalchemy.exc.OperationalError: could not connect to postgresql://acme:CIRDAN_FAKE_clave_bd_7781@db:5432/acme\n // Werkzeug Debugger</title>\n    <link rel=\"stylesheet\" href=\"?__debugger__=yes&amp;cmd=resource&amp;f=style.css\">\n    <script>\n      var CONSOLE_MODE = false,\n          EVALEX = true,\n          EVALEX_TRUSTED = false,\n          SECRET = \"CIRDAN_FAKE_secreto_del_depurador\";\n    </script>\n  </head>\n  <body style=\"background-color: #fff\">\n    <div class=\"debugger\">\n<h1>OperationalError</h1>\n<div class=\"detail\"><p class=\"errormsg\">sqlalchemy.exc.OperationalError</p></div>\n<h2 class=\"traceback\">Traceback <em>(most recent call last)</em></h2>\n    </div>\n  </body>\n</html>\n"
+}

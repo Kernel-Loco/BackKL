@@ -70,7 +70,7 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 | Identidad digital | Suplantación | `impersonation` | `lookalike_domain` |
 | Identidad digital | Correos expuestos | `exposed_emails` | `email_in_public_commits`, `personal_email_exposed`, `email_pattern_exposed` |
 | Configuración | Correo | `email` | `spf_missing`, `spf_allow_all`, `dmarc_missing`, `dmarc_policy_none` |
-| Configuración | Configuración de servidores | `server_configuration` | `server_version_disclosed`, `subdomain_takeover_risk` |
+| Configuración | Configuración de servidores | `server_configuration` | `server_version_disclosed`, `subdomain_takeover_risk`, `directory_listing`, `debug_page_exposed` |
 | Fugas de datos | Brechas de datos | `breaches` | `breach_exposure`, `breach_exposure_old`, `breach_exposure_no_passwords` |
 | Fugas de datos | Secretos expuestos | `exposed_secrets` | `secret_in_public_repo`, `secret_in_container_image` |
 | Fugas de datos | Almacenamiento público | `public_storage` | `public_bucket` |
