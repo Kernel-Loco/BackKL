@@ -136,6 +136,7 @@ DOMAINS_SQL = '''
 SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
        a.valid_from, a.valid_until, a.revoked_at, a.signer_email::text,
        (a.id IS NOT NULL AND a.revoked_at IS NULL AND current_date BETWEEN a.valid_from AND a.valid_until) AS auth_valid,
+       (a.valid_from > current_date) AS auth_not_started,
        t.result AS txt_result, t.checked_at AS txt_checked_at,
        s.score,
        (SELECT jsonb_object_agg(sev, n) FROM (SELECT severity AS sev, count(*) AS n FROM findings f
@@ -154,14 +155,16 @@ SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
 
 
 def _domain(r):
-    today = date.today()
+    # La base decide si la carta ya empezó o venció, con su current_date en la zona de México (cirdan/db.py). El
+    # contenedor de la API va en UTC: con date.today(), de 18:00 a 24:00 una carta que empieza mañana salía 'expired'
+    # (RC-313).
     if r['valid_until'] is None:
         auth = 'missing'
     elif r['revoked_at']:
         auth = 'revoked'
     elif r['auth_valid']:
         auth = 'valid'
-    elif r['valid_from'] > today:
+    elif r['auth_not_started']:
         auth = 'missing'
     else:
         auth = 'expired'
