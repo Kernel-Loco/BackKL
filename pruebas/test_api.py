@@ -25,9 +25,29 @@ class ApiCirdan(unittest.TestCase):
         cls.beta = sesion.login('dana.cruz@beta-corp.mx')
 
     def test_1_entra_como_rol_sin_privilegios(self):
+        # RC-291: el rol ya no sale en /health. Se lee con la misma conexión de la API (cirdan.db.transaction y su
+        # DATABASE_URL), dentro de su contenedor.
+        self.assertEqual(sesion.en_api(
+            'from cirdan.db import transaction\n'
+            'with transaction() as conn:\n'
+            "    print(conn.execute('SELECT current_user AS rol').fetchone()['rol'])"), 'cirdan_app')
+
+    def test_1b_health_solo_dice_ok(self):
+        # RC-291: /health no pide sesión, así que no da la versión de PostgreSQL ni el rol de la base.
         code, body = sesion.Client().get('/health')
-        self.assertEqual(code, 200)
-        self.assertEqual(body['role'], 'cirdan_app')
+        self.assertEqual((code, body), (200, {'status': 'ok'}))
+
+    def test_1c_health_falla_si_la_base_no_contesta(self):
+        # Con la base caída health() no responde ok: la excepción de la conexión llega al 500 de FastAPI.
+        self.assertEqual(sesion.en_api(
+            'import cirdan.db, psycopg\n'
+            "cirdan.db.DSN = 'postgresql://nadie@127.0.0.1:1/nada?connect_timeout=2'\n"
+            'from cirdan.api.main import health\n'
+            'try:\n'
+            '    health()\n'
+            "    print('respondio')\n"
+            'except psycopg.OperationalError:\n'
+            "    print('fallo')"), 'fallo')
 
     def test_2_acme_ve_sus_cinco_dominios_con_score(self):
         code, body = self.acme.get('/domains')
