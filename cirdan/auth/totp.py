@@ -12,6 +12,7 @@ import base64
 import binascii
 import hmac
 import os
+import re
 import threading
 import time
 
@@ -24,6 +25,9 @@ from cirdan.config import config
 
 STEP_SECONDS = 30
 VALID_WINDOW = 1  # acepta el código anterior y el siguiente por desfase de reloj
+# Solo 0 a 9. \d y str.isdigit() aceptan dígitos Unicode, como '١٢٣٤٥٦' o los de ancho completo, y luego
+# hmac.compare_digest lanza TypeError con texto no ASCII: un 500 sin bitácora ni fallo de la IP (RC-315).
+CODE_PATTERN = r'^[0-9]{6}$'
 
 _llave_vault = None
 _candado = threading.Lock()
@@ -108,7 +112,7 @@ def qr_svg_data_uri(uri):
 
 def verify_code(secret, code, last_step=None, now=None):
     """Paso de tiempo del código si es válido y no se ha usado; si no, None."""
-    if not (isinstance(code, str) and len(code) == 6 and code.isdigit()):
+    if not (isinstance(code, str) and re.fullmatch(CODE_PATTERN, code)):
         return None
     totp = pyotp.TOTP(secret, interval=STEP_SECONDS)
     current = int((now or time.time()) // STEP_SECONDS)
