@@ -80,6 +80,13 @@ def esquema():
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
+def en_api(codigo):
+    """Corre código de Python dentro del contenedor de la API, con su mismo entorno, y da la última línea que imprime."""
+    r = subprocess.run(['docker', 'exec', 'cirdan-api', 'python', '-c', codigo],
+                       check=True, capture_output=True, text=True, encoding='utf-8')
+    return r.stdout.strip().splitlines()[-1]
+
+
 class Client:
     """Cliente HTTP con su propia cookie de sesión."""
 

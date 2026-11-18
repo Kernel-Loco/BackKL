@@ -186,9 +186,11 @@ def known_domain(session, fqdn):
 
 @app.get('/health', tags=['sistema'], summary='Estado de la API y de la base')
 def health():
+    # Público y sin sesión: solo dice que la API y la base responden. Sin la versión de PostgreSQL ni el rol (RC-291).
+    # Si la base no contesta, la excepción da el 500 de siempre.
     with transaction() as conn:
-        row = conn.execute("SELECT current_setting('server_version') AS version, current_user AS role").fetchone()
-    return {'status': 'ok', 'postgres': row['version'], 'role': row['role']}
+        conn.execute('SELECT 1')
+    return {'status': 'ok'}
 
 
 @app.get('/domains', tags=['dominios'], summary='Dominios del cliente con autorización, TXT y score')
