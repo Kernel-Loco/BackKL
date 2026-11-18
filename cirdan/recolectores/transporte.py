@@ -39,6 +39,12 @@ visitar() es la petición de la visita web: da el estado, las cabeceras y hasta 
 respuesta, también un 4xx o un 5xx, y corta el cuerpo en vez de fallar. Una redirección tampoco se sigue: Redirigida
 trae el destino (`destino`) y quien llama decide si lo visita.
 
+El saludo TLS de la visita (#121, RC-239). Si la petición trae el atributo `saludo` (un dict), la conexión https lo
+llena con la versión y el cifrado que se negociaron (SSLSocket.version() y cipher()), después de revisar el
+certificado. Es el mismo saludo de la petición, con el mismo contexto: no hay otro saludo para verlo. Un certificado
+que no se pudo verificar o un servidor que no acepta TLS 1.2 ni 1.3 (el mínimo de ssl.create_default_context) salen
+como el OSError de siempre, y visita.py lee su verify_code o su alerta de versión.
+
 retry_after() lee la cabecera Retry-After, para que un 5xx que la trae espere lo que pide antes de otro intento.
 """
 import contextlib
@@ -197,9 +203,9 @@ class _ConPlazo:
     puertos = PUERTOS
     clase_socket = None   # None: socket.socket, buscado en cada conexión (las pruebas lo cambian con mock.patch)
 
-    def __init__(self, host, plazo, cronometro, familia=socket.AF_UNSPEC, **otros):
+    def __init__(self, host, plazo, cronometro, familia=socket.AF_UNSPEC, saludo=None, **otros):
         super().__init__(host, **otros)
-        self.plazo, self.cronometro, self.familia = plazo, cronometro, familia
+        self.plazo, self.cronometro, self.familia, self.saludo = plazo, cronometro, familia, saludo
         self._create_connection = self._conectar
 
     def queda(self):
@@ -254,6 +260,10 @@ class _ConPlazo:
     def connect(self):
         super().connect()
         self.sock.queda = self.queda
+        if self.saludo is not None and isinstance(self.sock, ssl.SSLSocket):
+            # El saludo ya terminó y se revisó el certificado: la versión y el cifrado que se negociaron (RC-239)
+            cifrado = self.sock.cipher()
+            self.saludo.update(version=self.sock.version(), cifrado=cifrado[0] if cifrado else None)
 
 
 class _Conexion(_ConPlazo, http.client.HTTPSConnection):
@@ -287,7 +297,9 @@ class _Https(urllib.request.HTTPSHandler):
         self._conexion = functools.partial(_Conexion, plazo=plazo, cronometro=cronometro, familia=familia)
 
     def https_open(self, req):
-        return self.do_open(self._conexion, req, context=self._context)
+        saludo = getattr(req, 'saludo', None)   # un dict que llena la conexión con la versión y el cifrado (RC-239)
+        conexion = self._conexion if saludo is None else functools.partial(self._conexion, saludo=saludo)
+        return self.do_open(conexion, req, context=self._context)
 
 
 class _SinRedirecciones(urllib.request.HTTPRedirectHandler):

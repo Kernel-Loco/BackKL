@@ -10,6 +10,7 @@ Uso, desde la raíz del repo:
 import email.message
 import importlib
 import json
+import os
 import shutil
 import socket
 import ssl
@@ -20,14 +21,15 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+import warnings
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 from urllib.parse import urlsplit
 
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))  # también corre como python pruebas/test_visita.py
-from pruebas import test_subfinder  # noqa: E402
+from pruebas import test_rdap, test_subfinder  # noqa: E402
 from pruebas.test_geoip import bases as bases_geo  # noqa: E402
 from pruebas.test_huellas import FIXTURES_BORDE, fixture  # noqa: E402
 from pruebas.test_shodan import ResolvedorSimulado, a, error_http, paginas  # noqa: E402
@@ -170,7 +172,9 @@ class Visita(unittest.TestCase):
         reto = fixture('cloudflare_reto_403', FIXTURES_BORDE)
         res, _, _ = correr({'https://%s/' % DOMINIO: visita.limpiar_visita(
             {k: reto[k] for k in ('estado', 'cabeceras', 'cuerpo')})})
-        self.assertEqual(res.sin_cobertura, list(visita.CODIGOS))
+        # el saludo sí terminó: las dos reglas TLS quedan revisadas con su parte (RC-239)
+        self.assertEqual(res.sin_cobertura, [c for c in visita.CODIGOS if c not in visita.CODIGOS_TLS])
+        self.assertEqual((res.revisados, res.sin_revisar), (['tls:' + DOMINIO], None))
         self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['reto'])
         self.assertNotIn('tecnologias', activo(res, DOMINIO).atributos)
         self.assertEqual(res.hallazgos, [])
@@ -195,7 +199,7 @@ class Visita(unittest.TestCase):
         # lo de endoflife.date y las cabeceras sí llegó
         self.assertEqual([h.codigo for h in res.hallazgos], ['outdated_software', 'server_version_disclosed'])
         self.assertEqual(res.cves, [])
-        self.assertEqual(res.revisados, [])
+        self.assertEqual(res.revisados, ['tls:' + DOMINIO])
         self.assertIn(DOMINIO, res.sin_revisar)
         self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['nvd_falta'])
         self.assertTrue(any('403' in x for x in res.avisos), res.avisos)
@@ -274,7 +278,8 @@ class Peticion(unittest.TestCase):
 
     def test_3_motivos_de_lo_que_no_termino(self):
         casos = ((urllib.error.URLError(transporte.NoPublica('x')), {'sin_respuesta': 'no_publica'}),
-                 (urllib.error.URLError(ssl.SSLCertVerificationError('x')), {'sin_respuesta': 'certificado'}),
+                 (urllib.error.URLError(ssl.SSLCertVerificationError('x')),
+                  {'sin_respuesta': 'certificado', 'verify_code': None}),
                  (urllib.error.URLError(ConnectionRefusedError()), {'rechazada': True}),
                  (urllib.error.URLError(OSError('x')), {'sin_respuesta': 'red'}),
                  (urllib.error.URLError(ssl.SSLError(1, '[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE]')),
@@ -714,7 +719,8 @@ class Contrato(unittest.TestCase):
         self.assertEqual(visita.MAX_CONSULTAS, 2 * 2 + 20 * 3 + 20 * 4 + 10 * 2 + 10 * 2)
         self.assertEqual(visita.MAX_CONSULTAS, 184)
         self.assertEqual(set(visita.CODIGOS), {'outdated_software', 'known_vulnerability', 'server_version_disclosed',
-                                               'directory_listing', 'debug_page_exposed'})
+                                               'directory_listing', 'debug_page_exposed',
+                                               'tls_certificate_invalid', 'tls_legacy_only'})
 
 
 class Base(unittest.TestCase):
@@ -808,7 +814,8 @@ class Arreglos(unittest.TestCase):
                 self.assertEqual(res.estado, 'succeeded', res.error)
                 self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['eol'])
                 self.assertNotIn('outdated_software', [h.codigo for h in res.hallazgos])
-                self.assertEqual((res.revisados, res.sin_revisar), ([], [DOMINIO]))   # no se cierra nada
+                # no se cierra nada del sitio, solo lo de su saludo TLS (RC-239)
+                self.assertEqual((res.revisados, res.sin_revisar), (['tls:' + DOMINIO], [DOMINIO]))
 
     def test_3_con_un_comodin_y_un_sitio_que_no_respondio_no_se_dice_cuales_faltan(self):
         """La raíz no responde (a lo mejor redirigía a www, que solo está bajo el comodín) y blog no tiene A: solo se
@@ -828,8 +835,8 @@ class Arreglos(unittest.TestCase):
                 res, _, _ = correr({raiz: raiz_responde}, zona={DOMINIO: a(IP)}, apis=Apis(ct=ct))
                 self.assertIn(BLOG, res.revisados)
                 self.assertNotIn(DOMINIO, res.revisados)
-                self.assertEqual(None if res.sin_revisar is None else sorted({x.rstrip('.') for x in res.sin_revisar}),
-                                 faltan)
+                self.assertEqual(None if res.sin_revisar is None else
+                                 sorted({x.rstrip('.') for x in res.sin_revisar if not x.startswith('tls:')}), faltan)
 
     def test_4_un_error_del_servidor_queda_sin_revisar(self):
         """Un 5xx puede ser fijo del sitio (un subdominio olvidado): no es una falla de la corrida y sí se graba."""
@@ -839,7 +846,7 @@ class Arreglos(unittest.TestCase):
                                          carpeta=Path(d) / DOMINIO)
                 self.assertTrue(list((Path(d) / DOMINIO).glob('*.json')))
                 self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['error_http'])
-                self.assertEqual((res.hallazgos, res.sin_cobertura), ([], list(visita.CODIGOS)))
+                self.assertEqual((res.hallazgos, res.sin_cobertura), ([], [c for c in visita.CODIGOS if c not in visita.CODIGOS_TLS]))
                 self.assertNotIn(visita.NO_SE_GRABO, res.avisos)
                 self.assertEqual(cliente.fallas, 0)
 
@@ -880,7 +887,7 @@ class Arreglos(unittest.TestCase):
         res, _, _ = correr({'https://%s/' % DOMINIO: pagina_nginx()}, apis=Apis(nvd=nvd))
         self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['nvd_falta'])
         self.assertIn('known_vulnerability', [h.codigo for h in res.hallazgos])   # lo que llegó sí se reporta
-        self.assertEqual((res.revisados, res.sin_revisar), ([], [DOMINIO]))
+        self.assertEqual((res.revisados, res.sin_revisar), (['tls:' + DOMINIO], [DOMINIO]))
 
     def test_8_una_grabacion_que_no_se_lee_no_tumba_la_fuente(self):
         original = visita.ClienteWeb._de_disco
@@ -1115,7 +1122,8 @@ class Confirmados(unittest.TestCase):
             self.assertEqual(visitados[-1][0], DOMINIO)   # la raíz, siempre
             self.assertIn('web: se visitaron 20 de 30 nombres del dominio (MAX_SITIOS)', res.avisos)
             # Solo se cierra lo de los visitados (borde.cobertura da cada nombre también con su punto final)
-            self.assertEqual({x.rstrip('.') for x in res.revisados}, set(visitados[-1]))
+            self.assertEqual({x.rstrip('.') for x in res.revisados if not x.startswith('tls:')}, set(visitados[-1]))
+            self.assertEqual({x for x in res.revisados if x.startswith('tls:')}, {'tls:' + v for v in visitados[-1]})
             self.assertIsNone(res.sin_revisar)
         self.assertEqual(set(visitados[0]) | set(visitados[1]), set(nombres) | {DOMINIO})   # en dos días, todos
         # El mismo día, los mismos
@@ -1137,6 +1145,335 @@ class Confirmados(unittest.TestCase):
         self.assertEqual(sorted(x.valor for x in res.activos), sorted(x.valor for x in grabada.activos))
         self.assertEqual(sorted(res.revisados), sorted(grabada.revisados))
         self.assertFalse([x.valor for x in res.activos if 'sin_revisar' in x.atributos['web']])
+
+
+def error_certificado(codigo):
+    """El error de un certificado que OpenSSL no pudo verificar, con su verify_code."""
+    error = ssl.SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed')
+    error.verify_code = codigo
+    return error
+
+
+def error_tls(razon):
+    """Un ssl.SSLError con la razón de OpenSSL `razon`, como lo arma el módulo ssl."""
+    error = ssl.SSLError(1, '[SSL: %s] %s' % (razon, razon.lower()))
+    error.reason = razon
+    return error
+
+
+class SaludoTls(unittest.TestCase):
+    """tls_certificate_invalid y tls_legacy_only del mismo saludo TLS de la visita (#121, RC-239), sin red."""
+    RAIZ_HTTPS = 'https://%s/' % DOMINIO
+
+    def test_1_motivo_y_verify_code_de_lo_que_no_termino(self):
+        casos = ((error_certificado(10), {'sin_respuesta': 'certificado', 'verify_code': 10}),
+                 (urllib.error.URLError(error_certificado(62)), {'sin_respuesta': 'certificado', 'verify_code': 62}),
+                 (urllib.error.URLError(error_certificado(True)), {'sin_respuesta': 'certificado', 'verify_code': None}),
+                 (urllib.error.URLError(error_certificado('10')), {'sin_respuesta': 'certificado', 'verify_code': None}),
+                 (urllib.error.URLError(error_tls('TLSV1_ALERT_PROTOCOL_VERSION')), {'sin_respuesta': 'tls_viejo'}),
+                 (error_tls('UNSUPPORTED_PROTOCOL'), {'sin_respuesta': 'tls_viejo'}),
+                 (error_tls('VERSION_TOO_LOW'), {'sin_respuesta': 'tls_viejo'}),
+                 # HTTP en texto plano en el 443 no es un protocolo viejo
+                 (error_tls('WRONG_VERSION_NUMBER'), {'sin_respuesta': 'tls'}),
+                 (error_tls('SSLV3_ALERT_HANDSHAKE_FAILURE'), {'sin_respuesta': 'tls'}))
+        for error, esperado in casos:
+            with self.subTest(repr(error)), mock.patch.object(transporte, 'abrir', mock.Mock(side_effect=error)):
+                self.assertEqual(visita._visitar(self.RAIZ_HTTPS, 5), esperado)
+        self.assertIn('tls_viejo', visita.OPACOS)
+        self.assertNotIn('tls_viejo', visita.FALLAS_DE_RED)
+
+    def test_2_cada_motivo_del_certificado_da_su_hallazgo(self):
+        casos = ((10, 'vencido'), (18, 'autofirmado'), (19, 'autofirmado'), (62, 'otro_nombre'), (66, 'debil'),
+                 (67, 'debil'), (68, 'debil'), (20, 'emisor_desconocido'), (2, 'otro'), (None, 'otro'))
+        huellas = set()
+        for codigo, motivo in casos:
+            with self.subTest(codigo):
+                res, cliente, _ = correr({self.RAIZ_HTTPS: {'sin_respuesta': 'certificado', 'verify_code': codigo}})
+                self.assertEqual(res.estado, 'succeeded', res.error)
+                self.assertEqual(contrato.validar(res, codigos=set(visita.CODIGOS)), [])
+                self.assertEqual(cliente.fallas, 0)   # es un dato del sitio, no una falla de la red
+                [h] = res.hallazgos
+                self.assertEqual((h.codigo, h.severidad, h.activo, h.partes),
+                                 ('tls_certificate_invalid', 'medium', DOMINIO, ['tls:' + DOMINIO]))
+                self.assertEqual(h.evidencia['motivo'], motivo)
+                self.assertEqual(h.evidencia['verify_code'], codigo)
+                self.assertEqual(h.evidencia['url'], self.RAIZ_HTTPS)
+                self.assertEqual(h.evidencia['title'], h.titulo)
+                self.assertIn(visita.TEXTO_CERTIFICADO[motivo], h.titulo)
+                self.assertEqual('nota' in h.evidencia, motivo == 'emisor_desconocido')
+                # Sin la página no hay tecnologías ni cabeceras: el sitio queda sin revisar para el resto
+                web = activo(res, DOMINIO).atributos
+                self.assertEqual(web['web']['sin_revisar'], visita.MOTIVOS['certificado'])
+                self.assertNotIn('tecnologias', web)
+                # El saludo sí se revisó: su parte va en revisados aunque el sitio quede sin revisar
+                self.assertEqual((res.revisados, res.sin_revisar, res.sin_cobertura),
+                                 (['tls:' + DOMINIO], [DOMINIO], []))
+                huellas.add(h.huella)
+        self.assertEqual(len(huellas), 1)   # el motivo no cambia la huella: es el mismo hallazgo del sitio
+
+    def test_3_tls_viejo_da_tls_legacy_only(self):
+        res, _, _ = correr({self.RAIZ_HTTPS: {'sin_respuesta': 'tls_viejo'}})
+        self.assertEqual(contrato.validar(res, codigos=set(visita.CODIGOS)), [])
+        [h] = res.hallazgos
+        self.assertEqual((h.codigo, h.severidad, h.partes), ('tls_legacy_only', 'medium', ['tls:' + DOMINIO]))
+        self.assertEqual(h.evidencia, {'title': 'El sitio %s no acepta TLS 1.2 ni 1.3' % DOMINIO, 'host': DOMINIO,
+                                       'url': self.RAIZ_HTTPS, 'minimo': 'TLSv1.2'})
+        self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['tls_viejo'])
+        otro, _, _ = correr({self.RAIZ_HTTPS: {'sin_respuesta': 'certificado', 'verify_code': 10}})
+        self.assertNotEqual(otro.hallazgos[0].huella, h.huella)
+
+    def test_4_sin_hallazgo_si_el_saludo_no_dijo_nada_del_sitio(self):
+        for falla in ({'sin_respuesta': 'tls'}, {'sin_respuesta': 'red'}, {'sin_respuesta': 'tiempo'},
+                      {'sin_respuesta': 'no_publica'}, {'rechazada': True}):
+            with self.subTest(falla):
+                res, _, _ = correr({self.RAIZ_HTTPS: falla})
+                self.assertEqual([h.codigo for h in res.hallazgos], [])
+
+    def test_5_el_destino_de_una_redireccion_lleva_su_hallazgo(self):
+        res, _, _ = correr({self.RAIZ_HTTPS: {'redirige': 'https://%s/' % WWW, 'codigo': 301},
+                            'https://%s/' % WWW: {'sin_respuesta': 'certificado', 'verify_code': 62}},
+                           zona={DOMINIO: a(IP), WWW: a(IP)}, apis=Apis(ct=paginas(WWW)))
+        self.assertEqual(contrato.validar(res, codigos=set(visita.CODIGOS)), [])
+        [h] = res.hallazgos
+        self.assertEqual((h.codigo, h.activo, h.partes, h.evidencia['url']),
+                         ('tls_certificate_invalid', WWW, ['tls:' + WWW], 'https://%s/' % WWW))
+        self.assertEqual(h.caracteristicas['exposicion'], 'publica')
+
+    def test_6_la_pagina_por_https_guarda_version_y_cifrado_sin_hallazgo(self):
+        pagina = dict(pagina_nginx(), tls={'version': 'TLSv1.3', 'cifrado': 'TLS_AES_256_GCM_SHA384'})
+        res, _, _ = correr({self.RAIZ_HTTPS: visita.limpiar_visita(pagina)},
+                           apis=Apis(eol=404, nvd={'totalResults': 0, 'vulnerabilities': []}))
+        self.assertEqual(activo(res, DOMINIO).atributos['web']['tls'],
+                         {'version': 'TLSv1.3', 'cifrado': 'TLS_AES_256_GCM_SHA384'})
+        self.assertNotIn('tls_certificate_invalid', [h.codigo for h in res.hallazgos])
+        self.assertNotIn('tls_legacy_only', [h.codigo for h in res.hallazgos])
+        # La del 80 no lleva saludo aunque la grabación lo traiga
+        res, _, _ = correr({self.RAIZ_HTTPS: {'rechazada': True}, 'http://%s/' % DOMINIO: visita.limpiar_visita(pagina)},
+                           apis=Apis(eol=404, nvd={'totalResults': 0, 'vulnerabilities': []}))
+        self.assertNotIn('tls', activo(res, DOMINIO).atributos['web'])
+
+    def test_7_limpiar_visita_con_saludo_y_verify_code(self):
+        base = pagina_nginx()
+        self.assertNotIn('tls', visita.limpiar_visita(base))   # una grabación de antes de RC-239
+        for tls, esperado in (({'version': 'TLSv1.2', 'cifrado': 'ECDHE-RSA-AES128-GCM-SHA256'},
+                               {'version': 'TLSv1.2', 'cifrado': 'ECDHE-RSA-AES128-GCM-SHA256'}),
+                              ({'version': 'TLSv1.3', 'cifrado': None}, {'version': 'TLSv1.3'}),
+                              ({'version': 'TLS v1.3<script>', 'cifrado': 'x' * 65}, None),
+                              ({'version': 13}, None), ('TLSv1.3', None), ({}, None)):
+            with self.subTest(tls):
+                self.assertEqual(visita.limpiar_visita(dict(base, tls=tls)).get('tls'), esperado)
+        self.assertEqual(visita.limpiar_visita({'sin_respuesta': 'certificado'}),
+                         {'sin_respuesta': 'certificado', 'verify_code': None})
+        self.assertEqual(visita.limpiar_visita({'sin_respuesta': 'certificado', 'verify_code': 20}),
+                         {'sin_respuesta': 'certificado', 'verify_code': 20})
+        self.assertEqual(visita.limpiar_visita({'sin_respuesta': 'certificado', 'verify_code': '20'}),
+                         {'sin_respuesta': 'certificado', 'verify_code': None})
+        self.assertEqual(visita.limpiar_visita({'sin_respuesta': 'tls_viejo', 'verify_code': 20}),
+                         {'sin_respuesta': 'tls_viejo'})
+
+    def test_8_transporte_llena_el_saludo_solo_si_la_peticion_lo_pide(self):
+        class Tls(ssl.SSLSocket):
+            def __init__(self):   # sin socket: solo lo que lee _ConPlazo.connect
+                pass
+
+            def version(self):
+                return 'TLSv1.3'
+
+            def cipher(self):
+                return ('TLS_AES_128_GCM_SHA256', 'TLSv1.3', 128)
+
+        for saludo in ({}, None):
+            with self.subTest(saludo):
+                conexion = transporte._Conexion(DOMINIO, time.monotonic() + 5, time.monotonic, saludo=saludo)
+                with mock.patch.object(urllib.request.http.client.HTTPSConnection, 'connect',
+                                       lambda self_: setattr(self_, 'sock', Tls())):
+                    conexion.connect()
+                if saludo is not None:
+                    self.assertEqual(saludo, {'version': 'TLSv1.3', 'cifrado': 'TLS_AES_128_GCM_SHA256'})
+
+    def cierra(self, res, codigo, partes):
+        """Lo que hace el UPDATE de cierre del orquestador con un hallazgo abierto que ya no salió (#23)."""
+        if res.revisados is None:
+            return codigo not in res.sin_cobertura
+        if res.sin_revisar is None:
+            return bool(partes) and set(partes) <= set(res.revisados)
+        return bool(partes) and not set(partes) & set(res.sin_revisar)
+
+    def test_9_un_saludo_bueno_cierra_las_reglas_tls_aunque_el_sitio_quede_sin_revisar(self):
+        reto = fixture('cloudflare_reto_403', FIXTURES_BORDE)
+        reto = dict({k: reto[k] for k in ('estado', 'cabeceras', 'cuerpo')},
+                    tls={'version': 'TLSv1.3', 'cifrado': 'TLS_AES_256_GCM_SHA384'})
+        error_5xx = dict(pagina_nginx(503), tls={'version': 'TLSv1.2', 'cifrado': 'ECDHE-RSA-AES128-GCM-SHA256'})
+        for nombre, pagina in (('reto', reto), ('5xx', error_5xx)):
+            with self.subTest(nombre):
+                res, _, _ = correr({self.RAIZ_HTTPS: visita.limpiar_visita(pagina)})
+                self.assertEqual(contrato.validar(res, codigos=set(visita.CODIGOS)), [])
+                self.assertEqual(res.hallazgos, [])
+                self.assertIn('tls:' + DOMINIO, res.revisados)
+                self.assertIsNone(res.sin_revisar)   # lo demás del sitio no se cierra en esta corrida
+                self.assertEqual(res.sin_cobertura, [c for c in visita.CODIGOS if c not in visita.CODIGOS_TLS])
+                for codigo in visita.CODIGOS_TLS:   # un certificado renovado o un TLS 1.2 nuevo se cierran
+                    self.assertTrue(self.cierra(res, codigo, ['tls:' + DOMINIO]), codigo)
+                self.assertFalse(self.cierra(res, 'outdated_software', [DOMINIO]))   # lo demás del sitio espera
+
+    def test_10_un_certificado_malo_cierra_tls_legacy_only_del_mismo_sitio(self):
+        res, _, _ = correr({self.RAIZ_HTTPS: {'sin_respuesta': 'certificado', 'verify_code': 18}})
+        [h] = res.hallazgos
+        self.assertEqual(h.codigo, 'tls_certificate_invalid')
+        # negoció TLS 1.2 o más para llegar al certificado: el tls_legacy_only de antes ya no es cierto
+        self.assertTrue(self.cierra(res, 'tls_legacy_only', ['tls:' + DOMINIO]))
+        self.assertFalse(self.cierra(res, 'outdated_software', [DOMINIO]))
+
+    def test_11_un_saludo_que_no_termino_no_cierra_las_reglas_tls(self):
+        for falla in ({'sin_respuesta': 'tls'}, {'sin_respuesta': 'red'}, {'sin_respuesta': 'tiempo'}):
+            with self.subTest(falla):
+                res, _, _ = correr({self.RAIZ_HTTPS: falla})
+                self.assertEqual(contrato.validar(res, codigos=set(visita.CODIGOS)), [])
+                for codigo in visita.CODIGOS_TLS:
+                    self.assertFalse(self.cierra(res, codigo, ['tls:' + DOMINIO]), codigo)
+        # Con dos sitios, el que respondió queda revisado y el saludo del otro no
+        res, _, _ = correr({self.RAIZ_HTTPS: {'sin_respuesta': 'red'},
+                            'https://%s/' % WWW: visita.limpiar_visita(pagina_nginx())},
+                           zona={DOMINIO: a(IP), WWW: a(IP)}, apis=Apis(ct=paginas(WWW), eol=404,
+                                                                       nvd={'totalResults': 0, 'vulnerabilities': []}))
+        self.assertEqual(contrato.validar(res, codigos=set(visita.CODIGOS)), [])
+        self.assertIn('tls:' + WWW, res.revisados)
+        self.assertIn('tls:' + DOMINIO, res.sin_revisar)
+        self.assertTrue(self.cierra(res, 'tls_certificate_invalid', ['tls:' + WWW]))
+        self.assertFalse(self.cierra(res, 'tls_certificate_invalid', ['tls:' + DOMINIO]))
+
+    def test_12_api_docs_toma_tls_viejo_como_tls(self):
+        from cirdan.recolectores import api_docs
+        with mock.patch.object(transporte, 'abrir', mock.Mock(side_effect=error_tls('UNSUPPORTED_PROTOCOL'))):
+            datos = api_docs._visitar(self.RAIZ_HTTPS, 5)
+        self.assertEqual(datos, {'sin_respuesta': 'tls'})
+        self.assertEqual(api_docs.limpiar(datos), datos)   # antes lanzaba ValueError('forma inesperada')
+
+
+
+def ca_y_hoja(carpeta, nombre, **opciones):
+    """(ruta de la CA, ruta de la cadena que entrega el servidor, ruta de su llave), hechos en la prueba. opciones:
+    vencido, otro_nombre, autofirmado, sin_intermedio (la hoja la firma un intermedio que el servidor no manda) y
+    debil (llave RSA de 1024 bits)."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+    ahora = datetime.now(timezone.utc)
+
+    def nombre_x509(cn):
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+
+    def emitir(sujeto, publica, emisor, llave_emisor, ca, desde, hasta, san=None):
+        b = (x509.CertificateBuilder().subject_name(nombre_x509(sujeto)).issuer_name(nombre_x509(emisor))
+             .public_key(publica).serial_number(x509.random_serial_number()).not_valid_before(desde)
+             .not_valid_after(hasta)
+             .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+             .add_extension(x509.SubjectKeyIdentifier.from_public_key(publica), critical=False)
+             .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(llave_emisor.public_key()),
+                            critical=False))
+        if ca:
+            b = b.add_extension(x509.KeyUsage(digital_signature=True, key_cert_sign=True, crl_sign=True,
+                                              content_commitment=False, key_encipherment=False,
+                                              data_encipherment=False, key_agreement=False, encipher_only=False,
+                                              decipher_only=False), critical=True)
+        else:
+            b = (b.add_extension(x509.SubjectAlternativeName([x509.DNSName(san)]), critical=False)
+                 .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False))
+        return b.sign(llave_emisor, hashes.SHA256())
+
+    pem = serialization.Encoding.PEM
+    llave_ca = ec.generate_private_key(ec.SECP256R1())
+    raiz = emitir('CA de prueba', llave_ca.public_key(), 'CA de prueba', llave_ca, True,
+                  ahora - timedelta(days=2), ahora + timedelta(days=2))
+    emisor, llave_emisor, cadena = 'CA de prueba', llave_ca, []
+    if opciones.get('sin_intermedio'):
+        llave_int = ec.generate_private_key(ec.SECP256R1())
+        cadena.append(emitir('Intermedio de prueba', llave_int.public_key(), 'CA de prueba', llave_ca, True,
+                             ahora - timedelta(days=2), ahora + timedelta(days=2)))
+        emisor, llave_emisor = 'Intermedio de prueba', llave_int
+    llave = rsa.generate_private_key(65537, 1024) if opciones.get('debil') else ec.generate_private_key(ec.SECP256R1())
+    if opciones.get('autofirmado'):
+        emisor, llave_emisor = nombre, llave
+    desde, hasta = ahora - timedelta(minutes=5), ahora + timedelta(hours=1)
+    if opciones.get('vencido'):
+        desde, hasta = ahora - timedelta(days=2), ahora - timedelta(days=1)
+    hoja = emitir(nombre, llave.public_key(), emisor, llave_emisor, False, desde, hasta,
+                  san='otro.prueba.example' if opciones.get('otro_nombre') else nombre)
+    rutas = Path(carpeta) / 'ca.pem', Path(carpeta) / 'cadena.pem', Path(carpeta) / 'llave.pem'
+    rutas[0].write_bytes(raiz.public_bytes(pem))
+    rutas[1].write_bytes(hoja.public_bytes(pem))   # sin_intermedio: el servidor no manda el intermedio
+    rutas[2].write_bytes(llave.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    return tuple(str(r) for r in rutas)
+
+
+HOST_SITIO = 'sitio.prueba.example'
+
+
+@unittest.skipUnless(os.environ.get('TRANSPORTE_TLS') == '1' or importlib.util.find_spec('cryptography'),
+                     'pide cryptography para los certificados: corre dentro del contenedor')
+class SaludoReal(unittest.TestCase):
+    """El saludo TLS de verdad, con el OpenSSL de la imagen, contra un servidor sobre socket.socketpair() con
+    certificados hechos aquí (#121, RC-239). Sin red: _conectar devuelve el extremo del servidor. Con
+    TRANSPORTE_TLS=1, como en el CI, falla en vez de saltarse si no hay cryptography."""
+    PAGINA = (b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok')
+
+    def visitar(self, ca, servidor_ctx):
+        servidor = test_rdap.ServidorTls(servidor_ctx, self.PAGINA)
+        cliente_ctx = ssl.create_default_context(cafile=ca)   # como transporte._contexto, con esta CA
+        cliente_ctx.sslsocket_class = transporte._SocketTls
+
+        def conectar(conexion, direccion, *_):
+            self.assertEqual(direccion, (HOST_SITIO, 443))
+            servidor.cliente.settimeout(conexion.queda())
+            return servidor.cliente
+        try:
+            with mock.patch.object(transporte, '_contexto', lambda: cliente_ctx), \
+                    mock.patch.object(transporte._Conexion, '_conectar', conectar):
+                return visita._visitar('https://%s/' % HOST_SITIO, 5)
+        finally:
+            servidor.cerrar()
+
+    def contexto(self, cadena, llave, maximo=None, debil=False):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        if maximo or debil:   # antes de cargar la llave: con el nivel por omisión una RSA de 1024 no carga
+            ctx.set_ciphers('DEFAULT:@SECLEVEL=0')
+        ctx.load_cert_chain(cadena, llave)
+        if maximo:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', DeprecationWarning)
+                ctx.minimum_version = ssl.TLSVersion.TLSv1
+                ctx.maximum_version = maximo
+        return ctx
+
+    def test_1_un_certificado_valido_da_la_pagina_con_version_y_cifrado(self):
+        with tempfile.TemporaryDirectory() as d:
+            ca, cadena, llave = ca_y_hoja(d, HOST_SITIO)
+            r = self.visitar(ca, self.contexto(cadena, llave))
+        self.assertEqual((r['estado'], r['cuerpo']), (200, 'ok'))
+        self.assertIn(r['tls']['version'], ('TLSv1.2', 'TLSv1.3'))
+        self.assertTrue(r['tls']['cifrado'])
+
+    def test_2_cada_certificado_malo_da_su_verify_code(self):
+        casos = (('vencido', 10), ('autofirmado', 18), ('otro_nombre', 62), ('sin_intermedio', 20), ('debil', 66))
+        for opcion, codigo in casos:
+            with self.subTest(opcion), tempfile.TemporaryDirectory() as d:
+                ca, cadena, llave = ca_y_hoja(d, HOST_SITIO, **{opcion: True})
+                r = self.visitar(ca, self.contexto(cadena, llave, debil=opcion == 'debil'))   # el cliente no la acepta
+                self.assertEqual(r, {'sin_respuesta': 'certificado', 'verify_code': codigo})
+                self.assertEqual(visita.MOTIVOS_CERTIFICADO[codigo], 'otro_nombre' if codigo == 62 else
+                                 {'vencido': 'vencido', 'autofirmado': 'autofirmado',
+                                  'sin_intermedio': 'emisor_desconocido', 'debil': 'debil'}[opcion])
+
+    def test_3_un_servidor_que_solo_habla_tls_1_0_o_1_1_es_tls_viejo(self):
+        for maximo in ('TLSv1', 'TLSv1_1'):
+            with self.subTest(maximo), tempfile.TemporaryDirectory() as d:
+                ca, cadena, llave = ca_y_hoja(d, HOST_SITIO)
+                try:
+                    servidor_ctx = self.contexto(cadena, llave, getattr(ssl.TLSVersion, maximo))
+                except (ValueError, ssl.SSLError) as e:   # un OpenSSL sin TLS 1.0 ni 1.1 ni con SECLEVEL=0
+                    self.fail('el OpenSSL de la imagen no arma un servidor %s: %s' % (maximo, e))
+                self.assertEqual(self.visitar(ca, servidor_ctx), {'sin_respuesta': 'tls_viejo'})
 
 
 FIXTURES_PORTADA = RAIZ / 'pruebas' / 'fixtures' / 'portada'
@@ -1252,8 +1589,9 @@ class Portada(unittest.TestCase):
             'servidor': 'Django', 'firmas_version': portada.VERSION, 'titulo_pagina': 'OperationalError at /',
             'cwe': 'CWE-215', 'estado_http': 500, 'host': DOMINIO, 'url': 'https://%s/' % DOMINIO})
         self.assertEqual(activo(res, DOMINIO).atributos['web']['sin_revisar'], visita.MOTIVOS['error_http'])
-        # Con un hallazgo y sin ningún sitio revisado la corrida queda parcial y no cierra nada (#23)
-        self.assertEqual((res.revisados, res.sin_cobertura), ([], []))
+        # Con un hallazgo y sin ningún sitio revisado la corrida queda parcial y no cierra nada (#23), salvo la parte
+        # del saludo TLS, que terminó aunque la página fuera un 500 (RC-239)
+        self.assertEqual((res.revisados, res.sin_cobertura), (['tls:' + DOMINIO], []))
         self.assertEqual(res.sin_revisar, [DOMINIO])
         self.assertEqual(contrato.validar(res, visita.CODIGOS), [])
 

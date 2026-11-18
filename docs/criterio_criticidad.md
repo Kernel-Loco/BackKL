@@ -62,7 +62,7 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 
 | Categoría | Subcategoría | Clave | Reglas |
 |---|---|---|---|
-| Infraestructura | Certificados | `certificates` | `cert_expired`, `cert_expiring_soon` |
+| Infraestructura | Certificados | `certificates` | `cert_expired`, `cert_expiring_soon`, `tls_certificate_invalid`, `tls_legacy_only` |
 | Infraestructura | Exposición de servicios | `exposed_services` | `exposed_rdp`, `exposed_remote_admin`, `exposed_file_sharing`, `exposed_database`, `exposed_container_api`, `exposed_ot_device`, `exposed_iot_device`, `exposed_service` |
 | Infraestructura | Documentación de APIs expuesta | `exposed_apis` | `exposed_api_docs`, `api_auth_not_declared` |
 | Infraestructura | Software vulnerable o sin soporte | `vulnerable_software` | `outdated_software`, `known_vulnerability` |
@@ -79,7 +79,7 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 
 | KRI | Clave | Subcategorías | Fuentes |
 |---|---|---|---|
-| Certificados | `certificates` | `certificates` | `ct_logs` |
+| Certificados | `certificates` | `certificates` | `ct_logs`, `web` |
 | Exposición de servicios | `service_exposure` | `exposed_services`, `exposed_apis` | `shodan`, `api_docs` |
 | Correo | `email` | `email` | `dns` |
 | Suplantación | `impersonation` | `impersonation` | `ct_logs` |
@@ -94,11 +94,12 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 - `no_coverage` (sin cobertura): alguna de sus fuentes corrió y no respondió (`sources_failed`), ninguna corrió, o ninguna regla suya se revisó aunque la fuente respondiera, como Correo cuando el dominio no existe en el DNS. Una regla no se revisó si quedó sin cobertura o si la fuente que la revisa no corrió: Exposición de servicios sale así cuando `shodan` responde sin poder revisar nada y `api_docs` no corrió. Sus hallazgos, su severidad y su suma van en `null`, no en cero.
 - `no_source_yet` (sin fuente todavía): el KRI aún no tiene fuente. Así sale Reputación hasta que RC-234 esté en dev. También va en `null`.
 
-Tres límites de los estados:
+Cuatro límites de los estados:
 
 - Con una fuente caída el KRI sale `no_coverage` aunque otra fuente suya sí haya encontrado algo. Así lo pide la tarjeta: una fuente que no respondió sale sin cobertura.
 - Exposición de servicios no sale `ok` mientras `shodan.py` no tenga la API de host de Shodan o `api_docs` siga apagada. `exposed_iot_device` y `exposed_ot_device` quedan sin cobertura en todo escaneo, con la llave de Shodan o sin ella (`SIN_LLAVE` en `cirdan/recolectores/shodan.py`. La llave sola no los prende, ver `docs/servicios_externos.md`), así que lo más que alcanza es `partial`.
-- `sources_partial` va por fuente y no por regla. Si a `ct_logs` solo le faltó la respuesta de una variante de dominios parecidos, Certificados también sale `partial`, aunque sus dos reglas se revisaron completas. `scans.stats` no guarda a qué regla le faltó la parte.
+- `sources_partial` va por fuente y no por regla. Si a `ct_logs` solo le faltó la respuesta de una variante de dominios parecidos, Certificados también sale `partial`, aunque sus reglas se revisaron completas. Lo mismo con `web`: un sitio que quedó sin revisar por otra cosa (un reto, un 5xx, la NVD, o el sitio de un hallazgo TLS, que no da página) deja a `web` en `sources_partial` y Certificados sale `partial`, aunque el saludo TLS de cada sitio sí se revisó. `scans.stats` no guarda a qué regla le faltó la parte.
+- El mapa se aplica al leer. Un score de un escaneo de antes de RC-239 se lee con el mapa 4 (`kri_map_version` 4): con `web` completo Certificados sale `ok` aunque ese escaneo no revisó `tls_certificate_invalid` ni `tls_legacy_only`, y con `web` caído sale `no_coverage`. Se corrige solo con el siguiente escaneo.
 
 Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado. Si un aporte es de una regla que el mapa no conoce, o que otro juego de reglas puso en otra categoría, va en una fila `other` (Sin clasificar) de la categoría de su regla, para que las subcategorías sigan sumando la nota. Los KRI juntan sus aportes por código de regla: el de una regla que el mapa no conoce no cuenta en ningún KRI, y el de una regla de un KRI que otro juego puso en otra categoría sigue contando en su KRI.
 

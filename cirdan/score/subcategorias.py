@@ -8,11 +8,14 @@ las corridas de `scan_source_runs` de su escaneo. El documento está en docs/cri
 
 Al cambiar el mapa (una regla nueva, otra subcategoría u otro KRI) sube VERSION.
 """
-VERSION = 3   # 3: directory_listing y debug_page_exposed en server_configuration (#111, RC-228)
+VERSION = 4   # 2: exposed_container_api (RC-224). 3: directory_listing y debug_page_exposed en
+              # server_configuration (#111, RC-228). 4: tls_certificate_invalid y tls_legacy_only en
+              # certificates (RC-239)
 
 # (clave, categoría, nombre, códigos de regla). El orden es el que muestra el portal.
 SUBCATEGORIAS = (
-    ('certificates', 'infrastructure', 'Certificados', ('cert_expired', 'cert_expiring_soon')),
+    ('certificates', 'infrastructure', 'Certificados',
+     ('cert_expired', 'cert_expiring_soon', 'tls_certificate_invalid', 'tls_legacy_only')),
     ('exposed_services', 'infrastructure', 'Exposición de servicios',
      ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database', 'exposed_container_api',
       'exposed_ot_device', 'exposed_iot_device', 'exposed_service')),
@@ -35,7 +38,7 @@ SUBCATEGORIAS = (
 # (clave, nombre, subcategorías que junta, fuentes de data_sources.code que lo alimentan).
 # Reputación no tiene fuente hasta que RC-234 esté en dev: sale 'sin fuente todavía'.
 KRIS = (
-    ('certificates', 'Certificados', ('certificates',), ('ct_logs',)),
+    ('certificates', 'Certificados', ('certificates',), ('ct_logs', 'web')),
     ('service_exposure', 'Exposición de servicios', ('exposed_services', 'exposed_apis'), ('shodan', 'api_docs')),
     ('email', 'Correo', ('email',), ('dns',)),
     ('impersonation', 'Suplantación', ('impersonation',), ('ct_logs',)),
@@ -50,6 +53,7 @@ EMITEN = (
                 'exposed_container_api', 'exposed_ot_device', 'exposed_iot_device', 'exposed_service')),
     ('api_docs', ('exposed_api_docs', 'api_auth_not_declared')),
     ('dns', ('spf_missing', 'spf_allow_all', 'dmarc_missing', 'dmarc_policy_none')),
+    ('web', ('tls_certificate_invalid', 'tls_legacy_only')),
 )
 
 # Fila de un aporte de una regla que el mapa no conoce o que su juego de reglas puso en otra categoría.
@@ -138,7 +142,7 @@ def resumen(aportes, corridas, sin_cobertura=(), a_medias=()):
     - 'ok': todas sus fuentes corrieron completas y ninguna regla suya quedó sin cobertura.
 
     `sources_partial` va por fuente, no por regla: si a ct_logs solo le faltó una variante de dominios parecidos,
-    Certificados también sale 'partial' aunque sus dos reglas se revisaron completas. Es el límite de `scans.stats`.
+    Certificados también sale 'partial' aunque sus reglas se revisaron completas. Es el límite de `scans.stats`.
     Los aportes de un KRI se juntan por código de regla: si un juego puso una regla suya en otra categoría, en las
     subcategorías va a 'other' y en su KRI sigue contando.
     """
