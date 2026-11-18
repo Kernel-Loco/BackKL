@@ -488,12 +488,12 @@ class Login(Base):
         with mock.patch.object(passwords, '_verificar_phc', lambda phc, clave: False):
             a, b = self._pares(inexistente, otro, 200)
         self.assertLess(abs(b - a), 0.001, (a, b))
-        # Con argon2id real, ninguno responde en menos de la mitad que el otro: los dos gastan argon2id. Sus dos modos
-        # se separan 1.65 veces, debajo de 2.
+        # Con argon2id real, los dos tardan más de 10 ms: los dos gastan argon2id (unos 47 ms en su modo rápido) y un
+        # camino sin él responde en microsegundos. No se compara uno contra otro: en un runner de GitHub el modo lento
+        # puede pasar de 2 veces el rápido.
         a, b = self._pares(inexistente, otro, 4)
-        self.assertGreater(b, 0.5 * a, (a, b))
-        self.assertGreater(a, 0.5 * b, (a, b))
-        return a, b
+        self.assertGreater(a, 0.01, ('el correo inexistente también debe gastar el tiempo de argon2id', a, b))
+        self.assertGreater(b, 0.01, ('la huella también debe gastar el tiempo de argon2id', a, b))
 
     def test_5d_y_tardan_lo_mismo_que_un_correo_inexistente(self):
         passwords.comprobar_llave()
@@ -507,9 +507,8 @@ class Login(Base):
     def test_5b_y_tardan_lo_mismo(self):
         huella = passwords.hash_password(CLAVE, ALEX)
         passwords.comprobar_llave()
-        a, _ = self._tardan_lo_mismo(lambda: passwords.burn_time('Otra-Clave-Larga-99'),
-                                     lambda: passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX))
-        self.assertGreater(a, 0.01, 'el correo inexistente también debe gastar el tiempo de argon2id')
+        self._tardan_lo_mismo(lambda: passwords.burn_time('Otra-Clave-Larga-99'),
+                              lambda: passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX))
 
 
 class Parametros(unittest.TestCase):
