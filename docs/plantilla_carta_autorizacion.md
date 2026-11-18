@@ -58,7 +58,7 @@ Son datos personales los correos del dominio que aparezcan en el sitio, en certi
 - Los hallazgos resueltos, los análisis, las alertas, los reportes y los scores se borran 12 meses después. Un hallazgo abierto se conserva mientras siga abierto. Al terminar el servicio, o antes si la empresa lo pide por escrito, el equipo borra sus hallazgos, activos y reportes en un plazo de [30] días y le confirma el borrado. La carta firmada, los datos de quien firma, las verificaciones del registro TXT y la bitácora se conservan [plazo] solo como prueba de la autorización y de lo que hizo cada persona.
 - Si una vulneración de seguridad afecta los datos de los que la empresa es responsable, el equipo le avisa en un plazo de [24] horas para que ella informe a las personas afectadas. Si afecta los datos de quien firma o de los usuarios del portal, el equipo les avisa directo.
 - Si un empleado ejerce sus derechos ARCO ante el equipo, el equipo reenvía la solicitud a la empresa en un plazo de [5] días hábiles y sigue sus instrucciones.
-- La empresa informa a sus empleados de este monitoreo en su aviso de privacidad. El aviso de privacidad del equipo, para los datos de quien firma y de los usuarios del portal, está en [enlace].
+- La empresa informa a sus empleados de este monitoreo en su aviso de privacidad. El aviso de privacidad del equipo, para los datos de quien firma y de los usuarios del portal, está en https://lowtidesec.com/privacidad.
 
 ## 7. Confidencialidad
 

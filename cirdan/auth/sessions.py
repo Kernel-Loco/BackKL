@@ -10,7 +10,9 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
   token al azar), 5 min y de un solo uso: se leen y se borran en el mismo paso. /passkeys/login/options cuenta
   300 por IP en 15 min, y los fallos de /passkeys/login/verify cuentan para la IP y el correo como en /login.
 - Bloqueo por intentos: 5 fallos por correo o 20 por IP en 15 min. Un código equivocado también
-  cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. Una IPv6
+  cuenta, y la contraseña correcta no borra los fallos hasta que el código sea correcto. /login cuenta el
+  intento antes de revisar la contraseña, no cuenta nada si ya está bloqueado y lo devuelve si fue correcta (RC-270).
+  Una IPv6
   cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
 - Cambio de contraseña (RC-290): 5 intentos por usuario en 15 min, contados antes de revisar la contraseña actual.
   El quinto fallo cierra la sesión que lo hizo.
@@ -327,6 +329,51 @@ def register_ip_fail(ip):
 
 def register_fail(email, ip):
     _count(_email_key(email), _ip_key(ip))
+
+
+# Los dos scripts corren enteros dentro de Valkey, sin que otra petición entre a la mitad.
+# _TAKE: KEYS son el correo y la IP, ARGV sus máximos y los segundos del bloqueo. Si alguno ya llegó a su máximo
+# devuelve 0 sin contar nada: un 429 no suma al otro contador, como antes con is_locked. Si no, sube los dos, les pone
+# el vencimiento solo si no tenían (EXPIRE NX) y devuelve cuándo vence cada uno, en ms (PEXPIRETIME).
+_TAKE = '''
+for i, key in ipairs(KEYS) do
+  if tonumber(redis.call('GET', key) or '0') >= tonumber(ARGV[i]) then return 0 end
+end
+local vence = {}
+for i, key in ipairs(KEYS) do
+  redis.call('INCR', key)
+  redis.call('EXPIRE', key, ARGV[3], 'NX')
+  vence[i] = redis.call('PEXPIRETIME', key)
+end
+return vence
+'''
+# _REFUND: ARGV es lo que devolvió _TAKE. Solo baja el contador que sigue con ese mismo vencimiento, o sea la misma
+# ventana de 15 min que subió el intento. Si venció entre los dos pasos (PEXPIRETIME da -2) no lo crea en -1, y si otro
+# fallo ya abrió una ventana nueva no se lo come. DECR conserva el vencimiento.
+_REFUND = '''
+for i, key in ipairs(KEYS) do
+  if redis.call('PEXPIRETIME', key) == tonumber(ARGV[i]) and tonumber(redis.call('GET', key) or '0') > 0 then
+    redis.call('DECR', key)
+  end
+end
+'''
+
+
+def take_login_attempt(email, ip):
+    """Cuenta el intento de /login para el correo y la IP antes de revisar la contraseña (RC-270). Devuelve el
+    comprobante para refund_login_attempt, o None si el correo ya tiene MAX_FAILS_EMAIL o la IP MAX_FAILS_IP, y
+    entonces no cuenta nada. Revisar y contar van en un solo script de Valkey, así que aunque lleguen 30 contraseñas a
+    la vez cada una ve un número distinto y solo 5 se revisan. Contado después, como antes, todas pasaban con el
+    contador en 0, igual que en take_mfa_attempt."""
+    vence = _valkey().eval(_TAKE, 2, _email_key(email), _ip_key(ip), MAX_FAILS_EMAIL, MAX_FAILS_IP, LOCK_SECONDS)
+    return vence or None
+
+
+def refund_login_attempt(email, ip, ticket):
+    """La contraseña fue correcta: devuelve el intento que contó take_login_attempt, porque un login bueno no es un
+    fallo. Para la IP, una oficina tras un NAT no se bloquea con 20 entradas buenas en 15 min. Para el correo, con
+    TOTP los 5 intentos siguen siendo para los códigos, y sin TOTP el login borra después los fallos del correo."""
+    _valkey().eval(_REFUND, 2, _email_key(email), _ip_key(ip), *ticket)
 
 
 def take_mfa_attempt(email, ip):

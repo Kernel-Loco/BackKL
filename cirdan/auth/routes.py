@@ -109,6 +109,19 @@ def _audit_bad_password(org, user_id, ip):
         log.exception('No se pudo escribir auth.login_failed del usuario %s', user_id)
 
 
+def _bad_password(org, user_id, ip):
+    return JSONResponse({'detail': INVALID}, status_code=401,
+                        background=BackgroundTask(_audit_bad_password, org, user_id, ip))
+
+
+def _refund_quietly(email, ip, ticket):
+    # Si Valkey también falla, sale la excepción original y el intento vence solo en 15 min.
+    try:
+        sessions.refund_login_attempt(email, ip, ticket)
+    except Exception:
+        log.exception('No se pudo devolver el intento de inicio de sesión después de un error')
+
+
 @router.get('/captcha', summary='Reto del captcha (prueba de trabajo ALTCHA) para el siguiente inicio de sesión')
 def get_captcha(response: Response):
     response.headers.update(NO_STORE)
@@ -124,24 +137,36 @@ def login(body: LoginIn, request: Request, response: Response):
         raise HTTPException(400, CAPTCHA_INVALID)
     email = body.email.strip().lower()
     ip = client_ip(request)
-    if sessions.is_locked(email, ip):
+    # El intento cuenta como fallo del correo y de la IP antes de buscar la cuenta, en un solo paso de Valkey (RC-270).
+    # Revisado y contado por separado, 30 contraseñas a la vez leían todas el contador en 0 y se revisaban todas.
+    # Va antes de buscar el correo, así que el 429 sale igual exista o no la cuenta.
+    ticket = sessions.take_login_attempt(email, ip)
+    if not ticket:
         raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
 
-    with transaction() as conn:
-        found = conn.execute('SELECT * FROM login_lookup(%s)', (email,)).fetchone()
+    try:
+        with transaction() as conn:
+            found = conn.execute('SELECT * FROM login_lookup(%s)', (email,)).fetchone()
+        if found:
+            good = passwords.verify_password(found['password_hash'], body.password, str(found['user_id']))
+        else:
+            passwords.burn_time(body.password)
+    except Exception:
+        # La base o la huella fallaron y la contraseña no se llegó a revisar: el 500 no es un fallo y no cuenta. El
+        # relleno del correo que no existe va en el mismo try: si su error contara, el contador diría qué correos existen.
+        _refund_quietly(email, ip, ticket)
+        raise
     if not found:
-        passwords.burn_time(body.password)
-        sessions.register_fail(email, ip)
         raise HTTPException(401, INVALID)
 
     org, user_id = str(found['organization_id']), str(found['user_id'])
-    if not passwords.verify_password(found['password_hash'], body.password, user_id):
-        sessions.register_fail(email, ip)
-        # La bitácora se escribe después de mandar el 401. Escrita antes, la conexión y el INSERT
-        # hacían que un correo que existe tardara unos 17 ms más que uno que no existe.
+    if not good:
+        # El fallo ya contó arriba. La bitácora se escribe después de mandar el 401. Escrita antes, la conexión y el
+        # INSERT hacían que un correo que existe tardara unos 17 ms más que uno que no existe.
         # Con raise HTTPException la tarea no correría: por eso se devuelve el mismo 401 a mano.
-        return JSONResponse({'detail': INVALID}, status_code=401,
-                            background=BackgroundTask(_audit_bad_password, org, user_id, ip))
+        return _bad_password(org, user_id, ip)
+    # La contraseña es correcta: el intento no fue un fallo y se devuelve, al correo y a la IP.
+    sessions.refund_login_attempt(email, ip, ticket)
 
     with transaction(org) as conn:
         if passwords.needs_rehash(found['password_hash'], user_id):
@@ -155,7 +180,9 @@ def login(body: LoginIn, request: Request, response: Response):
                                  found['password_hash'])).rowcount:
                 actual = conn.execute('SELECT password_hash FROM users WHERE id = %s', (user_id,)).fetchone()
                 if not actual or not passwords.verify_password(actual['password_hash'], body.password, user_id):
-                    raise HTTPException(401, INVALID)
+                    # Ya no abre la huella de ahora: vuelve a contar como fallo y queda en la bitácora como el otro 401.
+                    sessions.register_fail(email, ip)
+                    return _bad_password(org, user_id, ip)
         if found['mfa_enabled']:
             # Los fallos del correo se borran hasta que el código sea correcto. Borrados aquí, quien
             # tiene la contraseña repetiría el login y 5 códigos sin llegar nunca al bloqueo.
