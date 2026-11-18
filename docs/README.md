@@ -12,6 +12,7 @@
 | [`politica_seguridad_privacidad.md`](politica_seguridad_privacidad.md) | Política de seguridad y privacidad de LowTide: metodología de ISO/IEC 27001, controles del Anexo A que aplican, aviso de privacidad conforme a la LFPDPPP 2025, retención, derechos ARCO con el buzón arco@lowtidesec.com, validez legal, pendientes y términos de uso del portal | #78 y #96g |
 | [`plantilla_carta_autorizacion.md`](plantilla_carta_autorizacion.md) | Plantilla de la carta de autorización que firma quien controla cada dominio: alcance, vigencia, datos personales, firmas y Anexo A de actividades | #6 |
 | [`hallazgos_esperados.md`](hallazgos_esperados.md) | Hallazgos esperados del dominio de prueba olmardo.com, por fuente, con código, severidad, fecha y estado | #10b |
+| [`demo_pasos.md`](demo_pasos.md) | Pasos de la demo v0.2 de S12 (30 oct 2026): las 9 partes con quién, minutos y plan B, y qué prueba sin red la cubre | RC-164 |
 | [`servicios_externos.md`](servicios_externos.md) | Servicios externos: cuenta y dueño, plan, costo, límite, vencimiento de la llave y plan B de cada uno, las licencias y el gasto real | #8 |
 
 La base de datos se documenta en [`db/README.md`](../db/README.md).

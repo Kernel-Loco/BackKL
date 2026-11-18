@@ -33,11 +33,13 @@ from cirdan.config import config
 from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
-from cirdan.recolectores import api_docs, certspotter, crtsh, ejemplo, github, shodan
+from cirdan.recolectores import api_docs, certspotter, crtsh, ejemplo, geoip, github, registros_dns, shodan
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado
 from pruebas.test_certspotter import AHORA, EMISIONES, RespaldoSimulado, emision
 from pruebas.test_certspotter import recolectar as recolectar_ct
 from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado, cert
+from pruebas.test_registros_dns import DnsSimulado as DnsRegistros, zona
+from pruebas.test_geoip import bases as bases_geo
 
 ACME = '20000000-0000-4000-8000-000000000001'
 BETA = '20000000-0000-4000-8000-000000000002'
@@ -937,6 +939,37 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(sorted((p['d'], p['activo']) for p in parecidos), [(p, 'acme-demo.mx') for p in esperados])
         # el dominio parecido solo va en la evidencia: nunca entra a assets
         self.assertIsNone(self.uno('SELECT 1 FROM assets WHERE value = ANY(%s)', esperados))
+
+    def test_3c6_el_escaneo_normal_deja_ct_logs_y_dns_en_la_corrida(self):
+        """RC-164: lo que corre POST /api/v1/domains/{fqdn}/scans (escaneos._correr llama a correr sin fuentes, así que
+        van las de fuentes_activas) deja una corrida de crt.sh y otra de DNS, las dos en succeeded. Solo se dejan
+        esas dos de fuentes_activas para no simular las demás. crt.sh y el DNS son simulados y las bases geo son
+        falsas: nada sale a la red ni lee datos/geo."""
+        activas = orquestador.fuentes_activas(self.conn)
+        self.assertIn('ct_logs', activas)
+        self.assertIn('dns', activas)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.exige_cupo('ct_logs', crtsh.MAX_CONSULTAS)
+        self.exige_cupo('dns', registros_dns.MAX_CONSULTAS)
+        solo_dos = lambda conn: [f for f in activas if f in ('ct_logs', 'dns')]  # noqa: E731
+        dns = DnsRegistros(zona(spf=['v=spf1 -all'], dmarc=['v=DMARC1; p=reject']))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d) / 'crtsh'), \
+                mock.patch.object(registros_dns, 'CARPETA_GRABADAS', Path(d) / 'dns'), \
+                mock.patch.object(crtsh, '_descargar', CrtshSimulado()), mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                mock.patch.object(registros_dns, '_consultar', dns), \
+                mock.patch.object(geoip, 'bases_por_omision', return_value=bases_geo()), \
+                mock.patch.object(geoip, '_POR_OMISION', []), \
+                mock.patch.object(orquestador, 'fuentes_activas', solo_dos), \
+                mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', ahora=AHORA, conn=self.conn)
+        self.assertEqual(sorted(f['source'] for f in resumen['sources']), ['ct_logs', 'dns'])
+        for codigo in ('ct_logs', 'dns'):
+            with self.subTest(fuente=codigo):
+                run = self.corrida_de(s.scan_id, codigo)
+                self.assertIsNotNone(run, '%s no quedó en scan_source_runs' % codigo)
+                self.assertEqual((run['status'], run['error']), ('succeeded', None))
+        self.assertIn(('_dmarc.acme-demo.mx', 'TXT'), dns.llamadas)   # el DNS sí corrió, con el resolvedor simulado
+        self.assertEqual([n for n, _ in dns.llamadas if not n.endswith('acme-demo.mx')], [])
 
     def test_3c2_si_crtsh_no_responde_a_los_parecidos_el_escaneo_queda_parcial(self):
         """Hecho cuando 3 de RC-226: sin respuesta de crt.sh a %marca% ni a las variantes, lookalike_domain va en
