@@ -3028,12 +3028,12 @@ keywords = ["cirdan_fake_"]
 [[rules]]
 id = "cirdan-enlace-google-drive"
 description = "Enlace para compartir un archivo o una carpeta de Google Drive (RC-247). Solo se reconoce su forma"
-regex = '''(?i)\b(?:drive|docs)\.google\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/(?:u/\d{1,2}/)?d/(?:e/)?|drive/(?:u/\d{1,2}/)?folders/|(?:open|uc)\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)[a-z0-9_-]{25,}[^\s"'<>]*'''
+regex = '''(?i)\b(?:drive|docs)\.google\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/(?:u/\d{1,2}/)?d/(?:e/)?|drive/(?:u/\d{1,2}/)?folders/|(?:open|uc)\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)[a-z0-9_-]{25,}(?:&amp;|[^\s"'<>;|])*'''
 keywords = ["drive.google.com", "docs.google.com"]
 
 [rules.allowlist]
 regexes = [
-    '''(?i)(?:^|[/!=_-])(?:your|tu|example|ejemplo)(?:[_-]|[/?&#]|$)|[_-](?:here|aqui)(?:[/?&#]|$)''',
+    '''(?i)^(?:(?:drive|docs)\.google\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/(?:u/\d{1,2}/)?d/(?:e/)?|drive/(?:u/\d{1,2}/)?folders/|(?:open|uc)\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)|1drv\.ms/[a-z]{1,2}/(?:s!|c/[a-z0-9]{8,20}/)|onedrive\.live\.com/[^\s"'<>]{0,200}?[?&](?:redeem|authkey)=!?|(?:www\.|dl\.)?dropbox\.com/(?:s|sh|scl/f[io])/|dl\.dropboxusercontent\.com/(?:s|scl/f[io])/|db\.tt/)(?:(?:[a-z0-9_!%-]*[_-])?(?:your|tu|example|ejemplo)(?:[_-][a-z0-9_!%-]*)?|[a-z0-9_!%-]*[_-](?:here|aqui))(?:[^a-z0-9_!%-]|$)|^[a-z0-9-]{1,63}\.sharepoint\.com/:[a-z]{1,2}:/[gs]/(?:[a-z0-9_.%~-]{1,80}/){0,6}(?:(?:[a-z0-9_!%-]*[_-])?(?:your|tu|example|ejemplo)(?:[_-][a-z0-9_!%-]*)?|[a-z0-9_!%-]*[_-](?:here|aqui))$''',
 ]
 
 [[rules]]
@@ -3044,16 +3044,16 @@ keywords = ["1drv.ms", "onedrive.live.com", "sharepoint.com"]
 
 [rules.allowlist]
 regexes = [
-    '''(?i)(?:^|[/!=_-])(?:your|tu|example|ejemplo)(?:[_-]|[/?&#]|$)|[_-](?:here|aqui)(?:[/?&#]|$)''',
+    '''(?i)^(?:(?:drive|docs)\.google\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/(?:u/\d{1,2}/)?d/(?:e/)?|drive/(?:u/\d{1,2}/)?folders/|(?:open|uc)\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)|1drv\.ms/[a-z]{1,2}/(?:s!|c/[a-z0-9]{8,20}/)|onedrive\.live\.com/[^\s"'<>]{0,200}?[?&](?:redeem|authkey)=!?|(?:www\.|dl\.)?dropbox\.com/(?:s|sh|scl/f[io])/|dl\.dropboxusercontent\.com/(?:s|scl/f[io])/|db\.tt/)(?:(?:[a-z0-9_!%-]*[_-])?(?:your|tu|example|ejemplo)(?:[_-][a-z0-9_!%-]*)?|[a-z0-9_!%-]*[_-](?:here|aqui))(?:[^a-z0-9_!%-]|$)|^[a-z0-9-]{1,63}\.sharepoint\.com/:[a-z]{1,2}:/[gs]/(?:[a-z0-9_.%~-]{1,80}/){0,6}(?:(?:[a-z0-9_!%-]*[_-])?(?:your|tu|example|ejemplo)(?:[_-][a-z0-9_!%-]*)?|[a-z0-9_!%-]*[_-](?:here|aqui))$''',
 ]
 
 [[rules]]
 id = "cirdan-enlace-dropbox"
 description = "Enlace para compartir un archivo o una carpeta de Dropbox (RC-247). Solo se reconoce su forma"
-regex = '''(?i)\b(?:(?:www\.|dl\.)?dropbox\.com/(?:s|sh|scl/f[io])/|dl\.dropboxusercontent\.com/(?:s|scl/f[io])/|db\.tt/)[a-z0-9_-]{10,}[^\s"'<>]*'''
+regex = '''(?i)\b(?:(?:www\.|dl\.)?dropbox\.com/(?:s|sh|scl/f[io])/|dl\.dropboxusercontent\.com/(?:s|scl/f[io])/|db\.tt/)[a-z0-9_-]{10,}(?:&amp;|[^\s"'<>;|])*'''
 keywords = ["dropbox.com", "dropboxusercontent.com", "db.tt"]
 
 [rules.allowlist]
 regexes = [
-    '''(?i)(?:^|[/!=_-])(?:your|tu|example|ejemplo)(?:[_-]|[/?&#]|$)|[_-](?:here|aqui)(?:[/?&#]|$)''',
+    '''(?i)^(?:(?:drive|docs)\.google\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/(?:u/\d{1,2}/)?d/(?:e/)?|drive/(?:u/\d{1,2}/)?folders/|(?:open|uc)\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)|1drv\.ms/[a-z]{1,2}/(?:s!|c/[a-z0-9]{8,20}/)|onedrive\.live\.com/[^\s"'<>]{0,200}?[?&](?:redeem|authkey)=!?|(?:www\.|dl\.)?dropbox\.com/(?:s|sh|scl/f[io])/|dl\.dropboxusercontent\.com/(?:s|scl/f[io])/|db\.tt/)(?:(?:[a-z0-9_!%-]*[_-])?(?:your|tu|example|ejemplo)(?:[_-][a-z0-9_!%-]*)?|[a-z0-9_!%-]*[_-](?:here|aqui))(?:[^a-z0-9_!%-]|$)|^[a-z0-9-]{1,63}\.sharepoint\.com/:[a-z]{1,2}:/[gs]/(?:[a-z0-9_.%~-]{1,80}/){0,6}(?:(?:[a-z0-9_!%-]*[_-])?(?:your|tu|example|ejemplo)(?:[_-][a-z0-9_!%-]*)?|[a-z0-9_!%-]*[_-](?:here|aqui))$''',
 ]
