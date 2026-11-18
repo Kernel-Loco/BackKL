@@ -130,6 +130,22 @@ jobs:
           pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_siem.py pruebas/test_despliegue.py
           pruebas/test_ci.py
 
+      # RC-313, punto 3b: con la base a las 20:00 de México y la API en UTC, GET /api/v1/domains da 'missing' a una carta
+      # que empieza mañana. La base se levanta otra vez con libfaketime (pruebas/hora_base) en las 02:00 UTC de hoy, que
+      # son las 20:00 de México de ayer. La API no cambia y queda un día delante. Va al final porque deja la base con otra
+      # imagen y otro reloj, sobre el mismo volumen.
+      - name: Hora de la base fijada a las 20:00 de México
+        run: |
+          PG_IMAGE=$(docker compose config --images db)
+          FAKETIME_BASE=$(printf '%+ds' $(( $(TZ=UTC date -d 'today 02:00' +%s) - $(date +%s) )))
+          export PG_IMAGE FAKETIME_BASE
+          echo "Imagen $PG_IMAGE con el reloj de la base movido $FAKETIME_BASE"
+          docker compose -f docker-compose.yml -f pruebas/hora_base/docker-compose.yml up -d --build --wait db
+          HORA_BASE_FIJA=1 python -m unittest -v pruebas.test_api_v1.ApiV1.test_1c_carta_que_empieza_manana_con_la_base_a_las_20 \
+            2>&1 | tee hora_base.log
+          # Sin pipefail el código de salida es el de tee: pasa solo con 'OK' a secas, sin 'skipped'.
+          grep -qx 'OK' hora_base.log
+
       - name: Logs si algo falló
         if: failure()
         run: docker compose logs --no-color --tail=200
