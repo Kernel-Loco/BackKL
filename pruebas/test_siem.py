@@ -45,6 +45,7 @@ SCORE = {
     'id': 'a0000000-0000-4000-8000-000000000009', 'scan_id': '60000000-0000-4000-8000-000000000009', 'score': 64,
     'category_scores': {'infrastructure': 70, 'digital_identity': 20, 'configuration': 45, 'data_leaks': 80},
     'method': 'rules', 'model_version': None, 'rule_set_version': 2, 'reason': 'scan', 'partial_coverage': True,
+    'band_medium_from': 40, 'band_high_from': 60, 'band_critical_from': 80,
     'computed_at': datetime(2026, 11, 4, 12, 30, 16, tzinfo=MX),
 }
 CAMPOS_HALLAZGO = {'vendor_product', 'dvc', 'app', 'signature', 'signature_id', 'severity', 'category', 'dest',
@@ -171,6 +172,11 @@ class SalidaSiem(unittest.TestCase):
         self.assertTrue(ev['partial_coverage'])
         self.assertEqual(ev['computed_at'], SCORE['computed_at'].isoformat())
         self.assertNotIn('category_scores', ev)
+
+    def test_9b_la_banda_usa_los_cortes_del_juego_del_score(self):
+        # RC-237: el mismo 64 es medio con los cortes 50, 70 y 85.
+        propio = dict(SCORE, band_medium_from=50, band_high_from=70, band_critical_from=85)
+        self.assertEqual(siem.evento_score('olmardo.com', propio, **X)['event']['band'], 'medium')
 
     def test_10_ndjson_un_evento_por_linea_en_utf8_y_una_sola_exportacion(self):
         h = hallazgo(rule_title='Línea uno\nlínea dos')

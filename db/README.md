@@ -37,6 +37,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/021_textos_tls_sitio.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `tls_certificate_invalid` y `tls_legacy_only`, las 2 reglas del saludo TLS de la visita web (#121, RC-239). Sin técnica de ATT&CK, con ISO A.8.24 y CIS 3.10 como `cert_expired`. Va antes de la semilla 022 |
 | `migraciones/022_texto_enlaces_nube_repos.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `file_share_link_in_repo`, un enlace para compartir de Google Drive, OneDrive o SharePoint, o Dropbox, en un repo público (#16, RC-247). ATT&CK T1593.003 como `secret_in_public_repo` e ISO A.8.3 y CIS 3.3 como `public_bucket`. Va antes de la semilla 023 |
 | `migraciones/023_texto_ia_internetdb.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `exposed_ai_service` (sin técnica de ATT&CK, ISO A.8.20, CIS 4.4), la regla de los puertos por omisión de Ollama, LM Studio, Gradio, ComfyUI, Ray Dashboard, Qdrant y Milvus que ve Shodan InternetDB (#144, RC-262). Va antes de la semilla 024. Se puede correr otra vez sin error, pero vuelve a firmar el texto: no se corre otra vez si una migración posterior cambió el texto |
+| `migraciones/024_bandas_por_organizacion.sql` | Bandas de riesgo por cliente (RC-237, #118): `band_medium_from`, `band_high_from` y `band_critical_from` en `scoring_rule_sets`, NOT NULL, con 40, 60 y 80 en los juegos que ya existen. CHECK `scoring_rule_sets_band_cutoffs_ck`: medio desde 10, al menos 10 valores por banda y crítico a más tardar en 91. Trigger `scoring_rule_sets_copiar_cortes_bi`: un juego nuevo sin cortes copia los de la última versión de su organización o los del global activo. `cirdan_app` no recibe permisos nuevos: sigue solo con UPDATE de `is_active`, así los cortes de una versión no cambian. Va antes de reconstruir la API. Solo se corre una vez: la segunda falla en el ADD COLUMN |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -124,6 +125,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/021_textos_tls_sitio.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/022_texto_enlaces_nube_repos.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/023_texto_ia_internetdb.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/024_bandas_por_organizacion.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -445,6 +447,15 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT (SELECT count(*)
 
 Da `t`.
 
+Para las bandas por cliente (RC-237, #118) va la migración 024 antes de reconstruir la API: la API nueva lee `band_medium_from`, `band_high_from` y `band_critical_from` en cada consulta de score y sin ellas falla. La API anterior no las lee y con la 024 ya aplicada sigue igual. No trae semilla. Solo se corre una vez:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/024_bandas_por_organizacion.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM scoring_rule_sets WHERE (band_medium_from, band_high_from, band_critical_from) <> (40, 60, 80)"
+```
+
+Da `0` justo después de aplicarla: todos los juegos con los cortes de la plantilla.
+
 ## Respaldar y restaurar
 
 `respaldo/respaldar.sh` saca `pg_dump -Fc` de `cirdan` como postgres dentro del contenedor, lo cifra con age y una llave pública, lo deja con permisos 600 en una carpeta fuera del repo con los de los últimos 7 días y, en la VM, lo sube a Azure Blob (también los que un día no se pudieron subir). `respaldo/restaurar.sh` lo descifra y lo restaura siempre en una base nueva: nunca hace DROP DATABASE ni escribe sobre `cirdan`, no crea la base si no puede descifrar y le quita TEMPORARY a PUBLIC como la migración 004. `respaldo/conteos.sql` da filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base, y `respaldo/comparar.sh` compara esa salida entre dos bases del mismo contenedor. Contra la base de la VM se corre `conteos.sql` en las dos. Cómo se arma el timer en la VM, dónde queda la llave privada y cómo se baja un respaldo, en `docs/despliegue.md`, sección 'Respaldo diario'. Los respaldos traen datos personales: nunca van a git ni a la imagen (`.gitignore` y `.dockerignore` ignoran `respaldos/`, `*.dump` y `*.dump.age`). Valkey no se respalda.
@@ -459,7 +470,7 @@ La prueba 4b de `pruebas/test_catalogo_reglas.py` corre sin base y no sabe qué 
 - Las migraciones y las semillas que nombran `scoring_rules`, `scoring_rule_texts` o `scoring_rule_framework_mappings`, o un objeto (una tabla, una vista, una función) que crea o renombra un archivo que nombra los textos o el mapeo. Los nombres de las tablas se buscan en todo el texto, con comentarios y cadenas, también entre comillas y sin distinguir mayúsculas. Los de esos objetos se buscan en el SQL sin comentarios, y una función solo cuando se llama (su nombre y un paréntesis), así una función de nombre corto no hace entrar archivos que solo traen esa palabra. Lo que se crea TEMP no cuenta, porque `cargar_cirdan.sh` corre cada archivo en su propio `psql` y lo TEMP se borra al terminar.
 - Las que traen algo que arma SQL que no se ve o cambia cómo corre: `EXECUTE`, `format(`, `U&`, un `DO` con el cuerpo entre comillas simples, `set_config`, `search_path`, `session_replication_role`, `standard_conforming_strings`, `SET NAMES`, un `client_encoding` que no es UTF8, `CREATE TRIGGER` o `RULE`, `ALTER TABLE ... USING`, `COPY`, `CALL`, `CASCADE`, `dblink`, `DROP` o `ALTER SCHEMA`, `DROP` o `REASSIGN OWNED`, una escritura en las tablas `pg_` de Postgres o un meta-comando de psql (`\i`, `\set`, `\gexec`).
 
-Hoy entran 19: `db/init/cargar_cirdan.sh`, las migraciones 001 a 008, 011 a 013 y 016 a 019, y las semillas 001, 004 y 020. La 016 no nombra el catálogo: entra porque trae `search_path` y un trigger. La 018 tampoco: entra por el `search_path` de `passkey_lookup()`. Las demás no necesitan huella mientras no nombren esas tablas ni traigan nada de la lista.
+Hoy entran 28: `db/init/cargar_cirdan.sh`, las migraciones 001 a 008, 011 a 013 y 016 a 024, y las semillas 001, 004 y 020 a 024. La 016 no nombra el catálogo: entra porque trae `search_path` y un trigger. La 018 tampoco: entra por el `search_path` de `passkey_lookup()`. La 024 tampoco: entra por su trigger y el `search_path` de `scoring_rule_sets_copiar_cortes()`. Las demás no necesitan huella mientras no nombren esas tablas ni traigan nada de la lista.
 
 Cómo se agrega una huella:
 

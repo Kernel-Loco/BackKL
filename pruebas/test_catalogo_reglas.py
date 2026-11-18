@@ -148,6 +148,7 @@ HUELLAS_DB = {
     'db/migraciones/021_textos_tls_sitio.sql': '6160f534f3228be34c08335b1fdbd52774dcd4354e1451c3522484253dcf16fe',
     'db/migraciones/022_texto_enlaces_nube_repos.sql': '6a97d1aa68668ad8758e37b499010686baf4c91bfaede39f021d44f82eecdfc7',
     'db/migraciones/023_texto_ia_internetdb.sql': '21023fdae76fb51919a6e6edce31468b9e2d6e3fb637897441d76cf35f46e7ee',
+    'db/migraciones/024_bandas_por_organizacion.sql': '435dfb3b46d6d4b7db6b73e20630671781626fdca35b2f8f1e228671a1143fdd',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',

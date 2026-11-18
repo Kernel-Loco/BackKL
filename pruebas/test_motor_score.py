@@ -73,5 +73,19 @@ class MotorScore(unittest.TestCase):
         )
 
 
+    def test_los_cortes_solo_mueven_el_piso_y_la_banda(self):
+        # RC-237: los aportes, las notas por categoría y las severidades no cambian con los cortes.
+        hallazgos = [{'id': 'f1', 'rule_code': 'secret', 'severity': 'critical', 'status': 'open'}]
+        reglas = {'secret': {'id': 'r1', 'category': 'data_leaks', 'weight': 0.5, 'max_penalty': 40}}
+        plantilla = motor.calcular(hallazgos, reglas, PESOS_CATEGORIA)
+        propios = motor.calcular(hallazgos, reglas, PESOS_CATEGORIA, {'medium': 50, 'high': 70, 'critical': 85})
+        self.assertEqual(plantilla['category_scores'], propios['category_scores'])
+        self.assertEqual(plantilla['contributions'], propios['contributions'])
+        self.assertEqual((plantilla['score'], propios['score']), (60, 70))
+        self.assertEqual(propios['banda'], 'high')
+        with self.assertRaises(ValueError):
+            motor.calcular(hallazgos, reglas, PESOS_CATEGORIA, {'medium': 50, 'high': 55, 'critical': 85})
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

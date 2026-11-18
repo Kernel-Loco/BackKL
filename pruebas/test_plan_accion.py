@@ -86,6 +86,22 @@ class PlanAccion(unittest.TestCase):
         self.assertEqual((resultado['score_before'], resultado['band_before']), (54, 'medium'))
         self.assertEqual((resultado['actions'], resultado['total']), ([], 0))
 
+    def test_bandas_del_plan_y_la_simulacion_usan_los_cortes_del_juego(self):
+        # RC-237: con 50, 70 y 85 el 80 de antes es alto y no crítico, y el 60 del después es medio.
+        cortes = {'medium': 50, 'high': 70, 'critical': 85}
+        resultado = plan.construir_plan('olmardo.com', HALLAZGOS, REGLAS, PESOS, cortes=cortes)
+        self.assertEqual((resultado['score_before'], resultado['band_before']), (85, 'critical'))
+        simulado = plan.simular(HALLAZGOS, REGLAS, PESOS, ['secret'], cortes=cortes)
+        self.assertEqual(simulado['band_before'], 'critical')
+        self.assertEqual(simulado['band_after'], plan.criterio.banda(simulado['score_after'], cortes))
+        guardado = {'score': 80, 'category_scores': {'infrastructure': 80, 'digital_identity': 55,
+                                                     'configuration': 30, 'data_leaks': 90}}
+        con_guardado = plan.simular(HALLAZGOS, REGLAS, PESOS, ['secret', 'spf_missing'], guardado=guardado,
+                                    cortes=cortes)
+        self.assertEqual((con_guardado['score_before'], con_guardado['band_before']), (80, 'high'))
+        sin_cortes = plan.simular(HALLAZGOS, REGLAS, PESOS, ['secret', 'spf_missing'], guardado=guardado)
+        self.assertEqual(sin_cortes['band_before'], 'critical')
+
     def test_exportaciones_escapan_celdas_con_formula(self):
         data = plan.construir_plan('olmardo.com', HALLAZGOS, REGLAS, PESOS)
         csv = plan.exportar_csv(data)

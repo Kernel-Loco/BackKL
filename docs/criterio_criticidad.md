@@ -19,6 +19,16 @@ Responde al comentario 10 del socio formador en la revisión del 2 de octubre: �
 
 Las bandas están ancladas al ejemplo del reto: un dominio con 68 está en **riesgo alto**. El reto muestra ese 68 con barras de 80, 55, 40 y 90 y no publica sus pesos. Con los pesos v1 esas barras darían 70, que también es alto. El ancla es la banda, no el número exacto. Las notas de cada categoría usan las mismas bandas para su color en el portal.
 
+### Cortes por cliente (RC-237)
+
+La tabla de arriba es la plantilla global: medio empieza en 40, alto en 60 y crítico en 80. Cada organización puede mover esos tres cortes desde la pantalla de pesos del portal (`PUT /api/v1/scoring/weights` con `band_cutoffs`). Un banco puede querer que alto empiece en 50 y una tienda en 70.
+
+- Los cortes se guardan con el juego de reglas de la organización (`scoring_rule_sets.band_medium_from`, `band_high_from` y `band_critical_from`, migración 024), junto con sus pesos (#32). Un cambio de cortes crea una versión nueva del juego y recalcula los scores, porque el piso cambia el número. Una versión no cambia después de creada.
+- Una versión nueva que no manda cortes copia los de la anterior. La primera versión de una organización copia los del juego global.
+- Los cortes son enteros en orden y cada banda tiene al menos 10 valores: medio empieza en 10 o más, cada corte queda por lo menos 10 arriba del anterior y crítico empieza a más tardar en 91.
+- Cada score se lee con los cortes del juego con que se calculó (`domain_scores.rule_set_id`), no con los de hoy. Así un histórico no cambia de banda cuando la organización mueve sus cortes.
+- Los cortes solo tocan la banda, la letra y el piso del dominio. Las severidades de los hallazgos, el clasificador de RC-27 y el umbral de alerta (`organizations.alert_score_threshold`) no cambian con ellos.
+
 ## Letras de la A a la F (#114)
 
 Cada score lleva además una letra, que se entiende más rápido que el número. A es menos riesgo y F es más. No hay E. La letra sale del score final, ya con la regla de piso, y nunca contradice a la banda: A y B parten el bajo a la mitad.
@@ -31,13 +41,15 @@ Cada score lleva además una letra, que se entiende más rápido que el número.
 | D | 60 a 79 | Alto |
 | F | 80 a 100 | Crítico |
 
+La tabla es la de la plantilla. Con los cortes de un cliente las letras siguen a sus bandas: A va de 0 a la mitad del corte medio menos 1, B de ahí al corte medio menos 1, C es su medio, D su alto y F su crítico. Con 50, 70 y 85, A va de 0 a 24, B de 25 a 49, C de 50 a 69, D de 70 a 84 y F de 85 a 100.
+
 Por el piso, un dominio con un hallazgo crítico vigente tiene al menos D, y con dos o más tiene F. La letra es solo otra forma de leer el score: la alerta y el umbral siguen con el número de 0 a 100. Si el score tiene cobertura parcial (`partial_coverage`), la letra lleva el mismo aviso que el score. Las notas por categoría no llevan letra.
 
 ## Cómo se calcula el score de un dominio
 
 1. El motor de score (#31) calcula la nota de cada categoría con las reglas del catálogo (#30). Con `method = 'ml'` (#36), la severidad de cada hallazgo sale del clasificador con la correspondencia de la sección «Severidad de cada hallazgo», y el ponderado y el piso se aplican igual. Si el clasificador no supera a las reglas (#34), el score sigue con `method = 'rules'`.
 2. **Ponderado:** la suma de cada nota por su peso en el juego de reglas activo. Los pesos suman 1 y cambian solo con una versión nueva del juego de reglas (#32). En el juego v1 son infraestructura 30 %, identidad digital 20 %, configuración 20 % y fugas de datos 30 %. El resultado se redondea al entero, con .5 hacia arriba.
-3. **Piso:** si el dominio tiene un hallazgo crítico vigente, su score queda al menos en 60, que es la banda alto. Con dos o más, queda al menos en 80, que es la banda crítico.
+3. **Piso:** si el dominio tiene un hallazgo crítico vigente, su score queda al menos en el inicio de su banda alto (60 con la plantilla). Con dos o más, queda al menos en el inicio de su banda crítico (80 con la plantilla). Con los cortes 50, 70 y 85, un hallazgo crítico deja el dominio en 70, banda alto y letra D.
 4. **Score final:** el mayor entre el ponderado y el piso. Si el piso lo subió, el detalle del score lo dice (#31).
 
 ### Aporte de cada hallazgo (#31)
@@ -130,7 +142,7 @@ En el cuarto caso la nota de fugas queda en alto, pero el ponderado da 43, que e
 
 ## Alerta
 
-La alerta `score.above_threshold` se crea en cada cálculo en que el score queda **en el umbral o arriba** (score >= umbral), aunque haya bajado respecto al anterior. Si queda abajo, no se crea. Evitar alertas repetidas para un dominio que se queda arriba del umbral es una propuesta para #65, no cambia este criterio. El umbral por defecto es 60 y cada empresa lo puede cambiar (`organizations.alert_score_threshold`). Con el umbral por defecto, la alerta coincide con el inicio de la banda alto.
+La alerta `score.above_threshold` se crea en cada cálculo en que el score queda **en el umbral o arriba** (score >= umbral), aunque haya bajado respecto al anterior. Si queda abajo, no se crea. Evitar alertas repetidas para un dominio que se queda arriba del umbral es una propuesta para #65, no cambia este criterio. El umbral por defecto es 60 y cada empresa lo puede cambiar (`organizations.alert_score_threshold`). Con el umbral por defecto y los cortes de la plantilla, la alerta coincide con el inicio de la banda alto. El umbral no se mueve con los cortes del cliente: la pantalla de alertas del portal dice en qué banda del cliente queda.
 
 ## Severidad de cada hallazgo
 
