@@ -311,13 +311,28 @@ class BaseFalsa:
 
 class Login(Base):
     """Puntos 3, 4 y 5 por la ruta de /auth/login, con base y Valkey falsos."""
+    TICKET = [1, 2]  # lo que devuelve take_login_attempt: el vencimiento de cada contador
+
+    @classmethod
+    def sesiones(cls, ticket=TICKET):
+        return mock.Mock(**{'take_login_attempt.return_value': ticket, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+
+    def assert_vuelve_a_contar(self, sesiones, respuesta):
+        # RC-270: el intento se devolvió al ver la contraseña buena, pero ya no abre la huella de ahora: vuelve a
+        # contar, después de la devolución, y queda en la bitácora como cualquier contraseña mala.
+        from cirdan.auth import routes
+        nombres = [c[0] for c in sesiones.mock_calls if c[0] in ('refund_login_attempt', 'register_fail')]
+        self.assertEqual(nombres, ['refund_login_attempt', 'register_fail'])
+        sesiones.refund_login_attempt.assert_called_once_with('alex@acme-demo.mx', '127.0.0.1', self.TICKET)
+        sesiones.register_fail.assert_called_once_with('alex@acme-demo.mx', '127.0.0.1')
+        self.assertEqual((respuesta.background.func, respuesta.background.args),
+                         (routes._audit_bad_password, (ORG, ALEX, '127.0.0.1')))
 
     def entrar(self, huella, clave=CLAVE, user_id=ALEX, existe=True, rowcount=1, sesiones=None, releida=None):
         from cirdan.auth import routes
         base = BaseFalsa({'user_id': user_id, 'organization_id': ORG, 'password_hash': huella, 'mfa_enabled': True}
                          if existe else None, rowcount, releida)
-        sesiones = sesiones or mock.Mock(**{'is_locked.return_value': False,
-                                            'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+        sesiones = sesiones or self.sesiones()
         with mock.patch.object(routes, 'transaction', base.transaction), \
                 mock.patch.object(routes, 'sessions', sesiones), \
                 mock.patch.object(routes, 'client_ip', return_value='127.0.0.1'), \
@@ -347,12 +362,13 @@ class Login(Base):
         # Ronda 1, hallazgo 7: el UPDATE condicional no tocó ninguna fila porque la contraseña cambió entre la
         # búsqueda y el rehash. La contraseña que se verificó ya no es la de la cuenta: 401 y ni mfa_token ni
         # sesión.
-        sesiones = mock.Mock(**{'is_locked.return_value': False, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+        sesiones = self.sesiones()
         respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), rowcount=0, sesiones=sesiones,
                                       releida=passwords.hash_password('Otra-Clave-De-Prueba-2', ALEX))
         self.assertEqual(respuesta.status_code, 401)
         self.assertEqual((len(base.updates), base.relecturas), (1, 1))
         sesiones.create_mfa.assert_not_called()
+        self.assert_vuelve_a_contar(sesiones, respuesta)
 
     def test_3f_dos_logins_seguidos_con_huella_vieja_entran_los_dos(self):
         # Ronda 2, R1: doble clic. El primer login ya cifró la huella vieja, así que el UPDATE del segundo no toca
@@ -363,10 +379,21 @@ class Login(Base):
         self.assertEqual((len(base.updates), base.relecturas), (1, 1))
 
     def test_3g_si_la_fila_ya_no_esta_al_releer_no_entra(self):
-        sesiones = mock.Mock(**{'is_locked.return_value': False, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+        sesiones = self.sesiones()
         respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), rowcount=0, sesiones=sesiones, releida=False)
         self.assertEqual(respuesta.status_code, 401)
         self.assertEqual(base.relecturas, 1)
+        sesiones.create_mfa.assert_not_called()
+        self.assert_vuelve_a_contar(sesiones, respuesta)
+
+    def test_3h_con_el_bloqueo_alcanzado_no_revisa_ni_cifra_la_huella(self):
+        # RC-270: take_login_attempt sin comprobante es el 429, antes de buscar la cuenta y de tocar la huella.
+        sesiones = self.sesiones(ticket=None)
+        respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), sesiones=sesiones)
+        self.assertEqual(respuesta.status_code, 429)
+        self.assertEqual(base.updates, [])
+        sesiones.refund_login_attempt.assert_not_called()
+        sesiones.register_fail.assert_not_called()
         sesiones.create_mfa.assert_not_called()
 
     def test_3c_el_hash_de_relleno_no_abre_ninguna_cuenta(self):
