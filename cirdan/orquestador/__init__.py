@@ -63,12 +63,12 @@ TXT_DETALLE = {
 }
 FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
 
-# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 18 minutos solo de HTTP: 1055 s en el peor caso,
-# con crt.sh arriba y lento (155 s de cada una de sus 2 búsquedas con 3 intentos de 45 s, 180 s de las 4 páginas de Cert
-# Spotter con 2 intentos de 20 s, 95 s de %marca% con 2 intentos de 45 s y 470 s de las 10 variantes, que es
-# PRESUPUESTO_VARIANTES de crtsh.py, con 20 s en el primer intento y hasta 45 s en el segundo, o 45 s desde el primero
+# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 15 minutos solo de HTTP: 865 s en el peor caso,
+# con crt.sh arriba y lento (120 s de sus 2 búsquedas juntas, PLAZO_PRINCIPAL de crtsh.py, RC-218, 180 s de las 4
+# páginas de Cert Spotter con 2 intentos de 20 s, 95 s de %marca% con 2 intentos de 45 s y 470 s de las 10 variantes,
+# que es PRESUPUESTO_VARIANTES de crtsh.py, con 20 s en el primer intento y hasta 45 s en el segundo, o 45 s desde el primero
 # si crt.sh viene lento: el presupuesto no cambia, #109, RC-226).
-# Quedan 145 s antes de TOPE_CORRIDA, y el DNS de los nombres vencidos no tiene tope.
+# Quedan 335 s antes de TOPE_CORRIDA, y el DNS de los nombres vencidos no tiene tope.
 # Por eso, mientras corre una fuente, un hilo aparte marca vida cada LATIDO, hasta TOPE_CORRIDA: una corrida
 # colgada para siempre deja de marcar y el escaneo se da por caído pasado ABANDONO.
 LATIDO = 60                           # segundos entre marcas
@@ -288,6 +288,13 @@ def _latido(org, scan_id, conn=None):
 # llave: el secreto de GitHub su repo en 'repo', el puerto de Shodan su IP en 'ip' (la CVE, con '/cve'), y el correo
 # sus repos en 'repos', que sirven solo si no se cortaron en MAX_REPOS_ACTIVO (5) de github.py. La vigencia de un
 # certificado de ct_logs la arma con 'host' y 'vence', como _parte de crtsh.py (RC-55).
+# Hallazgos de ct_logs que se cierran por fecha en toda corrida de la fuente que respondió, aunque sea parcial (RC-55 y
+# RC-218): (código, campo de la evidencia, días). Se cierra si el campo es anterior a la hora del escaneo menos esos
+# días. cert_new_issuer deja de ser reciente a los crtsh.VENTANA_EMISOR_DIAS de emitido o al vencer, y
+# cert_internal_name cuenta hasta crtsh.VENTANA_VENCIDOS_DIAS después de vencer su certificado más reciente.
+CIERRE_POR_FECHA = (('cert_expiring_soon', 'vence', 0), ('cert_new_issuer', 'vence', 0),
+                    ('cert_new_issuer', 'emitido', 90), ('cert_internal_name', 'vence', 365))
+
 PARTES = ('''COALESCE(evidence->'partes', '''
           '''CASE WHEN jsonb_typeof(evidence->'repo') = 'string' THEN jsonb_build_array(evidence->'repo') END, '''
           '''CASE WHEN jsonb_typeof(evidence->'ip') = 'string' THEN '''
@@ -434,9 +441,12 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
     # Un certificado por vencer cuyo vencimiento ya pasó se cierra en toda corrida de su fuente que respondió, aunque no
     # lo haya visto: ya no está por vencer, y si la fuente siempre queda parcial (crt.sh solo con la búsqueda por nombre,
     # o más certificados de los que caben en las páginas de Cert Spotter) nunca llegaría la corrida completa que lo
-    # cierra (RC-55). 'vence' es un isoformat en UTC
-    # (crtsh._fecha): se compara como texto con la hora del escaneo en el mismo formato, así una fecha rota no lo cierra
+    # cierra (RC-55). Igual los de higiene que crt.sh ya no daría por fecha (CIERRE_POR_FECHA, RC-218). Las fechas de la
+    # evidencia son isoformat en UTC
+    # (crtsh._fecha): se comparan como texto con la hora del corte en el mismo formato, así una fecha rota no lo cierra
     # ni tumba la transacción.
+    cortes = [((ahora or datetime.now(timezone.utc)) - timedelta(days=dias)).astimezone(timezone.utc).isoformat()
+              for _, _, dias in CIERRE_POR_FECHA]
     cerrados = {f['id'] for f in conn.execute(
         "UPDATE findings SET status = 'resolved', resolved_at = now(), last_scan_id = %(scan)s, updated_at = now() "
         "WHERE domain_id = %(dominio)s AND source_id = %(fuente)s AND status = 'open' "
@@ -446,15 +456,16 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         'AND (%(revisados)s::text[] IS NULL OR (jsonb_array_length({p}) > 0 AND CASE '
         'WHEN %(sin_revisar)s::text[] IS NULL THEN {p} <@ to_jsonb(%(revisados)s::text[]) '
         'ELSE NOT ({p} ?| %(sin_revisar)s::text[]) END))) '
-        "OR (rule_id IN (SELECT id FROM scoring_rules WHERE code = 'cert_expiring_soon') "
-        "AND jsonb_typeof(evidence->'vence') = 'string' "
-        "AND evidence->>'vence' ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}(\\.\\d{{1,6}})?\\+00:00$' "
-        "AND (evidence->>'vence') COLLATE \"C\" < %(ahora)s)) RETURNING id::text".format(p=PARTES),
+        'OR EXISTS (SELECT 1 FROM unnest(%(codigos)s::text[], %(campos)s::text[], %(cortes)s::text[]) '
+        'AS c(codigo, campo, corte) JOIN scoring_rules r ON r.code = c.codigo WHERE r.id = findings.rule_id '
+        "AND jsonb_typeof(evidence->c.campo) = 'string' "
+        "AND evidence->>c.campo ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}(\\.\\d{{1,6}})?\\+00:00$' "
+        "AND (evidence->>c.campo) COLLATE \"C\" < c.corte)) RETURNING id::text".format(p=PARTES),
         {'scan': scan_id, 'dominio': domain_id, 'fuente': source_id,
          'huellas': huellas + [bytes.fromhex(h) for h in resultado.omitidos],
          'sin_cobertura': list(resultado.sin_cobertura), 'revisados': resultado.revisados,
-         'sin_revisar': resultado.sin_revisar,
-         'ahora': (ahora or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()},
+         'sin_revisar': resultado.sin_revisar, 'codigos': [c for c, _, _ in CIERRE_POR_FECHA],
+         'campos': [c for _, c, _ in CIERRE_POR_FECHA], 'cortes': cortes},
     ).fetchall()}
     return abiertos, cerrados
 

@@ -974,6 +974,53 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.abiertos('host', nuevo), {'nuevo.acme-demo.mx': 'resolved'})
         self.assertEqual(self.conteos(s.scan_id)[1], 1)
 
+    TIENDA_SECTIGO = cert(50, ['tienda.acme-demo.mx'], '2026-10-01T00:00:00', '2027-01-01T00:00:00',
+                          emisor='C=GB, O=Sectigo Limited, CN=Sectigo RSA Domain Validation Secure Server CA')
+
+    def test_2z3_la_autoridad_nueva_y_el_nombre_interno_se_cierran_por_fecha_aunque_toda_corrida_sea_parcial(self):
+        """RC-218: si ct_logs siempre queda parcial y no vuelve a ver esos certificados, cert_new_issuer se cierra a los
+        90 días de emitido y cert_internal_name a los 365 días de vencido, cuando crtsh.py ya no los daría. Antes no."""
+        completo = self.ct_logs(SUBDOMINIOS + [self.TIENDA_SECTIGO], [EMISIONES])
+        self.reescanear(completo, 'ct_logs', AHORA)
+        # el 9004 de EMISIONES (SSL Corporation) también es una autoridad nueva: solo cuenta el de Sectigo
+        [nueva] = [h for h in completo.hallazgos if h.codigo == 'cert_new_issuer' and 'Sectigo' in h.evidencia['emisor']]
+        [interno] = [h for h in completo.hallazgos if h.codigo == 'cert_internal_name']
+        self.assertEqual((nueva.evidencia['emitido'], interno.evidencia['vence']),
+                         ('2026-10-01T00:00:00+00:00', '2026-08-26T00:00:00+00:00'))
+        parcial = Resultado(**dict(vars(completo), hallazgos=[], sin_cobertura=[], sin_revisar=None,
+                                   revisados=['nada.acme-demo.mx@2026-01-01T00:00:00+00:00']))
+        for ahora, esperado in ((datetime(2026, 12, 29, 23, 59, tzinfo=timezone.utc), ('open', 'open')),
+                                (datetime(2026, 12, 30, 0, 0, 1, tzinfo=timezone.utc), ('resolved', 'open')),
+                                (datetime(2027, 8, 25, 23, 59, tzinfo=timezone.utc), ('resolved', 'open')),
+                                (datetime(2027, 8, 26, 0, 0, 1, tzinfo=timezone.utc), ('resolved', 'resolved'))):
+            with self.subTest(ahora=ahora):
+                _, resumen = self.reescanear(parcial, 'ct_logs', ahora)
+                self.assertEqual(resumen['stats']['sources_partial'], ['ct_logs'])
+                self.assertEqual((self.abiertos('emisor', nueva).popitem()[1],
+                                  self.abiertos('host', interno).popitem()[1]), esperado)
+
+    def test_2z4_el_respaldo_sin_todas_sus_paginas_no_cierra_un_nombre_interno(self):
+        """RC-218: con crt.sh caído, el respaldo de Cert Spotter sin todas sus páginas no trae los vencidos y deja
+        cert_internal_name en sin_cobertura. Su revisados no lleva partes interno:, así que el nombre interno dev, que
+        sale de un certificado vencido, sigue abierto entre los dos escaneos y no cuenta como resuelto."""
+        sin_comodin = EMISIONES[:3]   # sin el comodín 9004, que cubriría al vencido de dev
+        self.reescanear(self.ct_logs(SUBDOMINIOS, [sin_comodin]), 'ct_logs', AHORA)
+        [interno] = [h for h in self.ct_logs(SUBDOMINIOS, [sin_comodin]).hallazgos if h.codigo == 'cert_internal_name']
+        respaldo, _ = recolectar_ct(RespaldoSimulado(paginas=[sin_comodin, []], limite_en=1))
+        self.assertIn('cert_internal_name', respaldo.sin_cobertura)
+        self.assertFalse([p for p in respaldo.revisados if p.startswith(crtsh.INTERNO)])
+        s, resumen = self.reescanear(respaldo, 'ct_logs', AHORA)
+        self.assertEqual(resumen['stats']['sources_partial'], ['ct_logs'])
+        self.assertEqual(self.abiertos('host', interno), {'dev.acme-demo.mx': 'open'})
+        self.assertEqual(self.conteos(s.scan_id)[1], 0)
+
+    def test_2z5_el_cierre_por_fecha_usa_las_ventanas_de_crtsh(self):
+        """Los días de CIERRE_POR_FECHA son los de crtsh.py: si una ventana cambia allá, esta prueba lo avisa."""
+        self.assertEqual(orquestador.CIERRE_POR_FECHA,
+                         (('cert_expiring_soon', 'vence', 0), ('cert_new_issuer', 'vence', 0),
+                          ('cert_new_issuer', 'emitido', crtsh.VENTANA_EMISOR_DIAS),
+                          ('cert_internal_name', 'vence', crtsh.VENTANA_VENCIDOS_DIAS)))
+
     def test_2z2_un_archivo_danado_de_la_grabacion_de_ct_logs_no_cierra_nada(self):
         """RC-46 (Ernesto, 9 nov): al reproducir con un archivo de la grabación dañado, ct_logs no cierra ningún
         hallazgo en ese escaneo, ni el por vencer de pagos, que solo trae crt.sh. El escaneo queda parcial, con ct_logs
@@ -1033,7 +1080,8 @@ class Orquestador(unittest.TestCase):
             resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], modo='reproducir', ahora=AHORA,
                                          conn=self.conn)
         self.assertEqual(resumen['status'], 'partial')
-        self.assertEqual(resumen['stats']['rules_without_coverage'], ['cert_expired', 'lookalike_domain'])
+        self.assertEqual(resumen['stats']['rules_without_coverage'],
+                         ['cert_expired', 'cert_internal_name', 'cert_new_issuer', 'lookalike_domain'])  # RC-218
         self.assertNotIn('sources_partial', resumen['stats'])   # el respaldo con todas sus páginas es completo (RC-55)
         self.assertEqual((resumen['stats']['sources_ok'], resumen['stats']['assets']), (1, 4))
         run = self.uno('SELECT status, attempt FROM scan_source_runs WHERE scan_id = %s', s.scan_id)
@@ -1061,7 +1109,8 @@ class Orquestador(unittest.TestCase):
         self.assertEqual([n for n in t.dns if not n.endswith('acme-demo.mx')], [])  # ni su DNS
         self.assertNotIn('rules_without_coverage', resumen['stats'])
         self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 7)  # el vencido, el que vence pronto y 5 parecidos
+        # el vencido, el que vence pronto, el nombre interno dev (RC-218) y 5 parecidos
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 8)
         parecidos = self.conn.execute(
             "SELECT f.evidence->>'dominio_parecido' AS d, a.value AS activo FROM findings f "
             "JOIN scoring_rules r ON r.id = f.rule_id JOIN assets a ON a.id = f.asset_id "
@@ -1099,7 +1148,7 @@ class Orquestador(unittest.TestCase):
         resumen = escanear(SinParecidos())
         self.assertEqual(resumen['status'], 'partial')
         self.assertEqual(resumen['stats']['rules_without_coverage'], ['lookalike_domain'])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 2)
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 3)  # con el nombre interno dev (RC-218)
         self.assertEqual(abiertos(), antes + 5)  # nunca '0 parecidos': siguen abiertos
 
     def escanear_ct(self, t):
@@ -1133,7 +1182,7 @@ class Orquestador(unittest.TestCase):
         _, resumen = self.escanear_ct(SinLaVariante())
         self.assertNotIn('rules_without_coverage', resumen['stats'])
         self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 6)  # los 7 de siempre menos el de la variante
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 7)  # los 8 de siempre menos el de la variante
         self.assertEqual(estado(), ['open'])  # no saber si sigue ahí no es que ya no esté
         self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
         sin_certificado = CrtshSimulado()

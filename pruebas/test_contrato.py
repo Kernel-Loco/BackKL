@@ -479,7 +479,7 @@ class Ejecutar(unittest.TestCase):
         self.assertIn(certspotter.INCOMPLETO, res.avisos)  # se cortó en MAX_PAGINAS
         self.assertEqual(res.consultas, 2 * crtsh.INTENTOS + certspotter.MAX_PAGINAS * crtsh.INTENTOS)
         self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
-        self.assertEqual(res.sin_cobertura, ['cert_expired', 'lookalike_domain'])  # con crt.sh caído no se buscan
+        self.assertEqual(res.sin_cobertura, certspotter.SIN_COBERTURA)  # con crt.sh caído no se buscan
 
     def test_15d_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
         """Con crt.sh arriba y los parecidos (#109, RC-226): el comodín falla sus 3 intentos, la búsqueda por nombre
@@ -560,7 +560,8 @@ class Ejecutar(unittest.TestCase):
         ninguno = self.escanear(CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS}))
         self.assertEqual((ninguno.estado, ninguno.sin_cobertura, ninguno.avisos), ('succeeded', [], []))
         self.assertEqual(self.parecidos(ninguno), [])  # se buscó y no hay: 0 parecidos con cobertura
-        self.assertEqual({h.codigo for h in ninguno.hallazgos}, {'cert_expired', 'cert_expiring_soon'})
+        self.assertEqual({h.codigo for h in ninguno.hallazgos},
+                         {'cert_expired', 'cert_expiring_soon', 'cert_internal_name'})
 
     def test_16c_si_crtsh_no_responde_a_los_parecidos_quedan_sin_cobertura(self):
         """El Hecho cuando 3 de RC-226: nunca '0 parecidos'. crt.sh da los subdominios y luego deja de responder."""
@@ -575,7 +576,8 @@ class Ejecutar(unittest.TestCase):
         res = self.escanear(t)
         self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']))
         self.assertEqual(self.parecidos(res), [])
-        self.assertEqual({h.codigo for h in res.hallazgos}, {'cert_expired', 'cert_expiring_soon'})  # lo demás sigue
+        self.assertEqual({h.codigo for h in res.hallazgos},
+                         {'cert_expired', 'cert_expiring_soon', 'cert_internal_name'})  # lo demás sigue
         # H3 de la ronda 3: sin %marca% no se consulta ninguna variante. Solo salen sus 2 intentos, no 6 más.
         self.assertEqual([crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls],
                          ['%.acme-demo.mx'] + ['%acme-demo%'] * crtsh.INTENTOS_PARECIDOS)
@@ -585,7 +587,7 @@ class Ejecutar(unittest.TestCase):
         self.assertIn('Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).', crtsh.resumen(res))
 
         caido = self.escanear(RespaldoSimulado())  # crt.sh caído del todo: respaldo de Cert Spotter, sin parecidos
-        self.assertEqual((caido.estado, caido.sin_cobertura), ('succeeded', ['cert_expired', 'lookalike_domain']))
+        self.assertEqual((caido.estado, caido.sin_cobertura), ('succeeded', certspotter.SIN_COBERTURA))
         self.assertEqual(self.parecidos(caido), [])
 
     def test_16c2_una_variante_sin_respuesta_no_cierra_su_parecido_y_sin_marca_no_hay_cobertura(self):

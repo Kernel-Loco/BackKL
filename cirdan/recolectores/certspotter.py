@@ -11,9 +11,11 @@ carpeta de crt.sh del dominio con la misma Grabadora, así --reproducir lo repit
 
 Lo que no da:
 - certificados vencidos: la API solo devuelve certificados que todavía no vencen,
-- dominios parecidos: solo busca el dominio y sus subdominios.
-Por eso, cuando es respaldo, el resultado deja cert_expired y lookalike_domain en sin_cobertura
-(cobertura parcial, no 0).
+- dominios parecidos: solo busca el dominio y sus subdominios,
+- lo que depende de los vencidos (RC-218): un nombre interno cuenta también en un certificado que venció hace menos
+  de un año, y sin los vencidos no se sabe qué autoridades usaba antes el dominio.
+Por eso, cuando es respaldo, el resultado deja cert_expired, cert_internal_name, cert_new_issuer y lookalike_domain en
+sin_cobertura (cobertura parcial, no 0). Con revisados en None el orquestador no cierra lo abierto de esos códigos.
 
 Sin llave de API el límite es pequeño (unas 10 consultas por hora de un dominio con sus
 subdominios), y el complemento gasta el mismo cupo que necesita el respaldo. Cada corrida pide a lo más
@@ -37,9 +39,10 @@ PREFIJO = 'certspotter:'     # consulta de la grabadora: certspotter_<dominio>.j
 MAX_PAGINAS = 4              # cada página es una consulta del límite por hora (unas 10), la vacía que cierra también
 SIN_REINTENTO = (429,)       # límite por hora alcanzado: reintentar a los 5 o 15 s solo gasta cupo
 COMPLEMENTO = {'intentos': 2, 'timeout': 20}  # con crt.sh arriba: un Cert Spotter lento no detiene el escaneo
-SIN_COBERTURA = ['cert_expired', 'lookalike_domain']
+SIN_COBERTURA = ['cert_expired', 'cert_internal_name', 'cert_new_issuer', 'lookalike_domain']
 SOLO = ('Los subdominios y certificados vigentes salen de Cert Spotter (SSLMate), que no da certificados vencidos ni '
-        'dominios parecidos')
+        'dominios parecidos: quedan sin revisar los vencidos, los nombres internos, las autoridades nuevas y los '
+        'parecidos')
 AVISO = 'crt.sh no respondió. ' + SOLO
 AVISO_DANADA = 'La grabación de crt.sh está dañada. ' + SOLO  # al reproducir: crt.sh sí pudo haber respondido
 INCOMPLETO = ('Cert Spotter no dio todas las páginas o alguna emisión no se pudo leer: pueden faltar subdominios y '

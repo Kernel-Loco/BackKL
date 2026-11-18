@@ -43,6 +43,6 @@
     {"kri": "impersonation", "name": "Suplantación", "status": "ok", "subcategories": ["impersonation"], "sources": ["ct_logs"], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": 0, "max_severity": null, "penalty": 0.0},
     {"kri": "reputation", "name": "Reputación", "status": "no_source_yet", "subcategories": [], "sources": [], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": null, "max_severity": null, "penalty": null}
   ],
-  "kri_map_version": 6,
+  "kri_map_version": 7,
   "alert": {"threshold": 60, "triggered": true}
 }
