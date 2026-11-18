@@ -90,7 +90,9 @@ Para que un sistema de la propia empresa lea la API sin la sesión del portal. E
 | `grade` | La letra del score final, ya con el piso: A de 0 a 19, B de 20 a 39, C de 40 a 59, D de 60 a 79 y F de 80 a 100. No hay E. Va en `score.json` y en cada punto del histórico (#114, [`criterio_criticidad.md`](criterio_criticidad.md)). Con `partial_coverage` en `true` lleva el mismo aviso que el score |
 | `weighted`, `floor`, `floor_applied` | La suma ponderada, el piso por hallazgos críticos y si el piso subió el score. El portal muestra el aviso del piso cuando `floor_applied` es `true` (#29) |
 | `floor_message` | Explicación en español del piso cuando aplica; `null` si el ponderado ya alcanza el mínimo |
-| `critical_open` | Hallazgos que cuentan para el piso: `critical` y `open` o `accepted_risk` |
+| `critical_open` | Hallazgos que cuentan para el piso: `critical` y `open` o `accepted_risk`. En `score.json` son los de este momento. En cada punto del histórico, los que tenía ese score |
+| `critical_at_time` | Solo en `score.json`. Los críticos que tenía el score guardado. Con ellos salen `floor`, `floor_applied` y `floor_message`, igual que en el histórico (RC-316) |
+| `needs_rescan` | Solo en `score.json`. `true` si `critical_open` y `critical_at_time` ya no coinciden, por ejemplo por un crítico nuevo o uno resuelto a mano después del último score. El portal puede pedir un escaneo nuevo (RC-316) |
 | `method` | `rules` o `ml` (#36) |
 | `model_version` | Versión del clasificador; `null` si el score se calculó con reglas |
 | `model_fallback_reason` | Motivo por el que este score usó reglas; `null` cuando se usó ML |

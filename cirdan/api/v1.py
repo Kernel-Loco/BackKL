@@ -338,7 +338,12 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
         aportes = conn.execute(SCORE_APORTES_SQL, (rows[-1]['score_id'],)).fetchall()
         corridas = {r['source']: r['status']
                     for r in conn.execute(SCORE_CORRIDAS_SQL, (rows[-1]['scan_id'],)).fetchall()}
-    base, weights = _score_base(rows[-1], critical_open)
+    # El piso y su mensaje explican el score guardado con los críticos de su snapshot, como el histórico. Los de
+    # ahora van aparte en critical_open y needs_rescan avisa que ya no coinciden (RC-316).
+    critical_at_time = rows[-1]['critical_at_time']
+    base, weights = _score_base(rows[-1], critical_at_time)
+    base.update(critical_open=critical_open, critical_at_time=critical_at_time,
+                needs_rescan=critical_open != critical_at_time)
     stats = rows[-1]['stats'] or {}
     subs, kris = subcategorias.resumen(aportes, corridas, stats.get('rules_without_coverage') or (),
                                        stats.get('sources_partial') or ())
