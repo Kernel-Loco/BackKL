@@ -1,6 +1,6 @@
 """Arma gitleaks_cirdan.toml, la config de gitleaks del recolector de GitHub (#16, RC-50), desde el binario de gitleaks.
 
-Es la config por omisión que gitleaks trae embebida, copiada sin herencia y con tres cambios:
+Es la config por omisión que gitleaks trae embebida, copiada sin herencia y con cuatro cambios:
 - CAMBIOS quita o ancla rutas de la lista global que se salta (paths de [allowlist]). La de 8.21.2 salta archivos que
   escribe el cliente: los lock files, todo lo que lleve 'gitleaks.toml' en la ruta y lo que termine en doc, bin o v2
   aunque no sea extensión, como guia.adoc, api/v2 o scripts/bin. CONSERVADAS se quedan como vienen: dependencias que
@@ -9,6 +9,18 @@ Es la config por omisión que gitleaks trae embebida, copiada sin herencia y con
   de jQuery y Swagger UI. Esa última también salta un archivo del cliente cuyo nombre empiece con jquery o swagger-ui.
 - Se agrega la regla cirdan-fake-token. Ninguna de omisión halla un token CIRDAN_FAKE_: generic-api-key descarta los
   valores con la palabra 'fake' y el token sembrado en olmardo/sitio-reservas no tiene la forma de ningún proveedor.
+- Se agregan las 3 reglas de REGLAS_ENLACES (RC-247): la forma de un enlace para compartir de Google Drive, de
+  OneDrive o SharePoint y de Dropbox. Solo reconocen el texto del enlace: nada abre, sigue ni valida el enlace, que
+  sería usar un acceso filtrado. No tienen capturas, así que el secreto es el enlace entero y --redact lo tapa todo.
+  Las de Google Drive y Dropbox se llevan también el resto del enlace: así el valor de un resourcekey= o un rlkey=,
+  que generic-api-key halla aparte, queda dentro de su secreto y gitleaks quita el genérico, que github.py volvería
+  secret_in_public_repo. Su allowlist propia solo lleva regexes, nunca paths: en gitleaks las paths y las regexes de
+  una allowlist se unen con OR, así que una ruta de documentación (README.md, docs/, wiki/) saltaría el enlace aunque
+  ninguna regex lo permita. Esas regexes (PLANTILLA) saltan el texto de plantilla, como TU_ID_AQUI, YOUR_SHARE_ID o
+  FOLDER_ID_HERE. Fuera de eso les aplica la allowlist global, como a las demás reglas, que no salta Markdown,
+  AsciiDoc ni texto. Lo demás que no tiene forma de enlace real, como drive.google.com/file/d/<ID>/view, no da
+  hallazgo porque el identificador pide un largo mínimo y no admite < ni >. github.py da file_share_link_in_repo con
+  ellas y no secret_in_public_repo.
 - Cambian el encabezado y el título. El encabezado trae la licencia MIT de gitleaks, porque las reglas son suyas.
 Se copia en vez de heredarla con [extend] useDefault porque en 8.21.2 la allowlist heredada se suma a la propia y no
 se le puede quitar nada.
@@ -28,7 +40,8 @@ import sys
 
 LICENCIA = '/usr/share/licenses/gitleaks/LICENSE'   # la deja el Dockerfile
 MARCA = 'title = "gitleaks config"'                  # primera línea que no es comentario de la config embebida
-TITULO = 'title = "LowTide: reglas de omisión de gitleaks y tokens falsos CIRDAN_FAKE_"'
+TITULO = ('title = "LowTide: reglas de omisión de gitleaks, tokens falsos CIRDAN_FAKE_ y enlaces para compartir de '
+          'la nube"')
 
 # Ruta de la lista global de 8.21.2 -> la que la reemplaza, o None si se quita. Las que se quedan como vienen están
 # en CONSERVADAS.
@@ -80,6 +93,47 @@ description = "Token falso de LowTide (prefijo CIRDAN_FAKE_), de la siembra o de
 regex = \'\'\'CIRDAN_FAKE_[A-Za-z0-9_-]{8,}\'\'\'
 keywords = ["cirdan_fake_"]
 '''
+
+# Enlaces para compartir (RC-247). Sus id son las llaves de github.SERVICIOS_ENLACE. Formas que se reconocen:
+# - Google Drive: drive.google.com/file/d/<id>, drive/folders/<id> (también con u/<n>/), open?id=<id> y uc?id=<id>, y
+#   docs.google.com/<document|spreadsheets|presentation|drawings>/d/<id> (también d/e/<id>, lo publicado). Los
+#   formularios (docs.google.com/forms/) no: se hicieron para que cualquiera los conteste.
+# - OneDrive y SharePoint: 1drv.ms/<tipo>/s!<token> y 1drv.ms/<tipo>/c/<cid>/<token>, onedrive.live.com con redeem= o
+#   authkey=, y <empresa>.sharepoint.com/:<tipo>:/g/ o /s/ con su token. Los /:<tipo>:/r/ no: llevan a la ruta y
+#   piden permiso.
+# - Dropbox: dropbox.com/s/, /sh/, /scl/fi/ y /scl/fo/, dl.dropboxusercontent.com/s/ y db.tt/.
+# Las de Google Drive y Dropbox terminan en [^\s"'<>]*, el resto del enlace hasta un espacio, una comilla o un < o >.
+
+# Texto de plantilla en lugar del identificador: una palabra your, tu, example o ejemplo al inicio de un tramo del
+# enlace (después de /, !, = o del inicio) o entre guiones, o here o aqui al final de un tramo, como TU_ID_AQUI,
+# YOUR_SHARE_ID o FOLDER_ID_HERE. Se compara con el secreto, que es el enlace.
+PLANTILLA = r'(?i)(?:^|[/!=_-])(?:your|tu|example|ejemplo)(?:[_-]|[/?&#]|$)|[_-](?:here|aqui)(?:[/?&#]|$)'
+_ALLOWLIST_ENLACE = '''
+[rules.allowlist]
+regexes = [
+    \'\'\'%s\'\'\',
+]
+''' % PLANTILLA
+
+REGLAS_ENLACES = '''
+[[rules]]
+id = "cirdan-enlace-google-drive"
+description = "Enlace para compartir un archivo o una carpeta de Google Drive (RC-247). Solo se reconoce su forma"
+regex = \'\'\'(?i)\\b(?:drive|docs)\\.google\\.com/(?:(?:file|document|spreadsheets|presentation|drawings)/(?:u/\\d{1,2}/)?d/(?:e/)?|drive/(?:u/\\d{1,2}/)?folders/|(?:open|uc)\\?(?:[a-z0-9_.=-]{1,40}&){0,5}id=)[a-z0-9_-]{25,}[^\\s"'<>]*\'\'\'
+keywords = ["drive.google.com", "docs.google.com"]
+''' + _ALLOWLIST_ENLACE + '''
+[[rules]]
+id = "cirdan-enlace-onedrive"
+description = "Enlace para compartir de OneDrive o SharePoint (RC-247). Solo se reconoce su forma"
+regex = \'\'\'(?i)\\b(?:1drv\\.ms/[a-z]{1,2}/(?:s![a-z0-9_-]{10,}|c/[a-z0-9]{8,20}/[a-z0-9_-]{10,})|onedrive\\.live\\.com/[^\\s"'<>]{0,200}?[?&](?:redeem|authkey)=[a-z0-9_!%.-]{8,}|[a-z0-9-]{1,63}\\.sharepoint\\.com/:[a-z]{1,2}:/[gs]/(?:[a-z0-9_.%~-]{1,80}/){0,6}[a-z0-9_-]{20,})\'\'\'
+keywords = ["1drv.ms", "onedrive.live.com", "sharepoint.com"]
+''' + _ALLOWLIST_ENLACE + '''
+[[rules]]
+id = "cirdan-enlace-dropbox"
+description = "Enlace para compartir un archivo o una carpeta de Dropbox (RC-247). Solo se reconoce su forma"
+regex = \'\'\'(?i)\\b(?:(?:www\\.|dl\\.)?dropbox\\.com/(?:s|sh|scl/f[io])/|dl\\.dropboxusercontent\\.com/(?:s|scl/f[io])/|db\\.tt/)[a-z0-9_-]{10,}[^\\s"'<>]*\'\'\'
+keywords = ["dropbox.com", "dropboxusercontent.com", "db.tt"]
+''' + _ALLOWLIST_ENLACE
 
 ENCABEZADO = '''\
 # Reglas de gitleaks %(version)s para el recolector de GitHub (#16, RC-50, cirdan/recolectores/github.py).
@@ -174,7 +228,8 @@ def generar(texto, licencia, version):
     paths = 'paths = [\n%s]\n' % ''.join("    '''%s''',\n" % ruta for ruta in nuevas if ruta is not None)
     cuerpo = cuerpo[:bloque.start()] + paths + cuerpo[bloque.end():]
     licencia = '\n'.join(('# ' + linea).rstrip() for linea in licencia.strip('\n').split('\n'))
-    return ENCABEZADO % {'version': version, 'licencia': licencia} + '\n' + cuerpo.rstrip('\n') + '\n\n' + REGLA_PROPIA
+    return (ENCABEZADO % {'version': version, 'licencia': licencia} + '\n' + cuerpo.rstrip('\n') + '\n\n' + REGLA_PROPIA
+            + REGLAS_ENLACES)
 
 
 def main():

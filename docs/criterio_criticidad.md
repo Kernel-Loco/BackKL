@@ -73,7 +73,7 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 | Configuración | Configuración de servidores | `server_configuration` | `server_version_disclosed`, `subdomain_takeover_risk`, `directory_listing`, `debug_page_exposed` |
 | Fugas de datos | Brechas de datos | `breaches` | `breach_exposure`, `breach_exposure_old`, `breach_exposure_no_passwords` |
 | Fugas de datos | Secretos expuestos | `exposed_secrets` | `secret_in_public_repo`, `secret_in_container_image` |
-| Fugas de datos | Almacenamiento público | `public_storage` | `public_bucket` |
+| Fugas de datos | Almacenamiento público | `public_storage` | `public_bucket`, `file_share_link_in_repo` |
 
 **KRI.** Encima de las 4 categorías van 5 indicadores clave de riesgo. Cada uno junta subcategorías, aunque sean de categorías distintas, y dice qué fuentes lo alimentan. De cada KRI la API da sus hallazgos vigentes, su severidad más alta, que le da el color en el portal, y lo que suman sus aportes.
 
