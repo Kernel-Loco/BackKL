@@ -14,10 +14,11 @@ import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_certspotter.py
-from pruebas.test_crtsh import AHORA, SUBDOMINIOS, CrtshSimulado, cert  # noqa: E402
+from pruebas.test_crtsh import AHORA, GOTEO, GRANDE, SUBDOMINIOS, CrtshSimulado, ServidorSimulado, cert  # noqa: E402
 from cirdan.recolectores import cargar, certspotter, contrato, crtsh  # noqa: E402
 
 LE = {'friendly_name': "Let's Encrypt", 'pubkey_sha256': 'b' * 64, 'name': "C=US, O=Let's Encrypt, CN=R11"}
@@ -937,6 +938,65 @@ class Emision(unittest.TestCase):
         self.assertEqual(certspotter.url('acme-demo.mx', '9004'),
                          'https://api.certspotter.com/v1/issuances?domain=acme-demo.mx&include_subdomains=true'
                          '&expand=dns_names&expand=issuer&after=9004')
+
+
+class TopeYPlazo(unittest.TestCase):
+    """Comentario 10276 de RC-218: Cert Spotter usa el mismo crtsh._descargar() que crt.sh, con transporte.descargar(),
+    el tope de 50 MiB y el timeout como plazo de toda la petición. Aquí la petición llega de verdad a descargar(): solo
+    transporte.abrir() es simulado, con un reloj falso."""
+
+    def correr(self, crtsh_responde, de_cert_spotter):
+        reloj = [0.0]
+
+        def responder(url):
+            partes = urllib.parse.urlparse(url)
+            if partes.netloc == 'api.certspotter.com':
+                return de_cert_spotter
+            if crtsh_responde and urllib.parse.parse_qs(partes.query)['q'] == ['%.acme-demo.mx']:
+                return json.dumps(SUBDOMINIOS).encode()
+            raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+        servidor = ServidorSimulado(responder, reloj)
+        with mock.patch.object(crtsh, 'time', SimpleNamespace(monotonic=lambda: reloj[0])), \
+                mock.patch.object(crtsh.transporte, 'abrir', servidor):
+            cliente = crtsh.ClienteCrtsh(dormir=lambda s: None, resolver=lambda n: True)
+            res = crtsh.recolectar('acme-demo.mx', cliente, AHORA)
+        return res, [s for h, _, s in servidor.pedidas if h == 'api.certspotter.com'], reloj[0]
+
+    def test_1_una_respuesta_de_mas_de_50_mib_no_se_reintenta(self):
+        sano, _, _ = self.correr(True, b'[]')
+        # complemento: queda lo de crt.sh, con aviso y corrida parcial, nunca 0 hallazgos
+        res, plazos, _ = self.correr(True, GRANDE)
+        self.assertEqual(plazos, [certspotter.COMPLEMENTO['timeout']])  # un solo intento, de 20 s
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertEqual(res.avisos, ['Cert Spotter no respondió a acme-demo.mx después de 1 intento (RespuestaGrande: '
+                                      'respuesta de más de 52428800 bytes). ' + certspotter.SIN_COMPLEMENTO])
+        self.assertEqual([a.valor for a in res.activos], [a.valor for a in sano.activos])
+        self.assertEqual(sorted(h.huella for h in res.hallazgos), sorted(h.huella for h in sano.hallazgos))
+        self.assertTrue(res.revisados)  # parcial: el orquestador solo cierra lo que llegó
+        # respaldo: con crt.sh caído, failed y no 0 hallazgos
+        res, plazos, _ = self.correr(False, GRANDE)
+        self.assertEqual(plazos, [45])  # un solo intento, con el timeout del cliente
+        self.assertEqual((res.estado, res.activos, res.hallazgos), ('failed', [], []))
+        self.assertIn('Cert Spotter no respondió a acme-demo.mx después de 1 intento (RespuestaGrande: respuesta de '
+                      'más de 52428800 bytes)', res.error)
+
+    def test_2_una_respuesta_que_no_termina_en_su_plazo_se_corta_aunque_siga_llegando(self):
+        # un byte por segundo: un timeout por lectura nunca se vencería, el plazo total sí
+        res, plazos, reloj = self.correr(True, GOTEO)
+        self.assertEqual(plazos, [20, 20])  # los 2 intentos del complemento
+        self.assertEqual(reloj, 2 * 21)  # cada uno se corta en la primera lectura después de sus 20 s
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertEqual(res.avisos, ['Cert Spotter no respondió a acme-demo.mx después de 2 intentos (PlazoVencido: '
+                                      'api.certspotter.com no terminó dentro de su plazo). ' +
+                                      certspotter.SIN_COMPLEMENTO])
+        self.assertTrue(res.activos)
+        self.assertTrue(res.revisados)
+        res, plazos, reloj = self.correr(False, GOTEO)
+        self.assertEqual(plazos, [45] * crtsh.INTENTOS)  # como respaldo, los 3 intentos
+        self.assertEqual(reloj, crtsh.INTENTOS * 46)
+        self.assertEqual((res.estado, res.activos, res.hallazgos), ('failed', [], []))
+        self.assertIn('Cert Spotter no respondió a acme-demo.mx después de 3 intentos (PlazoVencido: '
+                      'api.certspotter.com no terminó dentro de su plazo)', res.error)
 
 
 if __name__ == '__main__':

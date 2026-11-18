@@ -1522,6 +1522,46 @@ GS = 'C=BE, O=GlobalSign nv-sa, CN=GlobalSign GCC R3 DV TLS CA 2020'
 SECTIGO = 'C=GB, ST=Greater Manchester, O=Sectigo Limited, CN=Sectigo RSA Domain Validation Secure Server CA'
 
 
+GRANDE = object()  # cuerpo sin fin: pasa de cualquier tope
+GOTEO = object()   # un byte por lectura, cada una de 1 s del reloj: solo un plazo total la corta
+
+
+class ServidorSimulado:
+    """transporte.abrir() simulado: la petición llega a transporte.descargar() con el cuerpo de `responder(url)`, que
+    también puede lanzar (un HTTPError) o dar GRANDE o GOTEO. `reloj` es una lista [segundos] que GOTEO avanza. Anota
+    (host, url, segundos que tenía la petición) de cada una."""
+
+    def __init__(self, responder, reloj=None):
+        self.responder, self.reloj, self.pedidas = responder, reloj, []
+
+    def __call__(self, req, plazo, cronometro, familia=None):
+        self.pedidas.append((req.host, req.full_url, round(plazo - cronometro())))
+        return _RespuestaSimulada(self.responder(req.full_url), self.reloj)
+
+
+class _RespuestaSimulada:
+    BLOQUE = b'x' * 64 * 1024
+
+    def __init__(self, cuerpo, reloj):
+        self.cuerpo, self.reloj, self.leido = cuerpo, reloj, 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def read1(self, n):
+        if self.cuerpo is GRANDE:
+            return self.BLOQUE[:n]
+        if self.cuerpo is GOTEO:
+            self.reloj[0] += 1
+            return b' '
+        parte = self.cuerpo[self.leido:self.leido + n]
+        self.leido += len(parte)
+        return parte
+
+
 def higiene(certs, dominio='acme-demo.mx'):
     """Los hallazgos de _higiene por (código, activo), con los certificados como los deja recolectar()."""
     return {(h.codigo, h.activo): h for h in crtsh._higiene(dominio, crtsh._con_fechas(certs), AHORA)}
@@ -1792,36 +1832,80 @@ class HigieneCertificados(unittest.TestCase):
         self.assertEqual(res.sin_cobertura, crtsh.certspotter.SIN_COBERTURA)
         self.assertIn('no quedó tiempo', ' '.join(res.avisos))
 
-    def test_13_volumen_5000_subdominios_y_20000_certificados(self):
+    def test_13_volumen_de_recolectar_con_5000_subdominios_y_20000_certificados(self):
+        """Comentario 10276: recolectar() completa con un dominio sintético de 5,000 subdominios y 20,000 certificados,
+        desde el cuerpo que baja transporte.descargar() (con su tope y su plazo) hasta los activos y los hallazgos. Mide
+        tiempo, memoria y filas."""
+        import collections
         import time
         import tracemalloc
         certs = []
-        for i in range(20000):
+        for i in range(20000):  # cada subdominio en 4 certificados, del 1 ene 2024 en adelante, uno por hora
             n = i % 5000
-            nombres = ['h%d.acme-demo.mx' % n] + (['dev-%d.acme-demo.mx' % n] if n % 100 == 0 else [])
+            nombre = ('dev-%d.acme-demo.mx' if n % 100 == 0 else 'h%d.acme-demo.mx') % n  # 50 nombres internos
             emisor = (LE, GS, SECTIGO)[i % 3] if i < 19990 else 'C=US, O=Nueva %d, CN=x' % i
             dia = (datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(hours=i) if i < 19990 else
                    datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(hours=i - 19990))
-            certs.append(cert(i + 1, nombres, dia.strftime('%Y-%m-%dT%H:%M:%S'),
+            certs.append(cert(i + 1, [nombre], dia.strftime('%Y-%m-%dT%H:%M:%S'),
                               (dia + timedelta(days=90)).strftime('%Y-%m-%dT%H:%M:%S'), emisor=emisor))
         certs.append(cert(30000, ['*.acme-demo.mx'], '2026-10-01T00:00:00', '2026-12-30T00:00:00'))
-        certs = crtsh._con_fechas(certs)
-        inicio = time.perf_counter()  # unos 0.4 s en una PC del equipo, sin tracemalloc, que lo hace más lento
-        hs = crtsh._higiene('acme-demo.mx', certs, AHORA)
-        dura = time.perf_counter() - inicio
-        tracemalloc.start()
-        try:
-            crtsh._higiene('acme-demo.mx', certs, AHORA)  # unos 13 MB
-            _, pico = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-        por_codigo = {}
-        for h in hs:
-            por_codigo[h.codigo] = por_codigo.get(h.codigo, 0) + 1
-        self.assertEqual(por_codigo.get('cert_broad_wildcard'), 1)
-        self.assertEqual(por_codigo.get('cert_new_issuer', 0), 10)  # los últimos 10, de organizaciones nuevas
-        self.assertLessEqual(por_codigo.get('cert_internal_name', 0), 50)
-        self.assertLess(dura, 5, 'tardó %.1f s' % dura)
+        cuerpo = json.dumps(certs).encode()  # unos 6 MB, debajo del tope de 50 MiB
+
+        def responder(url):
+            host = crtsh.urllib.parse.urlparse(url).netloc
+            if host == 'crt.sh' and consulta(url) == '%.acme-demo.mx':
+                return cuerpo
+            if host == 'api.certspotter.com':
+                return b'[]'  # Cert Spotter no suma nada: llegaron todos los certificados
+            raise AssertionError('consulta de más: %s' % url)
+        servidor, dns = ServidorSimulado(responder), []
+
+        def correr():
+            servidor.pedidas.clear()
+            cliente = crtsh.ClienteCrtsh(dormir=lambda s: None, resolver=lambda n: dns.append(n) or True)
+            return crtsh.recolectar('acme-demo.mx', cliente, AHORA)
+        with mock.patch.object(crtsh.transporte, 'abrir', servidor):
+            inicio = time.perf_counter()  # unos 1.1 s en una PC del equipo, sin tracemalloc, que lo hace más lento
+            res = correr()
+            dura = time.perf_counter() - inicio
+            tracemalloc.start()
+            try:
+                correr()  # unos 32 MB
+                _, pico = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        self.assertLess(len(cuerpo), crtsh.TOPE_BYTES)
+        self.assertEqual([h for h, _, _ in servidor.pedidas], ['crt.sh', 'api.certspotter.com'])
+        self.assertEqual((res.estado, res.consultas, res.sin_cobertura, res.revisados, res.avisos),
+                         ('succeeded', 2, ['lookalike_domain'], None, []))  # sin la búsqueda de parecidos
+        self.assertEqual(dns, [])  # los vencidos los cubre *.acme-demo.mx: no hace falta su DNS
+        # filas de activos: los 5,000 subdominios y el dominio del comodín
+        activos = {a.valor: a for a in res.activos}
+        self.assertEqual(len(res.activos), 5001)
+        self.assertEqual(collections.Counter(a.tipo for a in res.activos), {'subdomain': 5000, 'domain': 1})
+        subdominios = [a for a in res.activos if a.tipo == 'subdomain']
+        self.assertEqual({a.atributos['certificados'] for a in subdominios}, {4})
+        self.assertEqual(sum(a.atributos['certificados'] for a in subdominios), 20000)
+        cubiertos = [a.valor for a in subdominios if a.atributos.get('cubierto_por_comodin') == 'acme-demo.mx']
+        self.assertEqual(len(cubiertos), 4990)  # todos menos los 10 que siguen vigentes
+        self.assertEqual({a.valor for a in subdominios} - set(cubiertos),
+                         {'h%d.acme-demo.mx' % n for n in range(4990, 5000)})
+        self.assertEqual(activos['dev-0.acme-demo.mx'].atributos, {  # el último de sus 4 certificados, el 15001
+            'comodin': False, 'certificados': 4, 'primer_certificado': '2024-01-01T00:00:00+00:00',
+            'vence': '2025-12-16T00:00:00+00:00', 'emisor': LE, 'fuente': 'ct_logs', 'origen': 'crtsh',
+            'crtsh_id': 15001, 'serie': '%040x' % 15001, 'cubierto_por_comodin': 'acme-demo.mx'})
+        dominio = activos['acme-demo.mx'].atributos
+        self.assertEqual((dominio['comodin'], dominio['certificados']), (True, 1))
+        # filas de hallazgos: los valores exactos que dan estos datos
+        self.assertEqual(collections.Counter(h.codigo for h in res.hallazgos),
+                         {'cert_internal_name': 50, 'cert_new_issuer': 10, 'cert_broad_wildcard': 1})
+        self.assertEqual({h.activo for h in res.hallazgos if h.codigo == 'cert_internal_name'},
+                         {'dev-%d.acme-demo.mx' % n for n in range(0, 5000, 100)})
+        self.assertEqual({h.evidencia['organizacion'] for h in res.hallazgos if h.codigo == 'cert_new_issuer'},
+                         {'Nueva %d' % i for i in range(19990, 20000)})
+        comodin = [h for h in res.hallazgos if h.codigo == 'cert_broad_wildcard'][0]
+        self.assertEqual((comodin.activo, comodin.evidencia['certificados']), ('acme-demo.mx', 1))
+        self.assertLess(dura, 10, 'tardó %.1f s' % dura)
         self.assertLess(pico, 100 * 1024 * 1024, 'pico de %d bytes' % pico)
 
     def test_14_reproducir_da_los_mismos_hallazgos_sin_otra_consulta(self):
