@@ -291,6 +291,60 @@ class ApiV1(unittest.TestCase):
         escaneos = self.get(self.acme, '/api/v1/scans')
         self.assertIn('acme-demo.mx', [s['domain'] for s in escaneos['items']])
 
+    def test_5b_escaneos_por_dominio_y_paginados(self):
+        # RC-318. Un escaneo fallido de acme-tienda.mx y 60 de acme-demo.mx más nuevos: sin filtro, la página de 50 ya no
+        # trae el fallido y con ?domain sí. Entran sin triggers (el de la autorización pide un TXT de menos de 1 hora),
+        # solo en esa transacción, y se borran al final.
+        fallido = '60000000-0000-4000-8000-000000318000'
+        self.addCleanup(self.psql_o_falla, "DELETE FROM scans WHERE id::text LIKE '60000000-0000-4000-8000-000000318%';",
+                        'quedaron escaneos de prueba de RC-318')
+        self.psql_o_falla(
+            "BEGIN; SET LOCAL session_replication_role = replica; "
+            "INSERT INTO scans (id, organization_id, domain_id, authorization_id, txt_verification_id, trigger_type, "
+            "status, queued_at, finished_at) VALUES ('%s', '20000000-0000-4000-8000-000000000001', "
+            "'40000000-0000-4000-8000-000000000002', '41000000-0000-4000-8000-000000000002', "
+            "'42000000-0000-4000-8000-000000000012', 'on_demand', 'failed', now() - interval '2 minutes', "
+            "now() - interval '90 seconds'); "
+            "INSERT INTO scans (id, organization_id, domain_id, authorization_id, txt_verification_id, trigger_type, "
+            "status, queued_at, finished_at) SELECT ('60000000-0000-4000-8000-000000318' || lpad(g::text, 3, '0'))::uuid, "
+            "'20000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', "
+            "'41000000-0000-4000-8000-000000000001', '42000000-0000-4000-8000-000000000011', 'on_demand', 'completed', "
+            "now() - g * interval '1 second', now() "
+            "FROM generate_series(1, 60) g; COMMIT;" % fallido, 'no entraron los escaneos de prueba de RC-318')
+
+        def cuantos(domain_id):
+            ok, salida, err = psql("SELECT count(*) FROM scans WHERE domain_id = '%s';" % domain_id, user='postgres')
+            self.assertTrue(ok, err)
+            return int(salida)
+
+        todos = self.get(self.acme, '/api/v1/scans')
+        self.assertEqual((todos['limit'], todos['offset'], len(todos['items'])), (50, 0, 50))
+        self.assertGreaterEqual(todos['total'], 61)
+        self.assertNotIn(fallido, [s['id'] for s in todos['items']])
+        # Lo que pide la página del dominio: el fallido sale, y total es el de la empresa con ese filtro.
+        for fqdn in ('acme-tienda.mx', 'ACME-Tienda.mx'):
+            tienda = self.get(self.acme, '/api/v1/scans?domain=%s&limit=5' % fqdn)
+            self.assertEqual((tienda['total'], tienda['limit']), (cuantos('40000000-0000-4000-8000-000000000002'), 5))
+            self.assertEqual({s['domain'] for s in tienda['items']}, {'acme-tienda.mx'})
+            self.assertIn((fallido, 'failed'), [(s['id'], s['status']) for s in tienda['items']])
+        demo = self.get(self.acme, '/api/v1/scans?domain=acme-demo.mx&limit=100')
+        self.assertEqual(demo['total'], cuantos('40000000-0000-4000-8000-000000000001'))
+        self.assertGreaterEqual(demo['total'], 60)
+        self.assertEqual(len(demo['items']), min(100, demo['total']))
+        # offset: dos páginas de 30 seguidas dan lo mismo que una de 60, sin repetir ni saltar ninguno.
+        paginas = [self.get(self.acme, '/api/v1/scans?domain=acme-demo.mx&limit=30&offset=%d' % o)['items']
+                   for o in (0, 30)]
+        self.assertEqual([s['id'] for s in paginas[0] + paginas[1]], [s['id'] for s in demo['items']][:60])
+        lejos = self.get(self.acme, '/api/v1/scans?domain=acme-demo.mx&offset=1000')
+        self.assertEqual((lejos['items'], lejos['total']), ([], demo['total']))
+        for consulta in ('limit=0', 'limit=101', 'offset=-1', 'offset=1000001', 'offset=99999999999999999999',
+                         'limit=abc', 'domain='):
+            self.assertEqual(self.acme.get('/api/v1/scans?' + consulta)[0], 422, consulta)
+        # RLS sigue igual: otra empresa no ve los de Acme, con o sin filtro.
+        otra = self.get(self.beta, '/api/v1/scans?domain=acme-tienda.mx')
+        self.assertEqual((otra['items'], otra['total']), ([], 0))
+        self.assertNotIn('acme', str(self.get(self.beta, '/api/v1/scans?limit=100')))
+
     def test_6_cada_empresa_ve_solo_lo_suyo(self):
         self.assertEqual([d['fqdn'] for d in self.get(self.beta, '/api/v1/domains')['items']], ['beta-corp.mx'])
         olmardo = self.get(self.olmardo, '/api/v1/domains')['items']

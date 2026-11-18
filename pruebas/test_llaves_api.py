@@ -185,6 +185,9 @@ class LlavesApi(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual({s['domain'] for s in body['items']}, {'acme-tienda.mx'})
         self.assertNotIn('domain_id', str(body))
+        # Con ?domain de otro dominio de su empresa no ve nada (RC-318).
+        code, body = get(llave, '/api/v1/scans?domain=acme-demo.mx')
+        self.assertEqual((code, body['items'], body['total']), (200, [], 0))
         # Una llave no se crea para el dominio de otra empresa ni para uno que no existe.
         for dominio in ('beta-corp.mx', 'no-existe.example'):
             code, _ = self.alex.post(LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_ajeno', 'domain': dominio})
