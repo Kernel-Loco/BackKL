@@ -1022,17 +1022,26 @@ def domain_assets(fqdn: str, session: Session = Depends(session_or_api_key)):
 
 
 @router.get('/scans', summary='Escaneos de la organización, del más nuevo al más viejo (provisional)')
-def scans(session: Session = Depends(session_or_api_key)):
+def scans(domain: str | None = Query(default=None, min_length=1, max_length=253, description='Solo los de este dominio'),
+          limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0, le=1_000_000),
+          session: Session = Depends(session_or_api_key)):
     with transaction(session.org_id) as conn:
         # uno caído no se muestra en curso. Una llave de un dominio solo toca los de su dominio
         orquestador.abandonar_vencidos(conn, session.org_id, domain_id=session.domain_id)
-    rows = _query(session, '''
+    # RLS deja solo los de la empresa: un dominio de otra da total 0, no 404. El conteo y la página salen de la misma
+    # foto (REPEATABLE READ), así un escaneo que entra a la mitad no descuadra total contra items.
+    filtro = '''
+          FROM scans s JOIN domains d ON d.id = s.domain_id
+         WHERE (%(llave)s::uuid IS NULL OR s.domain_id = %(llave)s::uuid)
+           AND (%(fqdn)s::citext IS NULL OR d.fqdn = %(fqdn)s::citext)
+    '''
+    params = {'llave': session.domain_id, 'fqdn': domain, 'limit': limit, 'offset': offset}
+    with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
+        total = conn.execute('SELECT count(*) AS n' + filtro, params).fetchone()['n']
+        rows = conn.execute('''
         SELECT s.id::text, d.fqdn::text AS domain, s.trigger_type AS trigger, s.status, s.queued_at, s.finished_at, s.stats,
                coalesce((SELECT jsonb_agg(jsonb_build_object('source', ds.code, 'status', r.status, 'attempt', r.attempt,
                                                              'error', r.error, 'finished_at', r.finished_at) ORDER BY ds.code)
                            FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id WHERE r.scan_id = s.id), '[]') AS sources
-          FROM scans s JOIN domains d ON d.id = s.domain_id
-         WHERE %s::uuid IS NULL OR s.domain_id = %s::uuid
-         ORDER BY s.queued_at DESC LIMIT 50
-    ''', (session.domain_id, session.domain_id))
-    return {'items': rows, 'total': len(rows)}
+        ''' + filtro + ' ORDER BY s.queued_at DESC, s.id DESC LIMIT %(limit)s OFFSET %(offset)s', params).fetchall()
+    return {'items': rows, 'total': total, 'limit': limit, 'offset': offset}
