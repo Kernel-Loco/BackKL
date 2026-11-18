@@ -56,14 +56,14 @@ El ponderado es un promedio. Un dominio con todas sus categorías limpias y una 
 
 ## Subcategorías y KRI (#114)
 
-Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: se calculan al leer con los aportes que el score guardó en `score_contributions` y con las corridas de `scan_source_runs` de su escaneo. El mapa vive en `cirdan/score/subcategorias.py` y lleva versión (`VERSION`, hoy 1).
+Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: se calculan al leer con los aportes que el score guardó en `score_contributions` y con las corridas de `scan_source_runs` de su escaneo. El mapa vive en `cirdan/score/subcategorias.py` y lleva versión (`VERSION`, hoy 2).
 
 **Subcategorías.** Cada código de regla del catálogo (#30) cae en una subcategoría de su categoría. De cada una, la API da cuántos hallazgos vigentes tiene y cuánto suman sus aportes. Las subcategorías de una categoría suman su nota, salvo que la nota haya llegado al tope de 100.
 
 | Categoría | Subcategoría | Clave | Reglas |
 |---|---|---|---|
 | Infraestructura | Certificados | `certificates` | `cert_expired`, `cert_expiring_soon` |
-| Infraestructura | Exposición de servicios | `exposed_services` | `exposed_rdp`, `exposed_remote_admin`, `exposed_file_sharing`, `exposed_database`, `exposed_ot_device`, `exposed_iot_device`, `exposed_service` |
+| Infraestructura | Exposición de servicios | `exposed_services` | `exposed_rdp`, `exposed_remote_admin`, `exposed_file_sharing`, `exposed_database`, `exposed_container_api`, `exposed_ot_device`, `exposed_iot_device`, `exposed_service` |
 | Infraestructura | Documentación de APIs expuesta | `exposed_apis` | `exposed_api_docs`, `api_auth_not_declared` |
 | Infraestructura | Software vulnerable o sin soporte | `vulnerable_software` | `outdated_software`, `known_vulnerability` |
 | Infraestructura | Registro del dominio | `domain_registration` | `domain_expiring_soon` |

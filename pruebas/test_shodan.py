@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_shodan.py
-from pruebas.test_catalogo_reglas import POR_CODIGO  # noqa: E402
+from pruebas.test_catalogo_reglas import FILA_TEXTO, POR_CODIGO  # noqa: E402
 from pruebas.test_certspotter import emision  # noqa: E402
 from pruebas.test_crtsh import AHORA  # noqa: E402
 from pruebas.test_subfinder import Cronometro  # noqa: E402
@@ -343,7 +343,7 @@ class Shodan(unittest.TestCase):
             res = recolectar(http, ResolvedorSimulado({}), modo='reproducir', carpeta=Path(d) / DOMINIO)
         self.assertEqual(res.estado, 'succeeded')
         self.assertEqual(res.sin_cobertura, list(shodan.CODIGOS))
-        self.assertEqual(len(res.sin_cobertura), 9)
+        self.assertEqual(len(res.sin_cobertura), 10)
         self.assertEqual((res.avisos, res.consultas, http.urls), ([shodan.SIN_GRABACION_DOMINIO], 0, []))
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
 
@@ -469,7 +469,7 @@ class Shodan(unittest.TestCase):
         for codigo in shodan.SIN_LLAVE:   # RC-220: ya los emite, con su severidad del catálogo
             self.assertIn(codigo, POR_CODIGO)
             self.assertEqual(shodan.CODIGOS[codigo], POR_CODIGO[codigo][5], codigo)
-        res = recolectar(HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=[3389, 22, 445, 5432, 8080],
+        res = recolectar(HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=[3389, 22, 445, 5432, 2375, 8080],
                                                               vulns=['CVE-2024-6387'])}),
                          ResolvedorSimulado({DOMINIO: a(CAMARA)}))
         self.assertEqual({h.codigo for h in res.hallazgos}, set(shodan.CODIGOS_PUERTOS))
@@ -2256,6 +2256,89 @@ class ApiDeHost(unittest.TestCase):
         [h] = res.hallazgos
         self.assertNotIn('posible_dato_de_otro_dueno', h.evidencia)
         self.assertFalse(any('de otro dominio' in x for x in res.avisos), res.avisos)
+
+class Contenedores(unittest.TestCase):
+    """RC-224: los puertos de Docker, etcd, Kubernetes y kubelet que ve InternetDB dan exposed_container_api (alta). Solo
+    sale de la misma consulta pasiva a InternetDB: nunca se conecta al servicio, así que no sabe si pide autenticación."""
+
+    PUERTOS = {2375: 'Docker', 2376: 'Docker', 2379: 'etcd', 2380: 'etcd', 6443: 'Kubernetes', 10250: 'kubelet',
+               10255: 'kubelet'}
+    MIGRACION = Path(__file__).resolve().parents[1] / 'db' / 'migraciones' / '019_texto_contenedores_internetdb.sql'
+    PERMITE = re.compile(r'\bpermite\b', re.IGNORECASE)
+
+    def test_1_la_familia_tiene_los_7_puertos_alta_en_infrastructure(self):
+        self.assertEqual(shodan.PUERTOS['exposed_container_api'], (2375, 2376, 2379, 2380, 6443, 10250, 10255))
+        self.assertEqual(shodan.SERVICIO_CONTENEDORES, self.PUERTOS)
+        self.assertEqual(shodan.CODIGOS['exposed_container_api'], 'high')
+        self.assertIn('exposed_container_api', shodan.CODIGOS_PUERTOS)
+        self.assertEqual((POR_CODIGO['exposed_container_api'][4], POR_CODIGO['exposed_container_api'][5]),
+                         ('infrastructure', 'high'))
+        otras = [p for c, lista in shodan.PUERTOS.items() if c != 'exposed_container_api' for p in lista]
+        otras += list(shodan.PUERTOS_WEB + shodan.PUERTOS_CORREO + shodan.PUERTOS_INDUSTRIALES + shodan.PUERTOS_UDP)
+        self.assertEqual(set(self.PUERTOS) & set(otras), set())
+
+    def test_2_cada_puerto_da_su_hallazgo_con_el_servicio_probable_y_la_nota(self):
+        for puerto, servicio in self.PUERTOS.items():
+            with self.subTest(puerto=puerto):
+                http = HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=[puerto])})
+                res = recolectar(http, ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+                self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+                [h] = res.hallazgos
+                e = h.evidencia
+                self.assertEqual((h.codigo, h.severidad, h.activo), ('exposed_container_api', 'high',
+                                                                     '%s:%d/tcp' % (CAMARA, puerto)))
+                self.assertEqual((e['ip'], e['puerto'], e['servicio_probable'], e['servicio_supuesto'],
+                                  e['autenticacion']), (CAMARA, puerto, servicio, True, 'desconocida'))
+                self.assertEqual(e['nota_autenticacion'], shodan.NOTA_CONTENEDORES)
+                self.assertEqual((e['vigencia'], e['nota_vigencia']), ('sin_fecha', shodan.NOTA_SIN_FECHA))
+                self.assertEqual(h.titulo, 'Shodan vio abierto el puerto %d, que suele ser de %s, en %s'
+                                 % (puerto, servicio, DOMINIO))
+                self.assertEqual(h.titulo, e['title'])
+                self.assertEqual(http.consultadas(), {CAMARA})   # solo InternetDB, nunca el servicio
+
+    def test_3_la_nota_dice_que_no_se_sabe_si_pide_autenticacion_ni_cuando_lo_vio(self):
+        nota = shodan.NOTA_CONTENEDORES
+        self.assertIn('no dice si el servicio pide autenticación', nota)
+        self.assertIn('ni cuándo lo vio', nota)
+        self.assertIn('puede permitir', nota)
+        self.assertIsNone(self.PERMITE.search(nota))
+
+    def test_4_el_texto_de_la_regla_dice_puede_permitir_y_nunca_permite(self):
+        sql = self.MIGRACION.read_text(encoding='utf-8')
+        [fila] = [f for f in FILA_TEXTO.findall(sql) if f[0] == 'exposed_container_api']
+        texto = ' '.join(fila[1:])
+        self.assertIn('puede permitir', texto)
+        self.assertIsNone(self.PERMITE.search(texto))
+        titulos = [shodan.TITULOS['exposed_container_api'] % (p, s, DOMINIO) for p, s in self.PUERTOS.items()]
+        self.assertEqual([t for t in titulos if self.PERMITE.search(t)], [])
+
+    def test_5_una_ip_honeypot_con_2375_no_da_hallazgos(self):
+        http = HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=[2375], tags=['honeypot'])})
+        res = recolectar(http, ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+        self.assertEqual((res.hallazgos, [x.tipo for x in res.activos]), ([], ['ip']))
+        self.assertIn('shodan: InternetDB marca %s como honeypot, no se sacan hallazgos de esa IP' % CAMARA, res.avisos)
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+
+    def test_6_una_ip_sin_ninguno_de_esos_puertos_no_da_el_codigo(self):
+        for puertos in ([], [22, 80, 443, 8080, 2377, 6444, 10251]):
+            with self.subTest(puertos=puertos):
+                http = HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=puertos)})
+                res = recolectar(http, ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+                self.assertNotIn('exposed_container_api', {h.codigo for h in res.hallazgos})
+                self.assertEqual(res.sin_cobertura, list(shodan.SIN_LLAVE))   # revisado completo: no va a sin_cobertura
+                self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+
+    def test_7_cae_en_el_tipo_por_omision_de_caracteristicas(self):
+        """Sin entrada en TIPO el tipo es el código, la exposición es directa por el activo service y la sensibilidad
+        media, como cualquier código nuevo (cirdan/ml/caracteristicas.py)."""
+        from cirdan.ml import caracteristicas
+        self.assertNotIn('exposed_container_api', caracteristicas.TIPO)
+        http = HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=[6443])})
+        [h] = recolectar(http, ResolvedorSimulado({DOMINIO: a(CAMARA)})).hallazgos
+        self.assertEqual(caracteristicas.calcular(h.codigo, 'service', h.evidencia, AHORA),
+                         {'tipo': 'exposed_container_api', 'antiguedad_dias': 0, 'exposicion': 'directa',
+                          'sensibilidad': 'media'})
+
 
 class Semilla(unittest.TestCase):
     """base-3: lectura estática de db/semillas/007_shodan.sql, 011_shodan_nombres.sql y 018_shodan_host.sql, sin base."""
