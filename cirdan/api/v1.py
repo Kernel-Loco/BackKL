@@ -12,7 +12,7 @@ import json
 import uuid
 from datetime import date, datetime
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from psycopg import IsolationLevel
@@ -21,7 +21,7 @@ from psycopg.types.json import Jsonb
 from cirdan import orquestador, reporte, siem
 from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
-from cirdan.auth.deps import Session, current_session, in_scope, require_roles, session_or_api_key
+from cirdan.auth.deps import Session, client_ip, current_session, in_scope, require_roles, session_or_api_key
 from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import audit, transaction
@@ -395,6 +395,14 @@ def _dominio_autorizado(session, fqdn):
     return rows[0]['id']
 
 
+def _carta_vigente(conn, domain_id):
+    """Vuelve a revisar la carta dentro de la transacción que lee los datos, como _reporte(): si venció o se revocó
+    después de _dominio_autorizado(), responde 403 y la exportación no deja evento (RC-312)."""
+    if not conn.execute('SELECT 1 FROM domain_authorizations WHERE domain_id = %s AND revoked_at IS NULL '
+                        'AND current_date BETWEEN valid_from AND valid_until LIMIT 1', (domain_id,)).fetchone():
+        raise HTTPException(403, 'El dominio no tiene una autorización firmada vigente')
+
+
 def _formato(formato):
     if formato not in ('csv', 'json'):
         raise HTTPException(422, "El formato debe ser 'csv' o 'json'")
@@ -417,20 +425,50 @@ ENCABEZADOS_HALLAZGOS = (
 )
 
 
+REPORTE_DESCARGADO = 'report.downloaded'
+
+
+def _registrar_descarga(conn, session, request, tipo, formato, domain_id, filas):
+    """Deja la descarga en la bitácora (#194, RC-312) con la acción report.downloaded de db/cirdan_esquema.dbml.
+
+    Va en la transacción que leyó los datos y antes de devolverlos: si audit() falla, la transacción se deshace y la
+    petición responde 500 sin descarga. Cualquier ruta de descarga de reporte que llegue (el PDF de reports u otra)
+    usa esta misma acción con su tipo en details, así la bitácora (RC-130) filtra todas las descargas por una acción.
+    details lleva tipo, formato, dominio y número de filas, nunca lo exportado. El dominio sale de la base y no de la
+    ruta: fqdn es citext y la ruta acepta ACME-Demo.MX, pero details es jsonb y un filtro por dominio compara texto
+    exacto. audit() agrega además api_key_id si pidió una llave de API o platform_user_id si fue un superadmin en una
+    empresa ajena. El actor es el usuario de la sesión, ese superadmin o la llave, con la IP de la petición.
+
+    La transacción va en READ COMMITTED, como las tres de aquí: audit() no acepta REPEATABLE READ ni SERIALIZABLE,
+    porque el trigger de la cadena leería el último eslabón con la foto vieja y dos descargas a la vez chocarían. El
+    PDF de reports lee en REPEATABLE READ (_reporte): antes de registrar su descarga hay que cambiar eso o el trigger."""
+    dominio = conn.execute('SELECT fqdn::text FROM domains WHERE id = %s', (domain_id,)).fetchone()['fqdn']
+    audit(conn, session.org_id, REPORTE_DESCARGADO, user_id=session.audit_user_id, ip=client_ip(request),
+          entity_type='domain', entity_id=domain_id, platform=session.audit_platform, api_key_id=session.api_key_id,
+          details={'kind': tipo, 'format': formato, 'domain': dominio, 'rows': filas})
+
+
 @router.get('/domains/{fqdn}/findings/export', summary='Descarga los hallazgos abiertos del dominio en CSV o JSON')
-def export_findings(fqdn: str, formato: str = Query(default='json'), session: Session = Depends(session_or_api_key)):
+def export_findings(request: Request, fqdn: str, formato: str = Query(default='json'),
+                    session: Session = Depends(session_or_api_key)):
     formato = _formato(formato)
-    _dominio_autorizado(session, fqdn)
-    items = [_finding(f) for f in _query(session, FINDINGS_SQL, (fqdn,))]
-    if formato == 'json':
-        return _descarga(_json({'domain': fqdn, 'items': items, 'total': len(items)}),
-                         'application/json; charset=utf-8', '%s-hallazgos.json' % fqdn)
-    filas = [(fqdn, i['id'], i['title'], i['severity'], i['base_severity'], i['category'], i['rule_code'], i['asset'],
-              i['asset_type'], i['source'], i['status'], i['recurrence'], i['cve_id'], i['cvss'], i['epss'], i['in_kev'],
-              i['detected_at'], i['last_scan_id'], i['frameworks']['mitre_attack']['technique_id'],
-              i['frameworks']['iso_27001_2022']['control_id'], i['frameworks']['cis_controls_v8_1']['safeguard_id'],
-              i['evidence']) for i in items]
-    return _descarga(csv_con_bom(ENCABEZADOS_HALLAZGOS, filas), 'text/csv; charset=utf-8', '%s-hallazgos.csv' % fqdn)
+    domain_id = _dominio_autorizado(session, fqdn)
+    with transaction(session.org_id) as conn:
+        _carta_vigente(conn, domain_id)
+        items = [_finding(f) for f in conn.execute(FINDINGS_SQL, (fqdn,)).fetchall()]
+        if formato == 'json':
+            respuesta = _descarga(_json({'domain': fqdn, 'items': items, 'total': len(items)}),
+                                  'application/json; charset=utf-8', '%s-hallazgos.json' % fqdn)
+        else:
+            filas = [(fqdn, i['id'], i['title'], i['severity'], i['base_severity'], i['category'], i['rule_code'],
+                      i['asset'], i['asset_type'], i['source'], i['status'], i['recurrence'], i['cve_id'], i['cvss'],
+                      i['epss'], i['in_kev'], i['detected_at'], i['last_scan_id'],
+                      i['frameworks']['mitre_attack']['technique_id'], i['frameworks']['iso_27001_2022']['control_id'],
+                      i['frameworks']['cis_controls_v8_1']['safeguard_id'], i['evidence']) for i in items]
+            respuesta = _descarga(csv_con_bom(ENCABEZADOS_HALLAZGOS, filas), 'text/csv; charset=utf-8',
+                                  '%s-hallazgos.csv' % fqdn)
+        _registrar_descarga(conn, session, request, 'findings', formato, domain_id, len(items))
+    return respuesta
 
 
 # ---------------------------------------------------------------- reporte ejecutivo (#45, RC-70)
@@ -520,19 +558,23 @@ def _score_ids(*valores):
         raise HTTPException(404, 'Escaneo no encontrado')  # un id mal formado se responde igual que uno ajeno
 
 
-def _comparacion(session, fqdn, desde, hasta):
+def _comparacion(session, fqdn, desde, hasta, descargar=None):
+    """La comparación. Con `descargar(conn, data, domain_id)` devuelve lo que esa función arme dentro de la misma
+    transacción, para que la exportación escriba su evento en la bitácora antes de que se confirme."""
     domain_id = _dominio_autorizado(session, fqdn)
     desde, hasta = _score_ids(desde, hasta)
     with transaction(session.org_id) as conn:  # una sola transacción: las dos fotos y sus aportes del mismo momento
+        _carta_vigente(conn, domain_id)
         scores = {r['score_id']: r for r in conn.execute(COMPARE_SCORES_SQL, (domain_id, [desde, hasta])).fetchall()}
         if desde not in scores or hasta not in scores:
             raise HTTPException(404, 'Escaneo no encontrado')
         aportes = conn.execute(COMPARE_CONTRIBUTIONS_SQL, {'domain_id': domain_id, 'scores': [desde, hasta],
                                                            'solo': session.domain_id}).fetchall()
-    items, resumen = comparacion.comparar([a for a in aportes if a['score_id'] == desde],
-                                          [a for a in aportes if a['score_id'] == hasta])
-    return {'domain': fqdn, 'from': scores[desde], 'to': scores[hasta], 'summary': resumen,
-            'items': items, 'total': len(items)}
+        items, resumen = comparacion.comparar([a for a in aportes if a['score_id'] == desde],
+                                              [a for a in aportes if a['score_id'] == hasta])
+        data = {'domain': fqdn, 'from': scores[desde], 'to': scores[hasta], 'summary': resumen,
+                'items': items, 'total': len(items)}
+        return descargar(conn, data, domain_id) if descargar else data
 
 
 @router.get('/domains/{fqdn}/score/compare',
@@ -544,13 +586,20 @@ def compare_scores(fqdn: str, desde: str = Query(..., description='score_id del 
 
 
 @router.get('/domains/{fqdn}/score/compare/export', summary='Descarga la comparación de dos scores en CSV o JSON')
-def export_comparison(fqdn: str, desde: str = Query(...), hasta: str = Query(...),
+def export_comparison(request: Request, fqdn: str, desde: str = Query(...), hasta: str = Query(...),
                       formato: str = Query(default='json'), session: Session = Depends(session_or_api_key)):
     formato = _formato(formato)
-    data = _comparacion(session, fqdn, desde, hasta)
-    if formato == 'json':
-        return _descarga(_json(data), 'application/json; charset=utf-8', '%s-comparacion.json' % fqdn)
-    return _descarga(comparacion.exportar_csv(data), 'text/csv; charset=utf-8', '%s-comparacion.csv' % fqdn)
+
+    def descargar(conn, data, domain_id):
+        if formato == 'json':
+            respuesta = _descarga(_json(data), 'application/json; charset=utf-8', '%s-comparacion.json' % fqdn)
+        else:
+            respuesta = _descarga(comparacion.exportar_csv(data), 'text/csv; charset=utf-8',
+                                  '%s-comparacion.csv' % fqdn)
+        _registrar_descarga(conn, session, request, 'comparison', formato, domain_id, data['total'])
+        return respuesta
+
+    return _comparacion(session, fqdn, desde, hasta, descargar)
 
 
 # ---------------------------------------------------------------- plan de acción y simulador (#42, #70)
@@ -558,42 +607,51 @@ def export_comparison(fqdn: str, desde: str = Query(...), hasta: str = Query(...
 def _contexto_plan(session, fqdn):
     domain_id = _domain_id(session, fqdn)
     with transaction(session.org_id) as conn:
-        score = conn.execute(
-            'SELECT id::text, rule_set_id::text, score, category_scores, method, partial_coverage FROM domain_scores '
-            'WHERE domain_id = %s ORDER BY computed_at DESC LIMIT 1', (domain_id,),
-        ).fetchone()
-        if score:
-            rule_set_id, method, parcial = score['rule_set_id'], score['method'], score['partial_coverage']
-        else:
-            active = configuracion.juego_activo(conn, session.org_id)
-            if not active:
-                raise HTTPException(409, 'El dominio aún no tiene un juego de reglas activo')
-            rule_set_id, method, parcial = active['id'], 'rules', False
+        return _leer_contexto_plan(conn, session, domain_id)
 
-        rule_set = conn.execute(
-            'SELECT category_weights FROM scoring_rule_sets WHERE id = %s', (rule_set_id,),
-        ).fetchone()
-        reglas = {r['code']: r for r in conn.execute(
-            'SELECT r.id::text, r.code, r.category, r.base_severity, r.weight, r.max_penalty, t.recommendation '
-            'FROM scoring_rules r JOIN scoring_rule_texts t '
-            'ON t.code = r.code WHERE r.rule_set_id = %s',
-            (rule_set_id,),
+
+def _leer_contexto_plan(conn, session, domain_id):
+    """Lee el contexto del plan en la transacción de quien llama, en READ COMMITTED a propósito: la exportación escribe
+    ahí su evento y audit() no acepta REPEATABLE READ (_registrar_descarga). Cada lectura depende de una sola cosa que
+    cambia: el score se lee primero y lo demás sale de su id (juego de reglas y aportes, que no cambian) o de los
+    hallazgos, que el escaneo guarda por fuente en transacciones propias antes de su score. Un commit en medio da lo
+    mismo que una foto tomada antes o después de él. El 409 de ML con un escaneo a medias pasa igual con una sola foto."""
+    score = conn.execute(
+        'SELECT id::text, rule_set_id::text, score, category_scores, method, partial_coverage FROM domain_scores '
+        'WHERE domain_id = %s ORDER BY computed_at DESC LIMIT 1', (domain_id,),
+    ).fetchone()
+    if score:
+        rule_set_id, method, parcial = score['rule_set_id'], score['method'], score['partial_coverage']
+    else:
+        active = configuracion.juego_activo(conn, session.org_id)
+        if not active:
+            raise HTTPException(409, 'El dominio aún no tiene un juego de reglas activo')
+        rule_set_id, method, parcial = active['id'], 'rules', False
+
+    rule_set = conn.execute(
+        'SELECT category_weights FROM scoring_rule_sets WHERE id = %s', (rule_set_id,),
+    ).fetchone()
+    reglas = {r['code']: r for r in conn.execute(
+        'SELECT r.id::text, r.code, r.category, r.base_severity, r.weight, r.max_penalty, t.recommendation '
+        'FROM scoring_rules r JOIN scoring_rule_texts t '
+        'ON t.code = r.code WHERE r.rule_set_id = %s',
+        (rule_set_id,),
+    ).fetchall()}
+    hallazgos = conn.execute(
+        'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status '
+        'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id '
+        'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
+        (domain_id, list(motor.ESTADOS_PUNTUABLES)),
+    ).fetchall()
+    severidades = None
+    if method == 'ml' and score:
+        severidades = {r['finding_id']: r['severity'] for r in conn.execute(
+            'SELECT finding_id::text, severity FROM score_contributions WHERE score_id = %s',
+            (score['id'],),
         ).fetchall()}
-        hallazgos = conn.execute(
-            'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status '
-            'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id '
-            'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
-            (domain_id, list(motor.ESTADOS_PUNTUABLES)),
-        ).fetchall()
-        severidades = None
-        if method == 'ml' and score:
-            severidades = {r['finding_id']: r['severity'] for r in conn.execute(
-                'SELECT finding_id::text, severity FROM score_contributions WHERE score_id = %s',
-                (score['id'],),
-            ).fetchall()}
-            faltantes = [h['id'] for h in hallazgos if h['id'] not in severidades]
-            if faltantes:
-                raise HTTPException(409, 'No hay severidad de ML guardada para todos los hallazgos vigentes')
+        faltantes = [h['id'] for h in hallazgos if h['id'] not in severidades]
+        if faltantes:
+            raise HTTPException(409, 'No hay severidad de ML guardada para todos los hallazgos vigentes')
 
     pesos = {k: float(v) for k, v in rule_set['category_weights'].items()}
     # El 'Actual' del plan es el score guardado, el mismo que muestra /score.
@@ -601,12 +659,18 @@ def _contexto_plan(session, fqdn):
     return domain_id, reglas, pesos, hallazgos, method, severidades, parcial, guardado
 
 
-def _plan_data(session, fqdn):
-    _, reglas, pesos, hallazgos, method, severidades, parcial, guardado = _contexto_plan(session, fqdn)
-    try:
-        return plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial, guardado)
-    except ValueError as e:
-        raise HTTPException(409, str(e)) from e
+def _plan_data(session, fqdn, descargar=None):
+    """El plan de acción. Con `descargar(conn, data, domain_id)` devuelve lo que esa función arme dentro de la
+    transacción que leyó los datos, como en _comparacion()."""
+    domain_id = _domain_id(session, fqdn)
+    with transaction(session.org_id) as conn:
+        _, reglas, pesos, hallazgos, method, severidades, parcial, guardado = _leer_contexto_plan(conn, session,
+                                                                                                  domain_id)
+        try:
+            data = plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial, guardado)
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+        return descargar(conn, data, domain_id) if descargar else data
 
 
 @router.get('/domains/{fqdn}/action-plan', summary='Plan de acción con el impacto estimado por acción')
@@ -632,22 +696,20 @@ def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
 
 
 @router.get('/domains/{fqdn}/action-plan/export', summary='Descarga el plan de acción en CSV o JSON')
-def export_action_plan(fqdn: str, formato: str = Query(default='json'),
+def export_action_plan(request: Request, fqdn: str, formato: str = Query(default='json'),
                        session: Session = Depends(session_or_api_key)):
-    if formato not in ('csv', 'json'):
-        raise HTTPException(422, "El formato debe ser 'csv' o 'json'")
-    data = _plan_data(session, fqdn)
-    if formato == 'csv':
-        return Response(
-            content=plan_accion.exportar_csv(data),
-            media_type='text/csv; charset=utf-8',
-            headers={'Content-Disposition': 'attachment; filename="%s-plan.csv"' % fqdn},
-        )
-    return Response(
-        content=plan_accion.exportar_json(data),
-        media_type='application/json; charset=utf-8',
-        headers={'Content-Disposition': 'attachment; filename="%s-plan.json"' % fqdn},
-    )
+    formato = _formato(formato)
+
+    def descargar(conn, data, domain_id):
+        if formato == 'csv':
+            respuesta = _descarga(plan_accion.exportar_csv(data), 'text/csv; charset=utf-8', '%s-plan.csv' % fqdn)
+        else:
+            respuesta = _descarga(plan_accion.exportar_json(data), 'application/json; charset=utf-8',
+                                  '%s-plan.json' % fqdn)
+        _registrar_descarga(conn, session, request, 'action_plan', formato, domain_id, len(data['actions']))
+        return respuesta
+
+    return _plan_data(session, fqdn, descargar)
 
 
 # ---------------------------------------------------------------- salida a SIEM (#98, RC-212)

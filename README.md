@@ -157,6 +157,12 @@ python -m unittest -v pruebas/test_llaves_api.py
 
 Son 13 pruebas contra la API y la base levantadas por `docker compose`, con las cuentas de demo. Los nombres de sus llaves llevan `CIRDAN_FAKE_` y al terminar las borra.
 
+**Bitácora de las descargas (#194, RC-312).** Bajar los hallazgos (`/findings/export`), la comparación (`/score/compare/export`) o el plan de acción (`/action-plan/export`), en CSV o JSON, deja `report.downloaded` en `audit_log` con `details` de `kind` (`findings`, `comparison` o `action_plan`), `format`, `domain` y `rows`, con la IP y como actor el usuario de la sesión, el superadmin en una empresa ajena o la llave de API (`actor_type` `api_key` y su id en `details.api_key_id`, no en `actor_api_key_id`: esa FK no dejaría borrar nunca la llave). Se escribe en la misma transacción que lee los datos: si la bitácora falla, la descarga responde 500 sin contenido. `details` nunca guarda lo exportado. Una ruta de descarga de reporte que llegue después usa la misma acción con su propio `kind`.
+
+```bash
+python -m unittest -v pruebas/test_bitacora_descargas.py
+```
+
 `cirdan/api/explorer.py` agrega la página `/demo` y los 2 endpoints que usa, `GET /db/tables` y `GET /db/tables/{table}/rows`. Solo existen con `DEMO_EXPLORER=true` (ver Vista visual de la base). Piden sesión y toman la empresa de la sesión, como el resto de la API. Las tablas solo las ve el rol Admin, como `GET /api/v1/domains/txt`, porque traen usuarios, bitácora y valores TXT. Ninguna ruta acepta ya `X-Organization` (RC-58).
 
 Con `docker compose up -d` la API ya está corriendo. Su documentación (/docs, /redoc y /openapi.json) no existe por omisión: para verla en tu PC pon `API_DOCS=true` en el `.env` y vuelve a crear la API con `docker compose up -d api` (RC-303).

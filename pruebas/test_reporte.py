@@ -186,6 +186,21 @@ class Ruta(unittest.TestCase):
         self.assertEqual(llamadas, [v1.IsolationLevel.REPEATABLE_READ])
         self.assertEqual(r['organization'], 'Acme')
 
+    def test_2_la_bitacora_no_va_en_repeatable_read(self):
+        # Por eso el reporte no registra aún su descarga (RC-312): en REPEATABLE READ el trigger de la cadena lee el
+        # último eslabón con la foto vieja y dos descargas a la vez chocan en chain_seq. audit() lo rechaza antes.
+        v1 = _api()
+        from cirdan import db
+        for nivel in (v1.IsolationLevel.REPEATABLE_READ, v1.IsolationLevel.SERIALIZABLE):
+            conn = SimpleNamespace(isolation_level=nivel, execute=mock.Mock())
+            with self.assertRaises(ValueError):
+                db.audit(conn, 'o1', 'report.downloaded')
+            conn.execute.assert_not_called()
+        for nivel in (None, v1.IsolationLevel.READ_COMMITTED):
+            conn = SimpleNamespace(isolation_level=nivel, execute=mock.Mock())
+            db.audit(conn, 'o1', 'report.downloaded')
+            conn.execute.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()
