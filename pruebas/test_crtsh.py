@@ -67,11 +67,13 @@ class CrtshSimulado:
     """Transporte falso: responde según la consulta y puede fallar las primeras veces. Las consultas a Cert Spotter (#14b)
     van aparte, en `cert_spotter`, y por defecto no suman certificados."""
 
-    def __init__(self, fallas=0, respuestas=None, sin_dns=(), emisiones=()):
+    def __init__(self, fallas=0, respuestas=None, sin_dns=(), emisiones=(), san=None):
+        """`san`: respuestas del respaldo de las variantes (dNSName=X y dNSName=%.X, RC-337). Sin él, ese respaldo da
+        502: una variante caída en q= sigue caída, como en las pruebas de antes del respaldo."""
         self.fallas, self.urls, self.sin_dns, self.dns = fallas, [], set(sin_dns), []
         self.respuestas = respuestas if respuestas is not None else {
             '%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': CONTIENE_MARCA, 'acme-dem0.mx': CANDIDATO}
-        self.emisiones, self.cert_spotter = list(emisiones), []
+        self.emisiones, self.cert_spotter, self.san = list(emisiones), [], san
 
     def __call__(self, url, timeout):
         partes = crtsh.urllib.parse.urlparse(url)
@@ -82,7 +84,12 @@ class CrtshSimulado:
             raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
         if cert_spotter:  # una página con las emisiones y la vacía que cierra
             return json.dumps([] if 'after' in crtsh.urllib.parse.parse_qs(partes.query) else self.emisiones).encode()
-        q = crtsh.urllib.parse.parse_qs(partes.query)['q'][0]
+        parametros = crtsh.urllib.parse.parse_qs(partes.query)
+        if 'dNSName' in parametros:
+            if self.san is None:
+                raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+            return json.dumps(self.san.get(parametros['dNSName'][0], [])).encode()
+        q = parametros['q'][0]
         return json.dumps(self.respuestas.get(q, [])).encode()
 
     def resolver(self, nombre):
@@ -590,9 +597,13 @@ class FallasYGrabacion(unittest.TestCase):
         caidas = variantes[-3:-1]
         res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v in caidas + [ultima] or n == 1 else 20)
         self.assertEqual([t for v, t in pedidas if v == ultima], [20])
+        # Con los 22 s que quedan, el respaldo de la primera caída (RC-337) hace su pausa y su dNSName da 502 al
+        # momento. Al de la segunda ya no le cabe una petición (20 s < pausa + MINIMO_VARIANTE).
         self.assertEqual(duro, (len(variantes) - 3) * (cada_una + 20) + 2 * (cada_una + 45)
-                         + crtsh.PAUSA_PARECIDOS + 20)
-        self.assertEqual(crtsh.PRESUPUESTO_VARIANTES - duro, 22)
+                         + crtsh.PAUSA_PARECIDOS + 20 + crtsh.PAUSA_PARECIDOS)
+        self.assertEqual(crtsh.PRESUPUESTO_VARIANTES - duro, 20)
+        self.assertEqual([u for u in self.cliente.transporte.urls if 'dNSName' in u],
+                         ['https://crt.sh/?dNSName=%s&output=json' % caidas[0]])
         self.assertEqual(res.avisos[-1], crtsh.SIN_REINTENTO % (crtsh.PRESUPUESTO_VARIANTES, '1 variante', ultima))
         self.assertFalse([a for a in res.avisos if 'saturado' in a])
 
@@ -1053,6 +1064,218 @@ class FallasYGrabacion(unittest.TestCase):
                 self.assertTrue(ignorado(ruta), ruta)
             for ruta in ('crtsh/.gitkeep', 'ejemplo/acme-demo.mx/resultado.json'):
                 self.assertFalse(ignorado(ruta), ruta)
+
+
+class QCaido(CrtshSimulado):
+    """crt.sh como desde vm-lowtide el 17 nov (RC-337): q= de las variantes de `caidas` da `codigo` y lo demás
+    responde."""
+
+    def __init__(self, caidas=('acme-dem0.mx',), codigo=404, **kw):
+        kw.setdefault('san', {'acme-dem0.mx': CANDIDATO, '%.acme-dem0.mx': CANDIDATO})  # el mismo id en las dos
+        super().__init__(**kw)
+        self.caidas, self.codigo = set(caidas), codigo
+
+    def __call__(self, url, timeout):
+        q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q', [''])[0]
+        if q in self.caidas:
+            self.urls.append(url)
+            raise urllib.error.HTTPError(url, self.codigo, 'Not Found', None, None)
+        return super().__call__(url, timeout)
+
+
+def sin_red(url, timeout):
+    raise AssertionError('consultó la red: %s' % url)
+
+
+def huellas(res):
+    return sorted(h.huella for h in res.hallazgos)
+
+
+class RespaldoDeVariantes(unittest.TestCase):
+    """RC-337: si q= de una variante no responde, al final se piden dNSName=X y dNSName=%.X."""
+
+    def test_1_q_caido_y_dnsname_responde_deja_la_corrida_completa(self):
+        sano = recolectar(CrtshSimulado(), parecidos=True)
+        t = QCaido()
+        res = recolectar(t, parecidos=True)
+        self.assertEqual(huellas(res), huellas(sano))
+        self.assertIn('acme-dem0.mx', {h.evidencia.get('dominio_parecido') for h in res.hallazgos})
+        self.assertIsNone(res.revisados)  # nada quedó sin revisar: el escaneo no termina 'partial'
+        self.assertEqual((res.omitidos, res.sin_cobertura, res.avisos), ([], [], []))
+        self.assertEqual(crtsh.codigo_salida(res), 0)
+        self.assertEqual([u for u in t.urls if 'dNSName' in u], [
+            'https://crt.sh/?dNSName=acme-dem0.mx&output=json', 'https://crt.sh/?dNSName=%25.acme-dem0.mx&output=json'])
+        self.assertEqual(res.consultas, len(t.urls) + len(t.cert_spotter))  # un 404 de q= es 1 intento y el respaldo 2
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        self.assertEqual(crtsh.MAX_CONSULTAS, 36)  # el respaldo cabe en el cupo de antes: la semilla 014 no cambia
+
+    def test_2_si_el_respaldo_tampoco_responde_sigue_parcial(self):
+        class SinSubdominios(QCaido):  # dNSName=X responde y dNSName=%.X no: tampoco basta
+            def __call__(self, url, timeout):
+                if 'dNSName=%25.' in url:
+                    self.urls.append(url)
+                    raise TimeoutError('timed out')
+                return super().__call__(url, timeout)
+
+        for t in (QCaido(codigo=502, san=None), SinSubdominios(codigo=502)):
+            with self.subTest(t=type(t).__name__):
+                res = recolectar(t, parecidos=True)
+                self.assertIsNotNone(res.revisados)  # el escaneo termina 'partial', como antes del respaldo
+                self.assertIn(crtsh._huella('lookalike_domain', 'acme-demo.mx', 'acme-dem0.mx'), res.omitidos)
+                self.assertNotIn('acme-dem0.mx', {h.evidencia.get('dominio_parecido') for h in res.hallazgos})
+                [aviso] = [a for a in res.avisos if 'acme-dem0.mx' in a]
+                self.assertIn('no respondió a acme-dem0.mx después de 2 intentos', aviso)
+                self.assertIn('Tampoco respondió su respaldo: crt.sh no respondió a dNSName=', aviso)
+                self.assertEqual(crtsh.codigo_salida(res), 2)
+
+    def test_3_una_fila_sin_fechas_en_el_respaldo_no_da_cero_parecidos(self):
+        bien = {'id': 30, 'name_value': 'acme-dem0.mx', 'not_before': '2026-10-01T00:00:00',
+                'not_after': '2026-12-30T00:00:00'}
+        malas = [{'id': 30, 'name_value': 'acme-dem0.mx'},  # sin las llaves de las fechas
+                 dict(bien, not_before=None), dict(bien, not_after=''), dict(bien, not_before='1 oct 2026'),
+                 dict(bien, name_value=None), dict(bien, name_value=' ')]
+        for fila in malas:
+            with self.subTest(fila=fila):
+                t = QCaido(san={'acme-dem0.mx': [fila], '%.acme-dem0.mx': []})
+                res = recolectar(t, parecidos=True)
+                self.assertIsNotNone(res.revisados)
+                self.assertIn(crtsh._huella('lookalike_domain', 'acme-demo.mx', 'acme-dem0.mx'), res.omitidos)
+                self.assertIn('respuesta que no se puede leer', ' '.join(res.avisos))
+                self.assertEqual(len([u for u in t.urls if 'dNSName' in u]), 1)  # no se reintenta ni pide la segunda
+        res = recolectar(QCaido(san={'acme-dem0.mx': [bien], '%.acme-dem0.mx': []}), parecidos=True)
+        self.assertEqual((res.revisados, res.omitidos), (None, []))  # la misma fila con todo bien sí cuenta
+
+    def test_4_con_crtsh_saturado_no_se_pide_el_respaldo(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        t = QCaido(caidas=variantes[:crtsh.FALLAS_SEGUIDAS], codigo=502)
+        res = recolectar(t, parecidos=True)
+        self.assertFalse([u for u in t.urls if 'dNSName' in u])
+        self.assertIn('crt.sh saturado', res.avisos[-1])  # después de los avisos de cada variante, como antes
+        self.assertIsNotNone(res.revisados)
+
+    def test_5_el_respaldo_no_pasa_del_tope_de_consultas_de_parecidos(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[::2]  # una sí y una no: nunca 3 seguidas, así que no hay saturación
+        t = QCaido(caidas=caidas, codigo=502, san={})
+
+        def de_parecidos(url):
+            parametros = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query)
+            return 'dNSName' in parametros or parametros['q'][0] in variantes + ['%acme-demo%']
+        res = recolectar(t, parecidos=True)
+        # 9 variantes (sin acme-demo.com.mx, que es propio). %marca% 1, 4 sanas 4 y 5 caídas con 2 intentos 10: de las
+        # 22 quedan 7, para 3 respaldos de 2 consultas. Un 4.º llegaría a 23
+        self.assertEqual((len(variantes), len(caidas)), (9, 5))
+        self.assertEqual(len([u for u in t.urls if 'dNSName' in u]), 2 * 3)
+        self.assertEqual(len([u for u in t.urls if de_parecidos(u)]), 1 + 4 + 10 + 6)
+        self.assertLess(crtsh.TOPE_PARECIDOS - (1 + 4 + 10 + 6), 2 * crtsh.INTENTOS_RESPALDO)
+        self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
+        self.assertEqual(sorted(res.omitidos), sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v)
+                                                      for v in caidas[3:]))
+        sin_respaldo = [a for a in res.avisos if 'después de 2 intentos' in a and 'respaldo' not in a]
+        self.assertEqual(len(sin_respaldo), len(caidas) - 3)
+
+    def test_5b_el_respaldo_que_llega_justo_al_tope_si_se_pide(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[1::2]  # 4 caídas alternadas: %marca% 1, 5 sanas 5 y 4 caídas con 2 intentos 8, 14
+        t = QCaido(caidas=caidas, codigo=502, san={})
+        res = recolectar(t, parecidos=True)
+        # los respaldos empiezan en 14, 16, 18 y 20: el 4.º deja la cuenta justo en TOPE_PARECIDOS y sí se pide
+        self.assertEqual(1 + (len(variantes) - len(caidas)) + 2 * len(caidas) + 2 * 3, crtsh.TOPE_PARECIDOS - 2)
+        self.assertEqual(len([u for u in t.urls if 'dNSName' in u]), 2 * len(caidas))
+        self.assertEqual((res.revisados, res.omitidos, res.avisos), (None, [], []))
+
+    def test_6_grabar_y_reproducir_repiten_el_respaldo_sin_red(self):
+        sano = recolectar(CrtshSimulado(), parecidos=True)
+        with tempfile.TemporaryDirectory() as d:
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=QCaido(), dormir=lambda s: None)
+            res = crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            self.assertEqual(huellas(res), huellas(sano))
+            nombres = {f.name for f in Path(d).iterdir()}
+            self.assertTrue({'san_acme-dem0.mx.json', 'san_subdominios_acme-dem0.mx.json'} <= nombres, nombres)
+            self.assertNotIn('acme-dem0.mx.json', nombres)
+
+            rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d, transporte=sin_red, dormir=lambda s: None)
+            res = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+        self.assertEqual(huellas(res), huellas(sano))
+        self.assertEqual((res.revisados, res.omitidos, res.avisos), (None, [], []))
+
+    def test_7_reproducir_sin_q_ni_respaldo_grabados_deja_el_aviso_de_siempre(self):
+        with tempfile.TemporaryDirectory() as d:
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=QCaido(san=None), dormir=lambda s: None)
+            crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            self.assertFalse([f.name for f in Path(d).iterdir() if f.name.startswith('san_')])
+            rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d, transporte=sin_red, dormir=lambda s: None)
+            res = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+        self.assertEqual([a for a in res.avisos if 'acme-dem0.mx' in a], [contrato.SIN_GRABACION + 'acme-dem0.mx'])
+        self.assertIn('Falta 1 respuesta grabada: acme-dem0.mx.', '\n'.join(crtsh.resumen(res)))
+
+    def test_8_tres_fallas_seguidas_al_final_tambien_son_saturacion(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[-crtsh.FALLAS_SEGUIDAS:]
+        t = QCaido(caidas=caidas, codigo=502, san={})
+        res = recolectar(t, parecidos=True)
+        self.assertFalse([u for u in t.urls if 'dNSName' in u])  # el bucle terminó con crt.sh ya saturado
+        self.assertEqual(sorted(res.omitidos), sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v)
+                                                      for v in caidas))
+        self.assertFalse([a for a in res.avisos if 'respaldo' in a])
+
+    def test_9_si_un_respaldo_no_responde_no_se_piden_los_demas(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[::2]  # nunca 3 seguidas: sin el corte se pedirían 3 respaldos (test_5)
+        t = QCaido(caidas=caidas, codigo=502, san=None)
+        res = recolectar(t, parecidos=True)
+        self.assertEqual([u for u in t.urls if 'dNSName' in u],
+                         ['https://crt.sh/?dNSName=%s&output=json' % caidas[0]])  # dNSName=X falló: ni %.X
+        self.assertEqual(len([a for a in res.avisos if 'Tampoco respondió su respaldo' in a]), 1)
+        self.assertEqual(sorted(res.omitidos), sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v)
+                                                      for v in caidas))
+
+    def test_10_sin_tiempo_o_con_el_archivo_danado_el_aviso_no_culpa_a_crtsh(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[:2]
+        casos = [(crtsh.SinTiempo('no quedó tiempo para consultar dNSName=x'), False, True),
+                 (crtsh.GrabacionDanada('san_x.json'), False, True),
+                 (crtsh.SinTiempo('crt.sh no respondió a dNSName=x después de 1 intento', 1), True, False)]
+        for error, culpa, sigue in casos:
+            with self.subTest(error=str(error)):
+                cliente = crtsh.ClienteCrtsh(transporte=QCaido(caidas=caidas, codigo=502, san={}),
+                                             dormir=lambda s: None)
+                original = cliente.consultar_san
+
+                def respaldo(nombre, error=error, original=original, **kw):
+                    if nombre == caidas[0]:
+                        raise error
+                    return original(nombre, **kw)
+                with mock.patch.object(cliente, 'consultar_san', side_effect=respaldo):
+                    res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'],
+                                           parecidos=True)
+                [aviso] = [a for a in res.avisos if caidas[0] in a]
+                self.assertTrue(aviso.startswith('crt.sh no respondió a %s después de 2 intentos' % caidas[0]))
+                self.assertEqual('Tampoco respondió su respaldo' in aviso, culpa)
+                # ni el tiempo ni el disco dicen que crt.sh esté caído: el respaldo de la 2.ª se pide igual
+                self.assertEqual(crtsh._huella('lookalike_domain', 'acme-demo.mx', caidas[1]) not in res.omitidos,
+                                 sigue)
+
+    def test_11_completar_lee_el_respaldo_grabado_aunque_crtsh_quede_saturado(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        x, *otras = variantes[-crtsh.FALLAS_SEGUIDAS:]
+        with tempfile.TemporaryDirectory() as d:
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=QCaido(caidas=[x], san={}),
+                                      dormir=lambda s: None, nueva=True)
+            crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            self.assertTrue((Path(d) / ('san_%s.json' % x)).exists())
+            for v in otras:  # una grabación que se cortó antes de estas dos
+                (Path(d) / ('%s.json' % v)).unlink()
+            t = QCaido(caidas=[x] + otras, codigo=502, san=None)
+            comp = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=t, dormir=lambda s: None, completar=True,
+                                      desde=contrato.Grabadora.inicio(d))
+            completada = crtsh.recolectar('acme-demo.mx', comp, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            self.assertFalse([u for u in t.urls if 'dNSName' in u])  # el de x salió del disco y crt.sh quedó saturado
+            rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d, transporte=sin_red, dormir=lambda s: None)
+            reproducida = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+        omitidos = sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in otras)
+        self.assertEqual((sorted(completada.omitidos), sorted(reproducida.omitidos)), (omitidos, omitidos))
+        self.assertEqual(huellas(completada), huellas(reproducida))
 
 
 class ErroresQueNoSonDeCrtsh(unittest.TestCase):
