@@ -233,6 +233,9 @@ Table scoring_rule_sets [note: 'Versión completa del juego de reglas y pesos de
   is_active boolean [not null, note: 'Un solo juego activo global y un juego activo por organización (índices parciales de migración 013)']
   validated_by text [note: 'Quién validó los pesos (decisión 2 del deck del 25 sep)']
   activated_at timestamptz
+  band_medium_from smallint [not null, note: 'Primer score de la banda medio del juego (migración 024, RC-237). El bajo va de 0 a este valor menos 1. 40 en la plantilla y en los juegos que ya existían']
+  band_high_from smallint [not null, note: 'Primer score de la banda alto. Un hallazgo crítico vigente deja el dominio al menos aquí. 60 en la plantilla']
+  band_critical_from smallint [not null, note: 'Primer score de la banda crítico. Dos o más hallazgos críticos vigentes dejan el dominio al menos aquí. 80 en la plantilla. CHECK scoring_rule_sets_band_cutoffs_ck: medio >= 10, al menos 10 valores por banda y crítico <= 91. Trigger scoring_rule_sets_copiar_cortes_bi: sin cortes en el INSERT copia los de la última versión de la organización o los del global activo. cirdan_app no tiene UPDATE de estas columnas: una versión no cambia después de creada, así cada domain_scores se explica con los cortes de su rule_set_id']
 }
 
 Table scoring_rules [note: 'Reglas con pesos que clasifican hallazgos y calculan el score. Cada juego de reglas copia todas las reglas, así (rule_set_id, code) identifica la fila exacta usada.'] {

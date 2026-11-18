@@ -27,12 +27,13 @@ def mensaje_piso(calculo, criticos=None):
         calculo['score'], criticos, cuenta, calculo['ponderado'])
 
 
-def calcular(hallazgos, reglas, pesos_categoria):
+def calcular(hallazgos, reglas, pesos_categoria, cortes=None):
     """Calcula notas de categoría, score global y aportes congelables en la base.
 
     Cada hallazgo vigente aporta min(max_penalty, puntos_severidad * peso_regla).
     Las notas de categoría suman esos aportes hasta 100; el score global aplica
-    los pesos del juego activo y el piso de hallazgos críticos de #29.
+    los pesos del juego activo y el piso de hallazgos críticos de #29 con los cortes de bandas del juego (RC-237).
+    Los cortes solo mueven la banda y el piso del dominio: las notas y los aportes de cada hallazgo no cambian.
     """
     notas = {categoria: Decimal('0') for categoria in criterio.CATEGORIAS}
     aportes = []
@@ -74,7 +75,7 @@ def calcular(hallazgos, reglas, pesos_categoria):
         })
 
     notas = {categoria: float(nota.quantize(Decimal('0.01'))) for categoria, nota in notas.items()}
-    global_ = criterio.score_dominio(notas, pesos_categoria, criticos)
+    global_ = criterio.score_dominio(notas, pesos_categoria, criticos, cortes)
     resultado = {
         'category_scores': notas,
         'critical_open': criticos,

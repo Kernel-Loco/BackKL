@@ -470,5 +470,122 @@ ROLLBACK;""" % (ACME, BETA))
                           'sin ella: 0'])
 
 
+
+# RC-237, migración 024: cada juego de reglas guarda dónde empiezan sus bandas medio, alto y crítico. Todo corre en
+# una transacción con ROLLBACK. COMO_APP cambia a cirdan_app dentro de la sesión de postgres, así cada caso arma lo
+# que necesita sin dejar nada en la base.
+PESOS_IGUALES = '{"infrastructure":0.25,"digital_identity":0.25,"configuration":0.25,"data_leaks":0.25}'
+COMO_APP = "SET LOCAL ROLE cirdan_app;\nSET LOCAL app.current_org = '%s';\n"
+NUEVO_JUEGO = """INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active%(columnas)s)
+SELECT '%(org)s', coalesce(max(version), 0) + 1, '""" + PESOS_IGUALES + """', false%(valores)s
+  FROM scoring_rule_sets WHERE organization_id = '%(org)s';
+"""
+ULTIMOS_CORTES = ("SELECT band_medium_from || ',' || band_high_from || ',' || band_critical_from FROM scoring_rule_sets"
+                  " WHERE organization_id = '%s' ORDER BY version DESC LIMIT 1;\n")
+
+
+def nuevo_juego(org, cortes=None, columnas=('band_medium_from', 'band_high_from', 'band_critical_from')):
+    if cortes is None:
+        return NUEVO_JUEGO % {'org': org, 'columnas': '', 'valores': ''}
+    return NUEVO_JUEGO % {'org': org, 'columnas': ', ' + ', '.join(columnas),
+                          'valores': ', ' + ', '.join(str(c) for c in cortes)}
+
+
+class CortesDeBandas(unittest.TestCase):
+
+    def test_19_el_global_queda_en_40_60_80_y_las_columnas_son_obligatorias(self):
+        self.assertEqual(scalar("SELECT string_agg(DISTINCT band_medium_from || ',' || band_high_from || ','"
+                                " || band_critical_from, ' ') FROM scoring_rule_sets WHERE organization_id IS NULL;",
+                                user='postgres'), '40,60,80')
+        self.assertEqual(scalar("SELECT string_agg(attname || ':' || attnotnull, ',' ORDER BY attname) FROM pg_attribute"
+                                " WHERE attrelid = 'scoring_rule_sets'::regclass AND attname LIKE 'band_%';"),
+                         'band_critical_from:true,band_high_from:true,band_medium_from:true')
+
+    def test_19b_el_check_pide_enteros_en_orden_y_10_por_banda(self):
+        for cortes in ((10, 20, 30), (71, 81, 91), (50, 70, 85)):
+            with self.subTest(cortes=cortes):
+                ok, out, err = psql('BEGIN;\n' + nuevo_juego(ACME, cortes) + ULTIMOS_CORTES % ACME + 'ROLLBACK;',
+                                    user='postgres')
+                self.assertTrue(ok, err)
+                self.assertEqual(out.splitlines()[-1], ','.join(str(c) for c in cortes))
+        for cortes in ((9, 20, 30), (40, 49, 80), (40, 60, 69), (40, 60, 92), (60, 40, 80), (40, 60, 101)):
+            with self.subTest(cortes=cortes):
+                ok, _, err = psql('BEGIN;\n' + nuevo_juego(ACME, cortes) + 'ROLLBACK;', user='postgres')
+                self.assertFalse(ok)
+                self.assertIn('scoring_rule_sets_band_cutoffs_ck', err)
+        self.assertEqual(scalar("SELECT string_agg(DISTINCT format_type(atttypid, atttypmod), ',') FROM pg_attribute"
+                                " WHERE attrelid = 'scoring_rule_sets'::regclass AND attname LIKE 'band_%';"), 'smallint')
+
+    def test_19c_una_version_nueva_copia_los_cortes_de_la_anterior(self):
+        sql = ('BEGIN;\n' + COMO_APP % ACME
+               + nuevo_juego(ACME, (50, 70, 85)) + nuevo_juego(ACME) + ULTIMOS_CORTES % ACME
+               # BETA no tiene juego propio: el primero copia los del global activo.
+               + "SET LOCAL app.current_org = '%s';\n" % BETA + nuevo_juego(BETA) + ULTIMOS_CORTES % BETA
+               + 'ROLLBACK;')
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-2:], ['50,70,85', '40,60,80'])
+
+    def test_19d_cortes_a_medias_no_se_completan(self):
+        ok, _, err = psql('BEGIN;\n' + COMO_APP % ACME + nuevo_juego(ACME, (50,), ('band_medium_from',)) + 'ROLLBACK;',
+                          user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('null value in column', err)
+
+    def test_19e_cirdan_app_no_cambia_los_cortes_de_una_version_creada(self):
+        for columna in ('band_medium_from', 'band_high_from', 'band_critical_from'):
+            with self.subTest(columna=columna):
+                ok, _, err = psql('BEGIN;\n' + COMO_APP % ACME + nuevo_juego(ACME, (50, 70, 85))
+                                  + "UPDATE scoring_rule_sets SET %s = %s + 1 WHERE organization_id = '%s';\n"
+                                  % (columna, columna, ACME) + 'ROLLBACK;', user='postgres')
+                self.assertFalse(ok)
+                self.assertIn('permission denied', err)
+        ok, _, err = psql("BEGIN;\n" + COMO_APP % ACME + "UPDATE scoring_rule_sets SET band_high_from = 61"
+                          " WHERE organization_id IS NULL;\nROLLBACK;", user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('permission denied', err)
+
+    def test_19f_una_organizacion_no_ve_ni_cambia_los_cortes_de_otra(self):
+        # BETA crea su juego con 50, 70 y 85. ACME no lo ve, no lo activa y no le copia los cortes.
+        sql = ('BEGIN;\n' + COMO_APP % BETA + nuevo_juego(BETA, (50, 70, 85))
+               + "SET LOCAL app.current_org = '%s';\n" % ACME
+               + "SELECT 've ' || count(*) FROM scoring_rule_sets WHERE organization_id = '%s';\n" % BETA
+               + "WITH u AS (UPDATE scoring_rule_sets SET is_active = true WHERE organization_id = '%s' RETURNING 1)"
+                 " SELECT 'cambia ' || count(*) FROM u;\n" % BETA
+               + nuevo_juego(ACME) + ULTIMOS_CORTES % ACME
+               + "RESET ROLE;\nSELECT 'beta ' || is_active || ' ' || band_medium_from FROM scoring_rule_sets"
+                 " WHERE organization_id = '%s';\n" % BETA
+               + 'ROLLBACK;')
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-4:], ['ve 0', 'cambia 0', '40,60,80', 'beta false 50'])
+        ok, _, err = psql('BEGIN;\n' + COMO_APP % ACME + nuevo_juego(BETA, (50, 70, 85)) + 'ROLLBACK;', user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('row-level security', err)
+
+    def test_19g_el_global_no_se_modifica_desde_la_app(self):
+        antes = scalar("SELECT string_agg(concat_ws(' ', id, is_active, band_medium_from, band_high_from, band_critical_from),"
+                       " ',' ORDER BY id) FROM scoring_rule_sets WHERE organization_id IS NULL;", user='postgres')
+        ok, _, err = psql("BEGIN;\n" + COMO_APP % ACME + "UPDATE scoring_rule_sets SET is_active = false"
+                          " WHERE organization_id IS NULL;\nROLLBACK;", user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('row-level security', err)
+        ok, _, err = psql("BEGIN;\n" + COMO_APP % ACME + "INSERT INTO scoring_rule_sets (organization_id, version,"
+                          " category_weights, is_active) VALUES (NULL, 999, '" + PESOS_IGUALES + "', false);\nROLLBACK;",
+                          user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('row-level security', err)
+        self.assertEqual(scalar("SELECT string_agg(concat_ws(' ', id, is_active, band_medium_from, band_high_from,"
+                                " band_critical_from), ',' ORDER BY id) FROM scoring_rule_sets"
+                                " WHERE organization_id IS NULL;", user='postgres'), antes)
+
+    def test_19h_la_funcion_del_trigger_tiene_search_path_fijo(self):
+        self.assertEqual(scalar("SELECT array_to_string(proconfig, ' ') FROM pg_proc"
+                                " WHERE oid = 'public.scoring_rule_sets_copiar_cortes()'::regprocedure;"),
+                         'search_path=pg_catalog, public, pg_temp')
+        self.assertEqual(scalar("SELECT has_function_privilege('cirdan_app', 'public.scoring_rule_sets_copiar_cortes()',"
+                                " 'EXECUTE')::text;"), 'false')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

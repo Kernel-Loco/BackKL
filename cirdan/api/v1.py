@@ -1,7 +1,8 @@
 """API v1 de lectura para el portal (RC-17), con la forma del contrato de docs/contrato_api_v1.md (#21).
 
 Todo con sesión: la empresa sale de la cookie y RLS filtra en la base. Las bandas, el ponderado y
-el piso salen del criterio de criticidad (cirdan/score/criterio.py, #29).
+el piso salen del criterio de criticidad (cirdan/score/criterio.py, #29), con los cortes del juego de reglas con que
+se calculó cada score (RC-237), nunca con los de la plantilla.
 
 Los GET de datos también aceptan una llave de API (#87, RC-129) con session_or_api_key, salvo la salida
 a SIEM (export/siem), que por ahora pide la sesión. La empresa sale de la llave y RLS filtra igual.
@@ -142,7 +143,7 @@ SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
        (a.id IS NOT NULL AND a.revoked_at IS NULL AND current_date BETWEEN a.valid_from AND a.valid_until) AS auth_valid,
        (a.valid_from > current_date) AS auth_not_started,
        t.result AS txt_result, t.checked_at AS txt_checked_at,
-       s.score,
+       s.score, s.band_medium_from, s.band_high_from, s.band_critical_from,
        (SELECT jsonb_object_agg(sev, n) FROM (SELECT severity AS sev, count(*) AS n FROM findings f
           WHERE f.domain_id = d.id AND f.status = 'open' GROUP BY severity) c) AS open_findings
   FROM domains d
@@ -151,7 +152,8 @@ SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
                                x.valid_until DESC LIMIT 1) a ON true
   LEFT JOIN LATERAL (SELECT v.result, v.checked_at FROM dns_txt_verifications v
                       WHERE v.domain_id = d.id ORDER BY v.checked_at DESC LIMIT 1) t ON true
-  LEFT JOIN LATERAL (SELECT ds.score FROM domain_scores ds
+  LEFT JOIN LATERAL (SELECT ds.score, rs.band_medium_from, rs.band_high_from, rs.band_critical_from FROM domain_scores ds
+                      JOIN scoring_rule_sets rs ON rs.id = ds.rule_set_id
                       WHERE ds.domain_id = d.id ORDER BY ds.computed_at DESC LIMIT 1) s ON true
  WHERE d.status <> 'removed'
  ORDER BY s.score DESC NULLS LAST, d.status = 'pending_verification' DESC, d.fqdn
@@ -185,14 +187,15 @@ def _domain(r):
 
     counts = {s: 0 for s in SEVERIDADES}
     counts.update(r['open_findings'] or {})
+    cortes = configuracion.cortes_de_fila(r) if r['score'] is not None else None
     return {
         'id': r['id'], 'fqdn': r['fqdn'], 'status': r['status'],
         'authorization': {'status': auth, 'valid_from': r['valid_from'], 'valid_until': r['valid_until'],
                           'signer_email': r['signer_email']},
         'txt': {'status': txt, 'checked_at': r['txt_checked_at']},
         'scan_eligibility': {'can_scan': not reasons, 'reasons': reasons},
-        'score': r['score'], 'band': criterio.banda(r['score']) if r['score'] is not None else None,
-        'grade': criterio.letra(r['score']) if r['score'] is not None else None,
+        'score': r['score'], 'band': criterio.banda(r['score'], cortes) if r['score'] is not None else None,
+        'grade': criterio.letra(r['score'], cortes) if r['score'] is not None else None,
         'open_findings': counts, 'last_scan_at': r['last_scan_at'], 'next_scan_at': r['next_scan_at'],
     }
 
@@ -280,7 +283,8 @@ def domain_findings(fqdn: str, session: Session = Depends(session_or_api_key)):
 SCORES_SQL = '''
 SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
     ds.model_version, ds.model_fallback_reason, ds.computed_at,
-    rs.version AS rule_set_version, rs.category_weights, sc.stats, sc.queued_at, sc.finished_at,
+    rs.version AS rule_set_version, rs.category_weights, rs.band_medium_from, rs.band_high_from, rs.band_critical_from,
+    sc.stats, sc.queued_at, sc.finished_at,
        (SELECT count(*) FROM score_contributions x WHERE x.score_id = ds.id AND x.severity = 'critical') AS critical_at_time
   FROM domain_scores ds
   JOIN domains d ON d.id = ds.domain_id
@@ -306,10 +310,11 @@ SELECT ds.code AS source, r.status
 
 def _score_base(row, critical_open):
     weights = {k: float(v) for k, v in row['category_weights'].items()}
-    calc = criterio.score_dominio(row['category_scores'], weights, critical_open)
+    cortes = configuracion.cortes_de_fila(row)   # los del juego de este score (RC-237)
+    calc = criterio.score_dominio(row['category_scores'], weights, critical_open, cortes)
     return {
-        'score_id': row['score_id'], 'score': row['score'], 'band': criterio.banda(row['score']),
-        'grade': criterio.letra(row['score']),
+        'score_id': row['score_id'], 'score': row['score'], 'band': criterio.banda(row['score'], cortes),
+        'grade': criterio.letra(row['score'], cortes),
         'weighted': calc['ponderado'], 'floor': calc['piso'], 'floor_applied': row['score'] > calc['ponderado'],
         'critical_open': critical_open, 'method': row['method'], 'rule_set_version': row['rule_set_version'],
         'reason': row['reason'], 'partial_coverage': row['partial_coverage'], 'computed_at': row['computed_at'],
@@ -337,7 +342,9 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
     stats = rows[-1]['stats'] or {}
     subs, kris = subcategorias.resumen(aportes, corridas, stats.get('rules_without_coverage') or (),
                                        stats.get('sources_partial') or ())
-    categories = [{'category': c, 'score': rows[-1]['category_scores'][c], 'band': criterio.banda(rows[-1]['category_scores'][c]),
+    cortes = configuracion.cortes_de_fila(rows[-1])
+    categories = [{'category': c, 'score': rows[-1]['category_scores'][c],
+                   'band': criterio.banda(rows[-1]['category_scores'][c], cortes),
                    'weight': weights[c]} for c in criterio.CATEGORIAS]
     return {'domain': fqdn, **base, 'categories': categories,
             'subcategories': subs, 'kris': kris, 'kri_map_version': subcategorias.VERSION,
@@ -506,7 +513,9 @@ def _reporte(session, fqdn):
     score = None
     if scores:
         s = scores[-1]
-        score = {'score': s['score'], 'band': criterio.banda(s['score']), 'grade': criterio.letra(s['score']),
+        cortes = configuracion.cortes_de_fila(s)
+        score = {'score': s['score'], 'band': criterio.banda(s['score'], cortes),
+                 'grade': criterio.letra(s['score'], cortes),
                  'partial_coverage': s['partial_coverage'], 'computed_at': s['computed_at']}
     return reporte.armar(fqdn, dominio['organization'],
                          {'valid_from': dominio['valid_from'], 'valid_until': dominio['valid_until']},
@@ -633,7 +642,8 @@ def _leer_contexto_plan(conn, session, domain_id):
         rule_set_id, method, parcial = active['id'], 'rules', False
 
     rule_set = conn.execute(
-        'SELECT category_weights FROM scoring_rule_sets WHERE id = %s', (rule_set_id,),
+        'SELECT category_weights, band_medium_from, band_high_from, band_critical_from '
+        'FROM scoring_rule_sets WHERE id = %s', (rule_set_id,),
     ).fetchone()
     reglas = {r['code']: r for r in conn.execute(
         'SELECT r.id::text, r.code, r.category, r.base_severity, r.weight, r.max_penalty, t.recommendation '
@@ -658,9 +668,11 @@ def _leer_contexto_plan(conn, session, domain_id):
             raise HTTPException(409, 'No hay severidad de ML guardada para todos los hallazgos vigentes')
 
     pesos = {k: float(v) for k, v in rule_set['category_weights'].items()}
-    # El 'Actual' del plan es el score guardado, el mismo que muestra /score.
+    # El 'Actual' del plan es el score guardado, el mismo que muestra /score. Antes y después llevan los cortes de
+    # bandas del juego de ese score (RC-237).
+    cortes = configuracion.cortes_de_fila(rule_set)
     guardado = {'score': score['score'], 'category_scores': score['category_scores']} if score else None
-    return domain_id, reglas, pesos, hallazgos, method, severidades, parcial, guardado
+    return domain_id, reglas, pesos, hallazgos, method, severidades, parcial, guardado, cortes
 
 
 def _plan_data(session, fqdn, descargar=None):
@@ -668,10 +680,11 @@ def _plan_data(session, fqdn, descargar=None):
     transacción que leyó los datos, como en _comparacion()."""
     domain_id = _domain_id(session, fqdn)
     with transaction(session.org_id) as conn:
-        _, reglas, pesos, hallazgos, method, severidades, parcial, guardado = _leer_contexto_plan(conn, session,
-                                                                                                  domain_id)
+        _, reglas, pesos, hallazgos, method, severidades, parcial, guardado, cortes = _leer_contexto_plan(
+            conn, session, domain_id)
         try:
-            data = plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial, guardado)
+            data = plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial, guardado,
+                                              cortes)
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return descargar(conn, data, domain_id) if descargar else data
@@ -685,11 +698,11 @@ def action_plan(fqdn: str, session: Session = Depends(session_or_api_key)):
 @router.post('/domains/{fqdn}/action-plan/simulate', summary='Simula una o varias acciones sin guardar cambios')
 def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
                          session: Session = Depends(current_session)):
-    _, reglas, pesos, hallazgos, method, severidades, parcial, guardado = _contexto_plan(session, fqdn)
+    _, reglas, pesos, hallazgos, method, severidades, parcial, guardado, cortes = _contexto_plan(session, fqdn)
     if not action_ids or len(action_ids) > 100 or any(not isinstance(action_id, str) for action_id in action_ids):
         raise HTTPException(422, 'Selecciona entre 1 y 100 acciones del plan')
     try:
-        resultado = plan_accion.simular(hallazgos, reglas, pesos, action_ids, severidades, guardado)
+        resultado = plan_accion.simular(hallazgos, reglas, pesos, action_ids, severidades, guardado, cortes)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     resultado['domain'] = fqdn
@@ -819,7 +832,7 @@ SELECT 1 FROM scans s JOIN domains d ON d.id = s.domain_id WHERE d.fqdn = %s AND
 '''
 SIEM_SCORE_SQL = '''
 SELECT ds.id::text, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.model_version, ds.reason,
-       ds.partial_coverage, ds.computed_at, rs.version AS rule_set_version
+       ds.partial_coverage, ds.computed_at, rs.version AS rule_set_version, rs.band_medium_from, rs.band_high_from, rs.band_critical_from
   FROM domain_scores ds
   JOIN domains d ON d.id = ds.domain_id
   JOIN scoring_rule_sets rs ON rs.id = ds.rule_set_id
@@ -937,7 +950,7 @@ def finding_explanation(finding_id: str, session: Session = Depends(session_or_a
 
 # ---------------------------------------------------------------- pesos, activos y escaneos
 
-@router.get('/scoring/weights', summary='Juego de reglas activo: pesos, bandas, piso, umbral y reglas')
+@router.get('/scoring/weights', summary='Juego de reglas activo: pesos, cortes de bandas, letras, piso, umbral y reglas')
 def scoring_weights(session: Session = Depends(session_or_api_key)):
     with transaction(session.org_id) as conn:
         rs = configuracion.juego_activo(conn, session.org_id)
@@ -945,37 +958,45 @@ def scoring_weights(session: Session = Depends(session_or_api_key)):
                              't.title, t.meaning, t.recommendation FROM scoring_rules r '
                              'JOIN scoring_rule_texts t ON t.code = r.code '
                              'WHERE r.rule_set_id = %s ORDER BY r.id', (rs['id'],)).fetchall()
+    cortes = configuracion.cortes_de_fila(rs)
     return {
         'rule_set_version': rs['version'], 'is_active': True, 'activated_at': rs['activated_at'],
         'validated_by': rs['validated_by'], 'category_weights': {k: float(v) for k, v in rs['category_weights'].items()},
-        'bands': [{'band': c, 'from': d, 'to': h} for d, h, c, _ in criterio.BANDAS],
-        'grades': [{'grade': g, 'from': d, 'to': h} for d, h, g in criterio.LETRAS],
-        'floor': {'one_critical': criterio.PISO_UN_CRITICO, 'two_or_more_critical': criterio.PISO_VARIOS_CRITICOS,
+        'band_cutoffs': cortes, 'band_cutoffs_template': dict(criterio.CORTES_PLANTILLA),
+        'bands': [{'band': c, 'from': d, 'to': h} for d, h, c, _ in criterio.bandas(cortes)],
+        'grades': [{'grade': g, 'from': d, 'to': h} for d, h, g in criterio.letras(cortes)],
+        'floor': {'one_critical': criterio.piso(1, cortes), 'two_or_more_critical': criterio.piso(2, cortes),
                   'counts_statuses': list(criterio.ESTADOS_VIGENTES)},
         'alert_threshold_default': criterio.UMBRAL_ALERTA,
         'rules': [{**r, 'weight': float(r['weight']), 'max_penalty': float(r['max_penalty'])} for r in rules],
     }
 
 
-@router.put('/scoring/weights', summary='Crea una nueva versión de pesos para la organización y recalcula sus scores')
+@router.put('/scoring/weights',
+            summary='Crea una nueva versión de pesos y cortes de bandas para la organización y recalcula sus scores')
 def update_scoring_weights(payload: dict[str, object] = Body(...),
                            session: Session = Depends(require_roles('admin'))):
     try:
         pesos = configuracion.validar_pesos(payload.get('category_weights'))
+        # Sin band_cutoffs, la versión nueva copia los de la anterior (RC-237). Con ellos, la misma regla que el CHECK.
+        cortes = criterio.validar_cortes(payload['band_cutoffs']) if payload.get('band_cutoffs') is not None else None
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
 
     with transaction(session.org_id) as conn:
-        conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 32))', (str(session.org_id),))
+        configuracion.bloquear_pesos(conn, session.org_id)  # el mismo que toma el orquestador al guardar un score
         anterior = configuracion.juego_activo(conn, session.org_id)
         if not anterior:
             raise HTTPException(409, 'No hay un juego de reglas global para usar como plantilla')
         pesos_anteriores = {categoria: float(valor)
                             for categoria, valor in anterior['category_weights'].items()}
-        if pesos == pesos_anteriores:
+        cortes_anteriores = configuracion.cortes_de_fila(anterior)
+        cortes = cortes or cortes_anteriores
+        if pesos == pesos_anteriores and cortes == cortes_anteriores:
             return {
                 'rule_set_version': anterior['version'],
                 'category_weights': pesos_anteriores,
+                'band_cutoffs': cortes_anteriores,
                 'recalculated_domains': 0,
                 'unchanged': True,
             }
@@ -988,9 +1009,11 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
         conn.execute('UPDATE scoring_rule_sets SET is_active = false '
                      'WHERE organization_id = %s AND is_active', (session.org_id,))
         nuevo = conn.execute(
-            'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, activated_at) '
-            'VALUES (%s, %s, %s, true, %s, now()) RETURNING id::text',
-            (session.org_id, version, Jsonb(pesos), session.author),
+            'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, '
+            'activated_at, band_medium_from, band_high_from, band_critical_from) '
+            'VALUES (%s, %s, %s, true, %s, now(), %s, %s, %s) RETURNING id::text',
+            (session.org_id, version, Jsonb(pesos), session.author, cortes['medium'], cortes['high'],
+             cortes['critical']),
         ).fetchone()['id']
         conn.execute(
             'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
@@ -1004,11 +1027,14 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
         audit(conn, session.org_id, 'scoring.weights_changed', user_id=session.audit_user_id,
               platform=session.audit_platform, entity_type='scoring_rule_set', entity_id=nuevo,
               details={'version': version, 'previous_version': anterior['version'],
-                       'category_weights': pesos, 'recalculated_domains': recalculados})
+                       'category_weights': pesos, 'previous_category_weights': pesos_anteriores,
+                       'band_cutoffs': cortes, 'previous_band_cutoffs': cortes_anteriores,
+                       'recalculated_domains': recalculados})
 
     return {
         'rule_set_version': version,
         'category_weights': pesos,
+        'band_cutoffs': cortes,
         'recalculated_domains': recalculados,
         'unchanged': False,
     }

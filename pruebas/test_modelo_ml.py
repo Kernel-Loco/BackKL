@@ -205,14 +205,20 @@ class ResultadoSimulado:
 
 class ConexionSimulada:
 
-    def __init__(self):
+    def __init__(self, cortes=(40, 60, 80), severidad='medium'):
         self.consultas = []
+        self.cortes = cortes
+        self.severidad = severidad
 
     def execute(self, sql, parametros=()):
         self.consultas.append((sql, parametros))
+        if 'FROM scoring_rule_sets' in sql:   # cortes_del_juego (RC-237)
+            medio, alto, critico = self.cortes
+            return ResultadoSimulado(fila={'band_medium_from': medio, 'band_high_from': alto,
+                                           'band_critical_from': critico})
         if sql.startswith('SELECT f.id::text'):
             return ResultadoSimulado([{
-                'id': 'finding-1', 'rule_code': 'spf_missing', 'base_severity': 'medium', 'severity': 'medium',
+                'id': 'finding-1', 'rule_code': 'spf_missing', 'base_severity': 'medium', 'severity': self.severidad,
                 'status': 'open', 'evidence': {}, 'asset_type': 'domain', 'asset_first_seen': None,
                 'detected_at': None, 'scan_at': None,
                 'caracteristicas': {'tipo': 'spf_faltante', 'antiguedad_dias': 0,
@@ -228,8 +234,8 @@ class IntegracionScoreMl(unittest.TestCase):
     REGLAS = {'spf_missing': {'id': 'rule-1', 'category': 'configuration', 'weight': 1, 'max_penalty': 40}}
     PESOS = {'infrastructure': .3, 'digital_identity': .2, 'configuration': .2, 'data_leaks': .3}
 
-    def guardar(self, bundle, fallo=None):
-        conexion = ConexionSimulada()
+    def guardar(self, bundle, fallo=None, conexion=None):
+        conexion = conexion or ConexionSimulada()
         with mock.patch.object(inferencia, 'cargar_modelo', side_effect=fallo) if fallo else \
                 mock.patch.object(inferencia, 'cargar_modelo', return_value=bundle), \
                 mock.patch.object(inferencia, 'predecir', return_value={
@@ -264,6 +270,15 @@ class IntegracionScoreMl(unittest.TestCase):
         score = next(params for sql, params in conexion.consultas if 'INSERT INTO domain_scores' in sql)
         self.assertEqual(score[6:9], ('rules', None, 'artefacto_ml_no_disponible'))
         predecir.assert_not_called()
+
+    def test_el_piso_sale_de_los_cortes_del_juego_del_score(self):
+        # RC-237: un crítico vigente deja el dominio en el inicio de la banda alto del juego con que se guarda.
+        for cortes, piso in (((40, 60, 80), 60), ((50, 70, 85), 70)):
+            conexion, _ = self.guardar(None, FileNotFoundError(), ConexionSimulada(cortes, 'critical'))
+            consulta = next(params for sql, params in conexion.consultas if 'FROM scoring_rule_sets' in sql)
+            self.assertEqual(consulta, ('ruleset',))
+            score = next(params for sql, params in conexion.consultas if 'INSERT INTO domain_scores' in sql)
+            self.assertEqual(score[4], piso, cortes)
 
     def test_modelo_con_un_byte_cambiado_no_carga_y_el_score_sale_por_reglas(self):
         cargar_real = inferencia.cargar_modelo
