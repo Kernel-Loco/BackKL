@@ -265,6 +265,17 @@ class Login(unittest.TestCase):
             code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': sesion.next_code(DANA)})
             self.assertEqual(code, 200, 'código %d' % (i + 1))
 
+    def test_16_un_codigo_con_digitos_que_no_son_0_a_9_da_422_y_no_gasta_el_token(self):
+        # \d y isdigit() aceptaban '١٢٣٤٥٦' y '１２３４５６', y hmac.compare_digest tronaba con un 500 sin bitácora (RC-315).
+        client = Client()
+        _, body = sesion.post_login(client, MAYA, PASSWORD)
+        token = body['mfa_token']
+        for codigo in ('١٢٣٤٥٦', '１２３４５６'):
+            code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': codigo})
+            self.assertEqual(code, 422, ascii(codigo))
+        code, _ = client.post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': sesion.next_code(MAYA)})
+        self.assertEqual(code, 200, 'el 422 sale antes de revisar el token, así que el token sigue sirviendo')
+
 
 def _cambiar(resuelto, cambio):
     """El mismo captcha resuelto con un cambio aplicado a su JSON."""

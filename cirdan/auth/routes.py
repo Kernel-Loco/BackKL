@@ -37,7 +37,7 @@ class LoginIn(BaseModel):
 
 class MfaIn(BaseModel):
     mfa_token: str = Field(min_length=10, max_length=100)
-    code: str = Field(pattern=r'^\d{6}$')
+    code: str = Field(pattern=totp.CODE_PATTERN)
 
 
 class PasswordIn(BaseModel):
@@ -229,7 +229,7 @@ class MfaSetupIn(BaseModel):
 
 
 class MfaEnableIn(BaseModel):
-    code: str = Field(pattern=r'^\d{6}$')
+    code: str = Field(pattern=totp.CODE_PATTERN)
 
 
 @router.post('/mfa/setup', summary='Alta de TOTP, paso 1: con la contraseña, un secreto nuevo con su QR')
@@ -310,14 +310,29 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
 @router.post('/logout', status_code=204, summary='Cierra la sesión y la borra del servidor')
 def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
-    data = sessions.get(token)
+    # La cookie se borra antes de tocar Valkey y ninguna falla de Valkey sale de aquí: con una excepción, el 500 de
+    # main.py no lleva el Set-Cookie de este Response y el navegador conservaría la cookie.
+    response.delete_cookie(COOKIE, path='/', httponly=True, secure=COOKIE_SECURE, samesite='lax')
+    try:
+        data = sessions.get(token)
+    except Exception:  # se intenta borrar igual: la sesión puede existir aunque no se haya podido leer
+        data = None
+        log.exception('No se pudo leer la sesión al cerrar sesión. Se borró la cookie y se intenta borrar la sesión')
+    # Primero se borran la sesión y la cookie: si la base falla al escribir el evento, la persona igual sale (RC-314).
+    try:
+        sessions.delete(token)
+    except Exception:  # puede seguir en Valkey hasta que venza por inactividad: no se escribe auth.logout
+        log.exception('No se pudo borrar de Valkey la sesión del usuario %s al cerrar sesión. Se borró la cookie',
+                      data['user_id'] if data else 'desconocido')
+        return
     if data:
         # La bitácora va en la empresa de la cuenta, aunque un superadmin cierre sesión desde otra (RC-332).
         home = data.get('home_org_id') or data['org_id']
-        with transaction(home) as conn:
-            audit(conn, home, 'auth.logout', data['user_id'], client_ip(request), 'user', data['user_id'])
-    sessions.delete(token)
-    response.delete_cookie(COOKIE, path='/', httponly=True, secure=COOKIE_SECURE, samesite='lax')
+        try:
+            with transaction(home) as conn:
+                audit(conn, home, 'auth.logout', data['user_id'], client_ip(request), 'user', data['user_id'])
+        except Exception:  # la sesión ya no existe: se responde 204 y la falla queda en el log, sin el token
+            log.exception('No se pudo escribir auth.logout del usuario %s', data['user_id'])
 
 
 @router.get('/me', summary='Usuario de la sesión')
@@ -425,7 +440,7 @@ class PasskeyRegisterOptionsIn(BaseModel):
     current_password: str = Field(min_length=1, max_length=passwords.MAX_LENGTH)
     # Solo si la cuenta tiene TOTP. Sin él, quien robe la cookie y la contraseña registraría su passkey y se saltaría
     # el segundo factor para siempre.
-    code: str | None = Field(default=None, pattern=r'^\d{6}$')
+    code: str | None = Field(default=None, pattern=totp.CODE_PATTERN)
 
 
 class PasskeyRegisterVerifyIn(BaseModel):
