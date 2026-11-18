@@ -1,4 +1,8 @@
 """Pruebas offline del clasificador v1 y sus explicaciones SHAP (#34–#36)."""
+import hashlib
+import json
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,11 +62,21 @@ class ModeloMl(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directorio:
             artefacto = Path(directorio) / 'modelo.joblib'
             ficha = Path(directorio) / 'metricas.json'
-            modelo.guardar(self.bundle, artefacto, ficha)
+            sha256 = modelo.guardar(self.bundle, artefacto, ficha)
             cargado = modelo.joblib.load(artefacto)
             self.assertEqual(cargado['version'], modelo.VERSION)
             self.assertEqual(cargado['metrics'], self.bundle['metrics'])
-            self.assertTrue(ficha.exists())
+            # RC-305: guardar escribe el sha256 del modelo junto a él y en la ficha, y con esa huella carga
+            self.assertEqual(sha256, hashlib.sha256(artefacto.read_bytes()).hexdigest())
+            huella = Path(directorio) / 'modelo.joblib.sha256'
+            self.assertEqual(huella.read_text(encoding='ascii'), '%s  modelo.joblib\n' % sha256)
+            self.assertEqual(json.loads(ficha.read_text(encoding='utf-8')),
+                             {**self.bundle['metrics'], 'sha256': sha256})
+            inferencia.cargar_modelo.cache_clear()
+            try:
+                self.assertEqual(inferencia.cargar_modelo(artefacto, huella)['version'], modelo.VERSION)
+            finally:
+                inferencia.cargar_modelo.cache_clear()
 
     def test_artefacto_de_produccion_carga_con_version_integrable(self):
         inferencia.cargar_modelo.cache_clear()
@@ -70,6 +84,59 @@ class ModeloMl(unittest.TestCase):
         self.assertEqual(bundle['version'], modelo.VERSION)
         self.assertTrue(bundle['metrics']['integrable'])
         self.assertEqual(bundle['metrics']['particionamiento'], 'por_plantilla')
+
+    def test_huella_de_cirdan_ml_es_la_de_la_ficha_y_la_del_artefacto(self):
+        # RC-305: la huella que revisa la API (cirdan/ml/, entra en la imagen) es la misma de docs/modelo_ml_v1.json
+        ficha = json.loads(modelo.FICHA.read_text(encoding='utf-8'))
+        calculada = hashlib.sha256(inferencia.ARTEFACTO.read_bytes()).hexdigest()
+        self.assertEqual(inferencia.leer_huella(), ficha['sha256'])
+        self.assertEqual(inferencia.leer_huella(), calculada)
+        self.assertEqual(inferencia.HUELLA.parent, inferencia.ARTEFACTO.parent)
+
+    def test_copia_con_un_byte_cambiado_no_se_carga(self):
+        with tempfile.TemporaryDirectory() as directorio:
+            copia = cambiar_un_byte(Path(directorio))
+            inferencia.cargar_modelo.cache_clear()
+            try:
+                with mock.patch('joblib.load') as cargar_pickle, \
+                        self.assertLogs('cirdan.ml.inferencia', 'WARNING') as registro, \
+                        self.assertRaises(inferencia.HuellaNoCoincide):
+                    inferencia.cargar_modelo(copia)
+            finally:
+                inferencia.cargar_modelo.cache_clear()
+            cargar_pickle.assert_not_called()
+            self.assertIn('no coincide', registro.output[0])
+
+    def test_huella_ausente_o_rota_no_carga(self):
+        with tempfile.TemporaryDirectory() as directorio:
+            rota = Path(directorio) / 'rota.sha256'
+            rota.write_text('no-es-un-sha256  modelo_v1.joblib\n', encoding='ascii')
+            inferencia.cargar_modelo.cache_clear()
+            try:
+                with mock.patch('joblib.load') as cargar_pickle:
+                    with self.assertRaises(inferencia.HuellaNoCoincide):
+                        inferencia.cargar_modelo(inferencia.ARTEFACTO, rota)
+                    with self.assertLogs('cirdan.ml.inferencia', level='WARNING') as registro:
+                        with self.assertRaises(inferencia.HuellaNoCoincide):
+                            inferencia.cargar_modelo(inferencia.ARTEFACTO, Path(directorio) / 'falta.sha256')
+                    self.assertIn('falta.sha256', registro.output[0])
+                    # Si falta el modelo mismo sigue el FileNotFoundError: el orquestador da 'artefacto_ml_no_disponible'
+                    with self.assertRaises(FileNotFoundError):
+                        inferencia.cargar_modelo(Path(directorio) / 'falta.joblib', inferencia.HUELLA)
+            finally:
+                inferencia.cargar_modelo.cache_clear()
+            cargar_pickle.assert_not_called()
+
+    def test_cirdan_ml_model_path_ya_no_cambia_el_modelo(self):
+        # Decisión 1 en a (RC-305): solo se carga el modelo de cirdan/ml/
+        with tempfile.TemporaryDirectory() as directorio:
+            copia = cambiar_un_byte(Path(directorio))
+            inferencia.cargar_modelo.cache_clear()
+            try:
+                with mock.patch.dict(os.environ, {'CIRDAN_ML_MODEL_PATH': str(copia)}):
+                    self.assertEqual(inferencia.cargar_modelo()['version'], modelo.VERSION)
+            finally:
+                inferencia.cargar_modelo.cache_clear()
 
     def test_inferencia_da_severidad_confianza_y_top_tres_shap(self):
         fila = {
@@ -111,6 +178,16 @@ class ModeloMl(unittest.TestCase):
         prediccion = inferencia.predecir(self.bundle, [fila])['f-seed']
         self.assertIn(prediccion['severity'], ('high', 'medium', 'low'))
         self.assertEqual(len(prediccion['shap']), 3)
+
+
+def cambiar_un_byte(directorio):
+    """Copia el modelo del repo y le cambia un byte a la mitad."""
+    copia = directorio / 'modelo_v1.joblib'
+    shutil.copyfile(inferencia.ARTEFACTO, copia)
+    datos = bytearray(copia.read_bytes())
+    datos[len(datos) // 2] ^= 0x01
+    copia.write_bytes(bytes(datos))
+    return copia
 
 
 class ResultadoSimulado:
@@ -187,6 +264,25 @@ class IntegracionScoreMl(unittest.TestCase):
         score = next(params for sql, params in conexion.consultas if 'INSERT INTO domain_scores' in sql)
         self.assertEqual(score[6:9], ('rules', None, 'artefacto_ml_no_disponible'))
         predecir.assert_not_called()
+
+    def test_modelo_con_un_byte_cambiado_no_carga_y_el_score_sale_por_reglas(self):
+        cargar_real = inferencia.cargar_modelo
+        with tempfile.TemporaryDirectory() as directorio:
+            copia = cambiar_un_byte(Path(directorio))
+            cargar_real.cache_clear()
+            try:
+                with mock.patch('joblib.load') as cargar_pickle, \
+                        self.assertLogs('cirdan.ml.inferencia', 'WARNING') as registro:
+                    conexion, predecir = self.guardar(None, lambda: cargar_real(copia))
+            finally:
+                cargar_real.cache_clear()
+        cargar_pickle.assert_not_called()
+        predecir.assert_not_called()
+        self.assertIn('no coincide', registro.output[0])
+        score = next(params for sql, params in conexion.consultas if 'INSERT INTO domain_scores' in sql)
+        self.assertEqual(score[6:9], ('rules', None, 'inferencia_ml_no_disponible'))
+        aporte = next(params for sql, params in conexion.consultas if 'INSERT INTO score_contributions' in sql)
+        self.assertEqual(aporte[5], 'medium')
 
 
 if __name__ == '__main__':

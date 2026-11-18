@@ -1,19 +1,53 @@
 """Inferencia ML y valores SHAP por hallazgo (#35, #36)."""
 from functools import lru_cache
-import os
+import hashlib
+import io
+import logging
+import re
 from pathlib import Path
 
 ARTEFACTO = Path(__file__).with_name('modelo_v1.joblib')
+# sha256 del artefacto, escrito por modelo.guardar. Vive en cirdan/ porque docs/ no entra en la imagen (RC-305)
+HUELLA = Path(__file__).with_name('modelo_v1.joblib.sha256')
 CLASE_A_SEVERIDAD = {'alta': 'high', 'media': 'medium', 'baja': 'low'}
 CARACTERISTICAS_CATEGORICAS = ('tipo', 'exposicion', 'sensibilidad')
 
+log = logging.getLogger(__name__)
+
+
+class HuellaNoCoincide(ValueError):
+    """El sha256 del artefacto no es el de cirdan/ml/modelo_v1.joblib.sha256: no se carga."""
+
+
+def leer_huella(huella=HUELLA):
+    """Lee el sha256 del archivo de huella, con la forma de sha256sum: '<hex>  modelo_v1.joblib'."""
+    try:
+        partes = Path(huella).read_text(encoding='ascii').split()
+    except FileNotFoundError:
+        # Sin huella el modelo no se carga. cargar_modelo ya leyó el artefacto, así que no es 'artefacto_ml_no_disponible'
+        log.warning('Falta la huella del modelo %s. No se carga.', Path(huella).name)
+        raise HuellaNoCoincide('falta la huella del modelo %s' % Path(huella).name) from None
+    if not partes or not re.fullmatch(r'[0-9a-f]{64}', partes[0]):
+        raise HuellaNoCoincide('la huella del modelo en %s no es un sha256' % Path(huella).name)
+    return partes[0]
+
 
 @lru_cache(maxsize=1)
-def cargar_modelo(ruta=None):
+def cargar_modelo(ruta=ARTEFACTO, huella=HUELLA):
+    """Carga el modelo solo si su sha256 es el de la huella: joblib.load lee un pickle, que puede ejecutar código.
+
+    Se lee el archivo una vez y se carga de esos mismos bytes, así no se puede cambiar entre la revisión y la carga.
+    """
     import joblib
 
-    ruta = Path(ruta or os.environ.get('CIRDAN_ML_MODEL_PATH', ARTEFACTO))
-    return joblib.load(ruta)
+    datos = Path(ruta).read_bytes()
+    esperada = leer_huella(huella)
+    calculada = hashlib.sha256(datos).hexdigest()
+    if calculada != esperada:
+        log.warning('La huella del modelo %s no coincide: sha256 %s, se esperaba %s. No se carga.',
+                    Path(ruta).name, calculada, esperada)
+        raise HuellaNoCoincide('la huella del modelo %s no coincide' % Path(ruta).name)
+    return joblib.load(io.BytesIO(datos))
 
 
 def predecir(bundle, filas):
