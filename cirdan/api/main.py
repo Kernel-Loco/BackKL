@@ -122,6 +122,7 @@ SELECT d.fqdn AS domain,
        CASE WHEN d.status = 'pending_verification' THEN 'Pending TXT'
             WHEN a.id IS NULL                      THEN 'Not authorized'
             WHEN a.revoked_at IS NOT NULL          THEN 'Revoked'
+            WHEN current_date < a.valid_from       THEN 'Not authorized'
             WHEN current_date > a.valid_until      THEN 'Expired'
             ELSE 'Authorized' END                                   AS authorization,
        CASE WHEN t.result = 'match'                THEN 'Verified'
@@ -132,8 +133,9 @@ SELECT d.fqdn AS domain,
        """ + LEVEL.format(s='s.score') + """                        AS level,
        d.last_scan_at                                               AS last_scan
   FROM domains d
-  LEFT JOIN LATERAL (SELECT * FROM domain_authorizations x
-                      WHERE x.domain_id = d.id ORDER BY x.valid_until DESC LIMIT 1) a ON true
+  LEFT JOIN LATERAL (SELECT * FROM domain_authorizations x WHERE x.domain_id = d.id
+                      ORDER BY (x.revoked_at IS NULL AND current_date BETWEEN x.valid_from AND x.valid_until) DESC,
+                               x.valid_until DESC LIMIT 1) a ON true
   LEFT JOIN LATERAL (SELECT v.result FROM dns_txt_verifications v
                       WHERE v.domain_id = d.id ORDER BY v.checked_at DESC LIMIT 1) t ON true
   LEFT JOIN LATERAL (SELECT ds.score FROM domain_scores ds
