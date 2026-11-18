@@ -966,7 +966,7 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
         raise HTTPException(422, str(error)) from error
 
     with transaction(session.org_id) as conn:
-        conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 32))', (str(session.org_id),))
+        configuracion.bloquear_pesos(conn, session.org_id)  # el mismo que toma el orquestador al guardar un score
         anterior = configuracion.juego_activo(conn, session.org_id)
         if not anterior:
             raise HTTPException(409, 'No hay un juego de reglas global para usar como plantilla')
@@ -997,6 +997,8 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
             'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
             (nuevo, anterior['id']),
         )
+        # recalcular_scores ya no lanza ValueError por su cuenta, pero motor.calcular sí, con un hallazgo cuyo código no
+        # tiene regla en el juego (cirdan/score/motor.py:46-47). Responde 409 y la transacción deshace los pesos nuevos.
         try:
             recalculados = configuracion.recalcular_scores(conn, session.org_id, nuevo, pesos)
         except ValueError as error:

@@ -39,6 +39,28 @@ def juego_activo(conn, org):
     ).fetchone()
 
 
+def bloquear_pesos(conn, org):
+    """Candado de la transacción para cambiar pesos o guardar un score con el juego activo (RC-62).
+
+    PUT /scoring/weights lo toma antes de crear la versión nueva y recalcular, y el orquestador antes de guardar el
+    score de un escaneo. Así el score de un escaneo que termina mientras alguien cambia los pesos o sale con los
+    pesos nuevos, o lo ve el recálculo y lo copia con ellos.
+    """
+    # org pasa por uuid para que la llave sea la misma aunque la línea de comandos la reciba en mayúsculas.
+    conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s::uuid::text, 32))', (str(org),))
+
+
+def reglas_del_juego(conn, rule_set_id):
+    """Reglas de un juego por código, con lo que necesitan el orquestador y el motor."""
+    return {r['code']: r for r in conn.execute(
+        'SELECT id::text, code, category, base_severity, weight, max_penalty FROM scoring_rules '
+        'WHERE rule_set_id = %s', (rule_set_id,)).fetchall()}
+
+
+def pesos_del_juego(rule_set):
+    return {k: float(v) for k, v in rule_set['category_weights'].items()}
+
+
 def recalcular_scores(conn, org, rule_set_id, pesos):
     """Inserta un snapshot rules_change por dominio con score previo, sin modificar históricos."""
     anteriores = conn.execute(
@@ -69,10 +91,10 @@ def recalcular_scores(conn, org, rule_set_id, pesos):
         hallazgos = []
         factores_previos = {}
         for fila in filas:
-            if anterior['method'] == 'ml':
-                if fila['score_severity'] is None:
-                    raise ValueError('faltan severidades ML congeladas para recalcular el dominio %s' %
-                                     anterior['domain_id'])
+            # Con un score ML se copia la severidad que el modelo le dio en ese score. Un hallazgo vigente que no
+            # aportó ahí (lo insertó un escaneo que se cayó antes de guardar su score) se queda con f.severity: el
+            # cambio de pesos de toda la organización no se detiene por un dominio (RC-62).
+            if anterior['method'] == 'ml' and fila['score_severity'] is not None:
                 fila['severity'] = fila['score_severity']
             hallazgos.append(fila)
             factores_previos[fila['id']] = fila['previous_factors'] or {}
@@ -87,7 +109,8 @@ def recalcular_scores(conn, org, rule_set_id, pesos):
         score_id = conn.execute(
             'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
             'reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) '
-            "VALUES (%s, %s, %s, %s, %s, %s, 'rules_change', %s, %s, %s, %s, now()) RETURNING id::text",
+            # clock_timestamp(), como el score del escaneo: el orden de computed_at es el del candado de pesos.
+            "VALUES (%s, %s, %s, %s, %s, %s, 'rules_change', %s, %s, %s, %s, clock_timestamp()) RETURNING id::text",
             (org, anterior['domain_id'], anterior['scan_id'], rule_set_id, calculo['score'],
              Jsonb(calculo['category_scores']), anterior['method'], anterior['model_version'],
              anterior['model_fallback_reason'], anterior['partial_coverage']),

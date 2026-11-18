@@ -66,11 +66,22 @@ class JuegoActivo(unittest.TestCase):
         self.assertEqual(conn.parametros, ('org-1', 'org-1'))
 
 
+class CandadoDePesos(unittest.TestCase):
+
+    def test_la_llave_pasa_por_uuid_como_la_de_los_hallazgos(self):
+        """RC-62: el uuid en mayúsculas de la línea de comandos y el de la sesión caen en el mismo candado."""
+        conn = ConexionSimulada()
+        configuracion.bloquear_pesos(conn, '20000000-0000-4000-8000-00000000000A')
+        self.assertIn('hashtextextended(%s::uuid::text, 32)', conn.sql)
+        self.assertEqual(conn.parametros, ('20000000-0000-4000-8000-00000000000A',))
+
+
 class Recalculo:
 
-    def __init__(self):
+    def __init__(self, severidad_congelada='high'):
         self.consultas = []
         self.aportes = []
+        self.severidad_congelada = severidad_congelada
 
     def execute(self, sql, parametros=()):
         self.consultas.append((sql, parametros))
@@ -88,8 +99,9 @@ class Recalculo:
         if sql.startswith('SELECT f.id::text AS id'):
             return ResultadoSimulado(filas=[{
                 'id': 'finding-1', 'rule_code': 'spf_missing', 'severity': 'medium', 'status': 'open',
-                'score_severity': 'high',
-                'previous_factors': {'confidence': .91, 'shap': [{'feature': 'sensibilidad'}]},
+                'score_severity': self.severidad_congelada,
+                'previous_factors': ({'confidence': .91, 'shap': [{'feature': 'sensibilidad'}]}
+                                     if self.severidad_congelada else None),
             }])
         if sql.startswith('INSERT INTO domain_scores'):
             return ResultadoSimulado(fila={'id': 'score-nuevo'})
@@ -118,7 +130,17 @@ class RecalculoScores(unittest.TestCase):
         self.assertEqual(factores['confidence'], .91)
         self.assertEqual(factores['shap'][0]['feature'], 'sensibilidad')
         self.assertFalse(any('UPDATE domain_scores' in sql for sql, _ in conn.consultas))
+        self.assertIn('clock_timestamp()', score_sql)  # el orden de computed_at es el del candado de pesos (RC-62)
 
+
+    def test_hallazgo_sin_aporte_en_el_score_ml_no_detiene_el_recalculo(self):
+        """RC-62: un escaneo caído dejó un hallazgo vigente sin aporte en el último score ML. Ya no hay 409."""
+        conn = Recalculo(severidad_congelada=None)
+        pesos = {categoria: .25 for categoria in criterio.CATEGORIAS}
+        self.assertEqual(configuracion.recalcular_scores(conn, 'org-1', 'ruleset-v2', pesos), 1)
+        aporte = conn.aportes[0][1]
+        self.assertEqual(aporte[5], 'medium')  # f.severity del hallazgo
+        self.assertNotIn('confidence', aporte[6].obj)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
