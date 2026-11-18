@@ -517,12 +517,19 @@ def _visitar(url, timeout, cronometro=None):
     except urllib.error.URLError as e:
         if isinstance(e.reason, ConnectionRefusedError):
             return {'rechazada': True}
-        return {'sin_respuesta': visita._motivo(e)}
+        return {'sin_respuesta': _motivo(e)}
     except ConnectionRefusedError:
         return {'rechazada': True}
     except (OSError, http.client.HTTPException, ValueError) as e:
-        return {'sin_respuesta': visita._motivo(e)}
+        return {'sin_respuesta': _motivo(e)}
     return resumir(estado, cabeceras, cuerpo, cortado)
+
+
+def _motivo(error):
+    """El motivo de SIN_RESPUESTA de una petición que no terminó. 'tls_viejo' de la visita web (RC-239) aquí es 'tls':
+    api_docs no tiene regla de la versión de TLS y la ruta solo queda sin revisar."""
+    motivo = visita._motivo(error)
+    return 'tls' if motivo == 'tls_viejo' else motivo
 
 
 class ClienteApiDocs(shodan.ClienteShodan):

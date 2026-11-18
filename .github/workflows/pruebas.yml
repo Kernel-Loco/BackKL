@@ -105,7 +105,8 @@ jobs:
       # porque no trae gitleaks. Aquí INTEGRACION_GITHUB=1 hace que falle si a la imagen le faltan.
       # Transporte de test_rdap.py hace su certificado con cryptography, que el runner no trae: allí se salta y aquí
       # prueba el transporte, TLS incluido, con el OpenSSL de la imagen. TRANSPORTE_TLS=1 hace que falle si a la
-      # imagen le falta (RC-166).
+      # imagen le falta (RC-166). SaludoReal de test_visita.py hace lo mismo con el saludo TLS de la visita web: certificados
+      # malos y un servidor que solo habla TLS 1.0 o 1.1 (RC-239).
       - name: Pruebas dentro del contenedor (orquestador, explorador, modelo ML, TXT, cuentas de demo, bloqueo por IP, código MFA y logout sin red, llaves del MFA y de las huellas, captcha, documentación de la API, gitleaks, TLS, pesos, ruta del reporte, subfinder sin red y estado de la carta)
         run: >-
           docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -e RUTA_REPORTE=1 -e INTEGRACION_SUBFINDER=1 -e ESTADO_CARTA=1
@@ -115,7 +116,7 @@ jobs:
           pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_login_sin_red.py pruebas/test_llave_totp.py pruebas/test_llave_huellas.py
           pruebas/test_captcha.py pruebas/test_documentacion_api.py
           pruebas.test_github.Integracion
-          pruebas.test_rdap.Transporte pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
+          pruebas.test_rdap.Transporte pruebas.test_visita.SaludoReal pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
           pruebas.test_subfinder.Integracion pruebas/test_estado_carta.py
 
       - name: Pruebas sin base ni red

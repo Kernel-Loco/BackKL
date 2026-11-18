@@ -228,11 +228,12 @@ class ApiV1(unittest.TestCase):
 
     def test_3c_un_kri_con_su_fuente_caida_sale_sin_cobertura(self):
         # La corrida de ct_logs del escaneo del score de acme-demo.mx pasa a failed y vuelve a succeeded al terminar.
+        # Certificados sale 'partial' antes de la caída: ese escaneo de la semilla no corrió web (RC-239).
         corrida = "UPDATE scan_source_runs SET status = '%s' WHERE id = '61000000-0000-4000-8000-000000000001';"
         antes = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
         kri = {k['kri']: k for k in antes['kris']}
         self.assertEqual((kri['certificates']['status'], kri['certificates']['findings'],
-                          kri['certificates']['max_severity'], kri['certificates']['penalty']), ('ok', 1, 'high', 20.0))
+                          kri['certificates']['max_severity'], kri['certificates']['penalty']), ('partial', 1, 'high', 20.0))
         ok, _, err = psql(corrida % 'failed', user='postgres')
         self.assertTrue(ok, err)
         try:

@@ -29,7 +29,8 @@ Qué se pide, todo pasivo o dentro del Anexo A:
 Con más de MAX_SITIOS nombres se visitan la raíz y un bloque de los demás que cambia con el día (_elegir): ninguno
 queda siempre fuera. La conexión a un sitio va solo por IPv4, como su A.
 
-Cobertura (#23). Las partes son los sitios (sus nombres). Un sitio queda revisado si su visita terminó y todo lo que
+Cobertura (#23). Las partes son los sitios (sus nombres), salvo las de tls_certificate_invalid y tls_legacy_only,
+que son 'tls:<sitio>' (RC-239, _cobertura_tls). Un sitio queda revisado si su visita terminó y todo lo que
 pedían sus tecnologías llegó: también un nombre sin A, uno sin sitio en el 443 ni en el 80 o uno que redirige a
 otro dominio o uno cuyo A solo trae IP que no son públicas (no tiene sitio público). Queda sin revisar si no se
 pudo visitar (tiempo, red, certificado, o al conectar no quedó ninguna IP pública), si respondió con un error del
@@ -77,8 +78,36 @@ from cirdan.recolectores.shodan import LimiteAlcanzado, RespuestaIlegible, SinTi
 FUENTE = 'web'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'web'
 
-# Código de regla -> severidad base. Los tres existen en el catálogo de reglas (semillas 001 y 004).
-CODIGOS = dict(soporte.CODIGOS, **nvd.CODIGOS, server_version_disclosed='low')
+# Código de regla -> severidad base. Los tres primeros existen en el catálogo de reglas (semillas 001 y 004) y los dos
+# del saludo TLS en la semilla 020 (#121, RC-239).
+CODIGOS = dict(soporte.CODIGOS, **nvd.CODIGOS, server_version_disclosed='low', tls_certificate_invalid='medium',
+               tls_legacy_only='medium')
+
+# El saludo TLS de la visita (#121, RC-239): el mismo de la petición, con el contexto de transporte.py, que revisa el
+# certificado y el nombre y pide TLS 1.2 como mínimo. No hay otro saludo para confirmar nada: ni sin revisar el
+# certificado ni con un mínimo más bajo.
+# verify_code de OpenSSL (X509_V_ERR_*) -> motivo de tls_certificate_invalid. Otro código da 'otro'.
+MOTIVOS_CERTIFICADO = {10: 'vencido', 18: 'autofirmado', 19: 'autofirmado', 62: 'otro_nombre', 66: 'debil',
+                       67: 'debil', 68: 'debil', 20: 'emisor_desconocido'}
+TEXTO_CERTIFICADO = {'vencido': 'un certificado vencido', 'autofirmado': 'un certificado autofirmado',
+                     'otro_nombre': 'un certificado de otro nombre', 'debil': 'un certificado con llave o firma débil',
+                     'emisor_desconocido': 'un certificado de un emisor que no se reconoce o sin su intermedio',
+                     'otro': 'un certificado que no se pudo verificar'}
+# El 20 de OpenSSL no distingue un intermedio que el servidor no manda de un emisor privado (la autoridad interna de la
+# empresa): la nota dice las dos cosas.
+NOTA_CADENA = ('Si el certificado es de una autoridad pública y al servidor le falta mandar el intermedio, algunos '
+               'navegadores lo completan solos y el sitio puede abrir en unos y fallar en otros. Si es de una autoridad '
+               'privada de la empresa, ningún navegador público lo acepta.')
+# Razones de OpenSSL de un saludo que falló por la versión: el servidor mandó la alerta protocol_version, o contestó
+# con TLS 1.1 o anterior y el cliente lo rechazó por debajo de su mínimo. WRONG_VERSION_NUMBER no cuenta: es lo que da
+# un servidor que no habla TLS en el 443 (por ejemplo, HTTP en texto plano).
+ALERTAS_VERSION = frozenset({'TLSV1_ALERT_PROTOCOL_VERSION', 'UNSUPPORTED_PROTOCOL', 'VERSION_TOO_LOW'})
+# Las dos reglas del saludo llevan como parte 'tls:<sitio>', no el sitio: se revisan en cuanto el saludo terminó, aunque
+# lo demás del sitio quede sin revisar (un reto, un 5xx, la NVD), y así un certificado renovado se cierra.
+PARTE_TLS = 'tls:'
+CODIGOS_TLS = ('tls_certificate_invalid', 'tls_legacy_only')
+MINIMO_TLS = 'TLSv1.2'
+_NOMBRE_TLS = re.compile(r'[A-Za-z0-9_.-]{1,64}', re.A)   # TLSv1.3, TLS_AES_256_GCM_SHA384, ECDHE-RSA-AES128-GCM-SHA256
 
 # Cabeceras que revelan el programa del servidor y una versión: 'nginx/1.24.0 (Ubuntu)', 'PHP/8.1.2'. Sin número de
 # versión ('nginx', 'cloudflare', 'Express') no hay hallazgo.
@@ -131,13 +160,14 @@ MAX_CONSULTAS = (PAGINAS_CT * INTENTOS_CT + MAX_SITIOS * shodan.INTENTOS + MAX_S
 TOPES = ('paginas', 'sitios', 'productos', 'cpe')
 # Motivos de una visita que no dio la página del sitio: pudo redirigir a un nombre que no se conoce. Un 5xx o un reto
 # cuentan, porque la raíz que hoy da 502 ayer redirigía a www. No son FALLAS_DE_RED: sí se graban.
-OPACOS = ('tiempo', 'red', 'certificado', 'tls', 'no_publica', 'grabacion', 'dns', 'sin_tiempo', 'redirecciones',
+OPACOS = ('tiempo', 'red', 'certificado', 'tls', 'tls_viejo', 'no_publica', 'grabacion', 'dns', 'sin_tiempo', 'redirecciones',
           'reto', 'error_http')
 # Por qué un sitio no se pudo visitar (la clave 'sin_respuesta' de la visita). Solo estas cuentan como una falla de
 # la corrida (no se graba): las demás son un dato estable del sitio.
 FALLAS_DE_RED = ('tiempo', 'red')
 MOTIVOS = {'tiempo': 'no respondió a tiempo', 'red': 'la conexión falló', 'certificado': 'su certificado no se pudo '
            'verificar', 'tls': 'no se pudo negociar TLS con el sitio',
+           'tls_viejo': 'no acepta TLS 1.2 ni 1.3',
            'no_publica':'su nombre resolvió solo a direcciones que no son públicas',
            'redirecciones': 'redirigió más de %d veces' % MAX_REDIRECCIONES,
            'no_https': 'redirige fuera de https o a otro puerto', 'ilegible': 'redirige a una dirección que no se '
@@ -178,6 +208,17 @@ _TLS_PASAJERO = (ssl.SSLEOFError, ssl.SSLZeroReturnError, ssl.SSLSyscallError, s
                  ssl.SSLWantWriteError)
 
 
+def _falla(error):
+    """{'sin_respuesta': motivo} de MOTIVOS de una petición a un sitio que no terminó. Un certificado que no se pudo
+    verificar lleva su verify_code (un entero de OpenSSL, o None si no vino)."""
+    motivo = _motivo(error)
+    if motivo != 'certificado':
+        return {'sin_respuesta': motivo}
+    razon = error.reason if isinstance(error, urllib.error.URLError) else error
+    codigo = getattr(razon, 'verify_code', None)
+    return {'sin_respuesta': 'certificado', 'verify_code': codigo if shodan._entero(codigo) else None}
+
+
 def _motivo(error):
     """El motivo de MOTIVOS de una petición a un sitio que no terminó."""
     razon = error.reason if isinstance(error, urllib.error.URLError) else error
@@ -186,6 +227,8 @@ def _motivo(error):
     if isinstance(razon, ssl.SSLCertVerificationError):
         return 'certificado'
     if isinstance(razon, ssl.SSLError) and not isinstance(razon, _TLS_PASAJERO):
+        if getattr(razon, 'reason', None) in ALERTAS_VERSION:
+            return 'tls_viejo'   # no acepta TLS 1.2 ni 1.3: no se baja el mínimo para ver cuál acepta (#122)
         return 'tls'   # el sitio no negocia TLS con este cliente (protocolo o cifrado): es fijo del sitio, no de la red
     if isinstance(razon, (TimeoutError, socket.timeout)):
         return 'tiempo'
@@ -198,6 +241,7 @@ def _visitar(url, timeout, cronometro=None):
     mock.patch.object. Nunca lanza por el sitio: lo que no terminó es {'sin_respuesta': motivo}."""
     cronometro = cronometro or time.monotonic
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': ACEPTA, 'Accept-Language': IDIOMA})
+    req.saludo = {}   # transporte lo llena con la versión y el cifrado del saludo TLS, si lo hubo (RC-239)
     try:
         estado, cabeceras, cuerpo, cortado = transporte.visitar(req, cronometro() + timeout, MAX_BYTES_SITIO,
                                                                 cronometro)
@@ -210,13 +254,15 @@ def _visitar(url, timeout, cronometro=None):
     except urllib.error.URLError as e:
         if isinstance(e.reason, ConnectionRefusedError):
             return {'rechazada': True}
-        return {'sin_respuesta': _motivo(e)}
+        return _falla(e)
     except ConnectionRefusedError:
         return {'rechazada': True}
     except (OSError, http.client.HTTPException, ValueError) as e:
-        return {'sin_respuesta': _motivo(e)}
-    return limpiar_visita({'estado': estado, 'cabeceras': cabeceras, 'cuerpo': _texto(cuerpo, cabeceras),
-                           'cortado': cortado})
+        return _falla(e)
+    visita = {'estado': estado, 'cabeceras': cabeceras, 'cuerpo': _texto(cuerpo, cabeceras), 'cortado': cortado}
+    if req.saludo:
+        visita['tls'] = dict(req.saludo)
+    return limpiar_visita(visita)
 
 
 def _texto(cuerpo, cabeceras):
@@ -266,6 +312,9 @@ def limpiar_visita(datos):
             raise ValueError('forma inesperada')
         if datos['sin_respuesta'] == 'tiempo' and datos.get('al_conectar') is True:
             return {'sin_respuesta': 'tiempo', 'al_conectar': True}   # transporte.SinConexion: el puerto no conectó
+        if datos['sin_respuesta'] == 'certificado':   # una grabación de antes de RC-239 no trae verify_code
+            codigo = datos.get('verify_code')
+            return {'sin_respuesta': 'certificado', 'verify_code': codigo if shodan._entero(codigo) else None}
         return {'sin_respuesta': datos['sin_respuesta']}
     estado, cabeceras, cuerpo = datos.get('estado'), datos.get('cabeceras'), datos.get('cuerpo')
     if not shodan._entero(estado) or not isinstance(cabeceras, (list, tuple)) or not isinstance(cuerpo, str):
@@ -277,7 +326,21 @@ def limpiar_visita(datos):
         nombre, valor = par
         valor = _sin_valores(valor) if nombre.lower() == 'set-cookie' else valor
         pares.append([nombre[:MAX_LARGO_CABECERA], valor[:MAX_LARGO_CABECERA]])
-    return {'estado': estado, 'cabeceras': pares, 'cuerpo': cuerpo, 'cortado': datos.get('cortado') is True}
+    limpia = {'estado': estado, 'cabeceras': pares, 'cuerpo': cuerpo, 'cortado': datos.get('cortado') is True}
+    tls = _saludo(datos.get('tls'))
+    if tls:
+        limpia['tls'] = tls
+    return limpia
+
+
+def _saludo(tls):
+    """{version, cifrado} del saludo TLS de una visita, con solo nombres como 'TLSv1.3' o 'TLS_AES_256_GCM_SHA384', o
+    None si no vino o no se puede leer. Una grabación de antes de RC-239, o una visita por http, no lo trae."""
+    if not isinstance(tls, dict):
+        return None
+    salida = {k: tls[k] for k in ('version', 'cifrado')
+              if isinstance(tls.get(k), str) and _NOMBRE_TLS.fullmatch(tls[k])}
+    return salida or None
 
 
 def _reducir_nvd(datos):
@@ -539,6 +602,27 @@ def _version_expuesta(sitio, dominio, ahora):
                     partes=[sitio.nombre])
 
 
+def _saludo_fallido(sitio, dominio, ahora):
+    """tls_certificate_invalid o tls_legacy_only del sitio, del mismo saludo de su visita (#121, RC-239). La evidencia
+    dice el host, la URL y el motivo, sin copiar el certificado. La huella no lleva el motivo, así un certificado que
+    pasa de vencido a autofirmado sigue siendo el mismo hallazgo."""
+    tipo = 'domain' if sitio.nombre == dominio else 'subdomain'
+    if 'certificado' in sitio.saludo:
+        codigo, verify_code = 'tls_certificate_invalid', sitio.saludo['certificado']
+        motivo = MOTIVOS_CERTIFICADO.get(verify_code, 'otro')
+        evidencia = {'title': 'El sitio %s presenta %s' % (sitio.nombre, TEXTO_CERTIFICADO[motivo]),
+                     'host': sitio.nombre, 'url': sitio.url, 'motivo': motivo, 'verify_code': verify_code}
+        if motivo == 'emisor_desconocido':
+            evidencia['nota'] = NOTA_CADENA
+    else:
+        codigo = 'tls_legacy_only'
+        evidencia = {'title': 'El sitio %s no acepta TLS 1.2 ni 1.3' % sitio.nombre, 'host': sitio.nombre,
+                     'url': sitio.url, 'minimo': MINIMO_TLS}
+    return Hallazgo(codigo, CODIGOS[codigo], sitio.nombre, evidencia['title'], evidencia,
+                    rubrica.calcular(codigo, tipo, evidencia, ahora), _huella(codigo, dominio, sitio.nombre),
+                    partes=[PARTE_TLS + sitio.nombre])
+
+
 def _huella(codigo, dominio, activo, clave=''):
     """No lleva lo observado (la versión ni las señales), así el hallazgo no se duplica entre escaneos."""
     return hashlib.sha256('|'.join((FUENTE, codigo, dominio, activo, clave)).encode('utf-8')).hexdigest()
@@ -600,6 +684,9 @@ class _Sitio:
         self.url = None          # la URL de la página que se analizó
         self.expuestas = []      # las cabeceras Server y X-Powered-By con versión, si el análisis terminó completo
         self.falta = None        # el motivo de MOTIVOS si quedó sin revisar
+        self.saludo = None       # {'certificado': verify_code} o {'tls_viejo': True} si el saludo TLS falló así
+        self.tls_visto = False   # True si se sabe cómo quedó su saludo TLS: terminó, falló por el certificado o la
+        #                          versión, o el 443 no lo dio (rechazado, la página del 80, otro dominio)
 
     def sin_revisar(self, motivo):
         if self.falta is None:
@@ -734,6 +821,8 @@ def _revisar(res, cliente, dominio, ahora):
     for host in sorted(sitios):
         if sitios[host].expuestas and sitios[host].tecnologias is not None:
             res.hallazgos.append(_version_expuesta(sitios[host], dominio, ahora))
+        if sitios[host].saludo:
+            res.hallazgos.append(_saludo_fallido(sitios[host], dominio, ahora))
 
     # 5. Activos
     for host in sorted(sitios, key=lambda h: (h != dominio, h)):
@@ -771,6 +860,8 @@ def _revisar(res, cliente, dominio, ahora):
         # Ningún sitio quedó revisado completo, pero alguno dio hallazgos antes de que le faltara otra consulta: se
         # reportan y la corrida queda parcial, sin cerrar nada de lo que no se revisó.
         revisados, sin_revisar, sin_cobertura = [], (sorted(faltan) if lista is not None else None), []
+    revisados, sin_revisar, sin_cobertura = _cobertura_tls(sitios, faltan, revisados, sin_revisar, sin_cobertura,
+                                                           lista is not None)
     res.revisados, res.sin_revisar, res.sin_cobertura = revisados, sin_revisar, sin_cobertura
     if revisados is not None or sin_cobertura:
         res.avisos.append('%s, se revisaron %d de %d sitios' % (PARCIAL, len(hechos), len(sitios)))
@@ -781,11 +872,32 @@ def _revisar(res, cliente, dominio, ahora):
     return res
 
 
+def _cobertura_tls(sitios, faltan, revisados, sin_revisar, sin_cobertura, con_lista):
+    """La cobertura con las partes 'tls:<sitio>' de las dos reglas del saludo (RC-239). Si la corrida revisó todo, no
+    cambia. Si no, van en revisados las de los sitios cuyo saludo se vio (tls_visto) o que quedaron revisados, y en
+    sin_revisar, si la corrida sabe cuáles faltan, las de los que no. Si ningún sitio quedó revisado completo pero
+    alguno dio su saludo, las dos reglas dejan de ir sin cobertura y solo se cierra lo de esos saludos: sin_revisar va
+    en None, así nada de lo demás se cierra en una corrida que lo declara sin cobertura."""
+    if revisados is None and not sin_cobertura:
+        return revisados, sin_revisar, sin_cobertura
+    vistos = sorted(PARTE_TLS + h for h, s in sitios.items() if s.tls_visto or not s.falta)
+    if revisados is None:   # ningún sitio revisado completo y ningún hallazgo
+        if not vistos:
+            return revisados, sin_revisar, sin_cobertura
+        revisados, sin_revisar = [], None
+        sin_cobertura = [c for c in sin_cobertura if c not in CODIGOS_TLS]
+    revisados = list(revisados) + vistos
+    if sin_revisar is not None:
+        sin_revisar = list(sin_revisar) + sorted(PARTE_TLS + h for h in faltan if not sitios[h].tls_visto)
+    return revisados, sin_revisar, sin_cobertura
+
+
 def _registrar(res, sitios, sitio, host, url, visita, otro, dominio):
     """Lo que dejó la visita de `sitio`, que terminó en `host` (él mismo o el destino de sus redirecciones)."""
     if host != sitio.nombre:   # redirigió dentro del dominio: lo que se vio es de `host`
         sitio.web = {'estado': 'redirige', 'redirige_a': host}
         sitio.borde = []       # el borde se calcula sin cabeceras, solo con su A
+        sitio.tls_visto = True   # su saludo terminó: contestó con la redirección
         destino = sitios.setdefault(host, _Sitio(host))
         if destino.web is not None or destino.falta is not None:   # ya se visitó por su cuenta o por otro nombre
             return
@@ -793,17 +905,27 @@ def _registrar(res, sitios, sitio, host, url, visita, otro, dominio):
     if visita.get('fuera'):
         sitio.web = {'estado': 'redirige', 'redirige_a_otro_dominio': otro}
         sitio.borde = []
+        sitio.tls_visto = True
         return
     if visita.get('rechazada'):
         sitio.web = {'estado': 'sin_https'}
+        sitio.tls_visto = True
         return
     if 'sin_respuesta' in visita:
         sitio.web = {'estado': 'sin_respuesta'}
         sitio.sin_revisar(visita['sin_respuesta'])
+        if visita['sin_respuesta'] == 'certificado':
+            sitio.saludo, sitio.url = {'certificado': visita.get('verify_code')}, _sin_consulta(url)
+        elif visita['sin_respuesta'] == 'tls_viejo':
+            sitio.saludo, sitio.url = {'tls_viejo': True}, _sin_consulta(url)
+        sitio.tls_visto = sitio.saludo is not None
         return
+    sitio.tls_visto = True   # dio una página: por HTTPS el saludo terminó, y por HTTP el 443 no la dio
     sitio.web = {'estado': 'visitado', 'url': _sin_consulta(url), 'estado_http': visita['estado']}
     if url.startswith('http://'):
         sitio.web['protocolo'] = 'http'   # el 443 no dio la página: se vio la del 80
+    elif visita.get('tls'):
+        sitio.web['tls'] = dict(visita['tls'])   # dato del activo, no hallazgo ni score (RC-239)
     sitio.borde = visita['cabeceras']   # borde.detectar() las usa en el paso 3
     sitio.url = _sin_consulta(url)
     try:

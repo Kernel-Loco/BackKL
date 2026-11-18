@@ -82,7 +82,7 @@ APORTES = [aporte('cert_expired', 'infrastructure', 'high', 20), aporte('cert_ex
            aporte('exposed_rdp', 'infrastructure', 'high', 25), aporte('exposed_api_docs', 'infrastructure', 'medium', 10),
            aporte('dmarc_missing', 'configuration', 'medium', 10), aporte('lookalike_domain', 'digital_identity', 'medium', 15),
            aporte('breach_exposure', 'data_leaks', 'critical', 40)]
-TODAS = {f: 'succeeded' for f in ('ct_logs', 'dns', 'shodan', 'api_docs', 'whois')}
+TODAS = {f: 'succeeded' for f in ('ct_logs', 'dns', 'shodan', 'api_docs', 'whois', 'web')}
 
 
 class SubcategoriasYKri(unittest.TestCase):
@@ -100,7 +100,8 @@ class SubcategoriasYKri(unittest.TestCase):
     def test_1b_cambiar_el_mapa_pide_subir_la_version(self):
         # Huella de SUBCATEGORIAS, KRIS y EMITEN por versión. Si cambias el mapa, sube VERSION y agrega aquí su
         # huella nueva (la que imprime el mensaje de esta prueba), sin borrar las anteriores.
-        huellas = {1: '21dcfebaeb77bdcadd33c3342b5f34cffa11c2be9ac7b50252d52d368994a8cb'}
+        huellas = {1: '21dcfebaeb77bdcadd33c3342b5f34cffa11c2be9ac7b50252d52d368994a8cb',
+                   2: 'a81b44c8029acde2881bab899348e5619f1f8a77e2ae4ede02ed157e0ade68b1'}   # RC-239
         mapa = json.dumps([sub.SUBCATEGORIAS, sub.KRIS, sub.EMITEN], ensure_ascii=False, sort_keys=True)
         huella = hashlib.sha256(mapa.encode('utf-8')).hexdigest()
         self.assertIn(sub.VERSION, huellas, 'VERSION %d no tiene huella en esta prueba: %s' % (sub.VERSION, huella))
@@ -189,7 +190,11 @@ class SubcategoriasYKri(unittest.TestCase):
             ((TODAS, ['lookalike_domain'], ()), ('ok', 'ok', 'ok', nc, sf)),
             ((TODAS, ['cert_expired'], ()), ('partial', 'ok', 'ok', 'ok', sf)),
             ((TODAS, (), ['ct_logs']), ('partial', 'ok', 'ok', 'partial', sf)),
-            (({'shodan': 'succeeded', 'ct_logs': 'succeeded'}, (), ()), ('ok', 'partial', nc, 'ok', sf)),
+            # web no corrió: el saludo TLS de los sitios no se revisó (RC-239)
+            (({'shodan': 'succeeded', 'ct_logs': 'succeeded'}, (), ()), ('partial', 'partial', nc, 'ok', sf)),
+            (({'shodan': 'succeeded', 'ct_logs': 'succeeded', 'web': 'succeeded'}, (), ()),
+             ('ok', 'partial', nc, 'ok', sf)),
+            ((TODAS, (), ['web']), ('partial', 'ok', 'ok', 'ok', sf)),
             ((TODAS, (), ()), ('ok', 'ok', 'ok', 'ok', sf)),
         ]
         for (corridas, sin_cobertura, a_medias), esperado in casos:
