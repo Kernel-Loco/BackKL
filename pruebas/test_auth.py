@@ -531,7 +531,7 @@ def _esperar(contar, meta):
 def _login_con_cabeceras(email, password):
     """POST /auth/login que devuelve (código, detail, Retry-After)."""
     client = Client()
-    req = urllib.request.Request(sesion.BASE + AUTH + '/login', method='POST',
+    req = urllib.request.Request(AUTH + '/login', method='POST',
                                  data=json.dumps({'email': email, 'password': password,
                                                   'captcha': sesion.captcha(client)}).encode(),
                                  headers={'Content-Type': 'application/json'})
