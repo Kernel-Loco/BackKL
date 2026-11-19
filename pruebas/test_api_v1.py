@@ -199,6 +199,55 @@ class ApiV1(unittest.TestCase):
                            'la API debe ir un día delante de la base (API %s, México %s)' % (hoy_api, mexico))
         self.test_1b_carta_que_empieza_manana_no_cuenta_como_vigente()
 
+    def test_1e_open_findings_con_la_severidad_del_ultimo_score(self):
+        # RC-229. Se guarda un score de acme-demo.mx, copia del último, en el que un hallazgo abierto no crítico tiene
+        # aporte 'critical'. El conteo de /domains y la lista de /findings usan esa severidad y coinciden. Las dos
+        # tablas son de solo inserción: las filas de prueba se borran al final sin triggers, como en test_3a.
+        antes = next(d for d in self.get(self.acme, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
+        viejo = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')['score_id']
+        nuevo = '70000000-0000-4000-8000-000000000229'
+        ok, otro, err = psql(f"""
+            BEGIN;
+            INSERT INTO domain_scores (id, organization_id, domain_id, scan_id, rule_set_id, score, category_scores,
+                                       reason, method, model_version, model_fallback_reason, partial_coverage,
+                                       computed_at)
+            SELECT '{nuevo}', organization_id, domain_id, scan_id, rule_set_id, score, category_scores, reason, method,
+                   model_version, 'artefacto_ml_no_disponible', partial_coverage, computed_at + interval '1 second'
+              FROM domain_scores WHERE id = '{viejo}';
+            CREATE TEMP TABLE rc229_otro ON COMMIT DROP AS
+            SELECT x.finding_id FROM score_contributions x JOIN findings f ON f.id = x.finding_id
+             WHERE x.score_id = '{viejo}' AND x.severity <> 'critical' AND f.severity <> 'critical'
+               AND f.status = 'open' ORDER BY x.finding_id LIMIT 1;
+            INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, severity, factors)
+            SELECT organization_id, '{nuevo}', finding_id, rule_id, penalty,
+                   CASE WHEN finding_id IN (SELECT finding_id FROM rc229_otro) THEN 'critical' ELSE severity END,
+                   factors
+              FROM score_contributions WHERE score_id = '{viejo}';
+            SELECT finding_id FROM rc229_otro;
+            COMMIT;""", user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            self.assertRegex(otro, r'^[0-9a-f-]{36}$', 'no hay otro hallazgo abierto no crítico con aporte')
+            dominio = next(d for d in self.get(self.acme, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
+            lista = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')['items']
+            conteo = {s: 0 for s in ('critical', 'high', 'medium', 'low')}
+            for item in lista:
+                conteo[item['severity']] += 1
+            self.assertEqual(dominio['open_findings'], conteo)
+            self.assertEqual(dominio['open_findings']['critical'], antes['open_findings']['critical'] + 1)
+            self.assertEqual(next(i['severity'] for i in lista if i['id'] == otro), 'critical')
+            # la explicación del hallazgo lleva el motivo de caída del último score (RC-229)
+            exp = self.get(self.acme, '/api/v1/findings/%s/explanation' % otro)
+            self.assertEqual((exp['score_id'], exp['severity'], exp['model_fallback_reason']),
+                             (nuevo, 'critical', 'artefacto_ml_no_disponible'))
+        finally:
+            self.psql_o_falla(f"BEGIN; SET LOCAL session_replication_role = replica; "
+                              f"DELETE FROM score_contributions WHERE score_id = '{nuevo}'; "
+                              f"DELETE FROM domain_scores WHERE id = '{nuevo}'; COMMIT;",
+                              'quedó el score de prueba de RC-229')
+        despues = next(d for d in self.get(self.acme, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
+        self.assertEqual(despues['open_findings'], antes['open_findings'])
+
     def test_2_hallazgos_como_el_contrato(self):
         body = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
         esperado = ejemplo('hallazgos.json')
@@ -401,6 +450,37 @@ class ApiV1(unittest.TestCase):
             self.assertTrue(ok, err)
         self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), antes)
 
+    def test_3c3_codigos_sin_cobertura_con_su_fuente_y_su_motivo(self):
+        # RC-229. ct_logs cae, Shodan dice qué no revisó en su raw_payload y dns deja un código en
+        # rules_without_coverage. Todo vuelve como estaba al terminar.
+        url = '/api/v1/domains/acme-demo.mx/score'
+        antes = self.get(self.acme, url)
+        self.assertEqual({(h['source'], h['reason']) for h in antes['coverage_gaps']},
+                         {('api_docs', 'source_not_run'), ('github', 'source_not_run'), ('web', 'source_not_run')})
+        corrida = "UPDATE scan_source_runs SET %s WHERE id = '61000000-0000-4000-8000-0000000000%s';"
+        escaneo = "UPDATE scans SET stats = %s WHERE id = '60000000-0000-4000-8000-000000000001';"
+        ok, _, err = psql(corrida % ("status = 'failed'", '01')
+                          + corrida % ("""raw_payload = raw_payload || '{"sin_cobertura": ["exposed_iot_device"]}'""", '04')
+                          + escaneo % """stats || '{"rules_without_coverage": ["exposed_iot_device", "dmarc_missing"]}'""",
+                          user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            huecos = self.get(self.acme, url)['coverage_gaps']
+            por_fuente = {}
+            for h in huecos:
+                por_fuente.setdefault((h['source'], h['reason']), []).append(h['code'])
+            self.assertIn('lookalike_domain', por_fuente[('ct_logs', 'source_failed')])
+            self.assertEqual(por_fuente[('shodan', 'no_api_key')], ['exposed_iot_device'])
+            # dns no guarda sin_cobertura en la semilla: su código de rules_without_coverage se le da por CODIGOS
+            self.assertEqual(por_fuente[('dns', 'source_partial')], ['dmarc_missing'])
+            self.assertEqual([h['code'] for h in huecos], sorted(h['code'] for h in huecos))
+        finally:
+            ok, _, err = psql(corrida % ("status = 'succeeded'", '01')
+                              + corrida % ("raw_payload = raw_payload - 'sin_cobertura'", '04')
+                              + escaneo % "stats - 'rules_without_coverage'", user='postgres')
+            self.assertTrue(ok, err)
+        self.assertEqual(self.get(self.acme, url), antes)
+
     def test_3d_letra_en_dominios_historico_y_pesos_y_la_alerta_sigue_con_el_score(self):
         for d in self.get(self.acme, '/api/v1/domains')['items']:
             self.assertEqual(d['grade'], None if d['score'] is None else criterio.letra(d['score']), d['fqdn'])
@@ -435,7 +515,7 @@ class ApiV1(unittest.TestCase):
         esperado = ejemplo('explicacion.json')
         for campo in ('title', 'severity', 'penalty', 'max_penalty', 'factors', 'caracteristicas', 'score_id',
                       'model_version', 'model_prediction', 'explanation_model_version', 'confidence', 'shap',
-                      'rule_title', 'meaning', 'recommendation'):
+                      'rule_title', 'meaning', 'recommendation', 'model_fallback_reason'):
             self.assertEqual(exp[campo], esperado[campo], campo)
         hallazgos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
         hallazgo = next(item for item in hallazgos['items'] if item['id'] == exp['finding_id'])

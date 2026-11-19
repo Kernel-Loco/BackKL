@@ -26,7 +26,7 @@ from cirdan.auth.deps import Session, client_ip, current_session, in_scope, requ
 from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import audit, transaction
-from cirdan.score import cambios, comparacion, configuracion, criterio, motor, plan as plan_accion, subcategorias
+from cirdan.score import cambios, cobertura, comparacion, configuracion, criterio, motor, plan as plan_accion, subcategorias
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
@@ -144,8 +144,12 @@ SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
        (a.valid_from > current_date) AS auth_not_started,
        t.result AS txt_result, t.checked_at AS txt_checked_at,
        s.score, s.band_medium_from, s.band_high_from, s.band_critical_from,
-       (SELECT jsonb_object_agg(sev, n) FROM (SELECT severity AS sev, count(*) AS n FROM findings f
-          WHERE f.domain_id = d.id AND f.status = 'open' GROUP BY severity) c) AS open_findings
+       (SELECT jsonb_object_agg(sev, n) FROM (SELECT coalesce(sc_score.severity, f.severity) AS sev, count(*) AS n
+          FROM findings f
+          LEFT JOIN LATERAL (SELECT x.severity FROM domain_scores ds
+                               JOIN score_contributions x ON x.score_id = ds.id AND x.finding_id = f.id
+                              WHERE ds.domain_id = f.domain_id ORDER BY ds.computed_at DESC LIMIT 1) sc_score ON true
+          WHERE f.domain_id = d.id AND f.status = 'open' GROUP BY 1) c) AS open_findings
   FROM domains d
   LEFT JOIN LATERAL (SELECT * FROM domain_authorizations x WHERE x.domain_id = d.id
                       ORDER BY (x.revoked_at IS NULL AND current_date BETWEEN x.valid_from AND x.valid_until) DESC,
@@ -302,7 +306,7 @@ SELECT r.code, r.category, x.severity, x.penalty
 '''
 
 SCORE_CORRIDAS_SQL = '''
-SELECT ds.code AS source, r.status
+SELECT ds.code AS source, r.status, r.raw_payload->'sin_cobertura' AS sin_cobertura
   FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id
  WHERE r.scan_id = %s::uuid
 '''
@@ -348,8 +352,8 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
         threshold = conn.execute('SELECT alert_score_threshold AS t FROM organizations').fetchone()['t']
         # Subcategorías y KRI (#114): los aportes de este score y las corridas de su escaneo, sin columnas nuevas.
         aportes = conn.execute(SCORE_APORTES_SQL, (rows[-1]['score_id'],)).fetchall()
-        corridas = {r['source']: r['status']
-                    for r in conn.execute(SCORE_CORRIDAS_SQL, (rows[-1]['scan_id'],)).fetchall()}
+        filas_corridas = conn.execute(SCORE_CORRIDAS_SQL, (rows[-1]['scan_id'],)).fetchall()
+    corridas = {r['source']: r['status'] for r in filas_corridas}
     # El piso y su mensaje explican el score guardado con los críticos de su snapshot, como el histórico. Los de
     # ahora van aparte en critical_open y needs_rescan avisa cuando ya no son los mismos hallazgos, no solo cuando
     # cambia la cuenta: una brecha resuelta más un crítico nuevo da 1 contra 1 y sí pide escaneo (RC-316).
@@ -360,12 +364,17 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
     stats = rows[-1]['stats'] or {}
     subs, kris = subcategorias.resumen(aportes, corridas, stats.get('rules_without_coverage') or (),
                                        stats.get('sources_partial') or ())
+    # Los códigos que el escaneo del score no revisó, con su fuente y su motivo, para que el portal los nombre (RC-229).
+    huecos = cobertura.huecos([{'source': r['source'], 'status': r['status'],
+                                'sin_cobertura': r['sin_cobertura'] if isinstance(r['sin_cobertura'], list) else None}
+                               for r in filas_corridas], stats.get('rules_without_coverage') or ())
     cortes = configuracion.cortes_de_fila(rows[-1])
     categories = [{'category': c, 'score': rows[-1]['category_scores'][c],
                    'band': criterio.banda(rows[-1]['category_scores'][c], cortes),
                    'weight': weights[c]} for c in criterio.CATEGORIAS]
     return {'domain': fqdn, **base, 'categories': categories,
             'subcategories': subs, 'kris': kris, 'kri_map_version': subcategorias.VERSION,
+            'coverage_gaps': huecos,
             'alert': {'threshold': threshold, 'triggered': criterio.dispara_alerta(base['score'], threshold)}}
 
 
@@ -922,7 +931,7 @@ SELECT f.id::text AS finding_id, f.domain_id::text AS domain_id, d.fqdn::text AS
        fm.attack_source_url, fm.attack_unmapped_reason,
        fm.iso_version, fm.iso_control_id, fm.iso_control_name, fm.iso_source_url,
        fm.cis_version, fm.cis_safeguard_id, fm.cis_safeguard_name, fm.cis_source_url,
-    ds.id::text AS score_id, ds.computed_at, ds.method, ds.model_version, x.penalty, x.factors,
+    ds.id::text AS score_id, ds.computed_at, ds.method, ds.model_version, ds.model_fallback_reason, x.penalty, x.factors,
        t.title AS rule_title, t.meaning, t.recommendation
   FROM findings f
   JOIN domains d ON d.id = f.domain_id
@@ -956,7 +965,7 @@ def finding_explanation(finding_id: str, session: Session = Depends(session_or_a
         'severity': f['severity'], 'base_severity': f['base_severity'], 'category': f['category'], 'rule_code': f['rule_code'],
         'rule_title': f['rule_title'], 'meaning': f['meaning'],
         'score_id': f['score_id'], 'computed_at': f['computed_at'], 'method': f['method'] or 'rules',
-        'model_version': f['model_version'],
+        'model_version': f['model_version'], 'model_fallback_reason': f['model_fallback_reason'],
         'penalty': float(f['penalty']) if f['penalty'] is not None else 0.0, 'max_penalty': float(f['max_penalty']),
         'factors': factors, 'caracteristicas': caracteristicas(f),
         'summary': RESUMEN[f['severity']],
