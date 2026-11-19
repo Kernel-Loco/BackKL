@@ -60,8 +60,9 @@ recolector dns (registros_dns.RESOLVEDORES, 1.1.1.1 y 8.8.8.8, con su TIMEOUT_S 
 sistema: la carta solo nombra a los de Cloudflare y Google. Toda la corrida de DNS cabe en PLAZO_DNS: un nombre no se
 pregunta si no le quedan COSTO_DNS segundos, sus dos consultas. Si los resolvedores no responden o no quedó tiempo, no
 se sabe si el nombre resuelve: su certificado vencido no se reporta, queda un aviso y su huella va en omitidos, así el
-orquestador no cierra el que un escaneo anterior dejó abierto (DNS_SIN_RESPUESTA). Al reproducir, un nombre sin su
-dns_ grabado se reporta con aviso, como antes.
+orquestador no cierra el que un escaneo anterior dejó abierto (DNS_SIN_RESPUESTA), y la corrida queda parcial
+(revisados). Un «no existe» se cree si el dominio autorizado existe en DNS, aunque no tenga A ni AAAA. Al reproducir,
+un nombre sin su dns_ grabado se reporta con aviso, como antes.
 
     python -m cirdan.recolectores.crtsh olmardo.com
     python -m cirdan.recolectores.crtsh olmardo.com --sin-parecidos     (sin la búsqueda de dominios parecidos)
@@ -240,7 +241,10 @@ DNS_DANADO = object()        # lo que da el DNS de un nombre cuyo dns_ grabado e
 POR_NOMBRE_GRANDE = ('La respuesta de crt.sh a %%.%s pasó de su tope de %d bytes y no se leyó. Se usó la '
                      'búsqueda por nombre y pueden faltar subdominios')   # RC-288
 DNS_SIN_RESPUESTA = object()  # los resolvedores no respondieron o no quedó tiempo: su vencido va en omitidos (RC-288)
-SIN_DNS = 'No se pudo comprobar en DNS si %s resuelve. No se reporta su certificado vencido en este escaneo'
+SIN_DNS = 'No se pudo comprobar en DNS si resuelven %s. No se reporta su certificado vencido en este escaneo'
+SIN_DNSPYTHON = ('Falta dnspython en este equipo (pip install -r requirements.txt) y no se comprobó en DNS si resuelven '
+                 '%s. No se reporta su certificado vencido en este escaneo')
+MAX_NOMBRES_AVISO = 10       # nombres que dicen SIN_DNS y DNS_SIN_TIEMPO. De los demás dicen cuántos son (RC-288)
 DNS_SIN_TIEMPO = ('El DNS de los nombres vencidos llegó a su tope de %d s. No se comprobó si resuelven %s y no se '
                   'reporta su certificado vencido en este escaneo')
 MAX_DANADOS = 5              # archivos dañados que nombra el aviso. De los demás dice cuántos son
@@ -333,16 +337,18 @@ class ClienteCrtsh:
         self.dns_sin_respuesta = []  # nombres que se preguntaron y no se supo si resuelven (RC-288)
         self.dns_sin_tiempo = []     # nombres que no se preguntaron porque ya no quedaba PLAZO_DNS
 
-    def _preguntar(self, nombre, de=None):
+    def _preguntar(self, nombre, de=None, control=False):
         """self.resolver(nombre) si a la corrida de DNS le quedan COSTO_DNS segundos de PLAZO_DNS. Si no, None sin
         preguntar, y `de` (el nombre por el que se pregunta) queda en dns_sin_tiempo. El plazo empieza con la primera
-        pregunta de la corrida."""
+        pregunta de la corrida. Con `control` y el resolvedor de omisión, basta con que el nombre exista (_resolver_dns)."""
         if self._fin_dns is None:
             self._fin_dns = self.cronometro() + PLAZO_DNS
         if self._fin_dns - self.cronometro() < COSTO_DNS:
             if (de or nombre) not in self.dns_sin_tiempo:
                 self.dns_sin_tiempo.append(de or nombre)
             return None
+        if control and self.resolver is _resolver_dns:
+            return self.resolver(nombre, control=True)
         return self.resolver(nombre)
 
     @property
@@ -380,11 +386,12 @@ class ClienteCrtsh:
             return datos
         valor = self._preguntar(nombre)
         if valor is False and control:
-            if control not in self._dns_funciona:
-                funciona = self._preguntar(control, de=nombre)
-                if funciona is not None or nombre not in self.dns_sin_tiempo:  # sin tiempo no dice nada del DNS
-                    self._dns_funciona[control] = funciona is True
-            if not self._dns_funciona.get(control):
+            funciona = self._dns_funciona.get(control)
+            if funciona is None:
+                funciona = self._preguntar(control, de=nombre, control=True)
+                if funciona is not None:  # un None (sin respuesta o sin tiempo) no dice nada: se vuelve a preguntar
+                    self._dns_funciona[control] = funciona
+            if funciona is not True:
                 valor = None
         if valor is not None:
             self.grabadora.guardar(consulta, valor)
@@ -537,21 +544,40 @@ class ClienteCrtsh:
 
 # ---------------------------------------------------------------- utilidades
 
-def _resolver_dns(nombre):
+def _resolver_dns(nombre, control=False):
     """True si el nombre resuelve (A, AAAA o un CNAME que llega a una), False si no existe o no tiene ninguna y None si
     no se pudo saber. Es la misma consulta de DNS que hace cualquier navegador, sin tocar los servidores del dominio:
     A y, si no la tiene, AAAA, a registros_dns.RESOLVEDORES con TIMEOUT_S cada una (registros_dns._consultar), nunca
-    al DNS del sistema (RC-288). Un NXDOMAIN de la A basta: el nombre no existe."""
+    al DNS del sistema (RC-288). Un NXDOMAIN de la A basta: el nombre no existe.
+    Con `control` (el dominio autorizado) dice si existe: una A vacía también es True, porque un dominio con solo MX o
+    TXT en la raíz sí responde, y así su «no existe» se cree (RC-288)."""
     try:
         estado, valores = registros_dns._consultar(nombre, 'A')
         if estado == 'ok' and valores:
             return True
         if estado == 'nxdomain':
             return False
+        if control:
+            return True
         estado, valores = registros_dns._consultar(nombre, 'AAAA')
     except (registros_dns.ConsultaFallida, ImportError, OSError, ValueError, UnicodeError):
         return None
     return estado == 'ok' and bool(valores)
+
+
+def _hay_dnspython():
+    """Si dnspython carga. Sin él _resolver_dns da None en cada nombre y el aviso lo dice (RC-288)."""
+    try:
+        import dns.resolver  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _lista(nombres):
+    """Los primeros MAX_NOMBRES_AVISO nombres separados por coma y, si hay más, cuántos faltan."""
+    texto = ', '.join(nombres[:MAX_NOMBRES_AVISO])
+    return texto + (' y %d más' % (len(nombres) - MAX_NOMBRES_AVISO) if len(nombres) > MAX_NOMBRES_AVISO else '')
 
 
 def _con_fechas(certs):
@@ -1146,9 +1172,16 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
         # No se supo si resuelven (RC-288): su vencido no sale y el orquestador no cierra el que ya estaba abierto.
         res.omitidos += [h for _, h in omitidos if h not in res.omitidos]
         cortados = [n for n, _ in omitidos if n in getattr(cliente, 'dns_sin_tiempo', ())]
-        res.avisos += [SIN_DNS % n for n, _ in omitidos if n not in cortados]
+        sin_respuesta_dns = [n for n, _ in omitidos if n not in cortados]
+        if sin_respuesta_dns:
+            falta = getattr(cliente, 'resolver', None) is _resolver_dns and not _hay_dnspython()
+            res.avisos.append((SIN_DNSPYTHON if falta else SIN_DNS) % _lista(sin_respuesta_dns))
         if cortados:
-            res.avisos.append(DNS_SIN_TIEMPO % (PLAZO_DNS, ', '.join(cortados)))
+            res.avisos.append(DNS_SIN_TIEMPO % (PLAZO_DNS, _lista(cortados)))
+        # Y la corrida queda parcial, como con una variante sin respuesta: el escaneo no termina completo con 0
+        # vencidos cuando el DNS no se pudo comprobar.
+        if res.revisados is None:
+            res.revisados = sorted(set(_revisados(dominio, certs, ahora)) | _emisores(certs))
 
     # Dominios parecidos (#109, RC-226): solo se buscan en crt.sh. Nunca se resuelve su DNS ni se les pide nada.
     respondidas = 0        # búsquedas de parecidos que sí respondieron

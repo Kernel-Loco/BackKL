@@ -1010,14 +1010,16 @@ class Cuota(unittest.TestCase):
 class TransporteApi(unittest.TestCase):
     """RC-304: la API de GitHub sale por transporte.descargar(), como RDAP y Shodan: sin seguir redirecciones, sin los
     proxies del entorno y solo a direcciones públicas en el 443 (RC-299). Sin red: se simula la conexión https
-    (transporte._Https.https_open, detrás del opener de verdad) o transporte.abrir, y getaddrinfo truena si alguien
-    intenta salir."""
+    (transporte._Https.https_open, detrás del opener de verdad) o transporte.abrir, y transporte.resolver truena si
+    alguien intenta salir (getaddrinfo también, con un OSError que el hilo de resolver sí deja pasar)."""
     URL = 'https://api.github.com/orgs/acme-demo'
 
     def setUp(self):
-        sin_red = mock.patch('socket.getaddrinfo', side_effect=AssertionError('la prueba intentó salir a la red'))
-        sin_red.start()
-        self.addCleanup(sin_red.stop)
+        for sin_red in (mock.patch.object(github.transporte, 'resolver',
+                                          side_effect=AssertionError('la prueba intentó salir a la red')),
+                        mock.patch('socket.getaddrinfo', side_effect=OSError('la prueba intentó salir a la red'))):
+            sin_red.start()
+            self.addCleanup(sin_red.stop)
 
     @staticmethod
     def respuesta(req, codigo, cuerpo=b'', cabeceras=()):
@@ -1057,13 +1059,15 @@ class TransporteApi(unittest.TestCase):
         vistas = []
 
         def https_open(handler, req):
-            vistas.append((req.host, req._tunnel_host, req.get_header('Accept'), req.get_header('User-agent')))
+            vistas.append((req.host, req._tunnel_host, req.get_header('Accept'), req.get_header('User-agent'),
+                           req.get_header('X-github-api-version')))
             return self.respuesta(req, 200, b'{"login": "acme-demo"}', [('Content-Type', 'application/json')])
         proxies = {n: 'http://proxy.invalid:3128' for n in ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy',
                                                             'ALL_PROXY', 'all_proxy')}
         with mock.patch.dict(os.environ, proxies), mock.patch.object(github.transporte._Https, 'https_open', https_open):
             self.assertEqual(github._descargar(self.URL, 30), b'{"login": "acme-demo"}')
-        self.assertEqual(vistas, [('api.github.com', None, 'application/vnd.github+json', github.AGENTE)])
+        self.assertEqual(vistas, [('api.github.com', None, 'application/vnd.github+json', github.AGENTE,
+                                   github.VERSION_API)])
 
     def test_3_404_403_y_429_siguen_dando_noexiste_y_cuota(self):
         for codigo, error in ((404, github.NoExiste), (403, github.CuotaAgotada), (429, github.CuotaAgotada)):

@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import functools
+import importlib.util
 import os
 import re
 import shutil
@@ -800,6 +801,8 @@ class FallasYGrabacion(unittest.TestCase):
         orquestador = (raiz / 'cirdan' / 'orquestador' / '__init__.py').read_text(encoding='utf-8')
         tope = int(re.search(r'^TOPE_CORRIDA = timedelta\(minutes=(\d+)\)', orquestador, re.M).group(1)) * 60
         self.assertLess(peor, tope)
+        self.assertLessEqual(peor + crtsh.PLAZO_DNS, tope)   # el DNS de los vencidos también cabe (RC-288)
+        self.assertIn('PLAZO_DNS (%d s de crtsh.py' % crtsh.PLAZO_DNS, orquestador)
         self.assertIn('%d s en el peor' % peor, orquestador)
         self.assertIn('Quedan %d s antes de TOPE_CORRIDA' % (tope - peor), orquestador)
         doc = (raiz / 'docs' / 'contrato_plugin.md').read_text(encoding='utf-8')
@@ -1398,6 +1401,68 @@ class TopeDeBytes(unittest.TestCase):
         self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
+    @unittest.skipUnless(os.environ.get('TRANSPORTE_TLS') == '1' or importlib.util.find_spec('cryptography'),
+                         'pide cryptography para el certificado: corre dentro del contenedor')
+    def test_2_un_servidor_tls_local_que_manda_mas_del_tope_se_corta(self):
+        """El servidor local que pide el Hecho cuando: TLS de verdad sobre socket.socketpair() (sin red), con el
+        certificado y el extremo de test_rdap. Con TOPE_BYTES en 256 KiB el servidor intenta mandar 16 MiB sin
+        Content-Length: _descargar corta con RespuestaGrande y el servidor no alcanza a mandarlo todo."""
+        import socket
+        import ssl
+        import threading
+        from pruebas.test_rdap import Extremo, certificado
+        carpeta = tempfile.TemporaryDirectory()
+        self.addCleanup(carpeta.cleanup)
+        ruta_cert, ruta_llave = certificado(carpeta.name, 'crt.sh')
+        servidor_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        servidor_ctx.load_cert_chain(ruta_cert, ruta_llave)
+        cliente_ctx = ssl.create_default_context(cafile=ruta_cert)   # como transporte._contexto, con esta CA
+        cliente_ctx.sslsocket_class = crtsh.transporte._SocketTls
+        total, tope, enviados, pedidos = 16 * 1024 * 1024, 256 * 1024, [], []
+        a, b = socket.socketpair()
+        extremo = Extremo(fileno=a.detach())
+
+        def atender():
+            b.settimeout(10)
+            try:
+                with servidor_ctx.wrap_socket(b, server_side=True) as tls:
+                    pedido = b''
+                    while b'\r\n\r\n' not in pedido:
+                        parte = tls.recv(4096)
+                        if not parte:
+                            return
+                        pedido += parte
+                    pedidos.append(pedido)
+                    tls.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n')
+                    bloque = b' ' * 65536
+                    for _ in range(total // len(bloque)):
+                        tls.sendall(bloque)
+                        enviados.append(len(bloque))
+            except OSError:
+                pass
+            finally:
+                b.close()
+        hilo = threading.Thread(target=atender, daemon=True)
+        hilo.start()
+
+        def conectar(conexion, direccion, *_):
+            self.assertEqual(direccion, ('crt.sh', 443))
+            extremo.settimeout(conexion.queda())   # como _conectar antes del handshake
+            return extremo
+        try:
+            with mock.patch.object(crtsh, 'TOPE_BYTES', tope), \
+                    mock.patch.object(crtsh.transporte, '_contexto', lambda: cliente_ctx), \
+                    mock.patch.object(crtsh.transporte._Conexion, '_conectar', conectar), \
+                    self.assertRaises(crtsh.RespuestaGrande):
+                crtsh._descargar('https://crt.sh/?q=%25.acme-demo.mx&output=json', 10)
+        finally:
+            extremo.close()
+            hilo.join(15)
+        self.assertFalse(hilo.is_alive())
+        [pedido] = pedidos
+        self.assertTrue(pedido.startswith(b'GET /?q=%25.acme-demo.mx&output=json HTTP/1.1\r\n'), pedido)
+        self.assertLess(sum(enviados), total // 2)   # dejó de leer: el servidor no alcanzó a mandar los 16 MiB
+
 
 class TopeDelDns(unittest.TestCase):
     """RC-288, comentario 10394: toda la corrida de DNS cabe en PLAZO_DNS. Con un resolvedor lento (cada pregunta se
@@ -1428,8 +1493,10 @@ class TopeDelDns(unittest.TestCase):
         cortados = ['v%02d.acme-demo.mx' % i for i in range(40) if 'v%02d.acme-demo.mx' % i not in preguntados]
         self.assertEqual(len(cortados), 40 - cabe)
         self.assertEqual([a for a in res.avisos if a.startswith('No se pudo comprobar')],
-                         [crtsh.SIN_DNS % n for n in preguntados])
-        self.assertIn(crtsh.DNS_SIN_TIEMPO % (crtsh.PLAZO_DNS, ', '.join(cortados)), res.avisos)
+                         [crtsh.SIN_DNS % crtsh._lista(preguntados)])   # uno solo, con a lo más 10 nombres
+        self.assertTrue(crtsh._lista(preguntados).endswith(' y %d más' % (cabe - crtsh.MAX_NOMBRES_AVISO)))
+        self.assertIn(crtsh.DNS_SIN_TIEMPO % (crtsh.PLAZO_DNS, crtsh._lista(cortados)), res.avisos)
+        self.assertIsNotNone(res.revisados)   # la corrida queda parcial
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_2_lo_que_si_respondio_dentro_del_tope_se_reporta(self):
@@ -1440,6 +1507,7 @@ class TopeDelDns(unittest.TestCase):
         self.assertEqual(len(res.omitidos), 40 - cabe)
         self.assertFalse([a for a in res.avisos if a.startswith('No se pudo comprobar')])
         self.assertEqual(len([a for a in res.avisos if a.startswith('El DNS de los nombres vencidos')]), 1)
+        self.assertIsNotNone(res.revisados)
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_3_un_no_existe_sin_tiempo_para_el_control_no_se_cree(self):
@@ -1458,6 +1526,53 @@ class TopeDelDns(unittest.TestCase):
         self.assertEqual((preguntas, cliente.dns_sin_tiempo, cliente.dns_sin_respuesta),
                          (['dev.acme-demo.mx'], ['dev.acme-demo.mx'], []))
         self.assertNotIn('acme-demo.mx', cliente._dns_funciona)   # sin tiempo no dice nada del DNS
+
+    def test_4_un_dominio_sin_a_en_la_raiz_si_cuenta_como_dns_que_responde(self):
+        """Con el resolvedor de omisión el control pregunta si el dominio existe: con solo MX o TXT en la raíz (A vacía)
+        el NXDOMAIN de un nombre se cree. Un NXDOMAIN del propio dominio no: ese resolvedor miente."""
+        for raiz, esperado in ((('vacio', []), False), (('ok', ['198.51.100.1']), False), (('nxdomain', []), None)):
+            pedidos = []
+
+            def consultar(nombre, tipo, raiz=raiz, pedidos=pedidos):
+                pedidos.append((nombre, tipo))
+                return raiz if nombre == 'acme-demo.mx' else ('nxdomain', [])
+            with self.subTest(raiz=raiz), mock.patch.object(crtsh.registros_dns, '_consultar', consultar), \
+                    mock.patch('socket.getaddrinfo', side_effect=AssertionError('DNS del sistema')):
+                cliente = crtsh.ClienteCrtsh(dormir=lambda s: None)
+                self.assertIs(cliente.resolver, crtsh._resolver_dns)
+                self.assertIs(cliente.resuelve('dev.acme-demo.mx', control='acme-demo.mx'), esperado)
+                self.assertEqual(pedidos, [('dev.acme-demo.mx', 'A'), ('acme-demo.mx', 'A')])
+                self.assertEqual(cliente.dns_sin_respuesta, [] if esperado is False else ['dev.acme-demo.mx'])
+
+    def test_5_un_control_sin_respuesta_no_se_guarda_para_toda_la_corrida(self):
+        """Un tiempo agotado pasajero en el control deja ese nombre como 'no se pudo saber', pero el siguiente
+        NXDOMAIN vuelve a preguntar por el dominio y, si responde, sí se cree."""
+        respuestas = {'a.acme-demo.mx': [False], 'b.acme-demo.mx': [False], 'acme-demo.mx': [None, True]}
+        preguntas = []
+
+        def resolver(nombre):
+            preguntas.append(nombre)
+            return respuestas[nombre].pop(0)
+        cliente = crtsh.ClienteCrtsh(transporte=CrtshSimulado(), dormir=lambda s: None, resolver=resolver)
+        self.assertIsNone(cliente.resuelve('a.acme-demo.mx', control='acme-demo.mx'))
+        self.assertIs(cliente.resuelve('b.acme-demo.mx', control='acme-demo.mx'), False)
+        self.assertEqual(preguntas, ['a.acme-demo.mx', 'acme-demo.mx', 'b.acme-demo.mx', 'acme-demo.mx'])
+        self.assertEqual((cliente.dns_sin_respuesta, cliente._dns_funciona),
+                         (['a.acme-demo.mx'], {'acme-demo.mx': True}))
+
+    def test_6_sin_dnspython_el_aviso_lo_dice(self):
+        cliente = crtsh.ClienteCrtsh(transporte=CrtshSimulado(), dormir=lambda s: None, resolver=crtsh._resolver_dns)
+        with mock.patch.object(crtsh.registros_dns, '_consultar', side_effect=ImportError('sin dnspython')), \
+                mock.patch.object(crtsh, '_hay_dnspython', return_value=False):
+            res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, parecidos=False)
+        [aviso] = [a for a in res.avisos if 'dnspython' in a]
+        self.assertEqual(aviso, crtsh.SIN_DNSPYTHON % crtsh._lista(cliente.dns_sin_respuesta))
+        self.assertIn('dev.acme-demo.mx', aviso)
+        self.assertFalse([a for a in res.avisos if a.startswith('No se pudo comprobar')])
+        self.assertNotIn('cert_expired', {h.codigo for h in res.hallazgos})
+        self.assertIsNotNone(res.revisados)
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+
 
 
 class VigenciaReal(unittest.TestCase):
@@ -1525,6 +1640,7 @@ class VigenciaReal(unittest.TestCase):
         self.assertTrue(esperadas)
         self.assertEqual(res.omitidos, esperadas)
         self.assertIn(crtsh.SIN_DNS % 'dev.acme-demo.mx', res.avisos)
+        self.assertIsNotNone(res.revisados)   # parcial: el escaneo no termina completo con 0 vencidos
         self.assertFalse([a for a in res.avisos if 'Se reporta su certificado vencido' in a])
         self.assertNotIn('resuelve', {a.valor: a for a in res.activos}['dev.acme-demo.mx'].atributos)
         self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
