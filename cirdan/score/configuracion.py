@@ -77,11 +77,13 @@ def cortes_del_juego(conn, rule_set_id):
     return cortes_de_fila(fila)
 
 
-def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False):
-    """Inserta un snapshot rules_change por dominio con score previo, sin modificar históricos.
+def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False, saltados=None):
+    """Inserta un snapshot rules_change por dominio con score previo, sin modificar históricos. Devuelve cuántos.
 
     El piso y la banda salen de los cortes del juego `rule_set_id` (RC-237), así un cambio de cortes también cambia
     el número. Con `solo_otro_juego` deja fuera los dominios cuyo último snapshot ya usa `rule_set_id` (RC-310).
+    Un dominio con score ML y un hallazgo puntuable sin severidad congelada en ese score lanza ValueError. Si se pasa
+    la lista `saltados`, ese dominio no se recalcula, su domain_id se agrega a la lista y los demás siguen (RC-310).
     """
     anteriores = conn.execute(
         'SELECT DISTINCT ON (domain_id) domain_id::text, scan_id::text, id::text AS score_id, '
@@ -102,6 +104,7 @@ def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False):
     ).fetchall()}
     campos_explicativos = ('confidence', 'shap', 'model_prediction', 'explanation_model_version')
 
+    recalculados = 0
     for anterior in anteriores:
         filas = conn.execute(
             'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status, '
@@ -111,13 +114,17 @@ def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False):
             'WHERE f.organization_id = %s AND f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
             (anterior['score_id'], org, anterior['domain_id'], list(motor.ESTADOS_PUNTUABLES)),
         ).fetchall()
+        if anterior['method'] == 'ml' and any(fila['score_severity'] is None for fila in filas):
+            # Antes de insertar nada de este dominio, así saltarlo no deja un snapshot a medias.
+            if saltados is None:
+                raise ValueError('faltan severidades ML congeladas para recalcular el dominio %s' %
+                                 anterior['domain_id'])
+            saltados.append(anterior['domain_id'])
+            continue
         hallazgos = []
         factores_previos = {}
         for fila in filas:
             if anterior['method'] == 'ml':
-                if fila['score_severity'] is None:
-                    raise ValueError('faltan severidades ML congeladas para recalcular el dominio %s' %
-                                     anterior['domain_id'])
                 fila['severity'] = fila['score_severity']
             hallazgos.append(fila)
             factores_previos[fila['id']] = fila['previous_factors'] or {}
@@ -146,4 +153,5 @@ def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False):
                 (org, score_id, aporte['finding_id'], aporte['rule_id'], aporte['penalty'], aporte['severity'],
                  Jsonb(aporte['factors'])),
             )
-    return len(anteriores)
+        recalculados += 1
+    return recalculados

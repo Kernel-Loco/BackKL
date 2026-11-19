@@ -135,6 +135,20 @@ class RecalculoScores(unittest.TestCase):
         self.assertIn('clock_timestamp()', score_sql)  # el orden de computed_at es el del candado de pesos (RC-62)
 
 
+    def test_un_dominio_ml_sin_severidades_congeladas_falla_o_se_salta(self):
+        # RC-310: sin lista de saltados lanza ValueError. Con ella, se salta y no inserta nada de ese dominio.
+        pesos = {categoria: .25 for categoria in criterio.CATEGORIAS}
+        conn = Recalculo()
+        conn.severidad_score = None
+        with self.assertRaisesRegex(ValueError, 'severidades ML congeladas'):
+            configuracion.recalcular_scores(conn, 'org-1', 'ruleset-v2', pesos)
+        conn = Recalculo()
+        conn.severidad_score = None
+        saltados = []
+        self.assertEqual(configuracion.recalcular_scores(conn, 'org-1', 'ruleset-v2', pesos, saltados=saltados), 0)
+        self.assertEqual(saltados, ['domain-1'])
+        self.assertFalse(any(sql.startswith('INSERT') for sql, _ in conn.consultas))
+
     def _score_guardado(self, conn):
         return next(params for sql, params in conn.consultas if sql.startswith('INSERT INTO domain_scores'))[4]
 

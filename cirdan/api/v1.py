@@ -1034,21 +1034,25 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
         if pesos == pesos_anteriores and cortes == cortes_anteriores:
             # Sin versión nueva, pero un dominio cuyo último score salió con otro juego (por ejemplo, de un escaneo
             # que cerró con los pesos de antes) se pone al día con el activo. 'unchanged' solo si no hay ninguno
-            # (RC-310).
+            # (RC-310). Un dominio ML sin severidades congeladas se salta y se cuenta, en vez de tumbar a los demás
+            # con un 409 que se repetiría en cada PUT igual hasta el siguiente escaneo de ese dominio.
+            saltados = []
             try:
                 recalculados = configuracion.recalcular_scores(conn, session.org_id, anterior['id'], pesos,
-                                                               solo_otro_juego=True)
-            except ValueError as error:
+                                                               solo_otro_juego=True, saltados=saltados)
+            except ValueError as error:  # otro error del motor, como una regla que falta en el juego
                 raise HTTPException(409, str(error)) from error
             if recalculados:
                 audit(conn, session.org_id, 'scoring.scores_recalculated', user_id=session.audit_user_id,
                       platform=session.audit_platform, entity_type='scoring_rule_set', entity_id=anterior['id'],
-                      details={'version': anterior['version'], 'recalculated_domains': recalculados})
+                      details={'version': anterior['version'], 'recalculated_domains': recalculados,
+                               'skipped_domains': len(saltados), 'skipped_domain_ids': saltados})
             return {
                 'rule_set_version': anterior['version'],
                 'category_weights': pesos_anteriores,
                 'band_cutoffs': cortes_anteriores,
                 'recalculated_domains': recalculados,
+                'skipped_domains': len(saltados),
                 'unchanged': not recalculados,
             }
 
@@ -1087,6 +1091,7 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
         'category_weights': pesos,
         'band_cutoffs': cortes,
         'recalculated_domains': recalculados,
+        'skipped_domains': 0,
         'unchanged': False,
     }
 

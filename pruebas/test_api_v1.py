@@ -734,14 +734,14 @@ class ApiV1(unittest.TestCase):
         version = body['rule_set_version']
         self.assertNotEqual(version, antes['rule_set_version'])
 
-        # El score que dejó la semilla para acme-demo.mx, con el juego global, otra vez como el último.
+        # El score de la semilla para acme-demo.mx, con el juego global, otra vez como el último y como 'scan'.
         ok, copia, err = psql(
             "WITH semilla AS (SELECT s.* FROM domain_scores s JOIN domains d ON d.id = s.domain_id "
             "  WHERE s.organization_id = '{o}' AND d.fqdn = 'acme-demo.mx' AND s.reason <> 'rules_change' "
             "  ORDER BY s.computed_at DESC, s.created_at DESC, s.id DESC LIMIT 1), "
             "nuevo AS (INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, "
             "  category_scores, reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) "
-            "  SELECT organization_id, domain_id, scan_id, rule_set_id, score, category_scores, reason, method, "
+            "  SELECT organization_id, domain_id, scan_id, rule_set_id, score, category_scores, 'scan', method, "
             "  model_version, model_fallback_reason, partial_coverage, clock_timestamp() FROM semilla "
             "  RETURNING id), "
             "aportes AS (INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, "
@@ -779,6 +779,75 @@ class ApiV1(unittest.TestCase):
 
         code, body = self.acme.request('PUT', '/api/v1/scoring/weights', {'category_weights': otros})
         self.assertEqual((code, body['unchanged'], body['recalculated_domains']), (200, True, 0), body)
+
+    def test_4e_mismos_pesos_saltan_un_score_ml_sin_severidades_y_siguen_con_los_demas(self):
+        # RC-310. Después de un cambio de pesos, el último score de acme-demo.mx es uno 'ml' con el juego global y sin
+        # severidades congeladas (como cuando un hallazgo llegó en un escaneo que se cayó), y el de acme-tienda.mx
+        # uno 'scan' con el juego global. El mismo PUT otra vez responde 200: salta acme-demo.mx, lo cuenta en
+        # skipped_domains y pone al día acme-tienda.mx. Antes respondía 409 y no ponía al día a ninguno.
+        acme = '20000000-0000-4000-8000-000000000001'
+        demo = '40000000-0000-4000-8000-000000000001'
+        ok, seq, err = psql("SELECT coalesce(max(chain_seq), 0) FROM audit_log WHERE organization_id = '%s';" % acme,
+                            user='postgres')
+        self.assertTrue(ok, err)
+        antes = self.get(self.acme, '/api/v1/scoring/weights')
+        self.addCleanup(self.psql_o_falla,
+                        "BEGIN; SET LOCAL session_replication_role = replica; "
+                        "DELETE FROM score_contributions WHERE score_id IN (SELECT id FROM domain_scores "
+                        "WHERE organization_id = '{o}' AND reason = 'rules_change'); "
+                        "DELETE FROM domain_scores WHERE organization_id = '{o}' AND reason = 'rules_change'; "
+                        "DELETE FROM scoring_rules WHERE rule_set_id IN (SELECT id FROM scoring_rule_sets "
+                        "WHERE organization_id = '{o}'); "
+                        "DELETE FROM scoring_rule_sets WHERE organization_id = '{o}'; "
+                        "DELETE FROM audit_log WHERE organization_id = '{o}' AND chain_seq > {s}; COMMIT;"
+                        .format(o=acme, s=int(seq)), 'quedó el juego de reglas de prueba de Acme (RC-310)')
+        otros = dict(zip(criterio.CATEGORIAS, (0.4, 0.2, 0.2, 0.2)))
+        code, body = self.acme.request('PUT', '/api/v1/scoring/weights', {'category_weights': otros})
+        self.assertEqual((code, body['unchanged'], body['recalculated_domains']), (200, False, 3), body)
+        version = body['rule_set_version']
+
+        # Copias de los scores de la semilla, con el juego global, otra vez como los últimos de los dos dominios.
+        ok, copias, err = psql(
+            "WITH semilla AS (SELECT DISTINCT ON (s.domain_id) s.*, d.fqdn FROM domain_scores s "
+            "  JOIN domains d ON d.id = s.domain_id WHERE s.organization_id = '{o}' "
+            "  AND d.fqdn IN ('acme-demo.mx', 'acme-tienda.mx') AND s.reason <> 'rules_change' "
+            "  ORDER BY s.domain_id, s.computed_at DESC, s.created_at DESC, s.id DESC) "
+            "INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, "
+            "  reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) "
+            "SELECT organization_id, domain_id, scan_id, rule_set_id, score, category_scores, 'scan', "
+            "  CASE WHEN fqdn = 'acme-demo.mx' THEN 'ml' ELSE 'rules' END, "
+            "  CASE WHEN fqdn = 'acme-demo.mx' THEN 'v-prueba-rc310' END, NULL, partial_coverage, clock_timestamp() "
+            "FROM semilla RETURNING id::text;".format(o=acme), user='postgres')
+        copias = copias.split()
+        self.assertTrue(ok and len(copias) == 2, err or copias)
+        self.addCleanup(self.psql_o_falla,
+                        "BEGIN; SET LOCAL session_replication_role = replica; "
+                        "DELETE FROM domain_scores WHERE id IN ({c}); COMMIT;"
+                        .format(c=', '.join("'%s'" % c for c in copias)),
+                        'quedaron las copias de los scores de la semilla (RC-310)')
+        demo_ml = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
+        self.assertIn(demo_ml['score_id'], copias)
+        self.assertEqual(demo_ml['rule_set_version'], antes['rule_set_version'])
+
+        code, body = self.acme.request('PUT', '/api/v1/scoring/weights', {'category_weights': otros})
+        self.assertEqual(code, 200, body)
+        self.assertEqual((body['rule_set_version'], body['unchanged'], body['recalculated_domains'],
+                          body['skipped_domains']), (version, False, 1, 1))
+        self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')['score_id'], demo_ml['score_id'])
+        tienda = self.get(self.acme, '/api/v1/domains/acme-tienda.mx/score')
+        self.assertNotIn(tienda['score_id'], copias)
+        self.assertEqual(tienda['rule_set_version'], version)
+        ok, salida, err = psql(
+            "SELECT details->>'recalculated_domains', details->>'skipped_domains', details->'skipped_domain_ids' "
+            "FROM audit_log WHERE organization_id = '%s' AND chain_seq > %d "
+            "AND action = 'scoring.scores_recalculated';" % (acme, int(seq)), user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual([linea.split('|') for linea in salida.splitlines()], [['1', '1', '["%s"]' % demo]])
+
+        # Sigue saltando acme-demo.mx, pero ya no hay nada que poner al día.
+        code, body = self.acme.request('PUT', '/api/v1/scoring/weights', {'category_weights': otros})
+        self.assertEqual((code, body['unchanged'], body['recalculated_domains'], body['skipped_domains']),
+                         (200, True, 0, 1), body)
 
     def test_5_historico_activos_y_escaneos(self):
         hist = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score/history')
