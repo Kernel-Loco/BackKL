@@ -116,7 +116,7 @@ jobs:
           pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_login_sin_red.py pruebas/test_llave_totp.py pruebas/test_llave_huellas.py
           pruebas/test_captcha.py pruebas/test_documentacion_api.py
           pruebas.test_github.Integracion
-          pruebas.test_rdap.Transporte pruebas.test_visita.SaludoReal pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
+          pruebas.test_rdap.Transporte pruebas.test_crtsh.TopeDeBytes pruebas.test_visita.SaludoReal pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
           pruebas.test_subfinder.Integracion pruebas/test_estado_carta.py
 
       - name: Pruebas sin base ni red
