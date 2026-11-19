@@ -234,7 +234,10 @@ SELECT f.id::text, f.evidence, a.value AS asset, a.asset_type, a.first_seen_at A
        f.cve_id, coalesce(c.cvss_base_score, CASE WHEN jsonb_typeof(f.evidence->'cvss') = 'number' THEN
            CASE WHEN (f.evidence->>'cvss')::numeric BETWEEN 0 AND 10 THEN (f.evidence->>'cvss')::numeric END END)
            AS cvss,
-       c.epss_score AS epss, coalesce(c.in_kev, false) AS in_kev,
+       c.epss_score AS epss,
+       -- Sin CVE, false. Con CVE, KEV solo se sabe si el cargador diario de inteligencia (#69, RC-127) ya pasó por
+       -- la fila (intel_updated_at). Un stub del orquestador trae in_kev = false por omisión, y eso no es un «no».
+       CASE WHEN f.cve_id IS NULL THEN false WHEN c.intel_updated_at IS NULL THEN NULL ELSE c.in_kev END AS in_kev,
        f.detected_at, f.last_scan_id::text, sc.queued_at AS scan_at,
        b.breach_name, b.breach_date, b.data_classes,
        fm.attack_version, fm.attack_technique_id, fm.attack_technique_name,

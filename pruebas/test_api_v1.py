@@ -267,14 +267,18 @@ class ApiV1(unittest.TestCase):
         # RC-229 punto 2. Ningún hallazgo de la semilla trae CVE. Se abren dos known_vulnerability en acme-demo.mx: uno
         # con su CVE completo en cves (CVSS, EPSS y KEV) y otro con el CVE solo como stub, como lo deja un recolector
         # (migración 014), con el CVSS en la evidencia. /findings da los tres campos que pinta el panel del portal.
+        # in_kev solo es true o false si el cargador diario pasó por la fila (intel_updated_at). El stub, con el
+        # in_kev = false por omisión de la tabla, da null, y una CVE revisada que no está en KEV da false.
         completo, stub = '80000000-0000-4000-8000-000000002291', '80000000-0000-4000-8000-000000002292'
-        cve_completo, cve_stub = 'CVE-2099-22901', 'CVE-2099-22902'
-        borrar = (f"DELETE FROM findings WHERE id IN ('{completo}', '{stub}'); "
-                  f"DELETE FROM cves WHERE cve_id IN ('{cve_completo}', '{cve_stub}');")
+        fuera = '80000000-0000-4000-8000-000000002293'
+        cve_completo, cve_stub, cve_fuera = 'CVE-2099-22901', 'CVE-2099-22902', 'CVE-2099-22903'
+        borrar = (f"DELETE FROM findings WHERE id IN ('{completo}', '{stub}', '{fuera}'); "
+                  f"DELETE FROM cves WHERE cve_id IN ('{cve_completo}', '{cve_stub}', '{cve_fuera}');")
         ok, _, err = psql(f"""
             BEGIN;
-            INSERT INTO cves (cve_id, cvss_base_score, epss_score, in_kev)
-            VALUES ('{cve_completo}', 9.8, 0.00043, true), ('{cve_stub}', NULL, NULL, false);
+            INSERT INTO cves (cve_id, cvss_base_score, epss_score, in_kev, intel_updated_at)
+            VALUES ('{cve_completo}', 9.8, 0.00043, true, now()), ('{cve_stub}', NULL, NULL, false, NULL),
+                   ('{cve_fuera}', 5.3, 0.001, false, now());
             INSERT INTO findings (id, organization_id, domain_id, asset_id, rule_id, source_id, fingerprint,
                                   severity, status, cve_id, evidence, detected_at)
             SELECT v.id::uuid, d.organization_id, d.id,
@@ -284,7 +288,8 @@ class ApiV1(unittest.TestCase):
                    (SELECT s.id FROM data_sources s WHERE s.code = 'shodan'),
                    sha256(convert_to('rc229-' || v.cve, 'UTF8')), 'medium', 'open', v.cve, v.evidencia::jsonb, now()
               FROM domains d, (VALUES ('{completo}', '{cve_completo}', '{{"title": "CVE con CVSS, EPSS y KEV"}}'),
-                                      ('{stub}', '{cve_stub}', '{{"title": "CVE sin intel", "cvss": 7.5}}'))
+                                      ('{stub}', '{cve_stub}', '{{"title": "CVE sin intel", "cvss": 7.5}}'),
+                                      ('{fuera}', '{cve_fuera}', '{{"title": "CVE revisada fuera de KEV"}}'))
                               v(id, cve, evidencia)
              WHERE d.fqdn = 'acme-demo.mx';
             COMMIT;""", user='postgres')
@@ -293,7 +298,8 @@ class ApiV1(unittest.TestCase):
             lista = {i['id']: i for i in self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')['items']}
             campos = ('cve_id', 'cvss', 'epss', 'in_kev')
             self.assertEqual(tuple(lista[completo][c] for c in campos), (cve_completo, 9.8, 0.00043, True))
-            self.assertEqual(tuple(lista[stub][c] for c in campos), (cve_stub, 7.5, None, False))
+            self.assertEqual(tuple(lista[stub][c] for c in campos), (cve_stub, 7.5, None, None))
+            self.assertEqual(tuple(lista[fuera][c] for c in campos), (cve_fuera, 5.3, 0.001, False))
         finally:
             self.psql_o_falla(borrar, 'quedaron los hallazgos con CVE de prueba de RC-229')
 
