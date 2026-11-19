@@ -1,5 +1,6 @@
-"""HTTPS con un plazo absoluto por petición y sin redirecciones, para rdap.py y shodan.py (#15b, RC-166) y para el
-TXT de verificación por DNS sobre HTTPS de orquestador/txt.py (#119, RC-236).
+"""HTTPS con un plazo absoluto por petición y sin redirecciones, para rdap.py y shodan.py (#15b, RC-166), para el
+TXT de verificación por DNS sobre HTTPS de orquestador/txt.py (#119, RC-236), para crt.sh y Cert Spotter (RC-218 y
+RC-288) y para la API de GitHub (RC-304).
 
 urllib solo pone un timeout a cada operación del socket: getaddrinfo no tiene, y el connect de cada dirección, el
 handshake TLS, el envío y cada lectura de las cabeceras o del cuerpo tienen el timeout entero. Un servidor que contesta
@@ -17,7 +18,7 @@ Si se pasa del plazo, descargar() lanza PlazoVencido. El certificado se revisa c
 
 Una redirección (3xx) nunca se sigue: lanza Redirigida. Así cada petición llega solo al servidor que se pidió y es una
 sola consulta, la que cuenta el cliente para el cupo (#13b), sin saltos que no cuentan. El bootstrap de IANA, los
-registros RDAP, InternetDB y Cert Spotter responden sin redirigir. Si alguno redirige, el cliente lo toma como una
+registros RDAP, InternetDB, Cert Spotter y la API de GitHub responden sin redirigir. Si alguno redirige, el cliente lo toma como una
 respuesta que no se puede leer. Tampoco se usan los proxies del entorno (HTTPS_PROXY y los demás): cada
 petición va directa al servidor, porque el plazo no cubriría el CONNECT de un túnel.
 
