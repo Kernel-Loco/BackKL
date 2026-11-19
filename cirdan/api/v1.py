@@ -326,19 +326,37 @@ def _score_base(row, critical_open):
 @router.get('/domains/{fqdn}/score', summary='Score más reciente con su desglose por categoría')
 def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
     domain_id = _domain_id(session, fqdn)
-    rows = _query(session, SCORES_SQL, (fqdn,))
-    if not rows:
-        raise HTTPException(404, 'El dominio aún no tiene score')
-    with transaction(session.org_id) as conn:
-        critical_open = conn.execute(
-            "SELECT count(*) AS n FROM findings WHERE domain_id = %s AND severity = 'critical' AND status = ANY(%s)",
-            (domain_id, list(criterio.ESTADOS_VIGENTES))).fetchone()['n']
+    # REPEATABLE READ, como _reporte: el score y los críticos de ahora salen de una sola foto, así un score que el
+    # orquestador guarda a la mitad no da needs_rescan sin hacer falta (RC-316).
+    with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
+        rows = conn.execute(SCORES_SQL, (fqdn,)).fetchall()
+        if not rows:
+            raise HTTPException(404, 'El dominio aún no tiene score')
+        # En un score 'ml', score_contributions guarda la severidad que predijo el modelo (_guardar_score del
+        # orquestador), no la de findings. Un hallazgo vigente con aporte en este score se juzga con esa severidad y
+        # uno sin aporte, con la de findings: así un crítico que el modelo predijo high no deja needs_rescan en true
+        # para siempre. Con 'rules' es la de findings, como siempre (RC-316).
+        criticos_ahora = {r['id'] for r in conn.execute(
+            'SELECT f.id FROM findings f '
+            'LEFT JOIN score_contributions x ON x.finding_id = f.id AND x.score_id = %s::uuid '
+            'WHERE f.domain_id = %s AND f.status = ANY(%s) '
+            "AND CASE WHEN %s::text = 'ml' THEN coalesce(x.severity, f.severity) ELSE f.severity END = 'critical'",
+            (rows[-1]['score_id'], domain_id, list(criterio.ESTADOS_VIGENTES), rows[-1]['method'])).fetchall()}
+        criticos_del_score = {r['finding_id'] for r in conn.execute(
+            "SELECT finding_id FROM score_contributions WHERE score_id = %s::uuid AND severity = 'critical'",
+            (rows[-1]['score_id'],)).fetchall()}
         threshold = conn.execute('SELECT alert_score_threshold AS t FROM organizations').fetchone()['t']
         # Subcategorías y KRI (#114): los aportes de este score y las corridas de su escaneo, sin columnas nuevas.
         aportes = conn.execute(SCORE_APORTES_SQL, (rows[-1]['score_id'],)).fetchall()
         corridas = {r['source']: r['status']
                     for r in conn.execute(SCORE_CORRIDAS_SQL, (rows[-1]['scan_id'],)).fetchall()}
-    base, weights = _score_base(rows[-1], critical_open)
+    # El piso y su mensaje explican el score guardado con los críticos de su snapshot, como el histórico. Los de
+    # ahora van aparte en critical_open y needs_rescan avisa cuando ya no son los mismos hallazgos, no solo cuando
+    # cambia la cuenta: una brecha resuelta más un crítico nuevo da 1 contra 1 y sí pide escaneo (RC-316).
+    critical_at_time = rows[-1]['critical_at_time']
+    base, weights = _score_base(rows[-1], critical_at_time)
+    base.update(critical_open=len(criticos_ahora), critical_at_time=critical_at_time,
+                needs_rescan=criticos_ahora != criticos_del_score)
     stats = rows[-1]['stats'] or {}
     subs, kris = subcategorias.resumen(aportes, corridas, stats.get('rules_without_coverage') or (),
                                        stats.get('sources_partial') or ())

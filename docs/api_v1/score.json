@@ -9,6 +9,8 @@
   "floor_applied": true,
   "floor_message": "Subido a 60 por 1 hallazgo crítico vigente; la suma ponderada da 28.",
   "critical_open": 1,
+  "critical_at_time": 1,
+  "needs_rescan": false,
   "method": "rules",
   "model_version": null,
   "model_fallback_reason": null,

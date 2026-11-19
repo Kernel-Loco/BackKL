@@ -89,8 +89,10 @@ Para que un sistema de la propia empresa lea la API sin la sesión del portal. E
 | `score`, `band` | El score final y su banda |
 | `grade` | La letra del score final, ya con el piso: A de 0 a 19, B de 20 a 39, C de 40 a 59, D de 60 a 79 y F de 80 a 100. No hay E. Va en `score.json` y en cada punto del histórico (#114, [`criterio_criticidad.md`](criterio_criticidad.md)). Con `partial_coverage` en `true` lleva el mismo aviso que el score |
 | `weighted`, `floor`, `floor_applied` | La suma ponderada, el piso por hallazgos críticos y si el piso subió el score. El portal muestra el aviso del piso cuando `floor_applied` es `true` (#29) |
-| `floor_message` | Explicación en español del piso cuando aplica; `null` si el ponderado ya alcanza el mínimo |
-| `critical_open` | Hallazgos que cuentan para el piso: `critical` y `open` o `accepted_risk` |
+| `floor_message` | Explicación en español del piso cuando aplica; `null` si el ponderado ya alcanza el mínimo. Habla de los críticos vigentes cuando se calculó el score, no de los de ahora: en `score.json` el cambio desde entonces lo dice `needs_rescan` (RC-316) |
+| `critical_open` | Hallazgos `critical` y `open` o `accepted_risk`. En `score.json` son los de este momento y no mueven el piso, que sale de `critical_at_time`. Con `method` en `ml`, un hallazgo que tiene aporte en el score cuenta con la severidad que predijo el modelo y uno sin aporte, con la de `findings`, igual que en `needs_rescan`. En cada punto del histórico, los que tenía ese score, con los que sale su piso |
+| `critical_at_time` | Solo en `score.json`. Los críticos que tenía el score guardado. Con ellos salen `floor`, `floor_applied` y `floor_message`, igual que en el histórico (RC-316) |
+| `needs_rescan` | Solo en `score.json`. `true` si los hallazgos críticos vigentes de ahora ya no son los mismos que tenía el score guardado: compara cuáles, no cuántos. Sale `true` por un crítico nuevo, por uno resuelto a mano o por los dos juntos, aunque `critical_open` y `critical_at_time` den la misma cuenta. Con `method` en `ml` compara con la severidad del modelo, así que un crítico de `findings` que el modelo predijo `high` no lo pone en `true`. El portal puede pedir un escaneo nuevo (RC-316) |
 | `method` | `rules` o `ml` (#36) |
 | `model_version` | Versión del clasificador; `null` si el score se calculó con reglas |
 | `model_fallback_reason` | Motivo por el que este score usó reglas; `null` cuando se usó ML |
