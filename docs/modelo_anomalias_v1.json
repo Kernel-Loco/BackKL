@@ -1,0 +1,26 @@
+{
+  "version": "v1-anomalias-rc67-1",
+  "algoritmo": "IsolationForest",
+  "dataset": "datos/ml/rc65/dataset.csv",
+  "dataset_sha256": "d0881691090119a3252d1e951c123bc149ca8c76fd337ced71194f17b11b2fde",
+  "origen_etiquetas": "LLM; sin validación humana",
+  "caracteristicas": [
+    "tipo",
+    "exposicion",
+    "sensibilidad",
+    "antiguedad_dias"
+  ],
+  "criterio_entrenamiento": "etiqueta alta en la partición de entrenamiento",
+  "filas_entrenamiento": 72,
+  "plantillas_entrenamiento": [
+    "brecha_contrasenas_reciente",
+    "rdp_produccion",
+    "software_panel_kev"
+  ],
+  "contamination": "auto",
+  "salida": "score continuo; valores mayores indican perfiles más raros",
+  "umbral": null,
+  "validacion_anomalias": "no disponible: no hay etiquetas de anomalía ni validación humana",
+  "afecta_severidad_o_score": false,
+  "sha256": "9d3a2046425f6e711db34544005de8e5a440823c5a01c54a70164a731003e324"
+}

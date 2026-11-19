@@ -50,6 +50,26 @@ def cargar_modelo(ruta=ARTEFACTO, huella=HUELLA):
     return joblib.load(io.BytesIO(datos))
 
 
+def predecir_probabilidades(bundle, entrada):
+    """Devuelve las clases del artefacto y probabilidades calibradas en el mismo orden."""
+    import numpy as np
+
+    pipeline = bundle['pipeline']
+    probabilidades = pipeline.predict_proba(entrada)
+    clases = list(pipeline.classes_)
+    calibradores = bundle.get('calibradores')
+    if calibradores:
+        probabilidades = np.column_stack([
+            calibradores[clase].predict_proba(probabilidades[:, indice].reshape(-1, 1))[:, 1]
+            for indice, clase in enumerate(clases)
+        ])
+        totales = probabilidades.sum(axis=1, keepdims=True)
+        if np.any(totales <= 0):
+            raise ValueError('la calibración produjo probabilidades sin masa')
+        probabilidades /= totales
+    return clases, probabilidades
+
+
 def predecir(bundle, filas):
     """Predice severidad, confianza y los 3 SHAP de mayor magnitud por hallazgo."""
     import numpy as np
@@ -60,6 +80,10 @@ def predecir(bundle, filas):
     from cirdan.ml.modelo import CARACTERISTICAS, CARACTERISTICAS_CATEGORICAS
     from datetime import date
 
+    if not filas:
+        return {}
+    codigos_entrenados = frozenset(bundle.get('metrics', {}).get('codigos_entrenados', ()))
+    filas = [fila for fila in filas if fila.get('rule_code') in codigos_entrenados]
     if not filas:
         return {}
     caracteristicas = []
@@ -75,9 +99,8 @@ def predecir(bundle, filas):
 
     entrada = pd.DataFrame(caracteristicas, columns=CARACTERISTICAS)
     pipeline = bundle['pipeline']
-    predichas = pipeline.predict(entrada)
-    probabilidades = pipeline.predict_proba(entrada)
-    clases = list(pipeline.classes_)
+    clases, probabilidades = predecir_probabilidades(bundle, entrada)
+    predichas = np.asarray(clases)[probabilidades.argmax(axis=1)]
 
     preprocesador = pipeline.named_steps['columntransformer']
     clasificador = pipeline.named_steps['extratreesclassifier']
