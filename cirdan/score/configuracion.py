@@ -77,19 +77,21 @@ def cortes_del_juego(conn, rule_set_id):
     return cortes_de_fila(fila)
 
 
-def recalcular_scores(conn, org, rule_set_id, pesos):
+def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False):
     """Inserta un snapshot rules_change por dominio con score previo, sin modificar históricos.
 
     El piso y la banda salen de los cortes del juego `rule_set_id` (RC-237), así un cambio de cortes también cambia
-    el número.
+    el número. Con `solo_otro_juego` deja fuera los dominios cuyo último snapshot ya usa `rule_set_id` (RC-310).
     """
     anteriores = conn.execute(
         'SELECT DISTINCT ON (domain_id) domain_id::text, scan_id::text, id::text AS score_id, '
-        'partial_coverage, method, model_version, model_fallback_reason '
+        'rule_set_id::text, partial_coverage, method, model_version, model_fallback_reason '
         'FROM domain_scores WHERE organization_id = %s '
         'ORDER BY domain_id, computed_at DESC, created_at DESC, id DESC',
         (org,),
     ).fetchall()
+    if solo_otro_juego:
+        anteriores = [anterior for anterior in anteriores if anterior['rule_set_id'] != str(rule_set_id)]
     if not anteriores:
         return 0
 

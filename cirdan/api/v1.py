@@ -1032,12 +1032,24 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
         cortes_anteriores = configuracion.cortes_de_fila(anterior)
         cortes = cortes or cortes_anteriores
         if pesos == pesos_anteriores and cortes == cortes_anteriores:
+            # Sin versión nueva, pero un dominio cuyo último score salió con otro juego (por ejemplo, de un escaneo
+            # que cerró con los pesos de antes) se pone al día con el activo. 'unchanged' solo si no hay ninguno
+            # (RC-310).
+            try:
+                recalculados = configuracion.recalcular_scores(conn, session.org_id, anterior['id'], pesos,
+                                                               solo_otro_juego=True)
+            except ValueError as error:
+                raise HTTPException(409, str(error)) from error
+            if recalculados:
+                audit(conn, session.org_id, 'scoring.scores_recalculated', user_id=session.audit_user_id,
+                      platform=session.audit_platform, entity_type='scoring_rule_set', entity_id=anterior['id'],
+                      details={'version': anterior['version'], 'recalculated_domains': recalculados})
             return {
                 'rule_set_version': anterior['version'],
                 'category_weights': pesos_anteriores,
                 'band_cutoffs': cortes_anteriores,
-                'recalculated_domains': 0,
-                'unchanged': True,
+                'recalculated_domains': recalculados,
+                'unchanged': not recalculados,
             }
 
         version_local = conn.execute(

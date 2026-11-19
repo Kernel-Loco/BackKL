@@ -298,6 +298,10 @@ class Orquestador(unittest.TestCase):
                                      'ON r.id = sc.rule_id WHERE sc.score_id = %s AND r.rule_set_id = %s',
                                      score['id'], nuevo['id'])['n']
         self.assertGreater(reglas_del_aporte, 0)
+        # RC-310: y ese es el último snapshot del dominio, el que leen /domains y el recálculo de pesos.
+        ultimo = self.uno('SELECT id::text FROM domain_scores WHERE domain_id = %s '
+                          'ORDER BY computed_at DESC, created_at DESC, id DESC LIMIT 1', s.domain_id)
+        self.assertEqual(ultimo['id'], score['id'])
 
     def test_2a1_si_los_cortes_cambian_a_mitad_del_escaneo_el_score_sale_con_los_nuevos(self):
         """RC-237: un PUT que solo cambia los cortes de bandas mientras corre la fuente. El score del escaneo guarda el
