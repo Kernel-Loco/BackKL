@@ -1793,6 +1793,13 @@ class HigieneCertificados(unittest.TestCase):
         self.assertIn('no quedó tiempo', ' '.join(res.avisos))
 
     def test_13_volumen_5000_subdominios_y_20000_certificados(self):
+        """recolectar() completa, sin red, con un dominio de 5,000 subdominios y 20,000 certificados (comentario 10276):
+        tiempo, memoria y filas, desde el cuerpo JSON de crt.sh hasta activos, revisados y hallazgos.
+
+        Cada h<n> lleva 4 certificados de 90 días, emitidos de ene 2024 a abr 2026, y dev-<n> (n múltiplo de 100, 50
+        nombres) va en los mismos 4. El último de cada uno venció entre dic 2025 y jul 2026 y lo cubre el comodín
+        vigente *.acme-demo.mx, así que no hay cert_expired. h4990 a h4999 tienen uno vigente, de oct 2026, de 10
+        organizaciones nuevas."""
         import time
         import tracemalloc
         certs = []
@@ -1805,24 +1812,73 @@ class HigieneCertificados(unittest.TestCase):
             certs.append(cert(i + 1, nombres, dia.strftime('%Y-%m-%dT%H:%M:%S'),
                               (dia + timedelta(days=90)).strftime('%Y-%m-%dT%H:%M:%S'), emisor=emisor))
         certs.append(cert(30000, ['*.acme-demo.mx'], '2026-10-01T00:00:00', '2026-12-30T00:00:00'))
-        certs = crtsh._con_fechas(certs)
-        inicio = time.perf_counter()  # unos 0.4 s en una PC del equipo, sin tracemalloc, que lo hace más lento
-        hs = crtsh._higiene('acme-demo.mx', certs, AHORA)
-        dura = time.perf_counter() - inicio
-        tracemalloc.start()
-        try:
-            crtsh._higiene('acme-demo.mx', certs, AHORA)  # unos 13 MB
-            _, pico = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
-        por_codigo = {}
-        for h in hs:
-            por_codigo[h.codigo] = por_codigo.get(h.codigo, 0) + 1
-        self.assertEqual(por_codigo.get('cert_broad_wildcard'), 1)
-        self.assertEqual(por_codigo.get('cert_new_issuer', 0), 10)  # los últimos 10, de organizaciones nuevas
-        self.assertLessEqual(por_codigo.get('cert_internal_name', 0), 50)
-        self.assertLess(dura, 5, 'tardó %.1f s' % dura)
-        self.assertLess(pico, 100 * 1024 * 1024, 'pico de %d bytes' % pico)
+        cuerpo = json.dumps(certs).encode()  # unos 5 MB, por debajo de TOPE_BYTES
+        self.assertLess(len(cuerpo), crtsh.TOPE_BYTES)
+        internos = sorted('dev-%d.acme-demo.mx' % n for n in range(0, 5000, 100))
+
+        class Volumen:
+            """crt.sh da el mismo cuerpo a %.dominio y a la búsqueda por nombre. Cert Spotter da la página vacía."""
+
+            def __init__(self, comodin_cae=False, cert_spotter_cae=False):
+                self.comodin_cae, self.cert_spotter_cae, self.urls = comodin_cae, cert_spotter_cae, []
+
+            def __call__(self, url, timeout):
+                self.urls.append(url)
+                if crtsh.urllib.parse.urlparse(url).netloc == 'api.certspotter.com':
+                    if self.cert_spotter_cae:
+                        raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                    return b'[]'
+                if consulta(url) == '%.acme-demo.mx' and self.comodin_cae:
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return cuerpo
+
+            def resolver(self, nombre):
+                raise AssertionError('el comodín cubre todos los vencidos: no se consulta el DNS de %s' % nombre)
+
+        def medir(memoria=False, **kw):
+            """Corre recolectar() y revisa tiempo y filas. Con `memoria`, otra vez con tracemalloc, que la hace unas 6
+            veces más lenta."""
+            inicio = time.perf_counter()
+            res = recolectar(Volumen(**kw))
+            dura = time.perf_counter() - inicio
+            self.assertLess(dura, 10, 'tardó %.1f s' % dura)  # 1 a 1.3 s en una PC del equipo
+            if memoria:
+                tracemalloc.start()
+                try:
+                    recolectar(Volumen(**kw))
+                    _, pico = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(pico, 100 * 1024 * 1024, 'pico de %d bytes' % pico)  # unos 31 MB
+            self.assertEqual(res.estado, 'succeeded')
+            self.assertEqual(sorted({a.tipo for a in res.activos}), ['domain', 'subdomain'])
+            self.assertEqual(len(res.activos), 5051)  # h0 a h4999, los 50 dev-<n> y acme-demo.mx del comodín
+            self.assertEqual(len({a.valor for a in res.activos}), 5051)
+            por_codigo = {}
+            for h in res.hallazgos:
+                por_codigo[h.codigo] = por_codigo.get(h.codigo, 0) + 1
+            self.assertEqual(por_codigo, {'cert_internal_name': 50, 'cert_broad_wildcard': 1, 'cert_new_issuer': 10})
+            self.assertEqual(sorted(h.activo for h in res.hallazgos if h.codigo == 'cert_internal_name'), internos)
+            nuevas = sorted(h.evidencia['organizacion'] for h in res.hallazgos if h.codigo == 'cert_new_issuer')
+            self.assertEqual(nuevas, sorted('Nueva %d' % i for i in range(19990, 20000)))
+            return res
+        # todo respondió: revisados en None, el orquestador da por revisado todo
+        res = medir()
+        self.assertIsNone(res.revisados)
+        self.assertEqual(res.sin_cobertura, ['lookalike_domain'])  # parecidos=False
+        # %.dominio no respondió: la búsqueda por nombre da los mismos certificados y revisados trae cada parte, 4 por
+        # nombre (h<n> y dev-<n>), la del comodín y la interno: de cada certificado de dev-<n>. Es la corrida que más
+        # guarda, así que aquí se mide la memoria
+        res = medir(memoria=True, comodin_cae=True)
+        self.assertEqual(len(res.revisados), 5050 * 4 + 1 + 50 * 4)
+        self.assertEqual(len([p for p in res.revisados if p.startswith(crtsh.INTERNO)]), 50 * 4)
+        self.assertIn('Se usó la búsqueda por nombre', res.avisos[0])
+        # el complemento de Cert Spotter no respondió: no se sabe qué se revocó, así que no van los nombres de más de
+        # un certificado; quedan la parte del comodín y las interno:
+        res = medir(cert_spotter_cae=True)
+        self.assertEqual(len(res.revisados), 1 + 50 * 4)
+        self.assertIn('acme-demo.mx@2026-12-30T00:00:00+00:00', res.revisados)
+        self.assertIn(crtsh.certspotter.SIN_COMPLEMENTO, ' '.join(res.avisos))
 
     def test_14_reproducir_da_los_mismos_hallazgos_sin_otra_consulta(self):
         antes = [cert(100 + i, ['www.acme-demo.mx'], '2025-0%d-01T00:00:00' % i, '2025-0%d-28T00:00:00' % (i + 2))
