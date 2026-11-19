@@ -22,7 +22,8 @@ from psycopg.types.json import Jsonb
 from cirdan import orquestador, reporte, siem
 from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
-from cirdan.auth.deps import Session, client_ip, current_session, in_scope, require_roles, session_or_api_key
+from cirdan.auth.deps import (Session, api_key_or_roles, client_ip, current_session, in_scope, require_roles,
+                              session_or_api_key)
 from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.db import audit, transaction
@@ -30,6 +31,9 @@ from cirdan.score import cambios, cobertura, comparacion, configuracion, criteri
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
+# Lista, CSV y explicación de hallazgos: como en el portal (src/config/permissions.ts), el gerente no los ve y se
+# queda con los conteos por severidad de GET /domains (RC-280). Una llave de API entra igual.
+LEE_HALLAZGOS = api_key_or_roles('analyst', 'admin')
 
 # ---------------------------------------------------------------- características del reto
 # Desde #23 vienen guardadas en la evidencia. Para los hallazgos de la semilla, que no las traen, se calculan
@@ -281,7 +285,7 @@ def _finding(f):
 
 
 @router.get('/domains/{fqdn}/findings', summary='Hallazgos abiertos del dominio, de más a menos severo')
-def domain_findings(fqdn: str, session: Session = Depends(session_or_api_key)):
+def domain_findings(fqdn: str, session: Session = Depends(LEE_HALLAZGOS)):
     _domain_id(session, fqdn)
     items = [_finding(f) for f in _query(session, FINDINGS_SQL, (fqdn,))]
     return {'domain': fqdn, 'items': items, 'total': len(items)}
@@ -493,7 +497,7 @@ def _registrar_descarga(conn, session, request, tipo, formato, domain_id, filas)
 
 @router.get('/domains/{fqdn}/findings/export', summary='Descarga los hallazgos abiertos del dominio en CSV o JSON')
 def export_findings(request: Request, fqdn: str, formato: str = Query(default='json'),
-                    session: Session = Depends(session_or_api_key)):
+                    session: Session = Depends(LEE_HALLAZGOS)):
     formato = _formato(formato)
     domain_id = _dominio_autorizado(session, fqdn)
     with transaction(session.org_id) as conn:
@@ -953,7 +957,7 @@ SELECT f.id::text AS finding_id, f.domain_id::text AS domain_id, d.fqdn::text AS
 
 
 @router.get('/findings/{finding_id}/explanation', summary='Por qué el hallazgo tiene su severidad y cuánto suma al score')
-def finding_explanation(finding_id: str, session: Session = Depends(session_or_api_key)):
+def finding_explanation(finding_id: str, session: Session = Depends(LEE_HALLAZGOS)):
     try:
         finding_id = str(uuid.UUID(finding_id))
     except ValueError:

@@ -820,6 +820,36 @@ class ApiV1(unittest.TestCase):
         analista = sesion.login('jordan.tate@acme-demo.mx')
         self.assertEqual(analista.get('/api/v1/domains/txt')[0], 403)
 
+    def test_7b_el_gerente_no_lee_hallazgos_como_en_el_portal(self):
+        # RC-280: la lista, el CSV y la explicación son de analista y admin, como Hallazgos en el portal. El gerente
+        # se queda con los conteos por severidad de /domains y con lo demás de su rol.
+        hallazgo = '80000000-0000-4000-8000-000000000001'
+        rutas = ('/api/v1/domains/acme-demo.mx/findings', '/api/v1/domains/acme-demo.mx/findings/export?formato=json',
+                 '/api/v1/domains/acme-demo.mx/findings/export?formato=csv',
+                 '/api/v1/findings/%s/explanation' % hallazgo, '/domains/acme-demo.mx/findings')
+        gerente = sesion.login('maya.reed@acme-demo.mx')
+        for url in rutas + ('/api/v1/findings/no-es-un-id/explanation',
+                            '/api/v1/findings/00000000-0000-4000-8000-000000000000/explanation',
+                            '/api/v1/domains/no-existe.mx/findings'):
+            code, body = gerente.get(url)
+            # 403 antes de buscar: no dice si el hallazgo o el dominio existen.
+            self.assertEqual((code, body['detail']), (403, 'Tu rol no tiene permiso para esta acción.'), url)
+        analista = sesion.login('jordan.tate@acme-demo.mx')
+        for cliente, quien in ((analista, 'analista'), (self.acme, 'admin')):
+            for url in rutas:
+                if 'formato=csv' in url:
+                    continue   # el CSV no es JSON: se pide abajo
+                self.assertEqual(cliente.get(url)[0], 200, (quien, url))
+            req = sesion.urllib.request.Request(sesion.BASE + rutas[2])
+            with cliente.opener.open(req, timeout=10) as r:
+                self.assertEqual(r.status, 200, quien)
+        # Lo que sí es del gerente sigue igual: conteos, score, histórico, plan y reporte.
+        dominio = next(d for d in self.get(gerente, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
+        self.assertEqual(set(dominio['open_findings']), {'critical', 'high', 'medium', 'low'})
+        for url in ('/api/v1/domains/acme-demo.mx/score', '/api/v1/domains/acme-demo.mx/score/history',
+                    '/api/v1/domains/acme-demo.mx/action-plan', '/api/v1/domains/acme-demo.mx/report'):
+            self.assertEqual(gerente.get(url)[0], 200, url)
+
     def test_8_plan_y_simulacion_no_modifican_hallazgos_ni_score(self):
         score_before = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')
         findings_before = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
