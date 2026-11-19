@@ -987,12 +987,13 @@ class Cuota(unittest.TestCase):
                 time.sleep(self.espera)
                 return self.trozo
 
-        with mock.patch.object(github.urllib.request, 'urlopen', lambda req, timeout: Gotero(0.2, b'x')):
+        # RC-304: _descargar va por transporte.descargar. Sin red: transporte.abrir, la conexión, da el Gotero.
+        with mock.patch.object(github.transporte, 'abrir', lambda req, plazo, cronometro: Gotero(0.2, b'x')):
             inicio = time.monotonic()
-            with self.assertRaises(TimeoutError):
+            with self.assertRaises(github.transporte.PlazoVencido):
                 github._descargar('https://api.github.com/orgs/acme-demo', 1)
             self.assertLess(time.monotonic() - inicio, 5)
-        with mock.patch.object(github.urllib.request, 'urlopen', lambda req, timeout: Gotero(0, b'x' * 1024)), \
+        with mock.patch.object(github.transporte, 'abrir', lambda req, plazo, cronometro: Gotero(0, b'x' * 1024)), \
                 mock.patch.object(github, 'MAX_BYTES', 4000), self.assertRaises(ValueError):
             github._descargar('https://api.github.com/orgs/acme-demo', 30)
 
@@ -1004,6 +1005,99 @@ class Cuota(unittest.TestCase):
         res = por_ejecutar(api=api)
         self.assertEqual((res.estado, res.consultas), ('succeeded', github.MAX_CONSULTAS))
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+
+
+class TransporteApi(unittest.TestCase):
+    """RC-304: la API de GitHub sale por transporte.descargar(), como RDAP y Shodan: sin seguir redirecciones, sin los
+    proxies del entorno y solo a direcciones públicas en el 443 (RC-299). Sin red: se simula la conexión https
+    (transporte._Https.https_open, detrás del opener de verdad) o transporte.abrir, y getaddrinfo truena si alguien
+    intenta salir."""
+    URL = 'https://api.github.com/orgs/acme-demo'
+
+    def setUp(self):
+        sin_red = mock.patch('socket.getaddrinfo', side_effect=AssertionError('la prueba intentó salir a la red'))
+        sin_red.start()
+        self.addCleanup(sin_red.stop)
+
+    @staticmethod
+    def respuesta(req, codigo, cuerpo=b'', cabeceras=()):
+        import http.client
+        import urllib.response
+        h = http.client.HTTPMessage()
+        for nombre, valor in cabeceras:
+            h[nombre] = valor
+        r = urllib.response.addinfourl(io.BytesIO(cuerpo), h, req.full_url, codigo)
+        r.msg = http.client.responses.get(codigo, '')
+        return r
+
+    def cliente(self):
+        return github.ClienteGitHub(dormir=lambda s: None)
+
+    def test_1_un_301_a_otro_host_falla_sin_segunda_peticion(self):
+        https, http_ = [], []
+
+        def https_open(handler, req):
+            https.append(req.full_url)
+            return self.respuesta(req, 301, cabeceras=[('Location', 'http://otro-host.example/orgs/acme-demo')])
+        with mock.patch.object(github.transporte._Https, 'https_open', https_open), \
+                mock.patch.object(github.transporte._Http, 'http_open', lambda h, req: http_.append(req) or 1 / 0):
+            c = self.cliente()
+            with self.assertRaises(FuenteNoResponde) as e:
+                c._api('/orgs/acme-demo', 'perfil')
+        self.assertEqual(str(e.exception), 'github: la API de GitHub no respondió (perfil)')
+        self.assertEqual((https, http_, c.consultas), ([self.URL], [], 1))   # ni otro intento ni el salto a http
+        with mock.patch.object(github.transporte, 'abrir', side_effect=github.transporte.Redirigida(
+                301, 'api.github.com', 'http://otro-host.example/')) as abrir:
+            c = self.cliente()
+            with self.assertRaises(FuenteNoResponde):
+                c._api('/orgs/acme-demo', 'perfil')
+        self.assertEqual((abrir.call_count, c.consultas), (1, 1))
+
+    def test_2_https_proxy_del_entorno_no_se_usa(self):
+        vistas = []
+
+        def https_open(handler, req):
+            vistas.append((req.host, req._tunnel_host, req.get_header('Accept'), req.get_header('User-agent')))
+            return self.respuesta(req, 200, b'{"login": "acme-demo"}', [('Content-Type', 'application/json')])
+        proxies = {n: 'http://proxy.invalid:3128' for n in ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy',
+                                                            'ALL_PROXY', 'all_proxy')}
+        with mock.patch.dict(os.environ, proxies), mock.patch.object(github.transporte._Https, 'https_open', https_open):
+            self.assertEqual(github._descargar(self.URL, 30), b'{"login": "acme-demo"}')
+        self.assertEqual(vistas, [('api.github.com', None, 'application/vnd.github+json', github.AGENTE)])
+
+    def test_3_404_403_y_429_siguen_dando_noexiste_y_cuota(self):
+        for codigo, error in ((404, github.NoExiste), (403, github.CuotaAgotada), (429, github.CuotaAgotada)):
+            with self.subTest(codigo=codigo):
+                falla = urllib.error.HTTPError(self.URL, codigo, 'x', None, None)
+                with mock.patch.object(github.transporte, 'abrir', side_effect=falla):
+                    c = self.cliente()
+                    with self.assertRaises(error):
+                        c._api('/orgs/acme-demo', 'perfil')
+                self.assertEqual(c.consultas, 1)
+
+    def test_4_mas_de_max_bytes_y_plazo_vencido_fallan_como_hoy(self):
+        def grande(req, plazo, cronometro):
+            return self.respuesta(req, 200, b'x' * 5000)
+        casos = ((grande, 'grande'),
+                 (mock.Mock(side_effect=github.transporte.PlazoVencido('api.github.com no terminó')), 'plazo'))
+        for abrir, nombre in casos:
+            with self.subTest(nombre), mock.patch.object(github.transporte, 'abrir', abrir), \
+                    mock.patch.object(github, 'MAX_BYTES', 4000):
+                c = self.cliente()
+                with self.assertRaises(FuenteNoResponde) as e:
+                    c._api('/orgs/acme-demo', 'perfil')
+                self.assertEqual(str(e.exception), 'github: la API de GitHub no respondió (perfil)')
+                self.assertEqual(c.consultas, github.INTENTOS)   # se reintenta como cualquier falla de la red
+
+    def test_5_descargar_pasa_max_bytes_y_el_plazo(self):
+        pedidas = []
+
+        def descargar(req, plazo, tope, cronometro):
+            pedidas.append((req.full_url, round(plazo - cronometro()), tope))
+            return b'{}'
+        with mock.patch.object(github.transporte, 'descargar', descargar):
+            self.assertEqual(github._descargar(self.URL, 30), b'{}')
+        self.assertEqual(pedidas, [(self.URL, 30, github.MAX_BYTES)])
 
 
 class GrabarYReproducir(unittest.TestCase):
