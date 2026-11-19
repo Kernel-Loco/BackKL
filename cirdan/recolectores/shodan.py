@@ -1509,6 +1509,8 @@ def _revisar(res, cliente, dominio, ahora):
         if todas_las_ip:
             res.sin_revisar = [parte for ip in ips for parte in (ip, ip + PARTE_CVE, ip + PARTE_ETIQUETAS)
                                if parte not in res.revisados]
+    # Sin la API de host, las etiquetas faltan por la llave. Con ella, lo que falte es cobertura parcial (RC-229)
+    res.sin_llave = [] if con_host else [c for c in sin_etiquetas if c in res.sin_cobertura]
     # Una corrida con fallas no pisa una grabación completa (como github.py con SIN_CUOTA). El aviso va primero, para
     # que entre en los 10 que guarda el orquestador
     if cliente.modo == 'grabar' and cliente.degradada(parcial):

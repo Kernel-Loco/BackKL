@@ -146,9 +146,10 @@ SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
        s.score, s.band_medium_from, s.band_high_from, s.band_critical_from,
        (SELECT jsonb_object_agg(sev, n) FROM (SELECT coalesce(sc_score.severity, f.severity) AS sev, count(*) AS n
           FROM findings f
-          LEFT JOIN LATERAL (SELECT x.severity FROM domain_scores ds
-                               JOIN score_contributions x ON x.score_id = ds.id AND x.finding_id = f.id
-                              WHERE ds.domain_id = f.domain_id ORDER BY ds.computed_at DESC LIMIT 1) sc_score ON true
+          LEFT JOIN LATERAL (SELECT x.severity FROM score_contributions x
+                              WHERE x.finding_id = f.id
+                                AND x.score_id = (SELECT ds.id FROM domain_scores ds WHERE ds.domain_id = f.domain_id
+                                                   ORDER BY ds.computed_at DESC LIMIT 1)) sc_score ON true
           WHERE f.domain_id = d.id AND f.status = 'open' GROUP BY 1) c) AS open_findings
   FROM domains d
   LEFT JOIN LATERAL (SELECT * FROM domain_authorizations x WHERE x.domain_id = d.id
@@ -250,9 +251,10 @@ SELECT f.id::text, f.evidence, a.value AS asset, a.asset_type, a.first_seen_at A
   LEFT JOIN scans sc   ON sc.id = f.last_scan_id
   LEFT JOIN cves c     ON c.cve_id = f.cve_id
   LEFT JOIN breach_exposures b ON b.finding_id = f.id
-    LEFT JOIN LATERAL (SELECT x.severity FROM domain_scores ds
-                                         JOIN score_contributions x ON x.score_id = ds.id AND x.finding_id = f.id
-                                         WHERE ds.domain_id = f.domain_id ORDER BY ds.computed_at DESC LIMIT 1) sc_score ON true
+  LEFT JOIN LATERAL (SELECT x.severity FROM score_contributions x
+                      WHERE x.finding_id = f.id
+                        AND x.score_id = (SELECT ds.id FROM domain_scores ds WHERE ds.domain_id = f.domain_id
+                                           ORDER BY ds.computed_at DESC LIMIT 1)) sc_score ON true
  WHERE d.fqdn = %s AND f.status = 'open'
  ORDER BY array_position(ARRAY['critical','high','medium','low'], coalesce(sc_score.severity, f.severity)),
                     f.detected_at DESC, f.id
@@ -306,7 +308,8 @@ SELECT r.code, r.category, x.severity, x.penalty
 '''
 
 SCORE_CORRIDAS_SQL = '''
-SELECT ds.code AS source, r.status, r.raw_payload->'sin_cobertura' AS sin_cobertura
+SELECT ds.code AS source, r.status, r.raw_payload->'sin_cobertura' AS sin_cobertura,
+       r.raw_payload->'sin_llave' AS sin_llave, r.raw_payload->'avisos' AS avisos
   FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id
  WHERE r.scan_id = %s::uuid
 '''
@@ -365,9 +368,8 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
     subs, kris = subcategorias.resumen(aportes, corridas, stats.get('rules_without_coverage') or (),
                                        stats.get('sources_partial') or ())
     # Los códigos que el escaneo del score no revisó, con su fuente y su motivo, para que el portal los nombre (RC-229).
-    huecos = cobertura.huecos([{'source': r['source'], 'status': r['status'],
-                                'sin_cobertura': r['sin_cobertura'] if isinstance(r['sin_cobertura'], list) else None}
-                               for r in filas_corridas], stats.get('rules_without_coverage') or ())
+    huecos = cobertura.huecos(filas_corridas, stats.get('rules_without_coverage') or (),
+                              stats.get('sources_partial') or ())
     cortes = configuracion.cortes_de_fila(rows[-1])
     categories = [{'category': c, 'score': rows[-1]['category_scores'][c],
                    'band': criterio.banda(rows[-1]['category_scores'][c], cortes),

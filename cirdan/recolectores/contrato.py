@@ -97,6 +97,7 @@ class Resultado:
     activos: list = field(default_factory=list)
     hallazgos: list = field(default_factory=list)
     sin_cobertura: list = field(default_factory=list)  # códigos que la fuente no pudo revisar: cobertura parcial, no 0
+    sin_llave: list = field(default_factory=list)  # de sin_cobertura, los que faltaron por no tener la llave (RC-229)
     revisados: list | None = None    # None si revisó todo. Si no, las partes que sí revisó completas (#23)
     sin_revisar: list | None = None  # con revisados, las que existen, revisaría y no revisó. None si no las sabe
     omitidos: list = field(default_factory=list)  # huellas de lo que sigue ahí pero un tope no deja reportar (#23)
@@ -246,6 +247,8 @@ def validar(res, codigos=None):
         errores.append('sin_cobertura tiene códigos repetidos')
     elif codigos is not None and set(sin) - set(codigos):
         errores.append('sin_cobertura: %s no está en el catálogo de reglas' % ', '.join(sorted(set(sin) - set(codigos))))
+    if not isinstance(res.sin_llave, list) or (isinstance(sin, list) and set(res.sin_llave) - set(sin)):
+        errores.append('sin_llave debe ser una lista con códigos de sin_cobertura')
     rev, falta = res.revisados, res.sin_revisar
     errores += _errores_partes('revisados', rev, puede_faltar=True)
     errores += _errores_partes('sin_revisar', falta, puede_faltar=True)

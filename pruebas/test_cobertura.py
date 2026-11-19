@@ -10,8 +10,9 @@ from cirdan.score import cobertura
 TODAS = [f for f in REGISTRO if f != cobertura.FUENTE_PRUEBAS]
 
 
-def corrida(fuente, estado='succeeded', sin_cobertura=()):
-    return {'source': fuente, 'status': estado, 'sin_cobertura': None if sin_cobertura is None else list(sin_cobertura)}
+def corrida(fuente, estado='succeeded', sin_cobertura=(), sin_llave=None, avisos=None):
+    return {'source': fuente, 'status': estado, 'sin_cobertura': None if sin_cobertura is None else list(sin_cobertura),
+            'sin_llave': sin_llave, 'avisos': avisos}
 
 
 def de(huecos, motivo=None, fuente=None):
@@ -39,7 +40,8 @@ class Huecos(unittest.TestCase):
 
     def test_shodan_sin_llave_y_parcial_de_otra_fuente(self):
         corridas = [corrida(f) for f in TODAS if f not in ('shodan', 'ct_logs')]
-        corridas += [corrida('shodan', sin_cobertura=['exposed_iot_device', 'exposed_rdp']),
+        corridas += [corrida('shodan', sin_cobertura=['exposed_iot_device', 'exposed_rdp'],
+                             sin_llave=['exposed_iot_device']),
                      corrida('ct_logs', sin_cobertura=['lookalike_domain'])]
         huecos = cobertura.huecos(corridas, ['exposed_iot_device', 'exposed_rdp', 'lookalike_domain'])
         self.assertIn('exposed_iot_device', shodan.SIN_LLAVE)
@@ -50,12 +52,53 @@ class Huecos(unittest.TestCase):
     def test_outdated_software_va_por_fuente(self):
         # Está en SIN_LLAVE de Shodan y también lo revisa la visita web: cada fuente lleva su motivo.
         corridas = [corrida(f) for f in TODAS if f not in ('shodan', 'web')]
-        corridas += [corrida('shodan', sin_cobertura=['outdated_software']),
+        corridas += [corrida('shodan', sin_cobertura=['outdated_software'], sin_llave=['outdated_software']),
                      corrida('web', sin_cobertura=['outdated_software'])]
         self.assertEqual(de(cobertura.huecos(corridas, ['outdated_software']), 'no_api_key'),
                          [('outdated_software', 'shodan')])
         self.assertEqual(de(cobertura.huecos(corridas, ['outdated_software']), 'source_partial'),
                          [('outdated_software', 'web')])
+
+    def test_shodan_con_llave_y_api_de_host_incompleta_no_es_falta_de_llave(self):
+        # Con la llave, la API de host respondió por una parte de las IP: sus códigos son cobertura parcial (hallazgo 2).
+        corridas = [corrida(f) for f in TODAS if f != 'shodan']
+        corridas.append(corrida('shodan', sin_cobertura=list(shodan.SIN_LLAVE), sin_llave=[],
+                                avisos=[shodan.LIMITES_CON_LLAVE, shodan.ETIQUETAS_PARCIAL % (1, 2)]))
+        huecos = cobertura.huecos(corridas, list(shodan.SIN_LLAVE))
+        self.assertEqual(de(huecos, 'no_api_key'), [])
+        self.assertEqual(de(huecos, 'source_partial'), [(c, 'shodan') for c in sorted(shodan.SIN_LLAVE)])
+
+    def test_shodan_que_reproduce_sin_grabacion_no_es_falta_de_llave(self):
+        corridas = [corrida(f) for f in TODAS if f != 'shodan']
+        corridas.append(corrida('shodan', sin_cobertura=list(shodan.CODIGOS), sin_llave=[]))
+        self.assertEqual(de(cobertura.huecos(corridas), 'no_api_key'), [])
+
+    def test_corrida_de_antes_de_sin_llave_lo_toma_del_aviso_de_shodan(self):
+        otras = [corrida(f) for f in TODAS if f != 'shodan']
+        sin = ['exposed_iot_device', 'exposed_rdp']
+        sin_llave = cobertura.huecos(otras + [corrida('shodan', sin_cobertura=sin, avisos=[shodan.LIMITES])])
+        con_llave = cobertura.huecos(otras + [corrida('shodan', sin_cobertura=sin, avisos=[shodan.LIMITES_CON_LLAVE])])
+        sin_aviso = cobertura.huecos(otras + [corrida('shodan', sin_cobertura=sin)])
+        self.assertEqual(de(sin_llave, 'no_api_key'), [('exposed_iot_device', 'shodan')])
+        self.assertEqual(de(sin_llave, 'source_partial'), [('exposed_rdp', 'shodan')])
+        self.assertEqual(de(con_llave, 'no_api_key'), [])
+        self.assertEqual(de(sin_aviso, 'no_api_key'), [])
+
+    def test_fuente_parcial_sin_sin_cobertura_no_da_lista_vacia(self):
+        # stats.sources_partial con sin_cobertura vacía: sus códigos se revisaron solo en una parte (hallazgo 3).
+        huecos = cobertura.huecos([corrida(f) for f in TODAS], (), ['ct_logs'])
+        self.assertEqual(de(huecos), [(c, 'ct_logs') for c in sorted(crtsh.CODIGOS)])
+        self.assertEqual({h['reason'] for h in huecos}, {'partially_checked'})
+
+    def test_fuente_parcial_conserva_el_motivo_de_lo_que_no_reviso(self):
+        corridas = [corrida(f) for f in TODAS if f != 'ct_logs'] + [corrida('ct_logs', sin_cobertura=['lookalike_domain'])]
+        huecos = cobertura.huecos(corridas, ['lookalike_domain'], ['ct_logs'])
+        self.assertEqual(de(huecos, 'source_partial'), [('lookalike_domain', 'ct_logs')])
+        self.assertNotIn(('lookalike_domain', 'ct_logs'), de(huecos, 'partially_checked'))
+
+    def test_fuente_parcial_que_no_corrio_no_se_inventa(self):
+        corridas = [corrida(f) for f in TODAS if f != 'api_docs']
+        self.assertEqual(de(cobertura.huecos(corridas, (), ['api_docs']), 'partially_checked'), [])
 
     def test_sin_raw_payload_se_atribuye_por_codigos_y_si_no_va_sin_fuente(self):
         # GitHub no guarda raw_payload: lo de rules_without_coverage que es suyo va con GitHub.
@@ -69,9 +112,11 @@ class Huecos(unittest.TestCase):
         self.assertEqual(de(cobertura.huecos(corridas, ['dmarc_missing'])), [('dmarc_missing', 'dns')])
 
     def test_motivos_conocidos(self):
-        corridas = [corrida('ct_logs', 'failed'), corrida('shodan', sin_cobertura=['exposed_ot_device']),
-                    corrida('dns', sin_cobertura=['spf_missing'])]
-        self.assertTrue({h['reason'] for h in cobertura.huecos(corridas)} <= set(cobertura.MOTIVOS))
+        corridas = [corrida('ct_logs', 'failed'), corrida('shodan', sin_cobertura=['exposed_ot_device'],
+                                                          sin_llave=['exposed_ot_device']),
+                    corrida('dns', sin_cobertura=['spf_missing']), corrida('web')]
+        motivos = {h['reason'] for h in cobertura.huecos(corridas, (), ['web'])}
+        self.assertEqual(motivos, set(cobertura.MOTIVOS))
 
 
 if __name__ == '__main__':

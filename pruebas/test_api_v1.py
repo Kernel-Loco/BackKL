@@ -15,7 +15,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from cirdan.score import criterio, subcategorias
+from cirdan.score import cobertura, criterio, subcategorias
 from pruebas import sesion
 from pruebas.test_aislamiento import psql
 
@@ -200,34 +200,43 @@ class ApiV1(unittest.TestCase):
         self.test_1b_carta_que_empieza_manana_no_cuenta_como_vigente()
 
     def test_1e_open_findings_con_la_severidad_del_ultimo_score(self):
-        # RC-229. Se guarda un score de acme-demo.mx, copia del último, en el que un hallazgo abierto no crítico tiene
-        # aporte 'critical'. El conteo de /domains y la lista de /findings usan esa severidad y coinciden. Las dos
-        # tablas son de solo inserción: las filas de prueba se borran al final sin triggers, como en test_3a.
+        # RC-229. Se guardan dos scores de acme-demo.mx, copias del último. En el primero dos hallazgos abiertos no
+        # críticos tienen aporte 'critical'. El segundo, el más nuevo, deja 'critical' al primero (otro) y no trae
+        # aporte del segundo (omitido). /domains, /findings y la explicación usan el último score: otro sale
+        # 'critical' y omitido con su severidad de findings, no con la del score anterior. Las dos tablas son de solo
+        # inserción: las filas de prueba se borran al final sin triggers, como en test_3a.
         antes = next(d for d in self.get(self.acme, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
         viejo = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')['score_id']
+        medio = '70000000-0000-4000-8000-000000000228'
         nuevo = '70000000-0000-4000-8000-000000000229'
-        ok, otro, err = psql(f"""
+        ok, salida, err = psql(f"""
             BEGIN;
             INSERT INTO domain_scores (id, organization_id, domain_id, scan_id, rule_set_id, score, category_scores,
                                        reason, method, model_version, model_fallback_reason, partial_coverage,
                                        computed_at)
-            SELECT '{nuevo}', organization_id, domain_id, scan_id, rule_set_id, score, category_scores, reason, method,
-                   model_version, 'artefacto_ml_no_disponible', partial_coverage, computed_at + interval '1 second'
-              FROM domain_scores WHERE id = '{viejo}';
+            SELECT v.id, organization_id, domain_id, scan_id, rule_set_id, score, category_scores, reason, method,
+                   model_version, v.motivo, partial_coverage, computed_at + v.paso
+              FROM domain_scores, (VALUES ('{medio}'::uuid, NULL, interval '1 second'),
+                                          ('{nuevo}'::uuid, 'artefacto_ml_no_disponible', interval '2 seconds'))
+                                   v(id, motivo, paso)
+             WHERE domain_scores.id = '{viejo}';
             CREATE TEMP TABLE rc229_otro ON COMMIT DROP AS
-            SELECT x.finding_id FROM score_contributions x JOIN findings f ON f.id = x.finding_id
+            SELECT x.finding_id, row_number() OVER (ORDER BY x.finding_id) AS n
+              FROM score_contributions x JOIN findings f ON f.id = x.finding_id
              WHERE x.score_id = '{viejo}' AND x.severity <> 'critical' AND f.severity <> 'critical'
-               AND f.status = 'open' ORDER BY x.finding_id LIMIT 1;
+               AND f.status = 'open' ORDER BY x.finding_id LIMIT 2;
             INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, severity, factors)
-            SELECT organization_id, '{nuevo}', finding_id, rule_id, penalty,
-                   CASE WHEN finding_id IN (SELECT finding_id FROM rc229_otro) THEN 'critical' ELSE severity END,
-                   factors
-              FROM score_contributions WHERE score_id = '{viejo}';
-            SELECT finding_id FROM rc229_otro;
+            SELECT organization_id, s.id, x.finding_id, rule_id, penalty,
+                   CASE WHEN o.n = 1 OR (o.n = 2 AND s.id = '{medio}') THEN 'critical' ELSE severity END, factors
+              FROM score_contributions x LEFT JOIN rc229_otro o ON o.finding_id = x.finding_id,
+                   (VALUES ('{medio}'::uuid), ('{nuevo}'::uuid)) s(id)
+             WHERE x.score_id = '{viejo}' AND NOT (coalesce(o.n, 0) = 2 AND s.id = '{nuevo}');
+            SELECT string_agg(finding_id::text, ' ' ORDER BY n) FROM rc229_otro;
             COMMIT;""", user='postgres')
         self.assertTrue(ok, err)
         try:
-            self.assertRegex(otro, r'^[0-9a-f-]{36}$', 'no hay otro hallazgo abierto no crítico con aporte')
+            otro, omitido = (salida.split() + ['', ''])[:2]
+            self.assertRegex(omitido, r'^[0-9a-f-]{36}$', 'no hay dos hallazgos abiertos no críticos con aporte')
             dominio = next(d for d in self.get(self.acme, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
             lista = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')['items']
             conteo = {s: 0 for s in ('critical', 'high', 'medium', 'low')}
@@ -236,14 +245,20 @@ class ApiV1(unittest.TestCase):
             self.assertEqual(dominio['open_findings'], conteo)
             self.assertEqual(dominio['open_findings']['critical'], antes['open_findings']['critical'] + 1)
             self.assertEqual(next(i['severity'] for i in lista if i['id'] == otro), 'critical')
+            # sin aporte en el último score vale su severidad de findings, no la 'critical' del score anterior
+            ok, propia, err = psql(f"SELECT severity FROM findings WHERE id = '{omitido}'", user='postgres')
+            self.assertTrue(ok, err)
+            self.assertNotEqual(propia, 'critical')
+            self.assertEqual(next(i['severity'] for i in lista if i['id'] == omitido), propia)
+            self.assertEqual(self.get(self.acme, '/api/v1/findings/%s/explanation' % omitido)['severity'], propia)
             # la explicación del hallazgo lleva el motivo de caída del último score (RC-229)
             exp = self.get(self.acme, '/api/v1/findings/%s/explanation' % otro)
             self.assertEqual((exp['score_id'], exp['severity'], exp['model_fallback_reason']),
                              (nuevo, 'critical', 'artefacto_ml_no_disponible'))
         finally:
             self.psql_o_falla(f"BEGIN; SET LOCAL session_replication_role = replica; "
-                              f"DELETE FROM score_contributions WHERE score_id = '{nuevo}'; "
-                              f"DELETE FROM domain_scores WHERE id = '{nuevo}'; COMMIT;",
+                              f"DELETE FROM score_contributions WHERE score_id IN ('{medio}', '{nuevo}'); "
+                              f"DELETE FROM domain_scores WHERE id IN ('{medio}', '{nuevo}'); COMMIT;",
                               'quedó el score de prueba de RC-229')
         despues = next(d for d in self.get(self.acme, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
         self.assertEqual(despues['open_findings'], antes['open_findings'])
@@ -451,8 +466,9 @@ class ApiV1(unittest.TestCase):
         self.assertEqual(self.get(self.acme, '/api/v1/domains/acme-demo.mx/score'), antes)
 
     def test_3c3_codigos_sin_cobertura_con_su_fuente_y_su_motivo(self):
-        # RC-229. ct_logs cae, Shodan dice qué no revisó en su raw_payload y dns deja un código en
-        # rules_without_coverage. Todo vuelve como estaba al terminar.
+        # RC-229. ct_logs cae, Shodan dice en su raw_payload qué no revisó y qué le faltó por la llave, dns deja un
+        # código en rules_without_coverage y whois queda en sources_partial. exposed_iot_device y exposed_rdp van solo
+        # en el raw_payload, así la prueba falla si no se lee. Todo vuelve como estaba al terminar.
         url = '/api/v1/domains/acme-demo.mx/score'
         antes = self.get(self.acme, url)
         self.assertEqual({(h['source'], h['reason']) for h in antes['coverage_gaps']},
@@ -460,8 +476,10 @@ class ApiV1(unittest.TestCase):
         corrida = "UPDATE scan_source_runs SET %s WHERE id = '61000000-0000-4000-8000-0000000000%s';"
         escaneo = "UPDATE scans SET stats = %s WHERE id = '60000000-0000-4000-8000-000000000001';"
         ok, _, err = psql(corrida % ("status = 'failed'", '01')
-                          + corrida % ("""raw_payload = raw_payload || '{"sin_cobertura": ["exposed_iot_device"]}'""", '04')
-                          + escaneo % """stats || '{"rules_without_coverage": ["exposed_iot_device", "dmarc_missing"]}'""",
+                          + corrida % ("""raw_payload = raw_payload || '{"sin_cobertura": ["exposed_iot_device", """
+                                       """"exposed_rdp"], "sin_llave": ["exposed_iot_device"]}'""", '04')
+                          + escaneo % ("""stats || '{"rules_without_coverage": ["dmarc_missing"], """
+                                       """"sources_partial": ["whois"]}'"""),
                           user='postgres')
         self.assertTrue(ok, err)
         try:
@@ -471,13 +489,15 @@ class ApiV1(unittest.TestCase):
                 por_fuente.setdefault((h['source'], h['reason']), []).append(h['code'])
             self.assertIn('lookalike_domain', por_fuente[('ct_logs', 'source_failed')])
             self.assertEqual(por_fuente[('shodan', 'no_api_key')], ['exposed_iot_device'])
+            self.assertEqual(por_fuente[('shodan', 'source_partial')], ['exposed_rdp'])
+            self.assertEqual(sorted(por_fuente[('whois', 'partially_checked')]), sorted(cobertura.codigos_de('whois')))
             # dns no guarda sin_cobertura en la semilla: su código de rules_without_coverage se le da por CODIGOS
             self.assertEqual(por_fuente[('dns', 'source_partial')], ['dmarc_missing'])
             self.assertEqual([h['code'] for h in huecos], sorted(h['code'] for h in huecos))
         finally:
             ok, _, err = psql(corrida % ("status = 'succeeded'", '01')
-                              + corrida % ("raw_payload = raw_payload - 'sin_cobertura'", '04')
-                              + escaneo % "stats - 'rules_without_coverage'", user='postgres')
+                              + corrida % ("raw_payload = raw_payload - 'sin_cobertura' - 'sin_llave'", '04')
+                              + escaneo % "stats - 'rules_without_coverage' - 'sources_partial'", user='postgres')
             self.assertTrue(ok, err)
         self.assertEqual(self.get(self.acme, url), antes)
 

@@ -699,7 +699,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             gastadas += res.consultas
             avisos = previos + res.avisos
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
-                       'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura,
+                       'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura, 'sin_llave': res.sin_llave,
                        'cobertura_parcial': res.estado == 'succeeded' and res.revisados is not None}
             # La marca de vida y la fila van en una transacción: si lo dieron por caído mientras la fuente corría,
             # no se escribe encima de la fila que ya se cerró, y nadie lo puede dar por caído en medio.
