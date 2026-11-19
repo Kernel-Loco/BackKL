@@ -736,6 +736,35 @@ class ApiV1(unittest.TestCase):
         self.assertEqual((otra['items'], otra['total']), ([], 0))
         self.assertNotIn('acme', str(self.get(self.beta, '/api/v1/scans?limit=100')))
 
+    def test_5c_escaneos_sin_el_costo_interno(self):
+        # RC-87: el orquestador guarda en scans.stats las consultas y los segundos de cada fuente, pero GET /api/v1/scans
+        # y GET /api/v1/scans/{id} no los entregan. Las llaves de antes salen igual (RC-229 las lee). El escaneo de la
+        # semilla no trae ese costo: se le pone y se le quita al terminar.
+        escaneo = '60000000-0000-4000-8000-000000000001'
+        internas = {'queries', 'queries_by_source', 'seconds_by_source', 'duration_seconds'}
+
+        def de_la_lista():
+            items = self.get(self.acme, '/api/v1/scans?domain=acme-demo.mx&limit=100')['items']
+            return next(s for s in items if s['id'] == escaneo)
+
+        antes = self.get(self.acme, '/api/v1/scans/' + escaneo)['stats']
+        self.assertTrue(antes)
+        self.assertFalse(internas & set(antes), antes)
+        self.assertEqual(de_la_lista()['stats'], antes)
+        costo = ('{"queries": 5, "queries_by_source": {"ct_logs": 4, "dns": 1}, '
+                 '"seconds_by_source": {"ct_logs": 8.0, "dns": 0.5}, "duration_seconds": 1868.5}')
+        self.addCleanup(self.psql_o_falla, "UPDATE scans SET stats = stats - '%s'::text[] WHERE id = '%s';"
+                        % ('{' + ','.join(sorted(internas)) + '}', escaneo),
+                        'el escaneo de la semilla se quedó con el costo de prueba')
+        self.psql_o_falla("UPDATE scans SET stats = stats || '%s'::jsonb WHERE id = '%s';" % (costo, escaneo),
+                          'no entró el costo de prueba')
+        ok, salida, err = psql("SELECT stats->>'queries' FROM scans WHERE id = '%s';" % escaneo, user='postgres')
+        self.assertEqual((ok, salida.strip()), (True, '5'), err)
+        for ruta, stats in (('/scans/{id}', self.get(self.acme, '/api/v1/scans/' + escaneo)['stats']),
+                            ('/scans', de_la_lista()['stats'])):
+            self.assertFalse(internas & set(stats), (ruta, stats))
+            self.assertEqual(stats, antes, ruta)
+
     def test_6_cada_empresa_ve_solo_lo_suyo(self):
         self.assertEqual([d['fqdn'] for d in self.get(self.beta, '/api/v1/domains')['items']], ['beta-corp.mx'])
         olmardo = self.get(self.olmardo, '/api/v1/domains')['items']

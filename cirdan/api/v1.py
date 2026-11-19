@@ -1106,4 +1106,6 @@ def scans(domain: str | None = Query(default=None, min_length=1, max_length=253,
                                                              'error', r.error, 'finished_at', r.finished_at) ORDER BY ds.code)
                            FROM scan_source_runs r JOIN data_sources ds ON ds.id = r.source_id WHERE r.scan_id = s.id), '[]') AS sources
         ''' + filtro + ' ORDER BY s.queued_at DESC, s.id DESC LIMIT %(limit)s OFFSET %(offset)s', params).fetchall()
+    for row in rows:
+        row['stats'] = orquestador.stats_publicas(row['stats'])  # sin el costo interno (RC-87)
     return {'items': rows, 'total': total, 'limit': limit, 'offset': offset}
