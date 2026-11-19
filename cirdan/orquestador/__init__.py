@@ -646,9 +646,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     una sin revisar, salvo un cert_expiring_soon ya vencido). Un hallazgo que una fuente resuelve y otra reabre en
     el mismo escaneo quedó como estaba y no cuenta en ninguno. Los conteos solo se guardan al cerrar: lo que
     guardaron las fuentes de un escaneo que se cae o lo dan por caído no se cuenta.
+    queries, queries_by_source, seconds_by_source y duration_seconds dan el costo medido del escaneo (#52, RC-87).
     `dormir` reemplaza time.sleep (pruebas).
     """
     dormir = dormir or time.sleep
+    inicio = time.monotonic()
     fqdn = fqdn.strip().lower().rstrip('.')
     with _tx(org, conn) as c:
         fuentes = fuentes if fuentes is not None else fuentes_activas(c)
@@ -675,8 +677,9 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     con_cupo = modo in MODOS_CON_CUPO
     corridas, activos, hallazgos = [], set(), 0
     nuevos, resueltos = set(), set()  # id de los hallazgos que este escaneo abrió y los que resolvió
+    tiempos = {}  # segundos de cada fuente con todos sus intentos, sin las esperas entre reintentos
     for codigo in fuentes:
-        intento, gastadas, previos = 0, 0, []
+        intento, gastadas, previos, segundos = 0, 0, [], 0.0
         modulo = cargar(codigo)
         while True:
             if not _latido(org, scan_id, conn):
@@ -689,8 +692,10 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 res = Resultado(fqdn, codigo, estado='failed', error=SIN_CUPO % codigo, avisos=[SIN_CUPO % codigo])
                 status, attempt, next_retry_at = 'failed', intento, None
             else:
+                arranque = time.monotonic()
                 with _latiendo(org, scan_id, conn):
                     res = ejecutar(modulo, fqdn, modo, ahora=ahora, propios=propios, codigos=reglas)
+                segundos += time.monotonic() - arranque
                 if dia is not None and res.consultas != reservadas:
                     _ajustar(org, codigo, dia, res.consultas - reservadas, conn)
                 momento = datetime.now(timezone.utc)
@@ -736,6 +741,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             intento = attempt
         corridas.append({'source': codigo, 'status': status, 'error': res.error or None,
                          'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})
+        tiempos[codigo] = segundos
         if res.estado == 'succeeded':
             activos.update((a.tipo, a.valor) for a in res.activos)  # un subdominio que dan dos fuentes cuenta una vez
             hallazgos += len(res.hallazgos)
@@ -751,6 +757,13 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         stats['rules_without_coverage'] = sin_cobertura
     if a_medias:
         stats['sources_partial'] = a_medias
+    # Costo medido del escaneo (#52, RC-87): consultas de cada fuente con todos sus intentos, también las de una
+    # fuente que falló, y segundos. seconds_by_source suma lo que tardó el recolector en cada intento, sin las
+    # esperas entre reintentos. duration_seconds va del inicio de correr() hasta antes del score y sí las incluye.
+    stats['queries'] = sum(r['consultas'] for r in corridas)
+    stats['queries_by_source'] = {r['source']: r['consultas'] for r in corridas}
+    stats['seconds_by_source'] = {codigo: round(s, 3) for codigo, s in tiempos.items()}
+    stats['duration_seconds'] = round(time.monotonic() - inicio, 3)
     with _tx(org, conn) as c:
         # El modelo corre antes de bloquear la fila del escaneo y de tomar el candado de pesos (RC-62). Si ya lo
         # dieron por caído no se calcula de balde: el UPDATE de abajo sigue siendo el que decide.

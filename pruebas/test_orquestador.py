@@ -209,8 +209,14 @@ class Orquestador(unittest.TestCase):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
         self.assertEqual(resumen['status'], 'completed')
+        duracion = resumen['stats'].pop('duration_seconds')
+        self.assertIsInstance(duracion, float)
+        segundos = resumen['stats'].pop('seconds_by_source')
+        self.assertEqual(list(segundos), ['ejemplo'])
+        self.assertLessEqual(segundos['ejemplo'], duracion)
         self.assertEqual(resumen['stats'], {'assets': 2, 'findings': 1, 'new_findings': 1, 'resolved_findings': 0,
-                                            'sources_ok': 1, 'sources_failed': 0})
+                                            'sources_ok': 1, 'sources_failed': 0, 'queries': 0,
+                                            'queries_by_source': {'ejemplo': 0}})
         run = self.uno('SELECT r.status, r.attempt, r.raw_payload FROM scan_source_runs r WHERE r.scan_id = %s', s.scan_id)
         self.assertEqual((run['status'], run['attempt']), ('succeeded', 0))
         self.assertEqual(run['raw_payload']['hallazgos'], 1)
@@ -1339,6 +1345,34 @@ class Orquestador(unittest.TestCase):
                                          conn=self.conn)
         self.assertEqual([f['activos'] for f in resumen['sources']], [2, 2])  # cada fuente guarda lo suyo
         self.assertEqual((resumen['status'], resumen['stats']['assets']), ('completed', 3))  # www una sola vez
+
+    def test_3i4_stats_guarda_las_consultas_y_los_segundos_de_cada_fuente(self):
+        """#52 (RC-87): el costo medido del escaneo. Cuenta las consultas de todos los intentos, también las de una
+        fuente que falló. seconds_by_source no suma las esperas entre reintentos y duration_seconds sí."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.exige_cupo('ct_logs', crtsh.MAX_CONSULTAS)
+        reloj = [1000.0]
+
+        def tarda(resultado):  # cada corrida del recolector tarda 2 s en el reloj simulado
+            def correr_fuente():
+                reloj[0] += 2
+                return resultado
+            return correr_fuente
+
+        def dormir(segundos):
+            reloj[0] += segundos
+        tiempo = SimpleNamespace(monotonic=lambda: reloj[0], sleep=time.sleep)
+        with mock.patch.object(orquestador, 'time', tiempo):
+            resumen = self.en_vivo(s, [tarda(FALLA)] * 4 + [tarda(BIEN)], dormir, fuentes=('ejemplo', 'ct_logs'))
+        esperado = {'queries': 5, 'queries_by_source': {'ejemplo': 4, 'ct_logs': 1},
+                    'seconds_by_source': {'ejemplo': 8.0, 'ct_logs': 2.0}, 'duration_seconds': 8 + 31 * 60 + 2.0}
+        self.assertEqual(resumen['status'], 'partial')  # `ejemplo` agotó sus 4 intentos
+        self.assertEqual({k: resumen['stats'][k] for k in esperado}, esperado)
+        guardado = self.uno('SELECT stats FROM scans WHERE id = %s', s.scan_id)['stats']
+        self.assertEqual({k: guardado[k] for k in esperado}, esperado)
+        # las llaves de antes siguen igual (las leen la API v1, el SIEM y RC-229)
+        self.assertEqual({k: guardado[k] for k in ('assets', 'findings', 'sources_ok', 'sources_failed')},
+                         {'assets': 2, 'findings': 0, 'sources_ok': 1, 'sources_failed': 1})
 
     def test_3j_mientras_corre_una_fuente_un_hilo_marca_vida_y_para_al_terminar(self):
         latidos = []
