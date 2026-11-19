@@ -17,7 +17,7 @@ from pathlib import Path
 
 from cirdan.score import cobertura, criterio, subcategorias
 from pruebas import sesion
-from pruebas.test_aislamiento import psql
+from pruebas.test_aislamiento import psql, scalar
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
 PROPUESTOS = {'signer_email'}
@@ -835,7 +835,7 @@ class ApiV1(unittest.TestCase):
         descargas = ("SELECT count(*) FROM audit_log WHERE organization_id = '%s' AND action = 'report.downloaded';"
                      % acme)
         gerente = sesion.login('maya.reed@acme-demo.mx')
-        antes = psql(descargas, user='postgres')[1]
+        antes = scalar(descargas, user='postgres')
         for url in rutas + ('/api/v1/findings/no-es-un-id/explanation',
                             '/api/v1/findings/00000000-0000-4000-8000-000000000000/explanation',
                             '/api/v1/domains/no-existe.mx/findings', '/api/v1/domains/no-existe.mx/score/compare'
@@ -844,7 +844,7 @@ class ApiV1(unittest.TestCase):
             # 403 antes de buscar: no dice si el hallazgo o el dominio existen.
             self.assertEqual((code, body['detail']), (403, 'Tu rol no tiene permiso para esta acción.'), url)
         # El 403 llega antes de la exportación: la bitácora no anota una descarga que no hubo.
-        self.assertEqual(psql(descargas, user='postgres')[1], antes)
+        self.assertEqual(scalar(descargas, user='postgres'), antes)
         analista = sesion.login('jordan.tate@acme-demo.mx')
         for cliente, quien in ((analista, 'analista'), (self.acme, 'admin')):
             for url in rutas:
@@ -855,7 +855,7 @@ class ApiV1(unittest.TestCase):
                 else:
                     self.assertEqual(cliente.get(url)[0], 200, (quien, url))
         # Una llave de API entra igual, también junto a la cookie del gerente: el Bearer manda. Uno que no sirve es
-        # 401 y no cae a la cookie. La llave no pide exportaciones: su report.downloaded la ataría a la bitácora.
+        # 401 y no cae a la cookie. La descarga con llave ya la prueban test_llaves_api y test_bitacora_descargas.
         self.psql_o_falla("UPDATE organizations SET plan_id = (SELECT id FROM plans WHERE code = 'business') "
                           "WHERE id = '%s';" % acme, 'plan business para la llave')
         try:
