@@ -227,6 +227,7 @@ class Shodan(unittest.TestCase):
         self.assertEqual(ip.atributos['internetdb']['puertos'], [8080])
         self.assertEqual(res.sin_cobertura, list(shodan.SIN_LLAVE))
         self.assertIn(shodan.LIMITES, res.avisos)
+        self.assertEqual(res.sin_llave, list(shodan.SIN_LLAVE))   # sin la API de host faltan por la llave (RC-229)
 
     def test_3_web_y_correo_dan_servicio_sin_hallazgo(self):
         http = HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=[80, 443, 25, 587])})
@@ -1819,6 +1820,7 @@ class ApiDeHost(unittest.TestCase):
         self.assertEqual(activo(res, CAMARA).atributos['shodan_host'], 'sin_datos')
         self.assertEqual(res.sin_cobertura, list(shodan.SIN_LLAVE))
         self.assertIn(shodan.ETIQUETAS_PARCIAL % (0, 1), res.avisos)
+        self.assertEqual(res.sin_llave, [])   # con la llave lo que falta es cobertura parcial, no la llave (RC-229)
         # Con una etiqueta de InternetDB sale su hallazgo, sin fecha, y la parte de etiquetas queda sin revisar
         http = HttpSimulado(ips={CAMARA: internetdb(CAMARA, tags=['iot'])})
         res = con_llave(http, ResolvedorSimulado({DOMINIO: a(CAMARA)}))
