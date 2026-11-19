@@ -83,7 +83,15 @@ class ApiCirdan(unittest.TestCase):
                 self.assertEqual(estado, esperado)
                 self.assertEqual(cabeceras.get_all('X-Frame-Options'), ['DENY'])
                 self.assertEqual(cabeceras.get_all('X-Content-Type-Options'), ['nosniff'])
-                self.assertEqual(cabeceras.get_all('Content-Security-Policy'), ["frame-ancestors 'none'"])
+                self.assertIn("default-src 'none'", cabeceras['Content-Security-Policy'])
+                self.assertIn("frame-ancestors 'none'", cabeceras['Content-Security-Policy'])
+                self.assertIn("base-uri 'none'", cabeceras['Content-Security-Policy'])
+                self.assertIn("form-action 'none'", cabeceras['Content-Security-Policy'])
+                self.assertEqual(cabeceras.get_all('Strict-Transport-Security'),
+                                 ['max-age=31536000; includeSubDomains; preload'])
+                self.assertEqual(cabeceras.get_all('Referrer-Policy'), ['no-referrer'])
+                self.assertEqual(cabeceras.get_all('Permissions-Policy'),
+                                 ['camera=(), microphone=(), geolocation=(), usb=()'])
 
 
 if __name__ == '__main__':
