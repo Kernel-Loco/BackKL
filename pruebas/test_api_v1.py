@@ -44,6 +44,21 @@ class ApiV1(unittest.TestCase):
         cls.beta = sesion.login('dana.cruz@beta-corp.mx')
         cls.olmardo = sesion.login('admin@olmardo.com')
 
+    # RC-316: un crítico de acme-demo.mx abierto después de su score, y la brecha que sí tiene el score.
+    CRITICO_NUEVO = '80000000-0000-4000-8000-000000000316'
+    BRECHA = '80000000-0000-4000-8000-000000000001'
+    INSERTAR_CRITICO_NUEVO = '''
+            INSERT INTO findings (id, organization_id, domain_id, asset_id, rule_id, source_id, fingerprint,
+                                  severity, status, evidence, detected_at)
+            SELECT '%s', d.organization_id, d.id,
+                   (SELECT a.id FROM assets a WHERE a.domain_id = d.id ORDER BY a.id LIMIT 1),
+                   (SELECT r.id FROM scoring_rules r WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001'
+                       AND r.code = 'breach_exposure'),
+                   (SELECT s.id FROM data_sources s WHERE s.code = 'dns'),
+                   sha256('rc316-critico-nuevo'), 'critical', 'open', '{"title": "Crítico nuevo de prueba"}', now()
+              FROM domains d WHERE d.fqdn = 'acme-demo.mx';
+        ''' % CRITICO_NUEVO
+
     def psql_o_falla(self, sql, motivo):
         """psql como postgres que falla con su motivo: una limpieza que no regresa la base no pasa en silencio."""
         ok, _, err = psql(sql, user='postgres')
@@ -225,19 +240,8 @@ class ApiV1(unittest.TestCase):
         del_snapshot = {c: antes[c] for c in ('score', 'band', 'grade', 'weighted', 'floor', 'floor_applied',
                                               'floor_message', 'alert')}
         self.assertEqual(antes['floor_message'], 'Subido a 60 por 1 hallazgo crítico vigente; la suma ponderada da 28.')
-        nuevo = '80000000-0000-4000-8000-000000000316'
-        brecha = '80000000-0000-4000-8000-000000000001'
-        insertar = '''
-            INSERT INTO findings (id, organization_id, domain_id, asset_id, rule_id, source_id, fingerprint,
-                                  severity, status, evidence, detected_at)
-            SELECT '%s', d.organization_id, d.id,
-                   (SELECT a.id FROM assets a WHERE a.domain_id = d.id ORDER BY a.id LIMIT 1),
-                   (SELECT r.id FROM scoring_rules r WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001'
-                       AND r.code = 'breach_exposure'),
-                   (SELECT s.id FROM data_sources s WHERE s.code = 'dns'),
-                   sha256('rc316-critico-nuevo'), 'critical', 'open', '{"title": "Crítico nuevo de prueba"}', now()
-              FROM domains d WHERE d.fqdn = 'acme-demo.mx';
-        ''' % nuevo
+        nuevo, brecha = self.CRITICO_NUEVO, self.BRECHA
+        insertar = self.INSERTAR_CRITICO_NUEVO
         borrar = "DELETE FROM findings WHERE id = '%s';" % nuevo
         ok, _, err = psql(insertar, user='postgres')
         self.assertTrue(ok, err)
@@ -268,6 +272,62 @@ class ApiV1(unittest.TestCase):
         finally:
             self.psql_o_falla("UPDATE findings SET status = 'open', resolved_at = NULL WHERE id = '%s';" % brecha,
                               'no se regresó la brecha a open')
+        self.assertEqual(self.get(self.acme, url), antes)
+
+    def test_3a_ml_needs_rescan_usa_la_severidad_del_modelo(self):
+        # RC-316. En un score 'ml', score_contributions guarda la severidad que predijo el modelo. Se guarda un score
+        # 'ml' de acme-demo.mx, copia del último, en el que el modelo predijo high para la brecha (critical en
+        # findings) y critical para otro hallazgo vigente que en findings no lo es. Los críticos de ahora se juzgan
+        # con la severidad del aporte: 1 contra 1, el mismo hallazgo y needs_rescan en false. Un crítico nuevo sin
+        # aporte cuenta con la de findings y sí lo pone en true. Las dos tablas son de solo inserción: las filas de
+        # prueba se borran al final sin triggers, solo en esa transacción, y el score vuelve a ser el de antes.
+        url = '/api/v1/domains/acme-demo.mx/score'
+        antes = self.get(self.acme, url)
+        self.assertEqual((antes['method'], antes['critical_at_time'], antes['needs_rescan']), ('rules', 1, False))
+        viejo, ml = antes['score_id'], '70000000-0000-4000-8000-000000000316'
+        ok, otro, err = psql(f'''
+            BEGIN;
+            INSERT INTO domain_scores (id, organization_id, domain_id, scan_id, rule_set_id, score, category_scores,
+                                       reason, method, model_version, partial_coverage, computed_at)
+            SELECT '{ml}', organization_id, domain_id, scan_id, rule_set_id, score, category_scores, reason, 'ml',
+                   'rc316-prueba', partial_coverage, computed_at + interval '1 second'
+              FROM domain_scores WHERE id = '{viejo}';
+            CREATE TEMP TABLE rc316_otro ON COMMIT DROP AS
+            SELECT x.finding_id FROM score_contributions x JOIN findings f ON f.id = x.finding_id
+             WHERE x.score_id = '{viejo}' AND x.severity <> 'critical' AND f.severity <> 'critical'
+               AND f.status IN ('open', 'accepted_risk')
+             ORDER BY x.finding_id LIMIT 1;
+            INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, severity, factors)
+            SELECT organization_id, '{ml}', finding_id, rule_id, penalty,
+                   CASE WHEN finding_id = '{self.BRECHA}' THEN 'high'
+                        WHEN finding_id IN (SELECT finding_id FROM rc316_otro) THEN 'critical'
+                        ELSE severity END, factors
+              FROM score_contributions WHERE score_id = '{viejo}';
+            SELECT finding_id FROM rc316_otro;
+            COMMIT;''', user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            self.assertRegex(otro, r'^[0-9a-f-]{36}$', 'no hay otro hallazgo vigente no crítico con aporte')
+            predicho = self.get(self.acme, url)
+            self.assertEqual((predicho['score_id'], predicho['method'], predicho['model_version']),
+                             (ml, 'ml', 'rc316-prueba'))
+            self.assertEqual((predicho['critical_open'], predicho['critical_at_time'], predicho['needs_rescan']),
+                             (1, 1, False))
+            self.assertEqual(predicho['floor_message'], antes['floor_message'])
+            ok, _, err = psql(self.INSERTAR_CRITICO_NUEVO, user='postgres')
+            self.assertTrue(ok, err)
+            try:
+                con_nuevo = self.get(self.acme, url)
+                self.assertEqual((con_nuevo['critical_open'], con_nuevo['critical_at_time'],
+                                  con_nuevo['needs_rescan']), (2, 1, True))
+            finally:
+                self.psql_o_falla("DELETE FROM findings WHERE id = '%s';" % self.CRITICO_NUEVO,
+                                  'no se borró el crítico de prueba')
+        finally:
+            self.psql_o_falla(f"BEGIN; SET LOCAL session_replication_role = replica; "
+                              f"DELETE FROM score_contributions WHERE score_id = '{ml}'; "
+                              f"DELETE FROM domain_scores WHERE id = '{ml}'; COMMIT;",
+                              'quedó el score ml de prueba de RC-316')
         self.assertEqual(self.get(self.acme, url), antes)
 
     def test_3b_cada_regla_de_la_base_tiene_subcategoria_y_cada_kri_apunta_a_una_que_existe(self):

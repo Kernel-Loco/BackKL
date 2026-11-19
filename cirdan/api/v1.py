@@ -332,9 +332,16 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
         rows = conn.execute(SCORES_SQL, (fqdn,)).fetchall()
         if not rows:
             raise HTTPException(404, 'El dominio aún no tiene score')
+        # En un score 'ml', score_contributions guarda la severidad que predijo el modelo (_guardar_score del
+        # orquestador), no la de findings. Un hallazgo vigente con aporte en este score se juzga con esa severidad y
+        # uno sin aporte, con la de findings: así un crítico que el modelo predijo high no deja needs_rescan en true
+        # para siempre. Con 'rules' es la de findings, como siempre (RC-316).
         criticos_ahora = {r['id'] for r in conn.execute(
-            "SELECT id FROM findings WHERE domain_id = %s AND severity = 'critical' AND status = ANY(%s)",
-            (domain_id, list(criterio.ESTADOS_VIGENTES))).fetchall()}
+            'SELECT f.id FROM findings f '
+            'LEFT JOIN score_contributions x ON x.finding_id = f.id AND x.score_id = %s::uuid '
+            'WHERE f.domain_id = %s AND f.status = ANY(%s) '
+            "AND CASE WHEN %s::text = 'ml' THEN coalesce(x.severity, f.severity) ELSE f.severity END = 'critical'",
+            (rows[-1]['score_id'], domain_id, list(criterio.ESTADOS_VIGENTES), rows[-1]['method'])).fetchall()}
         criticos_del_score = {r['finding_id'] for r in conn.execute(
             "SELECT finding_id FROM score_contributions WHERE score_id = %s::uuid AND severity = 'critical'",
             (rows[-1]['score_id'],)).fetchall()}
