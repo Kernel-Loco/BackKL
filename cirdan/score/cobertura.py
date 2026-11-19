@@ -13,7 +13,8 @@ código va con la fuente que no lo revisó y el motivo:
   variante de crt.sh sin respuesta). Sus códigos se revisaron en esa parte y no en el resto.
 
 La lista de cada fuente sale de `raw_payload->'sin_cobertura'` de su corrida y la de la llave, de `sin_llave`. Una
-corrida de antes de `sin_llave` lo toma del aviso fijo de Shodan (LIMITES dice que no hubo llave). Una fuente con
+corrida de antes de `sin_llave` lo toma del aviso fijo de Shodan (LIMITES dice que no hubo llave), por su comienzo y no
+por el texto de hoy. Una fuente con
 keep_raw_payload en false (GitHub) no guarda nada: sus códigos de `rules_without_coverage` se le dan por su CODIGOS.
 Un código de `rules_without_coverage` que no se puede atribuir va con la fuente en None. Sin corridas (un escaneo
 sembrado) no hay de dónde sacarlo y la lista sale vacía.
@@ -25,6 +26,12 @@ from cirdan.recolectores import REGISTRO, cargar, shodan
 
 FUENTE_PRUEBAS = 'ejemplo'
 MOTIVOS = ('source_failed', 'source_not_run', 'no_api_key', 'source_partial', 'partially_checked')
+# Cómo empiezan shodan.LIMITES y shodan.LIMITES_CON_LLAVE. Una corrida guarda el aviso con el texto de su versión, y el
+# resto del texto cambió varias veces (la del CDN el 12 nov, la de las etiquetas el 17 nov en 839af0f). Todas las
+# versiones de LIMITES, desde la primera (42e545c), empiezan con AVISO_SIN_LLAVE, y antes de 839af0f no había API de
+# host: lo de SIN_LLAVE que quedó sin revisar fue por la llave.
+AVISO_SIN_LLAVE = 'shodan: solo IPv4 y sin la llave de Shodan'
+AVISO_CON_LLAVE = 'shodan: solo IPv4. exposed_iot_device, exposed_ot_device y outdated_software se revisan con las '
 
 
 def codigos_de(fuente):
@@ -44,11 +51,11 @@ def _sin_llave(corrida):
     sin_llave = _lista(corrida.get('sin_llave'))
     if sin_llave is not None:
         return set(sin_llave)
-    avisos = _lista(corrida.get('avisos')) or []
+    avisos = [a for a in _lista(corrida.get('avisos')) or [] if isinstance(a, str)]
     if corrida['source'] == 'shodan':
-        if shodan.LIMITES in avisos:
+        if any(a.startswith(AVISO_SIN_LLAVE) for a in avisos):
             return set(shodan.SIN_LLAVE)
-        if shodan.LIMITES_CON_LLAVE in avisos:
+        if any(a.startswith(AVISO_CON_LLAVE) for a in avisos):
             return set()
     return None
 

@@ -78,7 +78,7 @@ Para que un sistema de la propia empresa lea la API sin la sesión del portal. E
 | `severity`, `base_severity` | La severidad del último score (incluye la predicción ML cuando se usó `method = 'ml'`; si no hay contribución, la guardada en el hallazgo) y la de su regla. Son distintas cuando el motor la subió (#29) o el score usó ML (#36) |
 | `status` | Hoy siempre es `open`, porque el endpoint solo trae abiertos. En la base también existen `resolved`, `accepted_risk` y `false_positive` |
 | `recurrence` | `new` si apareció en el último escaneo, `recurring` si ya venía de antes |
-| `cve_id`, `cvss`, `epss`, `in_kev` | Datos de la CVE cuando el hallazgo tiene una. Si no, `null`, `null`, `null` y `false` |
+| `cve_id`, `cvss`, `epss`, `in_kev` | Datos de la CVE cuando el hallazgo tiene una. Si no, `null`, `null`, `null` y `false`. Con CVE, `in_kev` es `null` mientras el cargador diario de inteligencia no haya revisado esa CVE (`cves.intel_updated_at` vacío): no se sabe si está en el catálogo KEV |
 | `evidence` | Lo que prueba el hallazgo, sin `title`, `huella`, `caracteristicas` ni `partes`. Nunca contraseñas, tokens ni datos de brechas más allá del hecho |
 | `caracteristicas` | Las 4 del reto con las mismas claves y valores del [contrato de plugin](contrato_plugin.md#esquema-del-resultado): `tipo`, `antiguedad_dias`, `exposicion` (`directa` o `publica`) y `sensibilidad` (`baja`, `media` o `alta`) |
 

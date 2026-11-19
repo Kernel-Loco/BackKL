@@ -84,6 +84,28 @@ class Huecos(unittest.TestCase):
         self.assertEqual(de(con_llave, 'no_api_key'), [])
         self.assertEqual(de(sin_aviso, 'no_api_key'), [])
 
+    # LIMITES tal como lo guardó una corrida de antes del 17 nov: copia de shodan.py en 839af0f^, líneas 219 a 223.
+    LIMITES_16_NOV = (
+        'shodan: solo IPv4 y sin la llave de Shodan (#8): exposed_iot_device, exposed_ot_device y outdated_software '
+        'quedan sin cobertura, y no se detecta un CDN que no llegue por un CNAME conocido, cuyo ASN no esté en '
+        'geoip.CDN_POR_ASN y cuya IP no esté en los rangos publicados de CloudFront, Azure Front Door y los bordes '
+        'de Google del %s (en las nubes mixtas, por ejemplo Cloud CDN en un balanceador de Google Cloud, que '
+        'comparte rangos con las VM, y otros fuera de la lista)' % shodan.RANGOS_CDN_FECHA)
+
+    def test_corrida_con_el_aviso_de_una_version_anterior_sigue_siendo_sin_llave(self):
+        # El escaneo de olmardo.com del 16 nov guardó el LIMITES de entonces: Shodan sale 'Sin llave', no 'respondió
+        # pero no pudo revisarlas'.
+        self.assertTrue(shodan.LIMITES.startswith(cobertura.AVISO_SIN_LLAVE))
+        self.assertTrue(shodan.LIMITES_CON_LLAVE.startswith(cobertura.AVISO_CON_LLAVE))
+        self.assertFalse(shodan.LIMITES_CON_LLAVE.startswith(cobertura.AVISO_SIN_LLAVE))
+        self.assertNotEqual(self.LIMITES_16_NOV, shodan.LIMITES)
+        otras = [corrida(f) for f in TODAS if f != 'shodan']
+        sin = list(shodan.SIN_LLAVE) + ['exposed_rdp']
+        vieja = corrida('shodan', sin_cobertura=sin, avisos=['otro aviso', self.LIMITES_16_NOV])
+        huecos = cobertura.huecos(otras + [vieja])
+        self.assertEqual(de(huecos, 'no_api_key'), [(c, 'shodan') for c in sorted(shodan.SIN_LLAVE)])
+        self.assertEqual(de(huecos, 'source_partial'), [('exposed_rdp', 'shodan')])
+
     def test_fuente_parcial_sin_sin_cobertura_no_da_lista_vacia(self):
         # stats.sources_partial con sin_cobertura vacía: sus códigos se revisaron solo en una parte (hallazgo 3).
         huecos = cobertura.huecos([corrida(f) for f in TODAS], (), ['ct_logs'])
