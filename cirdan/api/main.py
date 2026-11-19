@@ -55,6 +55,97 @@ app = FastAPI(
                 'Con DEMO_EXPLORER=true, vista visual de la base en /demo, también con sesión.',
 )
 
+# Tope al cuerpo de las peticiones (RC-298). uvicorn no trae tope y FastAPI junta el cuerpo entero antes de revisar
+# los max_length de los modelos, también en /api/v1/auth/login, que no pide sesión: un JSON de 1 GB dejaba sin memoria
+# el único proceso de la API, donde también corren los recolectores. El cuerpo válido más grande es el de
+# /action-plan/simulate, con 100 códigos de regla de hasta 63 caracteres (003_textos_reglas.sql:25), unos 6.6 KB. El del
+# login, con el captcha de hasta 4,096 caracteres (captcha.py:30), no llega a 6 KB. 64 KB deja unas 10 veces de margen.
+TOPE_CUERPO = 64 * 1024
+
+
+class CuerpoDemasiadoGrande(Exception):
+    """El cuerpo pasó el tope mientras llegaba."""
+
+
+def _content_length_excedido(scope, tope):
+    """True si algún Content-Length pasa el tope. Uno que no sea un número no cuenta aquí: lo rechaza el servidor y,
+    si llegara, el conteo de bytes lo corta igual."""
+    for nombre, valor in scope.get('headers', ()):
+        if nombre.lower() == b'content-length':
+            valor = valor.strip()
+            # Más de 18 cifras ya pasa cualquier tope y int() de miles de cifras es lento o falla.
+            if valor.isdigit() and (len(valor) > 18 or int(valor) > tope):
+                return True
+    return False
+
+
+class TopeDeCuerpo:
+    """Middleware ASGI: 413 si el cuerpo pasa el tope, en todas las rutas, con o sin sesión.
+
+    Con Content-Length de más responde antes de entrar a la app. Sin él (chunked), o si llegan más bytes de los
+    anunciados, cuenta los bytes conforme la app los pide y corta al pasar el tope, sin juntar el cuerpo. FastAPI
+    convierte la excepción de receive() en un 400 ('There was an error parsing the body'): ese 400 no sale y en su lugar
+    va el 413.
+    """
+
+    def __init__(self, app, tope=TOPE_CUERPO):
+        self.app = app
+        self.tope = tope
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+        if _content_length_excedido(scope, self.tope):
+            await self._responder_413(scope, receive, send)
+            return
+
+        recibidos = 0
+        excedido = False
+        iniciada = False
+
+        async def recibir():
+            nonlocal recibidos, excedido
+            if excedido:
+                raise CuerpoDemasiadoGrande()
+            mensaje = await receive()
+            if mensaje['type'] == 'http.request':
+                recibidos += len(mensaje.get('body', b''))
+                if recibidos > self.tope:
+                    excedido = True
+                    raise CuerpoDemasiadoGrande()
+            return mensaje
+
+        async def enviar(mensaje):
+            nonlocal iniciada
+            if excedido:
+                return  # la respuesta que la app arme después del corte no sale
+            if mensaje['type'] == 'http.response.start':
+                iniciada = True
+            await send(mensaje)
+
+        try:
+            await self.app(scope, recibir, enviar)
+        except Exception:
+            if not excedido or iniciada:
+                raise
+        if excedido:
+            if iniciada:
+                # La respuesta ya había empezado: no hay cómo cambiarla por un 413 y el servidor corta la conexión.
+                raise CuerpoDemasiadoGrande()
+            await self._responder_413(scope, receive, send)
+
+    async def _responder_413(self, scope, receive, send):
+        # Connection: close porque el resto del cuerpo no se lee: la conexión no sirve para otra petición.
+        respuesta = JSONResponse({'detail': 'El cuerpo de la petición pasa el tope de %d KB' % (self.tope // 1024)},
+                                 status_code=413, headers={'Connection': 'close'})
+        await respuesta(scope, receive, send)
+
+
+# Va antes de los dos middlewares de abajo para quedar dentro de ellos: Starlette pone afuera el último que se agrega.
+# Así el 413 también sale con CABECERAS_SEGURIDAD.
+app.add_middleware(TopeDeCuerpo)
+
 # Orígenes que pueden mandar POST con la cookie: el portal y la propia API.
 ALLOWED_ORIGINS = {o.strip() for o in config('ALLOWED_ORIGINS', ORIGENES_LOCALES).split(',')}
 
