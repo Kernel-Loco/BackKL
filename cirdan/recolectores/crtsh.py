@@ -741,9 +741,15 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
         primero = min(_fecha(c['not_before']) for c in g['certs'])
         dias = (vence - ahora).total_seconds() / 86400
         origen = _origen(reciente)
+        # 'emitido' es el not_before del certificado emitido más tarde, sin contar revocados salvo que todos lo
+        # estén. No sale de 'reciente' (el que vence más tarde): uno de 90 días emitido hoy puede vencer antes que
+        # uno de un año. El portal lo compara con el inicio del escaneo anterior para marcar 'certificado nuevo'
+        # (#102, RC-219).
+        emitido = max(_fecha(c['not_before']) for c in ([c for c in g['certs'] if not c.get('revocado')] or g['certs']))
         activos.append(Activo('domain' if nombre == dominio else 'subdomain', nombre, {
             'comodin': g['comodin'], 'certificados': len(g['certs']), 'primer_certificado': primero.isoformat(),
-            'vence': vence.isoformat(), 'emisor': reciente.get('issuer_name', ''), 'fuente': FUENTE, **origen}))
+            'emitido': emitido.isoformat(), 'vence': vence.isoformat(),
+            'emisor': reciente.get('issuer_name', ''), 'fuente': FUENTE, **origen}))
         evidencia = {'host': nombre, 'emitido': _fecha(reciente['not_before']).isoformat(), 'vence': vence.isoformat(),
                      'emisor': reciente.get('issuer_name', ''), **origen, 'comodin': g['comodin']}
         tipo = 'domain' if nombre == dominio else 'subdomain'

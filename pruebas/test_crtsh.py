@@ -128,6 +128,35 @@ class Subdominios(unittest.TestCase):
         self.assertNotIn(('cert_expired', 'www.acme-demo.mx'), self.hallazgos)
         self.assertEqual(self.activos['www.acme-demo.mx'].atributos['certificados'], 2)
 
+    def test_2b_emitido_es_el_not_before_del_certificado_mas_reciente(self):
+        """RC-219: www y el dominio raíz tienen el certificado 1 (abr) y el 2 (sep). 'emitido' es el del 2."""
+        for nombre in ('www.acme-demo.mx', 'acme-demo.mx'):
+            a = self.activos[nombre].atributos
+            self.assertEqual((a['emitido'], a['primer_certificado']),
+                             ('2026-09-20T00:00:00+00:00', '2026-04-01T00:00:00+00:00'), nombre)
+        self.assertEqual(self.activos['api.acme-demo.mx'].atributos['emitido'], '2026-07-27T00:00:00+00:00')
+
+    def test_2d_emitido_es_el_emitido_mas_tarde_aunque_venza_antes(self):
+        """RC-219: uno de un año (mar) y uno de 90 días emitido después (oct) que vence antes. Gana el de oct."""
+        certs = [cert(1, ['www.acme-demo.mx'], '2026-03-01T00:00:00', '2027-03-01T00:00:00',
+                      emisor='C=US, O=DigiCert Inc'),
+                 cert(2, ['www.acme-demo.mx'], '2026-10-10T00:00:00', '2027-01-08T00:00:00')]
+        a = crtsh._subdominios('acme-demo.mx', certs, AHORA)[0][0].atributos
+        self.assertEqual((a['emitido'], a['vence']), ('2026-10-10T00:00:00+00:00', '2027-03-01T00:00:00+00:00'))
+
+    def test_2e_emitido_tambien_con_un_certificado_de_cert_spotter(self):
+        """RC-219: un certificado que solo trae Cert Spotter pasa por el mismo camino y deja 'emitido'."""
+        c = dict(cert(9, ['cs.acme-demo.mx'], '2026-10-01T00:00:00', '2026-12-30T00:00:00'), origen='certspotter')
+        a = crtsh._subdominios('acme-demo.mx', [c], AHORA)[0][0].atributos
+        self.assertEqual(a['emitido'], '2026-10-01T00:00:00+00:00')
+
+    def test_2c_emitido_no_toma_un_revocado_aunque_sea_mas_nuevo(self):
+        """RC-219: un revocado no cuenta para 'emitido' mientras haya otro sin revocar."""
+        certs = [cert(1, ['www.acme-demo.mx'], '2026-09-01T00:00:00', '2026-11-30T00:00:00'),
+                 dict(cert(2, ['www.acme-demo.mx'], '2026-10-10T00:00:00', '2027-01-08T00:00:00'), revocado=True)]
+        activos, _ = crtsh._subdominios('acme-demo.mx', certs, AHORA)
+        self.assertEqual(activos[0].atributos['emitido'], '2026-09-01T00:00:00+00:00')
+
     def test_3_vence_en_menos_de_30_dias(self):
         h = self.hallazgos[('cert_expiring_soon', 'api.acme-demo.mx')]
         self.assertEqual(h.severidad, 'medium')
