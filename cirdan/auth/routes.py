@@ -114,6 +114,79 @@ def _bad_password(org, user_id, ip):
                         background=BackgroundTask(_audit_bad_password, org, user_id, ip))
 
 
+def _email_domain(email):
+    # Del correo que no existe solo queda el dominio, nunca el correo completo (RC-302, decisión 2b de Ernesto).
+    return email.rpartition('@')[2][:100] if '@' in email else ''
+
+
+def _log_unknown_email(email, ip):
+    # Sin empresa no cabe en audit_log (su RLS pide organization_id = app_current_org()): va al log de la API (RC-302,
+    # decisión 1a). Corre después del 401, como _audit_bad_password con el correo que existe. %r escapa los saltos de
+    # línea, así que un correo o una IP con '\n' no inventan otra línea del log.
+    log.warning('auth.login_failed de un correo que no existe: ip=%r dominio=%r', ip, _email_domain(email))
+
+
+def _locked(task):
+    # El mismo 429 de siempre con una tarea después de la respuesta. Con raise HTTPException la tarea no correría.
+    return JSONResponse({'detail': LOCKED}, status_code=429, headers={'Retry-After': str(sessions.LOCK_SECONDS)},
+                        background=task)
+
+
+def _lock_kinds(por_correo, por_ip):
+    return [kind for kind, nuevo in (('email', por_correo), ('ip', por_ip)) if nuevo]
+
+
+def _record_login_locked(email, ip):
+    """El 429 de /login, en la bitácora de la empresa si el correo existe o en el log de la API si no (RC-302). Corre
+    después de la respuesta: el 429 sale antes de buscar el correo y así sigue, igual de rápido exista o no.
+    Solo el primero de cada ventana de bloqueo, por correo y por IP, porque audit_log no se purga."""
+    try:
+        por_correo, por_ip = sessions.first_lock('login', email, ip)
+    except Exception:
+        log.exception('No se pudo revisar en Valkey si el 429 del inicio de sesión ya tenía aviso')
+        return
+    if not (por_correo or por_ip):
+        return
+    lock = _lock_kinds(por_correo, por_ip)
+    try:
+        with transaction() as conn:
+            found = conn.execute('SELECT user_id, organization_id FROM login_lookup(%s)', (email,)).fetchone()
+        if not found:
+            log.warning('auth.login_locked de un correo que no existe: ip=%r dominio=%r bloqueo=%s',
+                        ip, _email_domain(email), '+'.join(lock))
+            return
+        org, user_id = str(found['organization_id']), str(found['user_id'])
+        with transaction(org) as conn:
+            audit(conn, org, 'auth.login_locked', user_id, ip, 'user', user_id, {'lock': lock})
+    except Exception:
+        log.exception('No se pudo escribir auth.login_locked')
+        _forget_lock_quietly('login', email, ip, por_correo, por_ip)
+
+
+def _record_mfa_locked(org, user_id, email, ip):
+    """El 429 de /mfa/verify en la bitácora de la empresa (RC-302). Solo el primero de cada ventana de bloqueo."""
+    try:
+        por_correo, por_ip = sessions.first_lock('mfa', email, ip)
+    except Exception:
+        log.exception('No se pudo revisar en Valkey si el 429 del código del usuario %s ya tenía aviso', user_id)
+        return
+    if not (por_correo or por_ip):
+        return
+    try:
+        with transaction(org) as conn:
+            audit(conn, org, 'auth.mfa_locked', user_id, ip, 'user', user_id, {'lock': _lock_kinds(por_correo, por_ip)})
+    except Exception:
+        log.exception('No se pudo escribir auth.mfa_locked del usuario %s', user_id)
+        _forget_lock_quietly('mfa', email, ip, por_correo, por_ip)
+
+
+def _forget_lock_quietly(event, email, ip, por_correo, por_ip):
+    try:
+        sessions.forget_lock(event, email, ip, por_correo, por_ip)
+    except Exception:
+        log.exception('No se pudo quitar la marca del aviso de bloqueo después de un error')
+
+
 def _refund_quietly(email, ip, ticket):
     # Si Valkey también falla, sale la excepción original y el intento vence solo en 15 min.
     try:
@@ -142,7 +215,8 @@ def login(body: LoginIn, request: Request, response: Response):
     # Va antes de buscar el correo, así que el 429 sale igual exista o no la cuenta.
     ticket = sessions.take_login_attempt(email, ip)
     if not ticket:
-        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+        # Quién era la cuenta se busca después de mandar el 429 (RC-302).
+        return _locked(BackgroundTask(_record_login_locked, email, ip))
 
     try:
         with transaction() as conn:
@@ -157,7 +231,9 @@ def login(body: LoginIn, request: Request, response: Response):
         _refund_quietly(email, ip, ticket)
         raise
     if not found:
-        raise HTTPException(401, INVALID)
+        # La línea del log va después del 401, como la bitácora del correo que existe (RC-302).
+        return JSONResponse({'detail': INVALID}, status_code=401,
+                            background=BackgroundTask(_log_unknown_email, email, ip))
 
     org, user_id = str(found['organization_id']), str(found['user_id'])
     if not good:
@@ -215,7 +291,7 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
     ip = client_ip(request)
     org, user_id, email = pending['org_id'], pending['user_id'], pending['email']
     if not sessions.take_mfa_attempt(email, ip):
-        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+        return _locked(BackgroundTask(_record_mfa_locked, org, user_id, email, ip))
     with transaction(org) as conn:
         row = conn.execute(
             'SELECT email::text, role, totp_secret_enc, last_totp_step FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()

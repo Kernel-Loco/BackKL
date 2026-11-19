@@ -452,5 +452,111 @@ class CarrerasDelLogin(unittest.TestCase):
         self.assertEqual((self._correo(), self._ip()), (1, 1))
 
 
+class RastroDeBloqueos(unittest.TestCase):
+    """RC-302 sin red: el 429 del login y del MFA y el correo que no existe dejan su evento en una tarea que corre
+    después de la respuesta. Lo que pasa con Valkey y la base reales está en test_auth.py (test_23 a test_26)."""
+    EMAIL, IP = 'rc302@ejemplo.test', '203.0.113.30'
+
+    def setUp(self):
+        for parche in (mock.patch.object(routes.captcha, 'verify', lambda _: True),
+                       mock.patch.object(routes, 'client_ip', lambda _: self.IP)):
+            parche.start()
+            self.addCleanup(parche.stop)
+
+    def _login(self, email=None):
+        return routes.login(routes.LoginIn(email=email or self.EMAIL, password='CIRDAN_FAKE_mala', captcha='x'), None,
+                            Response())
+
+    def test_1_el_429_del_login_es_el_de_siempre_con_la_tarea_despues(self):
+        with mock.patch.object(sessions, 'take_login_attempt', lambda *_: None):
+            salida = self._login(' RC302@Ejemplo.TEST ')
+        self.assertEqual((salida.status_code, salida.body), (429, routes.JSONResponse({'detail': routes.LOCKED}).body))
+        self.assertEqual(salida.headers['retry-after'], str(sessions.LOCK_SECONDS))
+        self.assertEqual((salida.background.func, salida.background.args), (routes._record_login_locked,
+                                                                            (self.EMAIL, self.IP)))
+
+    def test_2_el_correo_que_no_existe_da_el_mismo_401_y_la_linea_va_despues(self):
+        @contextlib.contextmanager
+        def sin_cuenta(org_id=None):
+            yield SimpleNamespace(execute=lambda *a: SimpleNamespace(fetchone=lambda: None))
+        with mock.patch.object(sessions, 'take_login_attempt', lambda *_: [1, 1]), \
+                mock.patch.object(routes, 'transaction', sin_cuenta), \
+                mock.patch.object(routes.passwords, 'burn_time', lambda _: None):
+            salida = self._login()
+        self.assertEqual((salida.status_code, salida.body), (401, routes._bad_password('o', 'u', 'ip').body),
+                         'el mismo 401 que una contraseña mala')
+        self.assertEqual((salida.background.func, salida.background.args), (routes._log_unknown_email,
+                                                                            (self.EMAIL, self.IP)))
+
+    def test_3_la_linea_lleva_ip_y_dominio_sin_el_correo_ni_saltos_de_linea(self):
+        for email, dominio in (('nadie.secreto@ejemplo.test', 'ejemplo.test'),
+                               ('nadie.secreto@ejemplo.test\nERROR inventado', 'ejemplo.test\\nERROR inventado'),
+                               ('nadie.secreto', '')):
+            with self.subTest(email=email), self.assertLogs(routes.log, 'WARNING') as logs:
+                routes._log_unknown_email(email, '198.51.100.1\nx')
+            texto, = logs.output
+            self.assertNotIn('nadie.secreto', texto)
+            self.assertNotIn('\n', texto)
+            self.assertIn("ip='198.51.100.1\\nx' dominio='%s'" % dominio, texto)
+
+    def test_4_sin_bloqueo_nuevo_no_busca_el_correo(self):
+        transaccion = mock.Mock(side_effect=AssertionError('no debía buscar el correo'))
+        with mock.patch.object(sessions, 'first_lock', lambda *_: (False, False)), \
+                mock.patch.object(routes, 'transaction', transaccion):
+            routes._record_login_locked(self.EMAIL, self.IP)
+            routes._record_mfa_locked('o-1', 'u-1', self.EMAIL, self.IP)
+        transaccion.assert_not_called()
+
+    def test_5_si_la_base_falla_quita_la_marca_y_no_lanza(self):
+        for nombre, llamar in (('login', lambda: routes._record_login_locked(self.EMAIL, self.IP)),
+                               ('mfa', lambda: routes._record_mfa_locked('o-1', 'u-1', self.EMAIL, self.IP))):
+            with self.subTest(nombre), mock.patch.object(sessions, 'first_lock', lambda *_: (True, False)), \
+                    mock.patch.object(sessions, 'forget_lock') as olvidar, \
+                    mock.patch.object(routes, 'transaction', lambda org_id=None, caida=BaseCaida(): caida(org_id)), \
+                    self.assertLogs(routes.log, 'ERROR') as logs:
+                llamar()
+            olvidar.assert_called_once_with(nombre, self.EMAIL, self.IP, True, False)
+            self.assertNotIn(self.EMAIL, '\n'.join(logs.output), 'el error no lleva el correo')
+
+    def test_6_si_valkey_falla_no_lanza_ni_toca_la_base(self):
+        def falla(*_):
+            raise redis.ConnectionError('valkey caído')
+        transaccion = mock.Mock(side_effect=AssertionError('no debía tocar la base'))
+        with mock.patch.object(sessions, 'first_lock', falla), mock.patch.object(routes, 'transaction', transaccion), \
+                self.assertLogs(routes.log, 'ERROR'):
+            routes._record_login_locked(self.EMAIL, self.IP)
+            routes._record_mfa_locked('o-1', 'u-1', self.EMAIL, self.IP)
+        transaccion.assert_not_called()
+
+    def test_7_el_429_del_codigo_es_el_de_siempre_con_la_tarea_despues(self):
+        pendiente = {'user_id': 'u-1', 'org_id': 'o-1', 'email': self.EMAIL}
+        with mock.patch.object(sessions, 'take_mfa', lambda _: dict(pendiente)), \
+                mock.patch.object(sessions, 'take_mfa_attempt', lambda *_: False):
+            salida = routes.verify_mfa(routes.MfaIn(mfa_token='t' * 20, code='123456'), None, Response())
+        self.assertEqual((salida.status_code, salida.headers['retry-after']), (429, str(sessions.LOCK_SECONDS)))
+        self.assertEqual((salida.background.func, salida.background.args),
+                         (routes._record_mfa_locked, ('o-1', 'u-1', self.EMAIL, self.IP)))
+
+    def test_8_el_evento_lleva_lo_que_bloqueo(self):
+        escritos = []
+
+        @contextlib.contextmanager
+        def con_cuenta(org_id=None):
+            fila = {'user_id': 'u-1', 'organization_id': 'o-1'}
+            yield SimpleNamespace(execute=lambda *a: SimpleNamespace(fetchone=lambda: fila))
+        with mock.patch.object(sessions, 'first_lock', lambda *_: (True, True)), \
+                mock.patch.object(routes, 'transaction', con_cuenta), \
+                mock.patch.object(routes, 'audit', lambda *a: escritos.append(a)):
+            routes._record_login_locked(self.EMAIL, self.IP)
+            routes._record_mfa_locked('o-1', 'u-1', self.EMAIL, self.IP)
+        self.assertEqual([(a[1], a[2], a[3], a[4], a[7]) for a in escritos],
+                         [('o-1', 'auth.login_locked', 'u-1', self.IP, {'lock': ['email', 'ip']}),
+                          ('o-1', 'auth.mfa_locked', 'u-1', self.IP, {'lock': ['email', 'ip']})])
+
+    def test_9_first_lock_solo_acepta_login_o_mfa(self):
+        with self.assertRaises(ValueError):
+            sessions.first_lock('passkey', self.EMAIL, self.IP)
+
+
 if __name__ == '__main__':
     unittest.main()

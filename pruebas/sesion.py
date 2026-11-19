@@ -97,6 +97,14 @@ def en_api(codigo):
     return r.stdout.strip().splitlines()[-1]
 
 
+def api_logs():
+    """El log del contenedor de la API (stdout y stderr juntos), para buscar las líneas que no van a la base."""
+    contenedor = os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api')
+    r = subprocess.run(['docker', 'logs', contenedor], check=True, capture_output=True, text=True, encoding='utf-8',
+                       errors='replace')
+    return r.stdout + r.stderr
+
+
 class Client:
     """Cliente HTTP con su propia cookie de sesión."""
 
