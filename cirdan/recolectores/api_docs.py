@@ -490,11 +490,12 @@ def limpiar(datos):
 
 def _descargar_ct(url, timeout, cronometro=None):
     """El cuerpo de una página de Cert Spotter, de a lo más MAX_BYTES_CT, con el plazo absoluto de
-    transporte.descargar. Una respuesta más grande o una redirección dan RespuestaIlegible."""
+    transporte.descargar. Una respuesta más grande o una redirección dan RespuestaIlegible. Va por
+    certspotter.descargar: una página que otra fuente ya pidió en este escaneo no sale a la red (RC-326)."""
     cronometro = cronometro or time.monotonic
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/json'})
     try:
-        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES_CT, cronometro)
+        return certspotter.descargar(req, cronometro() + timeout, MAX_BYTES_CT, cronometro)
     except transporte.PlazoVencido:
         raise SinTiempo('api_docs: la respuesta tardó más de %s s' % timeout) from None
     except (transporte.Redirigida, ValueError) as e:

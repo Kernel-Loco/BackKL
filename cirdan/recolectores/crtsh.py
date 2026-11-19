@@ -279,10 +279,11 @@ class RespuestaGrande(ValueError):
 def _descargar(url, timeout):
     """El cuerpo de `url` con transporte.descargar(): `timeout` es el plazo de toda la petición y el cuerpo no pasa de
     TOPE_BYTES (RespuestaGrande). Las URL de crt.sh y Cert Spotter son https y no se pide tipo, así que el único
-    ValueError de descargar() es el del tope."""
+    ValueError de descargar() es el del tope. Va por certspotter.descargar: una página de Cert Spotter que otra fuente
+    ya pidió en este escaneo no sale a la red (RC-326)."""
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/json'})
     try:
-        return transporte.descargar(req, time.monotonic() + timeout, TOPE_BYTES, time.monotonic)
+        return certspotter.descargar(req, time.monotonic() + timeout, TOPE_BYTES, time.monotonic)
     except ValueError as e:
         raise RespuestaGrande(str(e)) from None
 
@@ -481,11 +482,16 @@ class ClienteCrtsh:
         que falta se vuelve a medir después de la pausa y antes de cada intento. Si ni la primera cabe, lanza SinTiempo
         sin consultar. Si el tiempo se acaba después de un intento sin respuesta, lanza SinTiempo con esos `intentos`.
         Lo que sale del disco no gasta tiempo y siempre se lee.
+        Una página de Cert Spotter que otra fuente ya pidió en este escaneo (certspotter.repetida, RC-326) se lee de lo
+        que ella recibió, en un solo intento, sin pausa y sin contarla en `consultas`.
         `ultima` queda con (intentos, segundos que tardó la respuesta) si respondió por la red, y con None si no."""
         self.ultima = None
         del_disco, datos = self._de_disco(consulta)
         if del_disco:
             return datos
+        repetida = certspotter.repetida(url)
+        if repetida:
+            intentos, pausa = 1, 0
         if plazo is not None and plazo - self.cronometro() < pausa + MINIMO_VARIANTE:
             raise SinTiempo('no quedó tiempo para consultar %s' % (texto or consulta))
         if pausa:
@@ -499,7 +505,7 @@ class ClienteCrtsh:
                     sin_tiempo = True
                     break
                 espera = min(espera, queda)
-            self.consultas += 1
+            self.consultas += 0 if repetida else 1
             hechos += 1
             inicio = self.cronometro()
             try:

@@ -194,11 +194,12 @@ CVE_VALIDO = re.compile(r'CVE-[0-9]{4}-[0-9]{4,19}')
 def _descargar_api(url, timeout, cronometro=None):
     """El cuerpo de la respuesta de Cert Spotter, endoflife.date o la NVD, de a lo más MAX_BYTES_API, con el plazo
     absoluto de transporte.descargar. Una respuesta más grande o una redirección dan RespuestaIlegible, nunca un error
-    que tumbe la corrida."""
+    que tumbe la corrida. Va por certspotter.descargar: una página de Cert Spotter que otra fuente ya pidió en este
+    escaneo no sale a la red (RC-326)."""
     cronometro = cronometro or time.monotonic
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/json'})
     try:
-        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES_API, cronometro)
+        return certspotter.descargar(req, cronometro() + timeout, MAX_BYTES_API, cronometro)
     except transporte.PlazoVencido:
         raise SinTiempo('web: la respuesta tardó más de %s s' % timeout) from None
     except transporte.Redirigida as e:
