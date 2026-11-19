@@ -64,7 +64,7 @@ def responde(*valores):
 
 
 # Resultados de una corrida, para probar los reintentos sin recolector ni red
-FALLA = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[],
+FALLA = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[], sin_llave=[],
                         error='crt.sh no respondió')
 BIEN = Resultado('acme-demo.mx', 'ejemplo', activos=[Activo('domain', 'acme-demo.mx'),
                                                      Activo('subdomain', 'www.acme-demo.mx')], consultas=1)
