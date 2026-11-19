@@ -807,7 +807,9 @@ class ApiV1(unittest.TestCase):
                     '/api/v1/domains/old-example.net/score/compare?desde=a0000000-0000-4000-8000-000000000001'
                     '&hasta=a0000000-0000-4000-8000-000000000004',
                     '/api/v1/domains/old-example.net/score/compare/export?formato=csv'
-                    '&desde=a0000000-0000-4000-8000-000000000001&hasta=a0000000-0000-4000-8000-000000000004'):
+                    '&desde=a0000000-0000-4000-8000-000000000001&hasta=a0000000-0000-4000-8000-000000000004',
+                    '/api/v1/domains/old-example.net/action-plan/export?formato=csv',  # RC-307
+                    '/api/v1/domains/old-example.net/action-plan/export?formato=json'):
             code, body = self.acme.get(url)
             self.assertEqual(code, 403, (url, body))
             self.assertEqual(self.beta.get(url)[0], 404, url)

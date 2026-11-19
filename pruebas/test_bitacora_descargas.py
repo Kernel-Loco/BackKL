@@ -206,7 +206,8 @@ class BitacoraDescargas(unittest.TestCase):
         self.assertEqual(code, 201, revocada)
         self.assertEqual(self.alex.request('DELETE', '/api/v1/api-keys/' + revocada['id'])[0], 204)
         sin_carta = ('/api/v1/domains/old-example.net/findings/export?formato=csv',  # carta vencida el 15 ago
-                     '/api/v1/domains/old-example.net/score/compare/export?formato=json&' + COMPARAR)
+                     '/api/v1/domains/old-example.net/score/compare/export?formato=json&' + COMPARAR,
+                     '/api/v1/domains/old-example.net/action-plan/export?formato=csv')  # RC-307
         casos = [(None, None, ruta + 'formato=csv', 401) for _, ruta in EXPORTACIONES]   # sin sesión
         casos += [(self.beta, None, ruta + 'formato=json', 404) for _, ruta in EXPORTACIONES]   # otra empresa
         casos += [(None, tienda['key'], ruta + 'formato=json', 404) for _, ruta in EXPORTACIONES]   # otro dominio
