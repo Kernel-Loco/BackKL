@@ -149,12 +149,34 @@ class ApiReal(unittest.TestCase):
                 r = llamar(main.app, metodo, ruta, grande, headers=[('content-length', str(TOPE_CUERPO + 1))])
                 self.assertEqual((r.status, r.leidos), (413, 0))
 
-    def test_5b_sin_content_length_una_ruta_que_no_lee_el_cuerpo_no_lo_lee(self):
-        # Sin Content-Length el tope corre conforme la app pide bytes. /auth/me sin sesión no pide ninguno: da su 401
-        # y el cuerpo ni se lee.
-        r = llamar(main.app, 'GET', '/api/v1/auth/me', en_pedazos(b'x' * (TOPE_CUERPO * 4)))
-        self.assertEqual(r.status, 401)
-        self.assertEqual(r.leidos, 0)
+    def test_5b_chunked_en_una_ruta_que_no_lee_el_cuerpo_tambien_da_413(self):
+        # /auth/me sin sesión, /health y logout responden sin leer el cuerpo. Con chunked el middleware lee y tira el
+        # resto antes de dejar salir la respuesta: al pasar el tope sale el 413 y la conexión se cierra, en vez de que
+        # uvicorn siga leyendo un cuerpo sin fin después del 401, 200 o 204.
+        @contextlib.contextmanager
+        def transaccion(org_id=None):
+            yield SimpleNamespace(execute=lambda *a: None)
+
+        chunked = [('transfer-encoding', 'chunked')]
+        with mock.patch.object(main, 'transaction', transaccion):
+            for metodo, ruta, normal in (('GET', '/api/v1/auth/me', 401), ('GET', '/health', 200),
+                                         ('POST', '/api/v1/auth/logout', 204)):
+                with self.subTest(ruta=ruta, cuerpo='de más'):
+                    r = llamar(main.app, metodo, ruta, en_pedazos(b'x' * (TOPE_CUERPO * 4)), headers=chunked)
+                    self.assertEqual((r.status, r.inicios), (413, 1))
+                    self.assertEqual(r.leidos, TOPE_CUERPO // PEDAZO + 1, 'lee hasta el pedazo que pasa el tope y para')
+                    self.assertEqual(r.headers.get('connection'), 'close')
+                    self.assertEqual(r.headers.get('x-frame-options'), 'DENY')
+                with self.subTest(ruta=ruta, cuerpo='chico'):
+                    # Un cuerpo chunked chico se lee entero y la respuesta de la ruta sale igual, sin cerrar.
+                    pedazos = en_pedazos(b'x' * (PEDAZO * 2 + 10))
+                    r = llamar(main.app, metodo, ruta, pedazos, headers=chunked)
+                    self.assertEqual((r.status, r.leidos), (normal, len(pedazos)))
+                    self.assertNotIn('connection', r.headers)
+                with self.subTest(ruta=ruta, cuerpo='con Content-Length'):
+                    # Con Content-Length dentro del tope el servidor ya lee a lo más lo anunciado: no se toca.
+                    r = llamar(main.app, metodo, ruta, [b'x' * 10], headers=[('content-length', '10')])
+                    self.assertEqual((r.status, r.leidos), (normal, 0))
 
     def test_6_login_con_cuerpo_normal_llega_igual_a_la_ruta(self):
         # Con y sin Content-Length el cuerpo llega completo: el captcha que ve la ruta es el que se mandó.
@@ -246,6 +268,37 @@ class Middleware(unittest.TestCase):
 
         with self.assertRaises(main.CuerpoDemasiadoGrande):
             llamar(TopeDeCuerpo(app), 'POST', '/', en_pedazos(b'x' * (TOPE_CUERPO + PEDAZO)))
+
+    def test_5c_chunked_leido_a_medias_se_termina_de_contar_antes_de_responder(self):
+        # La app lee un pedazo y responde: con chunked el resto se cuenta antes de que salga su respuesta.
+        async def app(scope, receive, send):
+            await receive()
+            await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+            await send({'type': 'http.response.body', 'body': b'listo'})
+
+        chunked = [('transfer-encoding', 'chunked')]
+        for largo, esperado in ((TOPE_CUERPO, 200), (TOPE_CUERPO + 1, 413)):
+            with self.subTest(largo=largo):
+                pedazos = en_pedazos(b'x' * largo)
+                r = llamar(TopeDeCuerpo(app), 'POST', '/', pedazos, headers=chunked)
+                self.assertEqual((r.status, r.inicios, r.leidos), (esperado, 1, len(pedazos)))
+
+    def test_5d_si_el_cliente_se_va_a_media_lectura_sale_la_respuesta_de_la_app(self):
+        # El receive de llamar() da http.disconnect después del último pedazo, aunque diga more_body: se deja de leer.
+        async def app(scope, receive, send):
+            await send({'type': 'http.response.start', 'status': 204, 'headers': []})
+            await send({'type': 'http.response.body', 'body': b''})
+
+        async def corta(scope, receive, send):
+            async def receive_sin_fin():
+                mensaje = await receive()
+                if mensaje['type'] == 'http.request':
+                    mensaje = dict(mensaje, more_body=True)
+                return mensaje
+            await TopeDeCuerpo(app)(scope, receive_sin_fin, send)
+
+        r = llamar(corta, 'POST', '/', [b'x' * 10], headers=[('transfer-encoding', 'chunked')])
+        self.assertEqual((r.status, r.leidos), (204, 1))
 
     def test_6_lifespan_y_websocket_pasan_sin_tocar(self):
         vistos = []

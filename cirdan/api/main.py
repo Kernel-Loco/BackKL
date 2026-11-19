@@ -57,9 +57,11 @@ app = FastAPI(
 
 # Tope al cuerpo de las peticiones (RC-298). uvicorn no trae tope y FastAPI junta el cuerpo entero antes de revisar
 # los max_length de los modelos, también en /api/v1/auth/login, que no pide sesión: un JSON de 1 GB dejaba sin memoria
-# el único proceso de la API, donde también corren los recolectores. El cuerpo válido más grande es el de
-# /action-plan/simulate, con 100 códigos de regla de hasta 63 caracteres (003_textos_reglas.sql:25), unos 6.6 KB. El del
-# login, con el captcha de hasta 4,096 caracteres (captcha.py:30), no llega a 6 KB. 64 KB deja unas 10 veces de margen.
+# el único proceso de la API, donde también corren los recolectores. El cuerpo válido más grande es el de las passkeys
+# (/api/v1/auth/passkeys/register/verify y /passkeys/login/verify), con un credential de hasta 16 KB según json.dumps
+# (webauthn.MAX_CREDENTIAL_JSON). Le siguen /action-plan/simulate, con 100 códigos de regla de hasta 63 caracteres
+# (003_textos_reglas.sql:25), unos 6.6 KB, y el login, con el captcha de hasta 4,096 caracteres (captcha.py:30), que no
+# llega a 6 KB. 64 KB deja unas 4 veces de margen sobre el de las passkeys.
 TOPE_CUERPO = 64 * 1024
 
 
@@ -79,13 +81,20 @@ def _content_length_excedido(scope, tope):
     return False
 
 
+def _trae_transfer_encoding(scope):
+    """True si el cuerpo viene por pedazos (chunked): su largo no se sabe hasta que termina."""
+    return any(nombre.lower() == b'transfer-encoding' for nombre, _ in scope.get('headers', ()))
+
+
 class TopeDeCuerpo:
     """Middleware ASGI: 413 si el cuerpo pasa el tope, en todas las rutas, con o sin sesión.
 
     Con Content-Length de más responde antes de entrar a la app. Sin él (chunked), o si llegan más bytes de los
     anunciados, cuenta los bytes conforme la app los pide y corta al pasar el tope, sin juntar el cuerpo. FastAPI
     convierte la excepción de receive() en un 400 ('There was an error parsing the body'): ese 400 no sale y en su lugar
-    va el 413.
+    va el 413. Si la ruta responde sin haber leído todo un cuerpo chunked (/auth/me, /health, logout), el resto se lee
+    y se tira, contando, antes de dejar salir la respuesta: si pasa el tope sale el 413. Sin eso uvicorn seguiría
+    leyendo y tirando un cuerpo sin fin después de responder, sin tope ni timeout.
     """
 
     def __init__(self, app, tope=TOPE_CUERPO):
@@ -103,9 +112,11 @@ class TopeDeCuerpo:
         recibidos = 0
         excedido = False
         iniciada = False
+        # Con Content-Length el servidor lee a lo más lo anunciado, que ya no pasa el tope. Con chunked no hay largo.
+        pendiente = _trae_transfer_encoding(scope)
 
         async def recibir():
-            nonlocal recibidos, excedido
+            nonlocal recibidos, excedido, pendiente
             if excedido:
                 raise CuerpoDemasiadoGrande()
             mensaje = await receive()
@@ -114,10 +125,21 @@ class TopeDeCuerpo:
                 if recibidos > self.tope:
                     excedido = True
                     raise CuerpoDemasiadoGrande()
+                if not mensaje.get('more_body', False):
+                    pendiente = False
+            else:  # http.disconnect: el cliente se fue y ya no llega más cuerpo
+                pendiente = False
             return mensaje
 
         async def enviar(mensaje):
             nonlocal iniciada
+            if mensaje['type'] == 'http.response.start' and pendiente and not excedido:
+                # La ruta responde sin haber leído todo el cuerpo chunked: se lee el resto y se tira, sin juntarlo.
+                try:
+                    while pendiente:
+                        await recibir()
+                except CuerpoDemasiadoGrande:
+                    pass
             if excedido:
                 return  # la respuesta que la app arme después del corte no sale
             if mensaje['type'] == 'http.response.start':
