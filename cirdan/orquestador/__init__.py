@@ -85,6 +85,17 @@ ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta f
 MODOS_CON_CUPO = ('vivo', 'grabar')
 SIN_CUPO = 'Sin cupo diario: %s no tiene cupo para una corrida completa hoy (día UTC).'
 
+# Costo medido del escaneo (#52, RC-87): se guarda en scans.stats para el costo interno, pero GET /api/v1/scans y
+# GET /api/v1/scans/{id} no lo entregan al portal ni a las llaves de API. Las demás llaves de stats salen igual.
+STATS_INTERNAS = frozenset({'queries', 'queries_by_source', 'seconds_by_source', 'duration_seconds'})
+
+
+def stats_publicas(stats):
+    """scans.stats sin las llaves de STATS_INTERNAS. Un stats en NULL se queda en None."""
+    if stats is None:
+        return None
+    return {k: v for k, v in stats.items() if k not in STATS_INTERNAS}
+
 # Los hallazgos de una empresa se guardan de una fuente a la vez (RC-55). Dos dominios de la misma empresa pueden dar
 # la misma huella (un repo de GitHub declarado en los dos, el certificado de un subdominio) y escanearse a la vez:
 # así el segundo ve lo que insertó el primero y no lo cuenta otra vez como nuevo. Es la forma de dos llaves de
