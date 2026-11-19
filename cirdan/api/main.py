@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from cirdan.auth.deps import Session, current_session
+from cirdan.auth.deps import Session, current_session, require_roles
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
@@ -312,7 +312,7 @@ def list_domains(session: Session = Depends(current_session)):
 
 
 @app.get('/domains/{fqdn}/findings', tags=['dominios'], summary='Hallazgos abiertos de un dominio, por severidad')
-def list_findings(fqdn: str, session: Session = Depends(current_session)):
+def list_findings(fqdn: str, session: Session = Depends(require_roles('analyst', 'admin'))):  # RC-280
     known_domain(session, fqdn)
     return query(session, FINDINGS, (fqdn,))
 
