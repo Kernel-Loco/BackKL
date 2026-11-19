@@ -31,7 +31,7 @@ from cirdan.score import cambios, cobertura, comparacion, configuracion, criteri
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
-# Lista, CSV y explicación de hallazgos: como en el portal (src/config/permissions.ts), el gerente no los ve y se
+# Lista, CSV, explicación y comparación de hallazgos: como en el portal (src/config/permissions.ts), el gerente no los ve y se
 # queda con los conteos por severidad de GET /domains (RC-280). Una llave de API entra igual.
 LEE_HALLAZGOS = api_key_or_roles('analyst', 'admin')
 
@@ -630,13 +630,13 @@ def _comparacion(session, fqdn, desde, hasta, descargar=None):
             summary='Compara hallazgo por hallazgo dos scores del histórico: nuevos, que ya no están y que siguen')
 def compare_scores(fqdn: str, desde: str = Query(..., description='score_id del histórico'),
                    hasta: str = Query(..., description='score_id del histórico'),
-                   session: Session = Depends(session_or_api_key)):
+                   session: Session = Depends(LEE_HALLAZGOS)):
     return _comparacion(session, fqdn, desde, hasta)
 
 
 @router.get('/domains/{fqdn}/score/compare/export', summary='Descarga la comparación de dos scores en CSV o JSON')
 def export_comparison(request: Request, fqdn: str, desde: str = Query(...), hasta: str = Query(...),
-                      formato: str = Query(default='json'), session: Session = Depends(session_or_api_key)):
+                      formato: str = Query(default='json'), session: Session = Depends(LEE_HALLAZGOS)):
     formato = _formato(formato)
 
     def descargar(conn, data, domain_id):
