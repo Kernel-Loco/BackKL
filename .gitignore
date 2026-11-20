@@ -37,6 +37,10 @@ cirdan/recolectores/respuestas_grabadas/web/*
 # Documentación de APIs (#63, RC-118): la grabación trae el resumen de cada documento, no el documento
 cirdan/recolectores/respuestas_grabadas/api_docs/*
 !cirdan/recolectores/respuestas_grabadas/api_docs/.gitkeep
+# Identidad pasiva (#20, RC-56): solo lo ya reducido (los correos del dominio, los personales enmascarados y los
+# perfiles de cada página, y lo reducido de la API de GitHub), nunca el cuerpo de una página
+cirdan/recolectores/respuestas_grabadas/identity/*
+!cirdan/recolectores/respuestas_grabadas/identity/.gitkeep
 
 # Bases de DB-IP Lite (#15b, RC-166): pesan unos 17 MB y se bajan a mano cada mes. La imagen de la API sí las copia (Dockerfile)
 datos/geo/*
@@ -49,3 +53,13 @@ datos/geo/*
 respaldos/
 *.dump
 *.dump.age
+
+# Terraform (#81, RC-132): el estado, el plan y las variables de cada quien nunca van a git. El lock de proveedores sí.
+infra/terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log

@@ -1,0 +1,5 @@
+[
+ {"name": "sitio", "fork": false, "disabled": false, "archived": false, "private": false, "size": 120, "pushed_at": "2026-10-20T10:00:00Z"},
+ {"name": "vacio", "fork": false, "disabled": false, "archived": false, "private": false, "size": 0, "pushed_at": "2026-09-01T10:00:00Z"},
+ {"name": "copia", "fork": true, "disabled": false, "archived": false, "private": false, "size": 10, "pushed_at": "2026-11-01T10:00:00Z"}
+]

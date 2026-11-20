@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -20,7 +21,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_certspotter.py
 from pruebas.test_crtsh import AHORA, SUBDOMINIOS, CrtshSimulado, cert  # noqa: E402
-from cirdan.recolectores import api_docs, cargar, certspotter, contrato, crtsh, shodan, transporte, visita  # noqa: E402
+from cirdan.recolectores import (api_docs, cargar, certspotter, contrato, crtsh, identidad, shodan,  # noqa: E402
+                                 transporte, visita)
 
 LE = {'friendly_name': "Let's Encrypt", 'pubkey_sha256': 'b' * 64, 'name': "C=US, O=Let's Encrypt, CN=R11"}
 SSLCOM = {'friendly_name': 'SSL.com', 'pubkey_sha256': 'c' * 64, 'name': 'C=US, O=SSL Corporation, CN=Cloudflare TLS Issuing ECC CA 3'}
@@ -1042,7 +1044,7 @@ class TopeYPlazo(unittest.TestCase):
 
 # ---------------------------------------------------------------- una consulta por página en cada escaneo (RC-326)
 
-FUENTES_CT = ('api_docs', 'ct_logs', 'shodan', 'web')  # las que piden Cert Spotter, en el orden del orquestador
+FUENTES_CT = ('api_docs', 'ct_logs', 'identity', 'shodan', 'web')  # las que piden Cert Spotter, en el orden del orquestador
 
 
 class RedSimulada(RespaldoSimulado):
@@ -1079,7 +1081,8 @@ class RedSimulada(RespaldoSimulado):
 
 @contextlib.contextmanager
 def con_red_simulada(red):
-    """Las cuatro fuentes que piden Cert Spotter en vivo sin salir a la red ni al DNS: todo pasa por `red`."""
+    """Las cinco fuentes que piden Cert Spotter en vivo sin salir a la red ni al DNS: todo pasa por `red`. identity
+    lleva una llave falsa de su HMAC, sin ella no graba."""
     with contextlib.ExitStack() as pila:
         for parche in (mock.patch.object(transporte, 'descargar', red.descargar),
                        mock.patch.object(transporte, 'visitar', red.visitar),
@@ -1087,13 +1090,14 @@ def con_red_simulada(red):
                        mock.patch.object(shodan, '_resolver_a',
                                          lambda nombre, lifetime=None: red.dns.append(nombre) or ('nxdomain', [], [])),
                        mock.patch.object(shodan, '_llave_de_config', lambda: ''),
+                       mock.patch.dict(os.environ, {identidad.LLAVE: 'CIRDAN_FAKE_llave_del_hmac_de_identidad'}),
                        mock.patch('time.sleep', lambda segundos: None)):
             pila.enter_context(parche)
         yield
 
 
 def escanear(red, compartido=True, modo='vivo'):
-    """Lo que hace orquestador.correr con las cuatro fuentes que piden Cert Spotter, sin red: contrato.ejecutar de cada
+    """Lo que hace orquestador.correr con las cinco fuentes que piden Cert Spotter, sin red: contrato.ejecutar de cada
     una en `modo`, dentro de certspotter.un_escaneo() si `compartido`. {fuente: Resultado}."""
     with contextlib.ExitStack() as pila:
         pila.enter_context(con_red_simulada(red))
@@ -1104,9 +1108,9 @@ def escanear(red, compartido=True, modo='vivo'):
 
 @contextlib.contextmanager
 def grabaciones_en(carpeta):
-    """Las cuatro fuentes graban y reproducen en `carpeta`, nunca en respuestas_grabadas/ del repo."""
+    """Las cinco fuentes graban y reproducen en `carpeta`, nunca en respuestas_grabadas/ del repo."""
     with contextlib.ExitStack() as pila:
-        for modulo in (api_docs, crtsh, shodan, visita):
+        for modulo in (api_docs, crtsh, identidad, shodan, visita):
             pila.enter_context(mock.patch.object(modulo, 'CARPETA_GRABADAS', Path(carpeta) / modulo.__name__))
         yield
 
@@ -1128,12 +1132,12 @@ class UnaConsultaPorEscaneo(unittest.TestCase):
     """RC-326: dentro de un escaneo, cada página de Cert Spotter sale a la red una vez y las demás fuentes reusan lo que
     recibió la primera, también un 429 o una falla. Cada fuente da lo mismo que si la hubiera pedido ella."""
 
-    def test_1_cuatro_fuentes_piden_cada_pagina_una_sola_vez(self):
-        """Punto 1 y 4: un escaneo con las cuatro fuentes hace 2 consultas a Cert Spotter (la página y la vacía que
-        cierra), no 8, y cada fuente da lo mismo. Punto 3: la que reusa no cuenta esas consultas."""
+    def test_1_cinco_fuentes_piden_cada_pagina_una_sola_vez(self):
+        """Punto 1 y 4: un escaneo con las cinco fuentes hace 2 consultas a Cert Spotter (la página y la vacía que
+        cierra), no 10, y cada fuente da lo mismo. Punto 3: la que reusa no cuenta esas consultas."""
         sin, con = RedSimulada(), RedSimulada()
         antes, ahora = escanear(sin, compartido=False), escanear(con)
-        self.assertEqual(len(sin.cert_spotter), 8)
+        self.assertEqual(len(sin.cert_spotter), 10)
         self.assertEqual(con.cert_spotter, sin.cert_spotter[:2])
         for codigo in FUENTES_CT:
             self.assertEqual(antes[codigo].estado, 'succeeded', (codigo, antes[codigo].error))
@@ -1147,7 +1151,7 @@ class UnaConsultaPorEscaneo(unittest.TestCase):
         que si cada una hubiera recibido su 429."""
         sin, con = RedSimulada(limite_en=0), RedSimulada(limite_en=0)
         antes, ahora = escanear(sin, compartido=False), escanear(con)
-        self.assertEqual(len(sin.cert_spotter), 4)  # un 429 no se reintenta (SIN_REINTENTO)
+        self.assertEqual(len(sin.cert_spotter), 5)  # un 429 no se reintenta (SIN_REINTENTO)
         self.assertEqual(len(con.cert_spotter), 1)
         for codigo in FUENTES_CT:
             self.assertEqual(lo_que_dio(ahora[codigo]), lo_que_dio(antes[codigo]), codigo)
@@ -1160,7 +1164,7 @@ class UnaConsultaPorEscaneo(unittest.TestCase):
         con = RedSimulada(fallas=[transporte.PlazoVencido('api.certspotter.com no terminó dentro de su plazo')])
         ahora, limpio = escanear(con), escanear(RedSimulada())
         self.assertEqual(len(con.cert_spotter), 3)  # dos intentos de la primera página y la vacía
-        for codigo in ('ct_logs', 'shodan', 'web'):
+        for codigo in ('ct_logs', 'identity', 'shodan', 'web'):
             self.assertEqual(lo_que_dio(ahora[codigo]), lo_que_dio(limpio[codigo]), codigo)
             self.assertEqual(ahora[codigo].consultas, limpio[codigo].consultas, codigo)
         self.assertEqual(ahora['api_docs'].consultas, limpio['api_docs'].consultas + 1)
@@ -1170,7 +1174,7 @@ class UnaConsultaPorEscaneo(unittest.TestCase):
         el mismo estado y con el mismo aviso, salvo el número de intentos."""
         sin, con = RedSimulada(certspotter_caido=True), RedSimulada(certspotter_caido=True)
         antes, ahora = escanear(sin, compartido=False), escanear(con)
-        self.assertEqual(len(sin.cert_spotter), 8)  # 2 intentos en cada una
+        self.assertEqual(len(sin.cert_spotter), 10)  # 2 intentos en cada una
         self.assertEqual(len(con.cert_spotter), 2)  # solo los de la primera
         for codigo in FUENTES_CT:
             self.assertEqual(ahora[codigo].estado, antes[codigo].estado, codigo)
@@ -1338,7 +1342,7 @@ class UnaConsultaPorEscaneo(unittest.TestCase):
         self.assertTrue(any(a.valor == 'h3-1.acme-demo.mx' for a in ahora['ct_logs'].activos))
 
     def test_10_un_escaneo_grabado_se_reproduce_sin_pedir_cert_spotter(self):
-        """Punto 4: un escaneo grabado con las cuatro fuentes (red simulada, carpeta temporal) se reproduce dentro de
+        """Punto 4: un escaneo grabado con las cinco fuentes (red simulada, carpeta temporal) se reproduce dentro de
         un_escaneo() sin ninguna petición, ni a Cert Spotter ni a otro lado, y cada fuente da lo mismo que en vivo.
         Al grabar cada página sale una vez y las fuentes que la reusan también la graban en su carpeta."""
         vivo, al_grabar, al_reproducir = escanear(RedSimulada()), RedSimulada(), RedSimulada()

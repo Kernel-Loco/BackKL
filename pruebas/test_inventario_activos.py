@@ -25,7 +25,7 @@ from pruebas.test_llaves_api import borrar_llaves, get, poner_plan
 ALEX = 'alex.morgan@acme-demo.mx'     # admin de Acme
 DANA = 'dana.cruz@beta-corp.mx'       # admin de Beta
 CAMPOS = {'id', 'domain', 'type', 'value', 'ip', 'parent', 'parent_type', 'attributes', 'first_seen_at', 'last_seen_at'}
-ORDEN = ("array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email'], a.asset_type)")
+ORDEN = ("array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email','profile'], a.asset_type)")
 FORMULAS = ('=HYPERLINK("http://x.test")', '+1+1', '-2+3', '@SUM(A1)', 'ok;=1+1')
 PREFIJO_ID = '70000000-0000-4000-8000-000000231'
 PREFIJO_TOPE = '70000000-0000-4000-8231-'   # los activos de la prueba del tope de 50 000
