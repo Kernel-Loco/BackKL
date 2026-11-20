@@ -23,6 +23,14 @@ def config(name, default=None):
     return _env_file().get(name, default)
 
 
+def origenes_permitidos():
+    """Orígenes de `ALLOWED_ORIGINS`, sin espacios ni vacíos. Sin poner o vacía, ORIGENES_LOCALES: docker-compose.yml
+    la pasa a la API con `${ALLOWED_ORIGINS:-}`, y con '' la API rechazaría toda escritura con Origin (comentario
+    10401 de RC-277). Es la misma regla que el candado de las cuentas de demo (cirdan/auth/demo.py)."""
+    declarados = [o.strip() for o in (config('ALLOWED_ORIGINS') or '').split(',') if o.strip()]
+    return declarados or ORIGENES_LOCALES.split(',')
+
+
 def required(name):
     value = config(name)
     if not value:

@@ -40,7 +40,7 @@ ENV_FALSO = {
 }
 
 
-def _config(env, proyecto='prueba-despliegue'):
+def _config(env, proyecto='prueba-despliegue', archivos=ARCHIVOS):
     """Corre `docker compose config` con solo las variables de env. Devuelve (código de salida, salida). Con
     `proyecto=None` no pasa `-p` y el nombre del proyecto sale de env (COMPOSE_PROJECT_NAME) o de la carpeta."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -52,7 +52,7 @@ def _config(env, proyecto='prueba-despliegue'):
                                                                           'PORTAL_', 'DOMINIOS_', 'ORGS_', 'TOTP_'))}
         cmd = ['docker', 'compose', '--project-directory', str(RAIZ)] + (['-p', proyecto] if proyecto else []) + [
             '--env-file', str(archivo)]
-        for a in ARCHIVOS:
+        for a in archivos:
             cmd += ['-f', str(RAIZ / a)]
         r = subprocess.run(cmd + ['config', '--format', 'json'], capture_output=True, text=True, env=base,
                            timeout=60, encoding='utf-8')
@@ -262,6 +262,20 @@ class ImagenDeLaApi(unittest.TestCase):
         self.assertEqual(re.findall(r'^\s*API_DOCS:\s*(.+?)\s*$', compose, re.M), ['${API_DOCS:-false}'])
         ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
         self.assertEqual(re.findall(r'^API_DOCS=(.*)$', ejemplo, re.M), ['false'])
+
+
+@unittest.skipUnless(shutil.which('docker'), 'sin docker en el PATH')
+class ComposeDeDesarrollo(unittest.TestCase):
+    def test_1_la_api_recibe_allowed_origins(self):
+        # RC-277: con solo docker-compose.yml (el plan B sin el archivo del despliegue, o la PC de desarrollo) la API
+        # recibe ALLOWED_ORIGINS del .env. Sin poner llega vacía, y la API usa la lista local (test_ip_cliente.py).
+        env = {k: v for k, v in ENV_FALSO.items() if k != 'ALLOWED_ORIGINS'}
+        for extra, esperado in (({}, ''), ({'ALLOWED_ORIGINS': ORIGEN}, ORIGEN)):
+            with self.subTest(esperado=esperado):
+                rc, salida = _config({**env, **extra}, archivos=['docker-compose.yml'])
+                self.assertEqual(rc, 0, salida[-500:])
+                api = json.loads(salida)['services']['api']['environment']
+                self.assertEqual(api['ALLOWED_ORIGINS'], esperado)
 
 
 if __name__ == '__main__':

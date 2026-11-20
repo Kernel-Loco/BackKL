@@ -66,10 +66,13 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Dominio al que quedan amarradas las passkeys (RC-331). localhost en tu PC; los orígenes salen de ALLOWED_ORIGINS.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      # Orígenes que pueden escribir con la cookie (cirdan/api/main.py). Vacía o sin poner, la lista local
+      # (localhost y 127.0.0.1). El despliegue y el plan B la piden (docker-compose.despliegue.yml, RC-277).
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       # De quién se acepta X-Forwarded-For, que da la IP del bloqueo por intentos del login.
-      # Por omisión de nadie de fuera del contenedor. El portal (Next) no agrega ese encabezado:
-      # pasa tal cual el que mande el navegador, así que con "*" quien llama elige su IP y se
-      # salta el bloqueo. Sin proxy, la API ve con una sola IP a todo lo que entra por el puerto
+      # Por omisión de nadie de fuera del contenedor. El portal (Next) no limpia ese encabezado:
+      # reenvía tal cual el que mande el navegador y solo pone el suyo si no viene, así que con "*"
+      # quien llama elige su IP y se salta el bloqueo. Sin proxy, la API ve con una sola IP a todo lo que entra por el puerto
       # publicado (el portal y el host): la puerta de enlace de la red de Docker. Así el bloqueo
       # por IP es uno solo para todos. En el despliegue (#49) va la IP o el CIDR con que la API ve
       # llegar al portal (con el portal en el host, esa puerta de enlace, que da docker network
