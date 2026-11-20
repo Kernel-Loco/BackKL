@@ -531,13 +531,15 @@ def _siguiente(destino, dominio):
     return 'https://%s%s%s' % (host, ruta, '?' + consulta if consulta else ''), None
 
 
-def _recorrer(cliente, dominio, nombre, sitios=None):
+def _recorrer(cliente, dominio, nombre, sitios=None, saltos=None):
     """(host final, url final, visita, redirige_a) de la visita a https://<nombre>/ con sus redirecciones dentro del
     dominio. redirige_a es el nombre de otro dominio al que manda, o None. Un salto a otro sitio que ya se visitó (o
     ya quedó sin revisar) en `sitios` no se pide otra vez: da ese host con la visita {'ya_visitado': True}.
     Si el primer https se rechazó o no conectó (_sin_puerto), se pide http://<nombre>/ una vez (_http). Si da una
     página, esa es la visita. Si el 80 conectó y no terminó, o falló la red, no se sabe si tiene sitio: es una falla
-    y el sitio queda sin revisar. Un 443 que conectó y no terminó es pasajero: falla, y el 80 no se prueba."""
+    y el sitio queda sin revisar. Un 443 que conectó y no terminó es pasajero: falla, y el 80 no se prueba.
+    Si se da la lista `saltos`, se le agregan los hosts intermedios de la cadena, sin `nombre` ni el host final
+    (alcance1 de RC-56)."""
     url = 'https://%s/' % nombre
     for salto in range(MAX_REDIRECCIONES + 1):
         visita = cliente.sitio(url, contar=salto > 0)
@@ -568,6 +570,8 @@ def _recorrer(cliente, dominio, nombre, sitios=None):
             except ValueError:
                 pass
             return host, url, {'fuera': True}, otro
+        if saltos is not None and salto > 0:
+            saltos.append(urllib.parse.urlsplit(url).hostname)
         destino = urllib.parse.urlsplit(siguiente).hostname
         previo = (sitios or {}).get(destino)
         if destino != nombre and previo is not None and (previo.web is not None or previo.falta is not None):

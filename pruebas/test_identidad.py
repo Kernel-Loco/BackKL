@@ -737,6 +737,54 @@ class Ronda2(unittest.TestCase):
         self.assertIn('abiertos se\n# cierran', env)
 
 
+
+class Ronda4(unittest.TestCase):
+    """El alto de la pasada amplia de la ronda 3 de RC-56 (alcance1)."""
+
+    def test_1_lo_del_destino_de_una_redireccion_no_se_cierra_si_su_origen_queda_sin_revisar(self):
+        """alcance1: acme-demo.mx manda a www, que no es nombre de Cert Spotter (sale de un comodín), y la página de
+        www trae un correo personal. Si en la corrida siguiente la raíz da 503, www no se visita y no está en
+        sin_revisar: el hallazgo tiene que llevar también a la raíz como parte, o el orquestador lo cierra con
+        NOT(partes ?| sin_revisar) aunque el correo siga en www. Si www sí es nombre de Cert Spotter, tiene su propia
+        parte en sin_revisar y no depende de la raíz."""
+        www = 'www.acme-demo.mx'
+        cuerpo = '<html><body>Escribe a CIRDAN_FAKE_ana@gmail.com o a ti@acme-demo.mx</body></html>'
+        redirige = {'https://acme-demo.mx/': {'redirige': 'https://%s/' % www, 'codigo': 301},
+                    'https://%s/' % www: pagina(cuerpo=cuerpo)}
+        primera, _, _ = correr(redirige, red=Red(github_={}))
+        personal = hallazgos(primera, 'personal_email_exposed')
+        self.assertEqual([h.partes for h in personal], [sorted([DOMINIO, www])])
+
+        caida = {'https://acme-demo.mx/': pagina(estado=503)}
+        segunda, _, _ = correr(caida, red=Red(github_={}))
+        self.assertEqual(segunda.sin_revisar, [DOMINIO])
+        self.assertEqual(hallazgos(segunda, 'personal_email_exposed'), [])
+        # el orquestador cierra lo que trae partes y ninguna está en sin_revisar
+        self.assertTrue(set(personal[0].partes) & set(segunda.sin_revisar))
+
+        zona = {DOMINIO: a(IP), www: a(IP)}
+        de_ct, _, _ = correr(redirige, red=Red(ct=paginas(www), github_={}), zona=zona)
+        self.assertEqual([h.partes for h in hallazgos(de_ct, 'personal_email_exposed')], [[www]])
+
+    def test_2_en_una_cadena_lo_del_destino_depende_tambien_del_salto_intermedio(self):
+        """alcance1, cadena: acme-demo.mx -> tienda -> www, ninguno de los dos en Cert Spotter. Si en la corrida
+        siguiente tienda da 503, sin_revisar queda en [tienda] y la raíz sí se revisó: lo de www tiene que llevar a
+        tienda como parte, o se cierra aunque el correo siga en www."""
+        www, tienda = 'www.acme-demo.mx', 'tienda.acme-demo.mx'
+        cuerpo = '<html><body>Escribe a CIRDAN_FAKE_ana@gmail.com</body></html>'
+        cadena = {'https://acme-demo.mx/': {'redirige': 'https://%s/' % tienda, 'codigo': 301},
+                  'https://%s/' % tienda: {'redirige': 'https://%s/' % www, 'codigo': 302},
+                  'https://%s/' % www: pagina(cuerpo=cuerpo)}
+        primera, _, _ = correr(cadena, red=Red(github_={}))
+        personal = hallazgos(primera, 'personal_email_exposed')
+        self.assertEqual([h.partes for h in personal], [sorted([DOMINIO, tienda, www])])
+
+        caida = {'https://acme-demo.mx/': {'redirige': 'https://%s/' % tienda, 'codigo': 301},
+                 'https://%s/' % tienda: pagina(estado=503)}
+        segunda, _, _ = correr(caida, red=Red(github_={}))
+        self.assertEqual(segunda.sin_revisar, [tienda])
+        self.assertTrue(set(personal[0].partes) & set(segunda.sin_revisar))
+
 class Base(unittest.TestCase):
     """Lectura estática de la semilla y la migración 026, del registro y del .gitignore, sin base."""
 

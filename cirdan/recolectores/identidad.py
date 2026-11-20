@@ -40,7 +40,9 @@ o enlaces de los que caben) o lo de GitHub que no se pudo pedir deja la corrida 
 revisó. Si se sabe qué partes existen (Cert Spotter completo y la lista de repos entera), sin_revisar lleva las que no
 se revisaron, también las que MAX_SITIOS, MAX_REPOS_API o MAX_PERFILES_API dejaron fuera, y el orquestador cierra lo
 demás. Si no se sabe, sin_revisar va en None y solo se cierra lo que salió de partes revisadas. Un correo personal del
-perfil de GitHub enlazado lleva también como partes los sitios que lo enlazan.
+perfil de GitHub enlazado lleva también como partes los sitios que lo enlazan. Lo leído en el destino de una redirección
+que no es un nombre de Cert Spotter (uno de un comodín) lleva también como partes los nombres que redirigen ahí: si el
+origen queda sin revisar, el destino no se visita y no está en sin_revisar, así no se cierra lo suyo (alcance1).
 
 La grabación guarda solo lo ya reducido (los correos del dominio, los personales enmascarados y los perfiles, y de una
 redirección su destino sin correos ni valores sensibles en la consulta y los correos de su certificado), nunca el
@@ -773,12 +775,14 @@ class _Junta:
         self.personales = {}  # huella -> {correo, servicio, origenes, donde, partes, primera_vez}
         self.perfiles = {}    # url -> {red, usuario, origenes, hosts, partes}
 
-    def correo(self, correo, origen, donde, parte):
+    def correo(self, correo, origen, donde, parte, otras=()):
         d = self.correos.setdefault(correo, {'origenes': set(), 'donde': [], 'partes': set()})
         self._anotar(d, origen, donde, parte)
+        d['partes'].update(otras)
 
     def personal(self, p, origen, donde, parte, fecha='', otras=()):
-        """`otras` son partes de las que también depende (los sitios que enlazan el perfil donde salió)."""
+        """`otras` son partes de las que también depende (los sitios que enlazan el perfil donde salió, o los que
+        redirigen al sitio donde salió)."""
         d = self.personales.setdefault(p['huella'], {'correo': p['correo'], 'servicio': p['servicio'],
                                                      'origenes': set(), 'donde': [], 'partes': set(),
                                                      'primera_vez': ''})
@@ -787,10 +791,11 @@ class _Junta:
         if fecha and (not d['primera_vez'] or fecha < d['primera_vez']):
             d['primera_vez'] = fecha
 
-    def perfil(self, p, origen, host, parte):
+    def perfil(self, p, origen, host, parte, otras=()):
         d = self.perfiles.setdefault(p['url'], {'red': p['red'], 'usuario': p['usuario'], 'origenes': set(),
                                                 'hosts': [], 'donde': [], 'partes': set()})
         self._anotar(d, origen, host, parte)
+        d['partes'].update(otras)
         if host not in d['hosts']:
             d['hosts'].append(host)
 
@@ -809,6 +814,7 @@ class _Sitio:
         self.falta = None    # el motivo de MOTIVOS si quedó sin revisar
         self.pagina = None   # la página reducida, si dio una
         self.cert = None     # {correos_cert, personales_cert} del certificado de su redirección, si redirigió
+        self.origenes = set()   # alcance1: los nombres de Cert Spotter que redirigen aquí, si este no es uno de ellos
 
     @property
     def web(self):
@@ -936,6 +942,7 @@ def _sitios(res, cliente, dominio, ahora, parcial):
         res.avisos.append('%s. Solo se visitó la raíz' % e)
         parcial.append('ct')
     nombres = shodan._nombres(dominio, certs)
+    conocidos = set(nombres)   # los que tienen su propia parte en sin_revisar si no se visitan (alcance1)
     if len(nombres) > MAX_SITIOS:
         res.avisos.append(PREFIJO + 'se visitaron %d de %d nombres del dominio (MAX_SITIOS)' % (MAX_SITIOS,
                                                                                                len(nombres)))
@@ -971,7 +978,8 @@ def _sitios(res, cliente, dominio, ahora, parcial):
                 sitio.visto = True   # sin A o solo con IP privadas: no tiene sitio público que leer
                 continue
             try:
-                host, url, vista, _ = visita._recorrer(cliente, dominio, nombre, sitios)
+                saltos = []
+                host, url, vista, _ = visita._recorrer(cliente, dominio, nombre, sitios, saltos)
             except SinTiempo:
                 sin_tiempo = nombres[i:]
                 break
@@ -984,7 +992,7 @@ def _sitios(res, cliente, dominio, ahora, parcial):
                 parcial.append('ilegible')
                 continue
             sitio.cert = cliente.certs.get('https://%s/' % nombre)   # si su primera respuesta fue una redirección
-            final = _registrar(sitios, sitio, host, vista)
+            final = _registrar(sitios, sitio, host, vista, conocidos, saltos)
             if final is not None and final is not sitio and final.cert is None:
                 # R3: el destino (a -> z -> otro dominio) queda visto con los correos del certificado de su saludo
                 final.cert = cliente.certs.get(url)
@@ -1003,12 +1011,17 @@ def _sitios(res, cliente, dominio, ahora, parcial):
     return sitios, todos_los_nombres, ct_respondio, fallas_dns, len(nombres), cortados, ct_completo
 
 
-def _registrar(sitios, sitio, host, vista):
+def _registrar(sitios, sitio, host, vista, conocidos, saltos=()):
     """Lo que dejó la visita de `sitio`, que terminó en `host` (él mismo o el destino de sus redirecciones). Devuelve
-    el _Sitio al que quedó lo visto, o None si el destino ya se conocía."""
+    el _Sitio al que quedó lo visto, o None si el destino ya se conocía. `conocidos` son los nombres de Cert Spotter:
+    un destino que no es uno de ellos anota como orígenes a `sitio` y a los hosts intermedios de la cadena (`saltos`),
+    también si ya se conocía (alcance1): si uno de ellos queda sin revisar, el destino no se visita."""
     if host != sitio.nombre:   # redirigió dentro del dominio: lo que se vio es de `host`
         sitio.visto = True
         destino = sitios.setdefault(host, _Sitio(host))
+        if host not in conocidos:
+            destino.origenes.add(sitio.nombre)
+            destino.origenes.update(s for s in saltos if s and s != host)
         if destino.visto or destino.falta or vista.get('ya_visitado'):
             return None
         sitio = destino
@@ -1033,12 +1046,14 @@ def _registrar(sitios, sitio, host, vista):
 
 def _leer_sitio(res, sitio, junta):
     """Los correos y perfiles de la página de `sitio`. Lo de una página con reto no se lee. Lo de un 5xx o una página
-    cortada sí: se vio en la página que llegó, aunque el sitio quede sin revisar."""
+    cortada sí: se vio en la página que llegó, aunque el sitio quede sin revisar. Lo de un destino que no es nombre de
+    Cert Spotter lleva también como partes los nombres que redirigen a él (alcance1)."""
+    otras = sorted(sitio.origenes)
     donde = 'certificado de %s' % sitio.nombre
     for correo in (sitio.cert or {}).get('correos_cert', ()):
-        junta.correo(correo, 'certificado', donde, sitio.nombre)
+        junta.correo(correo, 'certificado', donde, sitio.nombre, otras)
     for p in (sitio.cert or {}).get('personales_cert', ()):
-        junta.personal(p, 'certificado', donde, sitio.nombre)
+        junta.personal(p, 'certificado', donde, sitio.nombre, otras=otras)
     pagina = sitio.pagina
     if pagina is None:
         return
@@ -1048,16 +1063,16 @@ def _leer_sitio(res, sitio, junta):
     ident = pagina['identidad']
     donde = 'sitio %s' % sitio.nombre
     for correo in ident['correos']:
-        junta.correo(correo, 'sitio', donde, sitio.nombre)
+        junta.correo(correo, 'sitio', donde, sitio.nombre, otras)
     for p in ident['personales']:
-        junta.personal(p, 'sitio', donde, sitio.nombre)
+        junta.personal(p, 'sitio', donde, sitio.nombre, otras=otras)
     for p in ident['perfiles']:
-        junta.perfil(p, 'sitio', sitio.nombre, sitio.nombre)
+        junta.perfil(p, 'sitio', sitio.nombre, sitio.nombre, otras)
     donde = 'certificado de %s' % sitio.nombre
     for correo in ident['correos_cert']:
-        junta.correo(correo, 'certificado', donde, sitio.nombre)
+        junta.correo(correo, 'certificado', donde, sitio.nombre, otras)
     for p in ident['personales_cert']:
-        junta.personal(p, 'certificado', donde, sitio.nombre)
+        junta.personal(p, 'certificado', donde, sitio.nombre, otras=otras)
 
 
 def _github(res, cliente, dominio, junta, parcial):
