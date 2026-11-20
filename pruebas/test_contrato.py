@@ -22,8 +22,8 @@ from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa
 from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a, bases_por_defecto, sin_llave  # noqa: E402
 from pruebas.test_subfinder import CdxSimulado, con_cdx  # noqa: E402
 from pruebas.test_rdap import HttpSimulado as RdapSimulado, respuesta as respuesta_rdap  # noqa: E402
-from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, rdap,  # noqa: E402
-                                 registros_dns, shodan, subfinder, visita)
+from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, identidad,  # noqa: E402
+                                 rdap, registros_dns, shodan, subfinder, visita)
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
@@ -428,7 +428,10 @@ class Ejecutar(unittest.TestCase):
                     mock.patch.object(shodan, '_resolver_a', ResolvedorSimulado({'acme-demo.mx': a(CAMARA)})), \
                     mock.patch.object(rdap, '_descargar', RdapSimulado(dominios={'acme-demo.mx': respuesta_rdap('acme-demo.mx')})),                     mock.patch.object(visita, '_descargar_api', HttpSimulado()), mock.patch.object(api_docs, '_descargar_ct', HttpSimulado()), mock.patch.object(api_docs, '_visitar', lambda url, timeout: {'estado': 404, 'doc': None}),                     mock.patch.object(visita, '_visitar', lambda url, timeout: {
                         'estado': 200, 'cabeceras': [['Server', 'nginx']], 'cuerpo': '<html></html>'}), \
-                    mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo'}):
+                    mock.patch.object(identidad, '_visitar', lambda url, timeout: {
+                        'estado': 200, 'cabeceras': [['Server', 'nginx']], 'cuerpo': '<html></html>', 'cortado': False}), \
+                    mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo',
+                                                 identidad.LLAVE: 'CIRDAN_FAKE_llave_del_hmac_de_identidad'}):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
                 (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')  # de una grabación anterior
@@ -455,8 +458,9 @@ class Ejecutar(unittest.TestCase):
             self.assertIs(type(maximo), int, fuente)
             self.assertGreaterEqual(maximo, 0, fuente)
         self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, shodan.MAX_CONSULTAS,
-                          rdap.MAX_CONSULTAS, visita.MAX_CONSULTAS, api_docs.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS),
-                         (36, 25, 16, 214, 10, 184, 264, 0))
+                          rdap.MAX_CONSULTAS, visita.MAX_CONSULTAS, api_docs.MAX_CONSULTAS, identidad.MAX_CONSULTAS,
+                          ejemplo.MAX_CONSULTAS),
+                         (36, 25, 16, 214, 10, 184, 264, 171, 0))
 
     def test_15c_el_respaldo_de_ct_logs_no_pasa_de_su_maximo(self):
         """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento: 18

@@ -41,6 +41,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/025_textos_higiene_certificados.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `cert_internal_name` (T1596.003, ISO A.8.31, CIS 16.8), `cert_broad_wildcard` (sin técnica de ATT&CK, ISO A.8.24, CIS 3.10) y `cert_new_issuer` (T1588.004, ISO A.8.24, CIS 3.10), las 3 reglas de higiene de certificados de `ct_logs` (#14, RC-218). Va antes de la semilla 025. Se puede correr otra vez sin error |
 | `migraciones/026_huellas_por_version.sql` | Rotación de la llave de las huellas de contraseña (RC-333): función `password_hash_version_orgs(p_version)`, SECURITY DEFINER con search_path fijo que termina en `pg_temp`, que da a `cirdan_app` solo los ids de las empresas con huellas `lt<versión>$` de esa versión, sin huellas, correos, ids de usuario ni conteos. La usa `cirdan/auth/rotar_huellas.py`, que luego recorre cada empresa con RLS. La API no la lee: puede ir antes o después de reconstruirla. Se puede correr otra vez sin error |
 | `migraciones/027_mfa_operador.sql` | Permite detectar cuentas `platform_admins` aunque no tengan TOTP activo, para que el login rechace la contraseña como único factor en una cuenta operadora (#66). Solo expone esa comprobación mediante una función `SECURITY DEFINER`; no da acceso a la tabla |
+| `migraciones/028_tipo_activo_perfil.sql` | Agrega `profile` al CHECK de `assets.asset_type`: un perfil público (GitHub, LinkedIn, X, Facebook, Instagram, YouTube, TikTok o GitLab) enlazado desde el sitio, o el usuario de GitHub que firma commits de la organización con un correo del dominio (#20, RC-56). `value` es la URL https canónica del perfil. No quita ningún tipo. Va antes de la semilla 026 y de reconstruir la API: sin ella, el primer perfil hace fallar `identity` entera. Se puede correr otra vez sin error |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -65,6 +66,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `semillas/023_regla_enlaces_nube_repos.sql` | Regla 36 del juego v1, `file_share_link_in_repo` (data_leaks, medium, peso 1.000 y tope 10.00), y la misma en cada otro juego que ya existe, también los de una organización (#16, RC-247, desviación 15). Necesita la migración 022 y va antes de reconstruir la API |
 | `semillas/024_regla_ia.sql` | La regla `exposed_ai_service` (infrastructure, high, tope 25) en el juego v1, id 37, y en cada otro juego que ya existe, también los de una organización (#144, RC-262, desviación 15). Necesita la migración 023 y va antes de reconstruir la API: sin la regla, un puerto de inteligencia artificial hace fallar la fuente `shodan` entera. Se puede correr otra vez sin error |
 | `semillas/025_reglas_higiene_certificados.sql` | Reglas 38 a 40 del juego v1, `cert_internal_name` y `cert_broad_wildcard` (infrastructure, low, peso 1.000 y tope 8.00) y `cert_new_issuer` (infrastructure, medium, peso 1.000 y tope 10.00), y las mismas en cada otro juego que ya existe, también los de una organización (#14, RC-218, desviación 15). Necesita la migración 025 y va antes de reconstruir la API |
+| `semillas/026_identidad.sql` | Fuente `identity` (osint, encendida, `keep_raw_payload` en false porque su resumen trae correos) con 1710 consultas al día, 10 corridas de 171 (#20, RC-56). Sus reglas `personal_email_exposed` y `email_pattern_exposed` ya están en v1 desde la semilla 004. Necesita la migración 028 y va antes de reconstruir la API. Se puede correr otra vez sin error |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 25 tablas con filas y RLS, más el resumen de objetos |
@@ -133,6 +135,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/025_textos_higiene_certificados.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/026_huellas_por_version.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/027_mfa_operador.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/028_tipo_activo_perfil.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -159,6 +162,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/023_regla_enlaces_nube_repos.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/024_regla_ia.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/025_reglas_higiene_certificados.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/026_identidad.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -479,6 +483,16 @@ Para exigir MFA a las cuentas de la consola de operador (#66), la migración 026
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/027_mfa_operador.sql
 ```
+
+Para la identidad pasiva (RC-56, #20) van la migración 028 y la semilla 026, en ese orden, después de la migración 027 y la semilla 025, y las dos antes de reconstruir la API. El recolector nuevo guarda perfiles con el tipo `profile`, que el CHECK de la 001 no deja, y el orquestador solo corre las fuentes de `data_sources`: sin la semilla, `identity` no corre, y sin la migración, el primer perfil la hace fallar entera. Sus dos reglas ya están en v1 desde la semilla 004, así que no hace falta juego nuevo. La API anterior no emite `profile` y con las dos ya aplicadas sigue igual. Las dos se pueden correr otra vez sin error:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/028_tipo_activo_perfil.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/026_identidad.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM data_sources WHERE code = 'identity' AND enabled"
+```
+
+Da `1`.
 
 ## Respaldar y restaurar
 

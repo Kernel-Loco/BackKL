@@ -1249,8 +1249,8 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
 
 # ---------------------------------------------------------------- inventario de activos (RC-17, #113 RC-231)
 
-ORDEN_TIPO = "array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email'], a.asset_type)"
-TipoActivo = Literal['domain', 'subdomain', 'certificate', 'ip', 'service', 'api_doc', 'email']
+ORDEN_TIPO = "array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email','profile'], a.asset_type)"
+TipoActivo = Literal['domain', 'subdomain', 'certificate', 'ip', 'service', 'api_doc', 'email', 'profile']
 
 
 @router.get('/domains/{fqdn}/assets', summary='Activos del dominio')
