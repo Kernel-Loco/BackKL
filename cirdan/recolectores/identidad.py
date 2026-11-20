@@ -26,25 +26,32 @@ Activos:
 Hallazgos, sobre el activo del dominio:
 - personal_email_exposed (medio): un correo de un servicio gratuito (GRATUITOS) en el sitio, en el certificado, en los
   commits de la organización o en un perfil de GitHub enlazado. La evidencia lo lleva enmascarado (primera letra,
-  '***' y el servicio) y dice dónde salió, nunca el correo completo. Su clave y su huella llevan un sha256 del correo
-  con el dominio, así el mismo correo no se duplica entre escaneos.
+  '***' y el servicio, sin la letra si el usuario es corto) y dice dónde salió, nunca el correo completo. Su clave y
+  su huella llevan un HMAC-SHA256 (llave IDENTITY_HMAC_KEY) del buzón normalizado con el dominio, así el mismo correo
+  no se duplica entre escaneos y la huella no se revierte probando nombres. Sin la llave no se guarda ningún correo
+  personal y la regla queda sin cobertura.
 - email_pattern_exposed (medio): al menos MIN_PATRON correos del dominio de personas distintas con el mismo formato
   (FORMATOS) en el mismo host. Un buzón con una palabra de GENERICOS no cuenta (docs/hallazgos_esperados.md:85). La
   evidencia dice el formato y cuántos, sin los correos, que ya son activos.
 
 Partes (#23): cada sitio por su nombre, 'github:<org>/<repo>' por los commits de un repo y 'github:perfil:<login>' por
-un perfil de GitHub. Un sitio que no se pudo leer completo (reto, 5xx, sin respuesta, página cortada) o lo de GitHub
-que no se pudo pedir deja la corrida parcial: revisados lleva lo que sí se revisó y sin_revisar va en None, así el
-orquestador solo cierra lo que salió de partes revisadas.
+un perfil de GitHub. Un sitio que no se pudo leer completo (reto, 5xx, sin respuesta, página cortada o con más correos
+o enlaces de los que caben) o lo de GitHub que no se pudo pedir deja la corrida parcial: revisados lleva lo que sí se
+revisó. Si se sabe qué partes existen (Cert Spotter completo y la lista de repos entera), sin_revisar lleva las que no
+se revisaron, también las que MAX_SITIOS, MAX_REPOS_API o MAX_PERFILES_API dejaron fuera, y el orquestador cierra lo
+demás. Si no se sabe, sin_revisar va en None y solo se cierra lo que salió de partes revisadas. Un correo personal del
+perfil de GitHub enlazado lleva también como partes los sitios que lo enlazan.
 
-La grabación guarda solo lo ya reducido (los correos del dominio, los personales enmascarados y los perfiles), nunca el
-cuerpo de una página ni un correo de terceros.
+La grabación guarda solo lo ya reducido (los correos del dominio, los personales enmascarados y los perfiles, y de una
+redirección su destino sin consulta y los correos de su certificado), nunca el cuerpo de una página ni un correo de
+terceros.
 
 Uso:
   python -m cirdan.recolectores.identidad --reproducir olmardo.com
 """
 import argparse
 import hashlib
+import hmac
 import html
 import html.parser
 import json
@@ -53,6 +60,7 @@ import sys
 import urllib.parse
 from datetime import datetime, timezone
 
+from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
 from cirdan.recolectores import borde, certspotter, github, shodan, transporte, visita
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
@@ -64,6 +72,11 @@ FUENTE = 'identity'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'identity'
 CODIGOS = {'personal_email_exposed': 'medium', 'email_pattern_exposed': 'medium'}
 PREFIJO = 'identity: '
+# Llave del HMAC de la huella de un correo personal (a1 de la revisión de RC-56). Sin llave, un sha256 del correo con el
+# dominio, que se conoce, se revierte probando nombres. Sin ella no se guarda ningún correo personal: la regla queda sin
+# cobertura. Cambiarla cambia las huellas, y los hallazgos abiertos se cierran y se abren otra vez.
+LLAVE = 'IDENTITY_HMAC_KEY'
+MIN_LLAVE = 32                             # caracteres de la llave, como mínimo
 
 MAX_SITIOS = visita.MAX_SITIOS             # nombres que se visitan, con la raíz
 MAX_REDIRECCIONES = visita.MAX_REDIRECCIONES
@@ -115,11 +128,13 @@ FORMATOS = (('nombre.apellido', re.compile(r'[a-z]{2,30}\.[a-z]{2,30}')),
             ('nombre.inicial', re.compile(r'[a-z]{2,30}\.[a-z]')))
 
 # Un correo en el texto: el usuario no puede venir pegado a otro carácter de usuario, así una cadena larga no da
-# pedazos. Cuantificadores con tope: sin retroceso que crezca con el cuerpo.
+# pedazos. Cuantificadores con tope: sin retroceso que crezca con el cuerpo. El host tampoco puede seguir con otra
+# etiqueta ('.xn--p1ai', '.x1'): sin eso el retroceso lo cortaba en un nombre del dominio que no es el del correo.
 _CORREO = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]{1,64})@((?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)"
-                     r"{1,8}[A-Za-z]{2,63})(?![A-Za-z0-9-])", re.A)
+                     r"{1,8}(?:[A-Za-z]{2,63}|xn--[A-Za-z0-9-]{1,59}))(?![A-Za-z0-9-]|\.[A-Za-z0-9])", re.A)
 _HUELLA = re.compile(r'[0-9a-f]{64}')
-_ENMASCARADO = re.compile(r'[a-z0-9]\*\*\*@[a-z0-9.-]{3,40}')
+_ENMASCARADO = re.compile(r'(?:[a-z0-9])?\*\*\*@[a-z0-9.-]{3,40}')
+MIN_USUARIO_MASCARA = 4                    # con un usuario más corto la máscara no lleva su primera letra
 ORIGENES = ('sitio', 'certificado', 'commits', 'perfil')
 TAGS_ENLACE = ('a', 'link', 'area')
 
@@ -135,26 +150,29 @@ RESERVADAS = {
     'github': {'about', 'apps', 'collections', 'contact', 'customer-stories', 'enterprise', 'events', 'explore',
                'features', 'home', 'join', 'login', 'marketplace', 'new', 'notifications', 'organizations', 'pricing',
                'readme', 'search', 'security', 'settings', 'site', 'sponsors', 'team', 'topics', 'trending', 'pulls',
-               'issues', 'codespaces', 'signup', 'logout', 'password_reset'},
+               'issues', 'codespaces', 'signup', 'logout', 'password_reset', 'users', 'orgs', 'dashboard',
+               'solutions', 'resources', 'copilot', 'why-github', 'premium-support', 'mobile', 'blog', 'partners',
+               'education', 'nonprofit', 'git-guides', 'github', 'stars', 'watching', 'gist', 'discussions', 'actions', 'packages', 'ai', 'customer', 'case-studies', 'newsroom', 'careers'},
     'gitlab': {'explore', 'help', 'users', 'dashboard', 'search', 'admin', 'projects', 'groups', 'api', '-'},
     'x': {'home', 'share', 'intent', 'i', 'search', 'hashtag', 'explore', 'settings', 'login', 'signup', 'tos',
           'privacy', 'messages', 'notifications', 'compose'},
     'facebook': {'sharer', 'sharer.php', 'share', 'share.php', 'dialog', 'plugins', 'login', 'login.php',
                  'profile.php', 'pages', 'groups', 'events', 'watch', 'help', 'policies', 'privacy', 'tr', 'home.php',
-                 'photo.php', 'story.php', 'permalink.php', 'hashtag', 'business', 'ads', 'marketplace', 'gaming'},
+                 'photo.php', 'story.php', 'permalink.php', 'hashtag', 'business', 'ads', 'marketplace', 'gaming',
+                 'people'},
     'instagram': {'p', 'reel', 'reels', 'explore', 'accounts', 'stories', 'tv', 'about', 'developer', 'legal',
                   'direct', 'web'},
 }
 _USUARIO_RED = {'github': github.ORG_VALIDA, 'gitlab': re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}'),
                 'x': re.compile(r'[A-Za-z0-9_]{1,15}'), 'facebook': re.compile(r'[A-Za-z0-9.]{1,50}'),
                 'instagram': re.compile(r'[A-Za-z0-9_.]{1,30}'), 'tiktok': re.compile(r'[A-Za-z0-9_.]{1,24}'),
-                'linkedin': re.compile(r'[A-Za-z0-9_-][A-Za-z0-9_.%-]{0,99}'),
+                'linkedin': re.compile(r'[\w-][\w.%-]{0,99}'),   # con acentos: jos%C3%A9-p es josé-p
                 'youtube': re.compile(r'[A-Za-z0-9_.-]{1,100}')}
 TIPOS_LINKEDIN = ('company', 'in', 'school', 'showcase')
 TIPOS_YOUTUBE = ('c', 'channel', 'user')
 
 # Motivos de un sitio sin revisar: los de visita.py más el de una página que pasó del tope de bytes
-MOTIVOS = dict(visita.MOTIVOS, cortado='su página pasó del tope de bytes y no se leyó completa',
+MOTIVOS = dict(visita.MOTIVOS, cortado='su página pasó del tope de bytes, de correos o de enlaces y no se leyó completa',
                pagina='su página no se pudo leer')
 FALLAS_DE_RED = visita.FALLAS_DE_RED
 
@@ -165,6 +183,8 @@ DECLARADA_INVALIDA = PREFIJO + 'la organización de GitHub declarada no es un no
 NO_EXISTE = PREFIJO + 'la organización de GitHub declarada no existe, no se revisaron commits'
 SIN_CUOTA = PREFIJO + 'GitHub no dio permiso o se acabó su cuota por hora (403 o 429)'
 PARCIAL = PREFIJO + 'cobertura parcial'
+SIN_LLAVE = (PREFIJO + 'falta %s (o tiene menos de %d caracteres): no se guardó ningún correo personal y '
+             'personal_email_exposed queda sin cobertura' % (LLAVE, MIN_LLAVE))
 NO_SE_GRABO = (PREFIJO + 'la corrida tuvo fallas (la red, el tiempo, la cuota de GitHub o una respuesta que no se puede '
                'leer): no se grabó, queda la grabación anterior')
 
@@ -212,6 +232,14 @@ class ClienteIdentidad(visita.ClienteWeb):
         super().__init__(modo=modo, carpeta=carpeta, visitar=visitar or (lambda url, timeout: _visitar(url, timeout)),
                          **otros)
         self.dominio = dominio
+        self.certs = {}   # url -> {correos_cert, personales_cert} de una visita que contestó con una redirección
+
+    def sitio(self, url, contar=True, **otros):
+        """visita.ClienteWeb.sitio, y anota los correos del certificado de una redirección (b2)."""
+        datos = super().sitio(url, contar=contar, **otros)
+        if isinstance(datos, dict) and 'cert' in datos:
+            self.certs[url] = datos['cert']
+        return datos
 
     def limpiar(self, datos):
         """La visita como se lee y se graba: una página queda en {estado, cortado, reto, identidad}, sin cabeceras ni
@@ -219,6 +247,15 @@ class ClienteIdentidad(visita.ClienteWeb):
         reducido (de la grabación) se valida otra vez. ValueError si no tiene ninguna de esas formas."""
         if isinstance(datos, dict) and 'identidad' in datos:
             return _reducida(datos, self.dominio)
+        if isinstance(datos, dict) and 'redirige' in datos:
+            if datos['redirige'] is not None and not isinstance(datos['redirige'], str):
+                raise ValueError('forma inesperada')
+            # Sin la consulta del destino (a4) y con los correos del certificado del saludo que la dio (b2)
+            limpia = visita.limpiar_visita(dict(datos, redirige=_destino_sin_datos(datos['redirige'])))
+            cert = _cert_de_redireccion(datos, self.dominio)
+            if cert is not None:
+                limpia['cert'] = cert
+            return limpia
         limpia = visita.limpiar_visita(datos)
         if 'estado' not in limpia:
             return limpia
@@ -279,12 +316,38 @@ def crear_cliente(modo, dominio):
 # ---------------------------------------------------------------- correos
 
 def _masca(usuario, servicio):
-    return '%s***@%s' % (usuario[0], servicio)
+    """El correo enmascarado: su primera letra, '***' y el servicio. Con un usuario de menos de MIN_USUARIO_MASCARA
+    caracteres la primera letra dejaría casi todo el correo a la vista: solo '***' y el servicio."""
+    return '%s***@%s' % (usuario[0] if len(usuario) >= MIN_USUARIO_MASCARA else '', servicio)
 
 
-def _clave(correo, dominio):
-    """La clave estable de un correo personal: un sha256 con el dominio, nunca el correo."""
-    return hashlib.sha256(('correo|%s|%s' % (dominio, correo)).encode('utf-8')).hexdigest()
+def _llave():
+    """La llave del HMAC (LLAVE) en bytes, o None si falta o es corta."""
+    valor = (config(LLAVE) or '').strip()
+    return valor.encode('utf-8') if len(valor) >= MIN_LLAVE else None
+
+
+# Servicios que son el mismo buzón con otro nombre, y los que no distinguen los puntos del usuario
+MISMO_SERVICIO = {'googlemail.com': 'gmail.com'}
+SIN_PUNTOS = frozenset({'gmail.com'})
+
+
+def _normal(usuario, servicio):
+    """El buzón de un correo personal para su huella: sin la '+etiqueta', con googlemail.com como gmail.com y, en
+    Gmail, sin los puntos del usuario. Así juan.perez+x@gmail.com y juanperez@googlemail.com dan la misma huella."""
+    usuario = usuario.split('+', 1)[0] or usuario
+    servicio = MISMO_SERVICIO.get(servicio, servicio)
+    if servicio in SIN_PUNTOS:
+        usuario = usuario.replace('.', '') or usuario
+    return '%s@%s' % (usuario, servicio)
+
+
+def _clave(correo, dominio, llave):
+    """La clave estable de un correo personal: un HMAC-SHA256 con la llave (LLAVE) del buzón normalizado (_normal) y
+    el dominio, nunca el correo. Sin la llave no se puede rehacer probando nombres."""
+    usuario, _, servicio = correo.rpartition('@')
+    mensaje = 'correo|%s|%s' % (dominio, _normal(usuario, servicio))
+    return hmac.new(llave, mensaje.encode('utf-8'), hashlib.sha256).hexdigest()
 
 
 def _clasificar(correo, dominio):
@@ -298,16 +361,18 @@ def _clasificar(correo, dominio):
         return None
     if en_alcance_nombre(host, dominio):
         return ('dominio', correo) if github.correo_valido(correo, dominio) else None
-    if host in GRATUITOS and usuario[0].isalnum():
-        return 'personal', {'huella': _clave(correo, dominio), 'correo': _masca(usuario, host), 'servicio': host}
+    llave = _llave() if host in GRATUITOS and usuario[0].isalnum() else None
+    if llave:   # sin llave no se guarda (SIN_LLAVE)
+        return 'personal', {'huella': _clave(correo, dominio, llave), 'correo': _masca(usuario, host), 'servicio': host}
     return None
 
 
 def _correos_del_texto(texto, dominio):
-    """(correos del dominio, personales) de un texto: tal cual, con las entidades HTML resueltas y con los %XX de un
-    mailto: resueltos. Sin repetir, en el orden en que salen, hasta MAX_POR_PAGINA de cada uno."""
+    """(correos del dominio, personales, lleno) de un texto: tal cual, con las entidades HTML resueltas y con los %XX
+    de un mailto: resueltos. Sin repetir, en el orden en que salen, hasta MAX_POR_PAGINA de cada uno. `lleno` dice que
+    alguno pasó del tope (o el texto de MAX_TEXTO) y quedaron correos sin guardar."""
     propios, personales = [], {}
-    vistos = set()
+    vistos, lleno = set(), len(texto) > MAX_TEXTO
     base = html.unescape(texto[:MAX_TEXTO])
     for t in (base, urllib.parse.unquote(base)):
         for m in _CORREO.finditer(t):
@@ -318,23 +383,30 @@ def _correos_del_texto(texto, dominio):
             tipo = _clasificar(correo, dominio)
             if tipo is None:
                 continue
-            if tipo[0] == 'dominio' and len(propios) < MAX_POR_PAGINA:
-                propios.append(tipo[1])
-            elif tipo[0] == 'personal' and len(personales) < MAX_POR_PAGINA:
-                personales.setdefault(tipo[1]['huella'], tipo[1])
-    return propios, list(personales.values())
+            if tipo[0] == 'dominio':
+                if len(propios) < MAX_POR_PAGINA:
+                    propios.append(tipo[1])
+                else:
+                    lleno = True
+            elif tipo[1]['huella'] not in personales:
+                if len(personales) < MAX_POR_PAGINA:
+                    personales[tipo[1]['huella']] = tipo[1]
+                else:
+                    lleno = True
+    return propios, list(personales.values()), lleno
 
 
 def _correos_sueltos(correos, dominio):
-    """(correos del dominio, personales) de una lista de correos (los del certificado)."""
+    """(correos del dominio, personales, lleno) de una lista de correos (los del certificado), hasta MAX_POR_PAGINA."""
     propios, personales = [], {}
-    for c in list(correos or ())[:MAX_POR_PAGINA]:
+    correos = list(correos or ())
+    for c in correos[:MAX_POR_PAGINA]:
         tipo = _clasificar(c, dominio)
         if tipo and tipo[0] == 'dominio' and tipo[1] not in propios:
             propios.append(tipo[1])
         elif tipo and tipo[0] == 'personal':
             personales.setdefault(tipo[1]['huella'], tipo[1])
-    return propios, list(personales.values())
+    return propios, list(personales.values()), len(correos) > MAX_POR_PAGINA
 
 
 def _personal_valido(p):
@@ -347,17 +419,20 @@ def _personal_valido(p):
 # ---------------------------------------------------------------- perfiles
 
 class _Enlaces(html.parser.HTMLParser):
-    """Los href de <a>, <link> y <area> de una página, hasta MAX_POR_PAGINA * 10."""
+    """Los href de <a>, <link> y <area> de una página, hasta MAX_POR_PAGINA * 10. `lleno` dice que hubo más."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.hrefs = []
+        self.hrefs, self.lleno = [], False
 
     def handle_starttag(self, tag, attrs):
-        if tag in TAGS_ENLACE and len(self.hrefs) < MAX_POR_PAGINA * 10:
+        if tag in TAGS_ENLACE:
             for nombre, valor in attrs:
                 if nombre == 'href' and isinstance(valor, str) and valor.strip():
-                    self.hrefs.append(valor.strip())
+                    if len(self.hrefs) < MAX_POR_PAGINA * 10:
+                        self.hrefs.append(valor.strip())
+                    else:
+                        self.lleno = True
 
     handle_startendtag = handle_starttag
 
@@ -407,8 +482,14 @@ def perfil(href):
         if not usuario or not _USUARIO_RED[red].fullmatch(usuario):
             return None
         return {'red': red, 'usuario': '@' + usuario, 'url': 'https://www.tiktok.com/@%s' % usuario}
-    if red == 'github' and primero.lower() == 'orgs' and len(segmentos) >= 2:
-        primero = segmentos[1]
+    if red == 'github':
+        # Solo github.com/<login> o github.com/orgs/<org>: github.com/<dueño>/<repo> es un repo, muchas veces de un
+        # tercero (una biblioteca que el sitio cita), no el perfil de la empresa.
+        if primero.lower() == 'orgs' and len(segmentos) in (2, 3) and segmentos[2:] in ([], ['people'],
+                                                                                         ['repositories']):
+            primero = segmentos[1]
+        elif len(segmentos) != 1:
+            return None
     usuario = primero.lower()
     if usuario in RESERVADAS.get(red, ()) or not _USUARIO_RED[red].fullmatch(usuario):
         return None
@@ -420,25 +501,30 @@ def perfil(href):
 
 
 def _ruta(texto):
-    return urllib.parse.quote(texto, safe="-._~%")
+    """El usuario ya decodificado como segmento de URL: perfil(perfil(x)['url']) da lo mismo que perfil(x), también
+    con un '%' o una letra con acento en el usuario."""
+    return urllib.parse.quote(texto, safe="-._~")
 
 
 def _perfiles_del_html(cuerpo):
-    """Los perfiles (perfil()) de los enlaces de una página, sin repetir, hasta MAX_POR_PAGINA. Un HTML que el
-    parser no puede leer da los que alcanzó a ver."""
+    """(perfiles, lleno): los perfiles (perfil()) de los enlaces de una página, sin repetir, hasta MAX_POR_PAGINA, y
+    si quedaron enlaces o perfiles sin leer por un tope. Un HTML que el parser no puede leer da los que alcanzó a ver."""
     lector = _Enlaces()
     try:
         lector.feed(cuerpo[:MAX_TEXTO])
         lector.close()
     except Exception:   # un HTML raro no tumba la corrida: quedan los enlaces que ya se leyeron
         pass
-    vistos, salida = set(), []
+    vistos, salida, lleno = set(), [], lector.lleno
     for href in lector.hrefs:
         p = perfil(href)
-        if p and p['url'] not in vistos and len(salida) < MAX_POR_PAGINA:
-            vistos.add(p['url'])
-            salida.append(p)
-    return salida
+        if p and p['url'] not in vistos:
+            if len(salida) < MAX_POR_PAGINA:
+                vistos.add(p['url'])
+                salida.append(p)
+            else:
+                lleno = True
+    return salida, lleno
 
 
 def _perfil_valido(p):
@@ -452,16 +538,54 @@ def _reducir(limpia, correos_cert, dominio):
     """{estado, cortado, reto, identidad} de una página ya limpia (visita.limpiar_visita) y los correos del certificado
     de su saludo. El reto (borde.reto) dice que la página no es la del sitio: no se lee."""
     reto = _reto(borde.reto(limpia['estado'], limpia['cabeceras'], limpia['cuerpo']))
-    salida = {'estado': limpia['estado'], 'cortado': limpia['cortado'], 'reto': reto}
-    cert_propios, cert_personales = _correos_sueltos(correos_cert if isinstance(correos_cert, list) else (), dominio)
+    cert_propios, cert_personales, lleno = _correos_sueltos(correos_cert if isinstance(correos_cert, list) else (),
+                                                            dominio)
     if reto:
         propios, personales, perfiles = [], [], []
     else:
-        propios, personales = _correos_del_texto(limpia['cuerpo'], dominio)
-        perfiles = _perfiles_del_html(limpia['cuerpo'])
+        propios, personales, lleno_texto = _correos_del_texto(limpia['cuerpo'], dominio)
+        perfiles, lleno_enlaces = _perfiles_del_html(limpia['cuerpo'])
+        lleno = lleno or lleno_texto or lleno_enlaces
+    # Una página con más correos o enlaces de los que caben queda como cortada: no se leyó completa
+    salida = {'estado': limpia['estado'], 'cortado': limpia['cortado'] or lleno, 'reto': reto}
     salida['identidad'] = {'correos': propios, 'personales': personales, 'perfiles': perfiles,
                            'correos_cert': cert_propios, 'personales_cert': cert_personales}
     return salida
+
+
+def _cert_de_redireccion(datos, dominio):
+    """{correos_cert, personales_cert} del certificado que presentó un sitio que contestó con una redirección (b2 de
+    la revisión de RC-56), de su saludo (tls.correos, en vivo) o ya reducido (cert, de la grabación). None si no hubo
+    saludo con correos, como en una grabación de antes o una redirección por http."""
+    if 'cert' in datos:
+        cert = datos['cert']
+        if not isinstance(cert, dict) or set(cert) != {'correos_cert', 'personales_cert'}:
+            raise ValueError('forma inesperada')
+        _validar_correos(cert['correos_cert'], dominio)
+        _validar_personales(cert['personales_cert'])
+        return {k: [dict(x) if isinstance(x, dict) else x for x in v] for k, v in cert.items()}
+    tls = datos.get('tls')
+    correos = tls.get('correos') if isinstance(tls, dict) else None
+    if not isinstance(correos, list):
+        return None
+    propios, personales, _ = _correos_sueltos(correos, dominio)
+    return {'correos_cert': propios, 'personales_cert': personales}
+
+
+def _destino_sin_datos(destino):
+    """El destino de una redirección como se lee y se graba (a4): sin usuario, sin consulta, sin fragmento ni
+    ';parámetros', y sin correos en la ruta. Una consulta puede traer un correo (login_hint, ref) o un token. La que no
+    se puede leer queda en None, que _recorrer trata como ilegible."""
+    if not isinstance(destino, str):
+        return None
+    try:
+        partes = urllib.parse.urlsplit(destino.strip())
+        partes.port
+    except ValueError:
+        return None
+    ruta = _CORREO.sub('_', urllib.parse.unquote(partes.path.split(';', 1)[0]))
+    return urllib.parse.urlunsplit((partes.scheme, partes.netloc.rpartition('@')[2],
+                                    urllib.parse.quote(ruta, safe="/%:!$&'()*+,=-._~"), '', ''))
 
 
 def _reto(datos):
@@ -485,19 +609,25 @@ def _reducida(datos, dominio):
     if set(ident) != {'correos', 'personales', 'perfiles', 'correos_cert', 'personales_cert'}:
         raise ValueError('forma inesperada')
     for llave in ('correos', 'correos_cert'):
-        lista = ident[llave]
-        if not isinstance(lista, list) or len(lista) > MAX_POR_PAGINA or not all(
-                isinstance(c, str) and _clasificar(c, dominio) == ('dominio', c) for c in lista):
-            raise ValueError('forma inesperada')
+        _validar_correos(ident[llave], dominio)
     for llave in ('personales', 'personales_cert'):
-        lista = ident[llave]
-        if not isinstance(lista, list) or len(lista) > MAX_POR_PAGINA or not all(_personal_valido(p) for p in lista):
-            raise ValueError('forma inesperada')
+        _validar_personales(ident[llave])
     if not isinstance(ident['perfiles'], list) or len(ident['perfiles']) > MAX_POR_PAGINA or not all(
             _perfil_valido(p) for p in ident['perfiles']):
         raise ValueError('forma inesperada')
     return {'estado': estado, 'cortado': datos['cortado'] is True, 'reto': reto,
             'identidad': {k: [dict(x) if isinstance(x, dict) else x for x in v] for k, v in ident.items()}}
+
+
+def _validar_correos(lista, dominio):
+    if not isinstance(lista, list) or len(lista) > MAX_POR_PAGINA or not all(
+            isinstance(c, str) and _clasificar(c, dominio) == ('dominio', c) for c in lista):
+        raise ValueError('forma inesperada')
+
+
+def _validar_personales(lista):
+    if not isinstance(lista, list) or len(lista) > MAX_POR_PAGINA or not all(_personal_valido(p) for p in lista):
+        raise ValueError('forma inesperada')
 
 
 # ---------------------------------------------------------------- GitHub
@@ -514,6 +644,13 @@ def _elegir_repos(repos):
     candidatos = [r for r in repos if r['nombre'] and not (r['fork'] or r['deshabilitado'] or r['privado'])]
     candidatos.sort(key=lambda r: (r['subido'], r['nombre']), reverse=True)
     return candidatos[:MAX_REPOS_API], max(0, len(candidatos) - MAX_REPOS_API)
+
+
+def _fuera_del_tope(repos, elegidos):
+    """Los repos que se leerían y MAX_REPOS_API dejó fuera (para sin_revisar)."""
+    nombres = {r['nombre'] for r in elegidos}
+    return [r for r in repos if r['nombre'] and not (r['fork'] or r['deshabilitado'] or r['privado'])
+            and r['nombre'] not in nombres]
 
 
 def _commits(datos, dominio):
@@ -600,11 +737,13 @@ class _Junta:
         d = self.correos.setdefault(correo, {'origenes': set(), 'donde': [], 'partes': set()})
         self._anotar(d, origen, donde, parte)
 
-    def personal(self, p, origen, donde, parte, fecha=''):
+    def personal(self, p, origen, donde, parte, fecha='', otras=()):
+        """`otras` son partes de las que también depende (los sitios que enlazan el perfil donde salió)."""
         d = self.personales.setdefault(p['huella'], {'correo': p['correo'], 'servicio': p['servicio'],
                                                      'origenes': set(), 'donde': [], 'partes': set(),
                                                      'primera_vez': ''})
         self._anotar(d, origen, donde, parte)
+        d['partes'].update(otras)
         if fecha and (not d['primera_vez'] or fecha < d['primera_vez']):
             d['primera_vez'] = fecha
 
@@ -629,6 +768,13 @@ class _Sitio:
         self.visto = False   # se sabe qué tiene: dio su página, redirigió, no tiene A, no es pública o no tiene https
         self.falta = None    # el motivo de MOTIVOS si quedó sin revisar
         self.pagina = None   # la página reducida, si dio una
+        self.cert = None     # {correos_cert, personales_cert} del certificado de su redirección, si redirigió
+
+    @property
+    def web(self):
+        """Lo que visita._recorrer mira para no visitar otra vez un sitio (b1 de la revisión de RC-56): algo si ya se
+        sabe qué tiene, None si no."""
+        return {} if self.visto else None
 
     def sin_revisar(self, motivo):
         if self.falta is None:
@@ -668,7 +814,12 @@ def recolectar(dominio, cliente=None, ahora=None, propios=()):
 
 def _revisar(res, cliente, dominio, ahora):
     parcial, junta = [], _Junta()
-    sitios, todos_los_nombres, ct_respondio, fallas_dns, n_nombres = _sitios(res, cliente, dominio, ahora, parcial)
+    sin_llave = cliente.modo != 'reproducir' and _llave() is None
+    if sin_llave:   # sin llave no se guarda ningún correo personal: tampoco se graba, queda la grabación anterior
+        res.avisos.append(SIN_LLAVE)
+        parcial.append('llave')
+    (sitios, todos_los_nombres, ct_respondio, fallas_dns, n_nombres, cortados,
+     ct_completo) = _sitios(res, cliente, dominio, ahora, parcial)
     for host in sorted(sitios):
         _leer_sitio(res, sitios[host], junta)
     gh = _github(res, cliente, dominio, junta, parcial)
@@ -702,10 +853,17 @@ def _revisar(res, cliente, dominio, ahora):
     if not completo:
         if hechos or res.hallazgos:
             res.revisados = hechos
+            # b4: si se sabe qué partes tiene el dominio (Cert Spotter completo y la lista de repos entera), van en
+            # sin_revisar las que existen y no se revisaron, así se cierra lo de un repo borrado o de un perfil que el
+            # sitio ya no enlaza. Si no se sabe, None: solo se cierra lo que salió de partes revisadas.
+            if ct_completo and gh['enumerado']:
+                res.sin_revisar = sorted(set(faltan + cortados + gh['sobran']) - set(hechos))
         else:
             res.sin_cobertura = list(CODIGOS)
         res.avisos.append('%s, se revisaron %d de %d sitios' % (PARCIAL, len([h for h in hechos if ':' not in h]),
                                                                 len(sitios)))
+    if sin_llave and 'personal_email_exposed' not in res.sin_cobertura:
+        res.sin_cobertura = list(res.sin_cobertura) + ['personal_email_exposed']
     if cliente.modo == 'grabar' and cliente.degradada(parcial):
         res.avisos.insert(0, NO_SE_GRABO)
     else:
@@ -714,9 +872,10 @@ def _revisar(res, cliente, dominio, ahora):
 
 
 def _sitios(res, cliente, dominio, ahora, parcial):
-    """({host: _Sitio}, todos_los_nombres, ct_respondio, fallas_dns, cuántos nombres) de la visita a la portada de
-    cada nombre."""
-    todos_los_nombres = True
+    """({host: _Sitio}, todos_los_nombres, ct_respondio, fallas_dns, cuántos nombres, cortados, ct_completo) de la
+    visita a la portada de cada nombre. cortados son los nombres que MAX_SITIOS dejó fuera, y ct_completo dice que
+    Cert Spotter dio todas sus páginas: con eso se sabe qué sitios tiene el dominio."""
+    todos_los_nombres, ct_completo, cortados = True, True, []
     try:
         certs, completos = certspotter.certificados(cliente, dominio, max_paginas=visita.PAGINAS_CT,
                                                     intentos=visita.INTENTOS_CT, timeout=visita.TIMEOUT_CT)
@@ -724,16 +883,18 @@ def _sitios(res, cliente, dominio, ahora, parcial):
         if not completos:
             res.avisos.append(PREFIJO + 'Cert Spotter no dio todas sus páginas, pueden faltar sitios del dominio')
             parcial.append('paginas' if not cliente.fallas and not cliente.raras_ct else 'ct')
-            todos_los_nombres = False
+            todos_los_nombres = ct_completo = False
     except FuenteNoResponde as e:
-        certs, ct_respondio, todos_los_nombres = [], False, False
+        certs, ct_respondio, todos_los_nombres, ct_completo = [], False, False, False
         res.avisos.append('%s. Solo se visitó la raíz' % e)
         parcial.append('ct')
     nombres = shodan._nombres(dominio, certs)
     if len(nombres) > MAX_SITIOS:
         res.avisos.append(PREFIJO + 'se visitaron %d de %d nombres del dominio (MAX_SITIOS)' % (MAX_SITIOS,
                                                                                                len(nombres)))
-        nombres = visita._elegir(nombres, ahora, cliente)
+        elegidos = visita._elegir(nombres, ahora, cliente)
+        cortados = sorted(set(nombres) - set(elegidos))
+        nombres = elegidos
         parcial.append('sitios')
         todos_los_nombres = False
 
@@ -775,6 +936,7 @@ def _sitios(res, cliente, dominio, ahora, parcial):
                 sitio.sin_revisar('grabacion')
                 parcial.append('ilegible')
                 continue
+            sitio.cert = cliente.certs.get('https://%s/' % nombre)   # si su primera respuesta fue una redirección
             _registrar(sitios, sitio, host, vista)
     finally:
         cliente.reserva = 0
@@ -788,7 +950,7 @@ def _sitios(res, cliente, dominio, ahora, parcial):
     if fallas_dns:
         res.avisos.append(PREFIJO + 'el DNS no respondió al A de %s' % visita._cuantos(fallas_dns, 'nombre', 'nombres'))
         parcial.append('a')
-    return sitios, todos_los_nombres, ct_respondio, fallas_dns, len(nombres)
+    return sitios, todos_los_nombres, ct_respondio, fallas_dns, len(nombres), cortados, ct_completo
 
 
 def _registrar(sitios, sitio, host, vista):
@@ -822,6 +984,11 @@ def _registrar(sitios, sitio, host, vista):
 def _leer_sitio(res, sitio, junta):
     """Los correos y perfiles de la página de `sitio`. Lo de una página con reto no se lee. Lo de un 5xx o una página
     cortada sí: se vio en la página que llegó, aunque el sitio quede sin revisar."""
+    donde = 'certificado de %s' % sitio.nombre
+    for correo in (sitio.cert or {}).get('correos_cert', ()):
+        junta.correo(correo, 'certificado', donde, sitio.nombre)
+    for p in (sitio.cert or {}).get('personales_cert', ()):
+        junta.personal(p, 'certificado', donde, sitio.nombre)
     pagina = sitio.pagina
     if pagina is None:
         return
@@ -846,11 +1013,18 @@ def _leer_sitio(res, sitio, junta):
 def _github(res, cliente, dominio, junta, parcial):
     """Los commits de la organización declarada y el correo público de los perfiles de GitHub enlazados desde el
     sitio. {respondio, completo, hechos, faltan}: las partes 'github:...' revisadas y las que faltaron."""
-    estado = {'respondio': False, 'completo': True, 'hechos': [], 'faltan': []}
+    # enumerado: se sabe qué partes github:... existen (sin org, o con su lista de repos entera). sobran: las que
+    # existen y los topes dejaron fuera, para sin_revisar.
+    estado = {'respondio': False, 'completo': True, 'hechos': [], 'faltan': [], 'enumerado': True, 'sobran': []}
     org = github.declarada(dominio)
     aviso = (SIN_DECLARACION if org is None else DECLARO_NINGUNA if org == github.NINGUNA else
              DECLARADA_INVALIDA if not github.ORG_VALIDA.fullmatch(org) else None)
-    perfiles = sorted({d['usuario'] for d in junta.perfiles.values() if d['red'] == 'github'})
+    # login -> los sitios que lo enlazan: un correo de su perfil también depende de que el sitio lo siga enlazando
+    sitios_de = {}
+    for d in junta.perfiles.values():
+        if d['red'] == 'github':
+            sitios_de.setdefault(d['usuario'], set()).update(d['partes'])
+    perfiles = sorted(sitios_de)
     if aviso:
         res.avisos.append(aviso)
         org = None
@@ -877,15 +1051,18 @@ def _github(res, cliente, dominio, junta, parcial):
             repos = None
             res.avisos.append(str(e))
             falta(parte_org, 'github')
+        if repos is None:
+            estado['enumerado'] = False
         if isinstance(repos, dict) and repos.get('no_existe'):
             res.avisos.append(NO_EXISTE)
             repos = []
         if isinstance(repos, list):
             if len(repos) >= POR_PAGINA:
                 res.avisos.append(PREFIJO + 'GitHub dio %d repos de %s en una página: pueden faltar' % (len(repos), org))
-                estado['completo'] = False
+                estado['completo'] = estado['enumerado'] = False
                 parcial.append('repos')
             elegidos, sobran = _elegir_repos(repos)
+            estado['sobran'] += ['github:%s/%s' % (org.lower(), r['nombre']) for r in _fuera_del_tope(repos, elegidos)]
             if sobran:
                 res.avisos.append(PREFIJO + 'se leyeron los commits de %d de %d repos de %s (MAX_REPOS_API)'
                                   % (len(elegidos), len(elegidos) + sobran, org))
@@ -897,7 +1074,9 @@ def _github(res, cliente, dominio, junta, parcial):
                     falta(parte, 'cuota' if cuota else 'tiempo')
                     continue
                 try:
-                    commits = cliente.github('gh:commits:%s/%s' % (org.lower(), r['nombre']),
+                    # Con 12 hex del nombre: 'a_b' y 'a__b' (o 'web' y 'web_') no comparten archivo (c2)
+                    commits = cliente.github('gh:commits:%s/%s:%s' % (org.lower(), r['nombre'], hashlib.sha256(
+                                                 r['nombre'].encode('utf-8')).hexdigest()[:12]),
                                              '/repos/%s/%s/commits?per_page=%d' % (org, urllib.parse.quote(
                                                  r['nombre'], safe='._-'), POR_PAGINA),
                                              'los commits de %s/%s' % (org, r['nombre']),
@@ -943,6 +1122,7 @@ def _github(res, cliente, dominio, junta, parcial):
                           % (MAX_PERFILES_API, len(perfiles)))
         estado['completo'] = False
         parcial.append('perfiles')
+        estado['sobran'] += ['github:perfil:%s' % login for login in perfiles[MAX_PERFILES_API:]]
     for login in perfiles[:MAX_PERFILES_API]:
         parte = 'github:perfil:%s' % login
         if cuota or cliente.restante() < MIN_RESTANTE:
@@ -970,7 +1150,7 @@ def _github(res, cliente, dominio, junta, parcial):
         if usuario['correo']:
             junta.correo(usuario['correo'], 'perfil', donde, parte)
         if usuario['personal']:
-            junta.personal(usuario['personal'], 'perfil', donde, parte)
+            junta.personal(usuario['personal'], 'perfil', donde, parte, otras=sitios_de[login])
     if cuota:
         res.avisos.append(SIN_CUOTA)
     return estado

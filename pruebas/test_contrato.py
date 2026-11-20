@@ -430,7 +430,8 @@ class Ejecutar(unittest.TestCase):
                         'estado': 200, 'cabeceras': [['Server', 'nginx']], 'cuerpo': '<html></html>'}), \
                     mock.patch.object(identidad, '_visitar', lambda url, timeout: {
                         'estado': 200, 'cabeceras': [['Server', 'nginx']], 'cuerpo': '<html></html>', 'cortado': False}), \
-                    mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo'}):
+                    mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo',
+                                                 identidad.LLAVE: 'CIRDAN_FAKE_llave_del_hmac_de_identidad'}):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
                 (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')  # de una grabación anterior

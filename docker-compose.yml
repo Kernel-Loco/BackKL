@@ -88,6 +88,9 @@ services:
       # InternetDB: exposed_iot_device, exposed_ot_device y outdated_software salen de sus etiquetas y, sin ellas,
       # quedan sin cobertura (docs/servicios_externos.md). El valor va solo en el .env, nunca en git.
       SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      # Llave del HMAC de la huella de los correos personales del recolector de identidad (RC-56), de 32
+      # caracteres o más. Vacía, personal_email_exposed queda sin cobertura. El valor va solo en el .env.
+      IDENTITY_HMAC_KEY: ${IDENTITY_HMAC_KEY:-}
       # Explorador de la base para la demo (/demo y /db), siempre con sesión (RC-58). Con false
       # esas rutas no existen. Nunca true en producción.
       DEMO_EXPLORER: ${DEMO_EXPLORER:-false}

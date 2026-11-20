@@ -254,7 +254,10 @@ def _visitar(url, timeout, cronometro=None, saludo=None, limpiar=True):
         estado, cabeceras, cuerpo, cortado = transporte.visitar(req, cronometro() + timeout, MAX_BYTES_SITIO,
                                                                 cronometro)
     except transporte.Redirigida as e:
-        return {'redirige': e.destino if isinstance(e.destino, str) else None, 'codigo': e.codigo}
+        redirige = {'redirige': e.destino if isinstance(e.destino, str) else None, 'codigo': e.codigo}
+        if 'correos' in req.saludo:   # identidad.py lee los correos del certificado que dio la redirección
+            redirige['tls'] = dict(req.saludo)
+        return redirige
     except transporte.SinConexion:   # ninguna IP aceptó la conexión: el puerto descarta los paquetes
         return {'sin_respuesta': 'tiempo', 'al_conectar': True}
     except transporte.PlazoVencido:

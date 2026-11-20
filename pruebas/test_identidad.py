@@ -42,6 +42,16 @@ FIXTURES = RAIZ / 'pruebas' / 'fixtures' / 'identidad'
 SEMILLA = RAIZ / 'db' / 'semillas' / '026_identidad.sql'
 MIGRACION = RAIZ / 'db' / 'migraciones' / '026_tipo_activo_perfil.sql'
 DECLARADA = 'acme-demo.mx=acme-demo'
+LLAVE_FALSA = 'CIRDAN_FAKE_llave_del_hmac_de_identidad'   # IDENTITY_HMAC_KEY de las pruebas, no es de ningún despliegue
+_CON_LLAVE = mock.patch.dict(os.environ, {identidad.LLAVE: LLAVE_FALSA})
+
+
+def setUpModule():
+    _CON_LLAVE.start()
+
+
+def tearDownModule():
+    _CON_LLAVE.stop()
 
 
 def fixture(nombre):
@@ -206,7 +216,8 @@ class Identidad(unittest.TestCase):
                          (DOMINIO, 'medium', ['github:acme-demo/sitio'], '2026-10-01T09:00:00+00:00'))
         self.assertEqual(becario.caracteristicas['sensibilidad'], 'media')
         perfil_org = [h for h in lista if 'perfil' in h.evidencia['origenes']]
-        self.assertEqual([h.partes for h in perfil_org], [['github:perfil:acme-demo']])
+        # Lleva también el sitio que enlaza el perfil: si deja de enlazarlo, se cierra (b4)
+        self.assertEqual([h.partes for h in perfil_org], [[DOMINIO, 'github:perfil:acme-demo']])
         # Nunca el correo completo: ni en la evidencia, ni en la clave, ni en la huella, ni en los activos
         textos = json.dumps(res.a_dict()).lower()
         self.assertNotIn('cirdan_fake_', textos)
@@ -329,7 +340,8 @@ class Identidad(unittest.TestCase):
         res, _, _ = correr(sitios, red=Red(ct=paginas(www)), zona=zona)
         self.assertEqual(sorted(res.revisados), sorted([DOMINIO, 'github:acme-demo', 'github:acme-demo/sitio',
                                                 'github:acme-demo/vacio', 'github:perfil:acme-demo']))
-        self.assertIsNone(res.sin_revisar)
+        # Cert Spotter dio todas sus páginas: se sabe qué sitios hay y www va en sin_revisar (b4)
+        self.assertEqual(res.sin_revisar, [www])
         self.assertTrue(any('www.acme-demo.mx respondió con un reto' in x for x in res.avisos))
         self.assertTrue(any(x.startswith(identidad.PARCIAL) for x in res.avisos))
         for perfil in de_tipo(res, 'profile').values():
@@ -398,7 +410,6 @@ class Extraccion(unittest.TestCase):
     def test_1_perfiles_canonicos(self):
         casos = {
             'https://github.com/Olmardo': 'https://github.com/olmardo',
-            'https://github.com/olmardo/sitio-reservas': 'https://github.com/olmardo',
             'https://github.com/orgs/olmardo/people': 'https://github.com/olmardo',
             'http://www.github.com/olmardo/': 'https://github.com/olmardo',
             'https://mx.linkedin.com/company/Grupo-Olmardo': 'https://www.linkedin.com/company/grupo-olmardo',
@@ -417,7 +428,12 @@ class Extraccion(unittest.TestCase):
                      'https://www.instagram.com/p/abc123/', 'https://otro.com/olmardo', 'mailto:ti@olmardo.com',
                      'javascript:alert(1)', 'https://user:clave@github.com/olmardo', 'https://github.com:8443/olmardo',
                      'https://github.com.evil.com/olmardo', 'https://evilgithub.com/olmardo',
-                     'https://github.com\\@evil.com/olmardo', 'https://www.tiktok.com/olmardo', '/contacto'):
+                     'https://github.com\\@evil.com/olmardo', 'https://www.tiktok.com/olmardo', '/contacto',
+                     # b3: un repo (muchas veces de un tercero) y las páginas del servicio no son perfiles
+                     'https://github.com/olmardo/sitio-reservas', 'https://github.com/axios/axios',
+                     'https://github.com/users/foo/projects/1', 'https://github.com/orgs/', 'https://github.com/dashboard',
+                     # b7: /people/<nombre>/<id> de Facebook no es un usuario 'people'
+                     'https://www.facebook.com/people/Grupo-Olmardo/100064'):
             self.assertIsNone(identidad.perfil(href), href)
         for href in casos:   # la URL canónica da el mismo perfil: así se valida al reproducir
             p = identidad.perfil(href)
@@ -428,18 +444,22 @@ class Extraccion(unittest.TestCase):
         texto = ('<a href="mailto:Ti%40olmardo.com">x</a> contacto&#64;olmardo.com otro@reservas.olmardo.com '
                  'CIRDAN_FAKE_ana@Gmail.com cobros@proveedor.mx olmardo.com@gmail.co '
                  + 'a' * 70 + '@olmardo.com x@olmardo.comercial')
-        propios, personales = identidad._correos_del_texto(texto, 'olmardo.com')
+        propios, personales, lleno = identidad._correos_del_texto(texto, 'olmardo.com')
         self.assertEqual(propios, ['contacto@olmardo.com', 'otro@reservas.olmardo.com', 'ti@olmardo.com'])
         self.assertEqual([(p['correo'], p['servicio']) for p in personales], [('c***@gmail.com', 'gmail.com')])
-        self.assertEqual(personales[0]['huella'], identidad._clave('cirdan_fake_ana@gmail.com', 'olmardo.com'))
+        self.assertFalse(lleno)
+        llave = LLAVE_FALSA.encode()
+        self.assertEqual(personales[0]['huella'], identidad._clave('cirdan_fake_ana@gmail.com', 'olmardo.com', llave))
         # La misma persona en otro dominio da otra clave: no se liga entre empresas
-        self.assertNotEqual(identidad._clave('cirdan_fake_ana@gmail.com', 'otro.mx'), personales[0]['huella'])
+        self.assertNotEqual(identidad._clave('cirdan_fake_ana@gmail.com', 'otro.mx', llave), personales[0]['huella'])
 
     def test_3_una_pagina_enorme_o_rara_no_tumba_la_lectura(self):
         raro = '<a href="https://github.com/olmardo">' + '<' * 50000 + '<a href=' + '"' * 1000
-        self.assertEqual([p['url'] for p in identidad._perfiles_del_html(raro)], ['https://github.com/olmardo'])
+        perfiles, _ = identidad._perfiles_del_html(raro)
+        self.assertEqual([p['url'] for p in perfiles], ['https://github.com/olmardo'])
         enorme = 'x' * (identidad.MAX_TEXTO + 10) + ' ti@olmardo.com'
-        self.assertEqual(identidad._correos_del_texto(enorme, 'olmardo.com'), ([], []))
+        # Lo que pasó de MAX_TEXTO no se leyó: la página cuenta como cortada (b8)
+        self.assertEqual(identidad._correos_del_texto(enorme, 'olmardo.com'), ([], [], True))
 
     def test_4_correos_del_certificado(self):
         cert = {'subject': ((('commonName', 'olmardo.com'),), (('emailAddress', 'ti@olmardo.com'),)),
@@ -456,10 +476,8 @@ class Extraccion(unittest.TestCase):
         with mock.patch.object(transporte, 'visitar', visitar):
             crudo = identidad._visitar('https://olmardo.com/', 5)
             self.assertEqual(crudo['tls']['correos'], ['ti@olmardo.com'])
-            # La visita de web no cambia: sin saludo extra y limpia
-            limpia = visita._visitar('https://olmardo.com/', 5, saludo=None) if False else None
-        self.assertIsNone(limpia)
 
+        # La visita de web no cambia: sin saludo extra y limpia (c4)
         def visitar_web(req, plazo, tope, cronometro):
             self.assertEqual(req.saludo, {})
             req.saludo.update(version='TLSv1.3', cifrado='TLS_AES_256_GCM_SHA384')
@@ -467,6 +485,167 @@ class Extraccion(unittest.TestCase):
         with mock.patch.object(transporte, 'visitar', visitar_web):
             self.assertEqual(visita._visitar('https://olmardo.com/', 5)['tls'],
                              {'version': 'TLSv1.3', 'cifrado': 'TLS_AES_256_GCM_SHA384'})
+
+
+class Revision(unittest.TestCase):
+    """Los arreglos de la revisión de riesgo de RC-56 (ronda 1), cada uno con el id de su hallazgo."""
+
+    def test_1_sin_llave_no_guarda_correos_personales_ni_graba(self):
+        """a1: sin IDENTITY_HMAC_KEY (o corta) no hay huella que no se pueda revertir: no se guarda ningún correo
+        personal, la regla queda sin cobertura y la corrida no se graba."""
+        for valor in ('', 'CIRDAN_FAKE_corta'):
+            with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {identidad.LLAVE: valor}):
+                carpeta = Path(d) / DOMINIO
+                res, _, _ = correr(ACME, modo='grabar', carpeta=carpeta)
+                self.assertEqual(hallazgos(res, 'personal_email_exposed'), [])
+                self.assertIn(identidad.SIN_LLAVE, res.avisos)
+                self.assertIn('personal_email_exposed', res.sin_cobertura)
+                self.assertEqual(res.avisos[0], identidad.NO_SE_GRABO)
+                self.assertFalse(list(carpeta.glob('*.json')))
+                self.assertTrue(hallazgos(res, 'email_pattern_exposed'))   # lo demás sí sale
+                self.assertEqual(contrato.validar(res, set(identidad.CODIGOS)), [])
+
+    def test_2_la_huella_es_un_hmac_del_buzon_normalizado(self):
+        """a1 y a3: con otra llave cambia, sin la llave no es el sha256 del correo, y las formas del mismo buzón de
+        Gmail (+etiqueta, puntos, googlemail.com) dan la misma."""
+        import hashlib
+        llave = LLAVE_FALSA.encode()
+        huella = identidad._clave('juanperez@gmail.com', DOMINIO, llave)
+        self.assertNotEqual(huella, identidad._clave('juanperez@gmail.com', DOMINIO, b'x' * 32))
+        self.assertNotEqual(huella, hashlib.sha256(('correo|%s|juanperez@gmail.com' % DOMINIO).encode()).hexdigest())
+        for igual in ('juan.perez@gmail.com', 'juan.perez+trabajo@gmail.com', 'juanperez@googlemail.com'):
+            self.assertEqual(identidad._clave(igual, DOMINIO, llave), huella, igual)
+        # En otro servicio los puntos sí cuentan
+        self.assertNotEqual(identidad._clave('juan.perez@outlook.com', DOMINIO, llave),
+                            identidad._clave('juanperez@outlook.com', DOMINIO, llave))
+        cuerpo = '<p>CIRDAN_FAKE_ju.an@gmail.com y cirdan_fake_juan+x@googlemail.com</p>'
+        res, _, _ = correr({'https://acme-demo.mx/': pagina(cuerpo=cuerpo)}, red=Red(github_={}))
+        self.assertEqual(len(hallazgos(res, 'personal_email_exposed')), 1)
+
+    def test_3_la_mascara_de_un_usuario_corto_no_lleva_su_letra(self):
+        """a2: 'a***@outlook.com' de a@outlook.com era el correo entero."""
+        for usuario, mascara in (('a', '***@outlook.com'), ('jp', '***@outlook.com'), ('ana', '***@outlook.com'),
+                                 ('anab', 'a***@outlook.com')):
+            tipo, p = identidad._clasificar('%s@outlook.com' % usuario, DOMINIO)
+            self.assertEqual((tipo, p['correo']), ('personal', mascara), usuario)
+            self.assertTrue(identidad._personal_valido(p), usuario)
+
+    def test_4_una_redireccion_no_tumba_la_corrida_ni_graba_su_consulta(self):
+        """b1: www que redirige a la raíz ya visitada no tumba la corrida. a4: el destino se graba sin su consulta.
+        b2: los correos del certificado de www salen, con www como parte, y www queda revisado."""
+        www = 'www.acme-demo.mx'
+        sitios = dict(ACME)
+        sitios['https://%s/' % www] = {
+            'redirige': 'https://acme-demo.mx/?login_hint=CIRDAN_FAKE_hint@gmail.com#x', 'codigo': 301,
+            'tls': {'version': 'TLSv1.3', 'cifrado': 'TLS_AES_256_GCM_SHA384',
+                    'correos': ['CIRDAN_FAKE_viejo@gmail.com', 'pki@acme-demo.mx']}}
+        zona = {DOMINIO: a(IP), www: a(IP)}
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            res, _, _ = correr(sitios, red=Red(ct=paginas(www)), zona=zona, modo='grabar', carpeta=carpeta)
+            self.assertEqual(res.estado, 'succeeded')
+            self.assertIsNone(res.revisados)   # www quedó revisado: redirigió y se leyó su certificado
+            self.assertEqual(de_tipo(res, 'email')['pki@acme-demo.mx'].atributos['identidad']['donde'],
+                             ['certificado de %s' % www])
+            viejo = [h for h in hallazgos(res, 'personal_email_exposed') if h.partes == [www]]
+            self.assertEqual([h.evidencia['donde'] for h in viejo], [['certificado de %s' % www]])
+            texto = '\n'.join(p.read_text(encoding='utf-8') for p in carpeta.glob('*.json')).lower()
+            for nunca in ('login_hint', 'cirdan_fake_', '#x'):
+                self.assertNotIn(nunca, texto)
+            otra, cliente, _ = correr({}, red=Red(ct=[], github_={}), zona=zona, modo='reproducir', carpeta=carpeta)
+            self.assertEqual(cliente.consultas, 0)
+            self.assertEqual((otra.activos, otra.hallazgos, otra.revisados), (res.activos, res.hallazgos, None))
+
+    def test_5_el_destino_de_una_redireccion_se_lee_sin_datos(self):
+        """a4: sin usuario, consulta, fragmento, ';parámetros' ni correos en la ruta. Dos veces da lo mismo."""
+        casos = {'https://u:p@acme-demo.mx/a;jsessionid=1?ref=x@gmail.com#f': 'https://acme-demo.mx/a',
+                 'https://acme-demo.mx/u/juan.perez@gmail.com/': 'https://acme-demo.mx/u/_/',
+                 'https://acme-demo.mx': 'https://acme-demo.mx'}
+        for destino, esperado in casos.items():
+            self.assertEqual(identidad._destino_sin_datos(destino), esperado, destino)
+            self.assertEqual(identidad._destino_sin_datos(esperado), esperado, destino)
+        self.assertIsNone(identidad._destino_sin_datos('https://[::1/'))
+        cliente = identidad.ClienteIdentidad(dominio=DOMINIO)
+        with self.assertRaises(ValueError):
+            cliente.limpiar({'redirige': 7})
+        with self.assertRaises(ValueError):   # una grabación con un correo personal sin enmascarar
+            cliente.limpiar({'redirige': None, 'codigo': 301, 'cert': {
+                'correos_cert': [], 'personales_cert': [{'huella': '0' * 64, 'correo': 'ana@gmail.com',
+                                                         'servicio': 'gmail.com'}]}})
+
+    def test_6_con_las_partes_sabidas_van_en_sin_revisar_las_que_no_se_revisaron(self):
+        """b4: con Cert Spotter completo y la lista de repos entera, sin_revisar lleva los repos que MAX_REPOS_API dejó
+        fuera y los perfiles que dejó MAX_PERFILES_API. Si Cert Spotter no respondió, None."""
+        repos = [{'name': 'r%d' % i, 'fork': False, 'disabled': False, 'private': False, 'size': 1,
+                  'pushed_at': '2026-10-%02dT10:00:00Z' % (i + 1)} for i in range(identidad.MAX_REPOS_API + 2)]
+        enlaces = ''.join('<a href="https://github.com/acme-p%d">p</a>' % i
+                          for i in range(identidad.MAX_PERFILES_API + 1))
+        sitios = {'https://acme-demo.mx/': pagina(cuerpo='<html>%s</html>' % enlaces)}
+        res, _, _ = correr(sitios, red=Red(github_={'/orgs/acme-demo/repos': repos}))
+        self.assertEqual(res.sin_revisar, ['github:acme-demo/r0', 'github:acme-demo/r1',
+                                           'github:perfil:acme-p%d' % identidad.MAX_PERFILES_API])
+        self.assertIn('github:acme-demo/r6', res.revisados)
+        self.assertEqual(contrato.validar(res, set(identidad.CODIGOS)), [])
+        res, _, _ = correr(sitios, red=Red(ct=[500] * 10, github_={'/orgs/acme-demo/repos': repos}))
+        self.assertIsNone(res.sin_revisar)
+        # Sin la lista de repos tampoco se sabe qué partes hay
+        res, _, _ = correr(sitios, red=Red(github_={'/orgs/acme-demo/repos': 500}))
+        self.assertIsNone(res.sin_revisar)
+
+    def test_7_una_pagina_con_mas_correos_de_los_que_caben_queda_cortada(self):
+        """b8: lo que pasó del tope no se leyó, así que el sitio no queda revisado y no cierra lo suyo."""
+        cuerpo = ' '.join('p%d@acme-demo.mx' % i for i in range(identidad.MAX_POR_PAGINA + 1))
+        res, _, _ = correr({'https://acme-demo.mx/': pagina(cuerpo=cuerpo)}, red=Red(github_={}))
+        self.assertNotIn(DOMINIO, res.revisados)
+        self.assertTrue(any('tope de bytes, de correos o de enlaces' in x for x in res.avisos), res.avisos)
+        enlaces = ''.join('<a href="https://x.com/p%d">x</a>' % i for i in range(identidad.MAX_POR_PAGINA + 1))
+        self.assertTrue(identidad._perfiles_del_html(enlaces)[1])
+
+    def test_8_un_correo_con_otra_etiqueta_detras_no_es_del_dominio(self):
+        """b5: juan.perez@acme-demo.mx.xn--p1ai no es un correo de acme-demo.mx."""
+        propios, _, _ = identidad._correos_del_texto('juan.perez@acme-demo.mx.xn--p1ai luis@acme-demo.mx.x1 '
+                                                     'ana@acme-demo.mx. beto@ACME-demo.mx', DOMINIO)
+        self.assertEqual(propios, ['ana@acme-demo.mx', 'beto@acme-demo.mx'])
+
+    def test_9_linkedin_con_acentos_o_por_ciento_da_lo_mismo_al_reproducir(self):
+        """b6"""
+        for href, url in (('https://www.linkedin.com/in/jos%C3%A9-p', 'https://www.linkedin.com/in/jos%C3%A9-p'),
+                          ('https://www.linkedin.com/in/a%2541', 'https://www.linkedin.com/in/a%2541')):
+            p = identidad.perfil(href)
+            self.assertEqual(p['url'], url, href)
+            self.assertTrue(identidad._perfil_valido(p), href)
+
+    def test_10_repos_con_nombres_parecidos_no_comparten_archivo(self):
+        """c2: 'a_b' y 'a__b' (o 'web' y 'web_') daban el mismo archivo de la grabación."""
+        repos = [{'name': n, 'fork': False, 'disabled': False, 'private': False, 'size': 1,
+                  'pushed_at': '2026-10-01T10:00:00Z'} for n in ('a_b', 'a__b', 'web', 'web_')]
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            correr(ACME, red=Red(github_={'/orgs/acme-demo/repos': repos}), modo='grabar', carpeta=carpeta)
+            self.assertEqual(len(list(carpeta.glob('gh_commits_*.json'))), 4)
+
+    def test_11_el_peor_caso_no_pasa_de_max_consultas(self):
+        """c5: Cert Spotter con un reintento por página, MAX_SITIOS nombres con el A al último intento, cada sitio con
+        todas sus redirecciones, GitHub con más repos y perfiles de los topes y cada petición con todos sus intentos."""
+        nombres = ['s%d.acme-demo.mx' % i for i in range(identidad.MAX_SITIOS - 1)]
+        pagina_ct, vacia = paginas(*nombres)
+        zona = {n: ['falla'] * (identidad.shodan.INTENTOS - 1) + [a(IP)] for n in [DOMINIO] + nombres}
+        enlaces = ''.join('<a href="https://github.com/acme-p%d">p</a>' % i
+                          for i in range(identidad.MAX_PERFILES_API + 2))
+        sitios = {}
+        for n in [DOMINIO] + nombres:
+            for salto in range(identidad.MAX_REDIRECCIONES + 1):
+                sitios['https://%s/%s' % (n, 'p%d' % salto if salto else '')] = {
+                    'redirige': 'https://%s/p%d' % (n, salto + 1), 'codigo': 302}
+        sitios['https://%s/' % DOMINIO] = pagina(cuerpo=enlaces)
+        repos = [{'name': 'r%d' % i, 'fork': False, 'disabled': False, 'private': False, 'size': 1,
+                  'pushed_at': '2026-10-%02dT10:00:00Z' % (i + 1)} for i in range(identidad.MAX_REPOS_API + 2)]
+        api = {'/orgs/acme-demo/repos': repos}
+        api.update({'/repos/acme-demo/r%d/commits' % i: 500 for i in range(len(repos))})
+        api.update({'/users/acme-p%d' % i: 500 for i in range(identidad.MAX_PERFILES_API + 2)})
+        res, cliente, _ = correr(sitios, red=Red(ct=[500, pagina_ct, 500, vacia], github_=api), zona=zona)
+        self.assertGreater(res.consultas, identidad.MAX_CONSULTAS // 2)
+        self.assertLessEqual(res.consultas, identidad.MAX_CONSULTAS)
 
 
 class Base(unittest.TestCase):
