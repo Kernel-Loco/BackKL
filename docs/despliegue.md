@@ -325,7 +325,7 @@ En cada ventana de prueba:
 - Al abrir, `docker compose up -d`. Se anotan la hora y los minutos hasta que `https://pruebas.lowtidesec.com/login` respondió 200.
 - La prueba de punta a punta: login con MFA, ver un dominio y cerrar sesión, sin 403. La respuesta del login trae `Set-Cookie: lt_session` con `Secure` (RC-286). Un login con una X-Forwarded-For inventada cuenta el fallo con la IP real, y 20 fallos desde una IP no bloquean el login desde otra.
 - ZAP activo nunca va por el túnel, sino contra una pila local sin túnel: Cloudflare frena el escaneo y el reporte mezclaría su WAF con LowTide. Por el túnel solo va el escaneo pasivo (cabeceras, HSTS y certificado). El cambio de destino se comenta en RC-89 antes del primer escaneo.
-- Al cerrar, `docker compose stop` (la base se queda) y se anota la hora. `docker inspect -f '{{.State.StartedAt}} {{.State.FinishedAt}}' lowtide-pruebas-cloudflared-1` da las dos horas del túnel en UTC. Con `restart: unless-stopped`, un contenedor detenido a mano no vuelve a arrancar al reiniciar la PC.
+- Al cerrar, `docker compose stop` (la base se queda) y se anota la hora. `docker inspect -f '{{.State.StartedAt}} {{.State.FinishedAt}}' lowtide-pruebas-cloudflared-1` da las dos horas del túnel en UTC. Con `restart: unless-stopped`, un contenedor detenido a mano no vuelve a arrancar al reiniciar la PC. Uno que no se detuvo sí: si la PC se apaga o se reinicia a mitad de una ventana, Docker Desktop vuelve a levantar el túnel. Por eso el `stop` va antes de apagar, y al prender la PC fuera de una ventana se revisa `docker compose ps`. Si cloudflared quedó arriba, se detiene y se anota el rato que estuvo publicado.
 - Las horas de cada ventana van en un comentario de RC-277.
 
 ## Pruebas

@@ -143,7 +143,7 @@ def _es_local(origen):
 def origenes_publicados():
     """Los valores de `ALLOWED_ORIGINS` que `_es_local` no acepta como origen local, en orden alfabético. Sin la
     variable vale la lista por omisión de la API (ORIGENES_LOCALES), que es toda local. Vacía, aquí se toma como
-    sin poner. La API (cirdan/api/main.py) la toma como ningún origen."""
+    sin poner, igual que en la API (cirdan.config.origenes_permitidos, RC-277)."""
     declarados = [o.strip() for o in (config('ALLOWED_ORIGINS') or '').split(',') if o.strip()]
     return sorted(o for o in declarados or ORIGENES_LOCALES.split(',') if not _es_local(o))
 

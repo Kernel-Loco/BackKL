@@ -3,13 +3,17 @@
 La IP con que el login cuenta sus 20 fallos la da uvicorn con --proxy-headers (Dockerfile): de derecha a izquierda,
 la primera de X-Forwarded-For que no está en FORWARDED_ALLOW_IPS. Estas pruebas usan el ProxyHeadersMiddleware real de
 uvicorn con la lista del despliegue (docker-compose.despliegue.yml, la revisa test_despliegue.py test_7) y con la del
-README fuera de Docker (--forwarded-allow-ips=""), y el bloqueo real con un Valkey falso. Corren dentro del contenedor,
-porque piden uvicorn y redis:
+README fuera de Docker (--forwarded-allow-ips=""), y el contador por IP de sessions (register_fail e is_locked) con un
+Valkey falso. El camino del login con take_login_attempt lo prueban test_login_sin_red.py y test_auth.py. Corren dentro
+del contenedor, porque piden uvicorn y redis:
 
     docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest -v pruebas/test_ip_cliente.py
 """
 import asyncio
+import json
 import os
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -92,6 +96,50 @@ class Origenes(unittest.TestCase):
     def test_8_la_declarada_sin_espacios_ni_vacios(self):
         self.assertEqual(self.origenes(' https://pruebas.lowtidesec.com , ,https://lowtidesec.com,'),
                          ['https://pruebas.lowtidesec.com', 'https://lowtidesec.com'])
+
+    def test_9_escrita_como_el_origin_del_navegador(self):
+        # El navegador manda esquema y host en minúsculas, sin barra ni puerto por omisión. Escrita de otra forma, la
+        # regla de RC-286 la veía https y el filtro de Origin rechazaba todo POST.
+        valor = ' HTTPS://Pruebas.LowTideSec.com:443/ ,http://LOCALHOST:80,http://localhost:3000/'
+        self.assertEqual(self.origenes(valor),
+                         ['https://pruebas.lowtidesec.com', 'http://localhost', 'http://localhost:3000'])
+        # Con ruta o sin host no es un origen: se queda tal cual y no coincide con ningún Origin.
+        self.assertEqual(self.origenes('https://lowtidesec.com/app,lowtidesec.com'),
+                         ['https://lowtidesec.com/app', 'lowtidesec.com'])
+
+    def test_10_el_filtro_de_la_api_usa_la_misma_lista(self):
+        # La API arma su lista al importar cirdan.api.main: se importa en otro proceso con cada valor y se manda un
+        # POST por ASGI, sin lifespan, base ni red. 404 es que el filtro lo dejó pasar.
+        for valor, pasa, no_pasa in (('', 'http://localhost:3000', 'https://otro.example'),
+                                     (' HTTPS://Pruebas.lowtidesec.com:443/ ', 'https://pruebas.lowtidesec.com',
+                                      'http://localhost:3000')):
+            with self.subTest(valor=valor):
+                r = subprocess.run([sys.executable, '-c', POST_POR_ASGI, pasa, no_pasa],
+                                   env=dict(os.environ, ALLOWED_ORIGINS=valor), capture_output=True, text=True,
+                                   timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+                self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]), [404, 403])
+
+
+POST_POR_ASGI = '''
+import asyncio, json, sys
+from cirdan.api import main
+
+async def post(origen):
+    estado = {}
+    async def recibir():
+        return {'type': 'http.request', 'body': b'', 'more_body': False}
+    async def enviar(mensaje):
+        if mensaje['type'] == 'http.response.start':
+            estado['codigo'] = mensaje['status']
+    await main.app({'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': 'POST',
+                    'scheme': 'http', 'path': '/no-existe-rc277', 'raw_path': b'/no-existe-rc277', 'query_string': b'',
+                    'root_path': '', 'headers': [(b'host', b'api'), (b'origin', origen.encode())],
+                    'client': ('127.0.0.1', 1), 'server': ('api', 8000)}, recibir, enviar)
+    return estado['codigo']
+
+print(json.dumps([asyncio.run(post(sys.argv[1])), asyncio.run(post(sys.argv[2]))]))
+'''
 
 
 if __name__ == '__main__':

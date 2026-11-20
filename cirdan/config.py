@@ -1,6 +1,7 @@
 """Configuración de Cirdan: variables de entorno o, fuera de Docker, el `.env` de la raíz."""
 import os
 from functools import cache
+from urllib.parse import urlsplit
 
 from cirdan import RAIZ
 
@@ -23,11 +24,25 @@ def config(name, default=None):
     return _env_file().get(name, default)
 
 
+def _como_origin(origen):
+    """El origen como lo manda el navegador en Origin: esquema y host en minúsculas, sin barra final y sin el puerto
+    por omisión (443 en https, 80 en http). Uno con ruta, consulta o sin host se deja tal cual y no coincide nunca."""
+    partes = urlsplit(origen.rstrip('/'))
+    if not partes.scheme or not partes.netloc or partes.path or partes.query or partes.fragment:
+        return origen
+    esquema, netloc = partes.scheme.lower(), partes.netloc.lower()
+    defecto = {'https': ':443', 'http': ':80'}.get(esquema)
+    if defecto and netloc.endswith(defecto):
+        netloc = netloc[:-len(defecto)]
+    return '%s://%s' % (esquema, netloc)
+
+
 def origenes_permitidos():
-    """Orígenes de `ALLOWED_ORIGINS`, sin espacios ni vacíos. Sin poner o vacía, ORIGENES_LOCALES: docker-compose.yml
-    la pasa a la API con `${ALLOWED_ORIGINS:-}`, y con '' la API rechazaría toda escritura con Origin (comentario
-    10401 de RC-277). Es la misma regla que el candado de las cuentas de demo (cirdan/auth/demo.py)."""
-    declarados = [o.strip() for o in (config('ALLOWED_ORIGINS') or '').split(',') if o.strip()]
+    """Orígenes de `ALLOWED_ORIGINS`, sin espacios ni vacíos y escritos como el Origin del navegador. Sin poner o vacía,
+    ORIGENES_LOCALES: docker-compose.yml la pasa a la API con `${ALLOWED_ORIGINS:-}`, y con '' la API rechazaría toda
+    escritura con Origin (comentario 10401 de RC-277). Es la misma regla que el candado de las cuentas de demo
+    (cirdan/auth/demo.py). La usan el filtro de Origin (cirdan/api/main.py), las passkeys y la regla de RC-286."""
+    declarados = [_como_origin(o.strip()) for o in (config('ALLOWED_ORIGINS') or '').split(',') if o.strip()]
     return declarados or ORIGENES_LOCALES.split(',')
 
 
