@@ -112,7 +112,7 @@ jobs:
           docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -e RUTA_REPORTE=1 -e INTEGRACION_SUBFINDER=1 -e ESTADO_CARTA=1 -e CIRDAN_TEST_DB_ISOLATED=true
           -v "$PWD/pruebas:/app/pruebas:ro"
           -v "$PWD/datos/ml:/app/datos/ml:ro" -v "$PWD/db:/app/db:ro" -v "$PWD/docs:/app/docs:ro" -v "$PWD/Dockerfile:/app/Dockerfile:ro"
-          api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_txt.py
+          api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_anomalias_ml.py pruebas/test_auditoria_humana_ml.py pruebas/test_txt.py
           pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_login_sin_red.py pruebas/test_tope_cuerpo.py pruebas/test_llave_totp.py pruebas/test_llave_huellas.py
           pruebas/test_captcha.py pruebas/test_documentacion_api.py
           pruebas.test_github.Integracion
