@@ -40,6 +40,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/024_bandas_por_organizacion.sql` | Bandas de riesgo por cliente (RC-237, #118): `band_medium_from`, `band_high_from` y `band_critical_from` en `scoring_rule_sets`, NOT NULL, con 40, 60 y 80 en los juegos que ya existen. CHECK `scoring_rule_sets_band_cutoffs_ck`: medio desde 10, al menos 10 valores por banda y crítico a más tardar en 91. Trigger `scoring_rule_sets_copiar_cortes_bi`: un juego nuevo sin cortes copia los de la última versión de su organización o los del global activo. `cirdan_app` no recibe permisos nuevos: sigue solo con UPDATE de `is_active`, así los cortes de una versión no cambian. Va antes de reconstruir la API. Solo se corre una vez: la segunda falla en el ADD COLUMN |
 | `migraciones/025_textos_higiene_certificados.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `cert_internal_name` (T1596.003, ISO A.8.31, CIS 16.8), `cert_broad_wildcard` (sin técnica de ATT&CK, ISO A.8.24, CIS 3.10) y `cert_new_issuer` (T1588.004, ISO A.8.24, CIS 3.10), las 3 reglas de higiene de certificados de `ct_logs` (#14, RC-218). Va antes de la semilla 025. Se puede correr otra vez sin error |
 | `migraciones/026_huellas_por_version.sql` | Rotación de la llave de las huellas de contraseña (RC-333): función `password_hash_version_orgs(p_version)`, SECURITY DEFINER con search_path fijo que termina en `pg_temp`, que da a `cirdan_app` solo los ids de las empresas con huellas `lt<versión>$` de esa versión, sin huellas, correos, ids de usuario ni conteos. La usa `cirdan/auth/rotar_huellas.py`, que luego recorre cada empresa con RLS. La API no la lee: puede ir antes o después de reconstruirla. Se puede correr otra vez sin error |
+| `migraciones/027_mfa_operador.sql` | Permite detectar cuentas `platform_admins` aunque no tengan TOTP activo, para que el login rechace la contraseña como único factor en una cuenta operadora (#66). Solo expone esa comprobación mediante una función `SECURITY DEFINER`; no da acceso a la tabla |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -131,6 +132,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/024_bandas_por_organizacion.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/025_textos_higiene_certificados.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/026_huellas_por_version.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/027_mfa_operador.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -471,6 +473,12 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM sc
 ```
 
 Da `0`: ningún juego sin las 3 reglas.
+
+Para exigir MFA a las cuentas de la consola de operador (#66), la migración 026 agrega una función de consulta y no modifica datos. Aplícala antes de reconstruir la API, que la consulta al validar el inicio de sesión:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/027_mfa_operador.sql
+```
 
 ## Respaldar y restaurar
 

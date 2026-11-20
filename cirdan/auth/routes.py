@@ -26,6 +26,7 @@ INVALID = 'Correo o contraseña incorrectos.'
 LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
+OPERATOR_MFA_REQUIRED = 'Las cuentas de operador deben tener MFA activo antes de iniciar sesión.'
 CAPTCHA_INVALID = 'No se pudo comprobar que no eres un robot. Espera a que termine la verificación e inténtalo de nuevo.'
 
 
@@ -213,7 +214,7 @@ def get_captcha(response: Response):
     return captcha.new_challenge()
 
 
-@router.post('/login',summary='Correo, contraseña y captcha; si la cuenta tiene MFA, pide el código')
+@router.post('/login', summary='Correo, contraseña y captcha; pide MFA cuando la cuenta lo requiere')
 def login(body: LoginIn, request: Request, response: Response):
     # El captcha va antes que todo: sin él no se busca el correo ni se mira el bloqueo, así que la respuesta no dice
     # nada de la cuenta. No cuenta como fallo de contraseña: si contara, cualquiera bloquearía un correo ajeno sin
@@ -256,6 +257,7 @@ def login(body: LoginIn, request: Request, response: Response):
     # La contraseña es correcta: el intento no fue un fallo y se devuelve, al correo y a la IP.
     sessions.refund_login_attempt(email, ip, ticket)
 
+    operator_mfa_required = False
     with transaction(org) as conn:
         if passwords.needs_rehash(found['password_hash'], user_id):
             # Una huella vieja sin cifrar queda cifrada en este mismo inicio de sesión (RC-330). Solo si nadie la
@@ -285,7 +287,15 @@ def login(body: LoginIn, request: Request, response: Response):
             raise HTTPException(401, INVALID)
         if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
-        user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': email}, ip, 'password')
+        operator_mfa_required = bool(conn.execute(
+            'SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required'])
+        if operator_mfa_required:
+            audit(conn, org, 'auth.operator_mfa_required', user_id, ip, 'user', user_id)
+        else:
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
+                                                    'email': email}, ip, 'password')
+    if operator_mfa_required:
+        raise HTTPException(403, OPERATOR_MFA_REQUIRED)
     _clear_fails(email)
     return {'mfa_required': False, 'user': user}
 
