@@ -12,51 +12,53 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 - **Peso:** `weight`, que no tiene columna en la tabla. Las 23 reglas nuevas llevan 1.000 y las 7 de la semilla 001 conservan el suyo: 1.000 en `breach_exposure` y `lookalike_domain`, 0.400 en `cert_expired` y `outdated_software`, 0.200 en `exposed_rdp` y 0.500 en `dmarc_missing` y `spf_missing` (`db/semillas/001_datos_demo.sql:36-42` y `docs/api_v1/pesos.json`). El motor multiplica los puntos por `weight` y aplica `max_penalty` como tope por hallazgo; por eso el peso sí puede cambiar la nota cuando el aporte no llega al tope (`cirdan/score/motor.py`).
 - **Recolector:** el número del backlog y la clave de Jira de la tarjeta que emite el código.
 - **Estado:** Lo emite hoy (su recolector está en dev), Planeado (su recolector es una tarjeta de #14 a #20 que todavía no está en dev) o Previsto (sale de las extras #62 a #64).
+- **Qué falta:** dependencia de una regla que aún no emite; `—` no significa que la cobertura de cada escaneo sea completa.
+- **Superficie moderna:** categoría del reto, distinta de la categoría del score. `—` indica que no se usa como evidencia de las cinco categorías de esta medición.
 
 ## Las 40 reglas
 
-| Id | Código | Categoría | Severidad base | Tope | Recolector | Estado |
-|---|---|---|---|---|---|---|
-| 01 | `breach_exposure` | data_leaks | critical | 40.00 | #19 RC-54 | Planeado |
-| 02 | `cert_expired` | infrastructure | high | 20.00 | #14 RC-47 | Lo emite hoy |
-| 03 | `outdated_software` | infrastructure | high | 25.00 | #18 RC-46, #17 RC-49, RC-220 y RC-337 | Lo emite hoy |
-| 04 | `exposed_rdp` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
-| 05 | `dmarc_missing` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
-| 06 | `spf_missing` | configuration | low | 8.00 | #15 RC-48 | Lo emite hoy |
-| 07 | `lookalike_domain` | digital_identity | medium | 15.00 | #14 RC-47 | Lo emite hoy |
-| 08 | `cert_expiring_soon` | infrastructure | medium | 10.00 | #14 RC-47 y #14b RC-184 | Lo emite hoy |
-| 09 | `domain_expiring_soon` | infrastructure | medium | 10.00 | #15b RC-166 | Lo emite hoy |
-| 10 | `spf_allow_all` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
-| 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy |
-| 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Lo emite hoy |
-| 13 | `email_in_public_commits` | digital_identity | low | 8.00 | #16 RC-50 | Lo emite hoy |
-| 14 | `breach_exposure_old` | data_leaks | high | 25.00 | #19 RC-54 | Planeado |
-| 15 | `breach_exposure_no_passwords` | data_leaks | medium | 10.00 | #19 RC-54 | Planeado |
-| 16 | `personal_email_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado |
-| 17 | `email_pattern_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado |
-| 18 | `exposed_remote_admin` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
-| 19 | `exposed_file_sharing` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
-| 20 | `exposed_database` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
-| 21 | `exposed_ot_device` | infrastructure | critical | 40.00 | #17 RC-49, RC-220 y RC-337 | Lo emite hoy |
-| 22 | `exposed_iot_device` | infrastructure | high | 25.00 | #17 RC-49, RC-220 y RC-337 | Lo emite hoy |
-| 23 | `exposed_service` | infrastructure | low | 8.00 | #17 RC-49 | Lo emite hoy |
-| 24 | `known_vulnerability` | infrastructure | medium | 10.00 | #17 RC-49 y #18 RC-46 | Lo emite hoy |
-| 25 | `server_version_disclosed` | configuration | low | 8.00 | #18 RC-46 | Lo emite hoy |
-| 26 | `public_bucket` | data_leaks | high | 25.00 | #62 | Previsto |
-| 27 | `subdomain_takeover_risk` | configuration | high | 25.00 | #62 | Previsto |
-| 28 | `exposed_api_docs` | infrastructure | medium | 10.00 | #63 RC-118 | Lo emite hoy |
-| 29 | `api_auth_not_declared` | infrastructure | medium | 10.00 | #63 RC-118 | Lo emite hoy |
-| 30 | `secret_in_container_image` | data_leaks | critical | 40.00 | #64 | Previsto |
-| 31 | `exposed_container_api` | infrastructure | high | 25.00 | #17 RC-224 | Lo emite hoy |
-| 32 | `directory_listing` | configuration | medium | 10.00 | #111 RC-228 | Lo emite hoy |
-| 33 | `debug_page_exposed` | configuration | high | 25.00 | #111 RC-228 | Lo emite hoy |
-| 34 | `tls_certificate_invalid` | infrastructure | medium | 10.00 | #121 RC-239 | Lo emite hoy |
-| 35 | `tls_legacy_only` | infrastructure | medium | 10.00 | #121 RC-239 | Lo emite hoy |
-| 36 | `file_share_link_in_repo` | data_leaks | medium | 10.00 | #16 RC-247 | Lo emite hoy |
-| 37 | `exposed_ai_service` | infrastructure | high | 25.00 | #17 RC-262 | Lo emite hoy |
-| 38 | `cert_internal_name` | infrastructure | low | 8.00 | #14 RC-218 | Lo emite hoy |
-| 39 | `cert_broad_wildcard` | infrastructure | low | 8.00 | #14 RC-218 | Lo emite hoy |
-| 40 | `cert_new_issuer` | infrastructure | medium | 10.00 | #14 RC-218 | Lo emite hoy |
+| Id | Código | Categoría | Severidad base | Tope | Recolector | Estado | Qué falta | Superficie moderna |
+|---|---|---|---|---|---|---|---|---|
+| 01 | `breach_exposure` | data_leaks | critical | 40.00 | #19 RC-54 | Planeado | Recolector HIBP RC-54 | — |
+| 02 | `cert_expired` | infrastructure | high | 20.00 | #14 RC-47 | Lo emite hoy | — | — |
+| 03 | `outdated_software` | infrastructure | high | 25.00 | #18 RC-46, #17 RC-49, RC-220 y RC-337 | Lo emite hoy | — | — |
+| 04 | `exposed_rdp` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy | — | — |
+| 05 | `dmarc_missing` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy | — | — |
+| 06 | `spf_missing` | configuration | low | 8.00 | #15 RC-48 | Lo emite hoy | — | — |
+| 07 | `lookalike_domain` | digital_identity | medium | 15.00 | #14 RC-47 | Lo emite hoy | — | — |
+| 08 | `cert_expiring_soon` | infrastructure | medium | 10.00 | #14 RC-47 y #14b RC-184 | Lo emite hoy | — | — |
+| 09 | `domain_expiring_soon` | infrastructure | medium | 10.00 | #15b RC-166 | Lo emite hoy | — | — |
+| 10 | `spf_allow_all` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy | — | — |
+| 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy | — | — |
+| 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Lo emite hoy | — | Secretos |
+| 13 | `email_in_public_commits` | digital_identity | low | 8.00 | #16 RC-50 | Lo emite hoy | — | — |
+| 14 | `breach_exposure_old` | data_leaks | high | 25.00 | #19 RC-54 | Planeado | Recolector HIBP RC-54 | — |
+| 15 | `breach_exposure_no_passwords` | data_leaks | medium | 10.00 | #19 RC-54 | Planeado | Recolector HIBP RC-54 | — |
+| 16 | `personal_email_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado | Recolector de identidad pasiva RC-56 | — |
+| 17 | `email_pattern_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado | Recolector de identidad pasiva RC-56 | — |
+| 18 | `exposed_remote_admin` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy | — | — |
+| 19 | `exposed_file_sharing` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy | — | — |
+| 20 | `exposed_database` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy | — | — |
+| 21 | `exposed_ot_device` | infrastructure | critical | 40.00 | #17 RC-49, RC-220 y RC-337 | Lo emite hoy | — | IoT y OT |
+| 22 | `exposed_iot_device` | infrastructure | high | 25.00 | #17 RC-49, RC-220 y RC-337 | Lo emite hoy | — | IoT y OT |
+| 23 | `exposed_service` | infrastructure | low | 8.00 | #17 RC-49 | Lo emite hoy | — | — |
+| 24 | `known_vulnerability` | infrastructure | medium | 10.00 | #17 RC-49 y #18 RC-46 | Lo emite hoy | — | — |
+| 25 | `server_version_disclosed` | configuration | low | 8.00 | #18 RC-46 | Lo emite hoy | — | — |
+| 26 | `public_bucket` | data_leaks | high | 25.00 | #62 | Previsto | Recolector de nube RC-119 | Nube |
+| 27 | `subdomain_takeover_risk` | configuration | high | 25.00 | #62 | Previsto | Recolector de nube RC-119 | Nube |
+| 28 | `exposed_api_docs` | infrastructure | medium | 10.00 | #63 RC-118 | Lo emite hoy | — | APIs |
+| 29 | `api_auth_not_declared` | infrastructure | medium | 10.00 | #63 RC-118 | Lo emite hoy | — | APIs |
+| 30 | `secret_in_container_image` | data_leaks | critical | 40.00 | #64 | Previsto | Recolector de imágenes RC-120 | Contenedores |
+| 31 | `exposed_container_api` | infrastructure | high | 25.00 | #17 RC-224 | Lo emite hoy | — | Contenedores |
+| 32 | `directory_listing` | configuration | medium | 10.00 | #111 RC-228 | Lo emite hoy | — | — |
+| 33 | `debug_page_exposed` | configuration | high | 25.00 | #111 RC-228 | Lo emite hoy | — | — |
+| 34 | `tls_certificate_invalid` | infrastructure | medium | 10.00 | #121 RC-239 | Lo emite hoy | — | — |
+| 35 | `tls_legacy_only` | infrastructure | medium | 10.00 | #121 RC-239 | Lo emite hoy | — | — |
+| 36 | `file_share_link_in_repo` | data_leaks | medium | 10.00 | #16 RC-247 | Lo emite hoy | — | Nube |
+| 37 | `exposed_ai_service` | infrastructure | high | 25.00 | #17 RC-262 | Lo emite hoy | — | — |
+| 38 | `cert_internal_name` | infrastructure | low | 8.00 | #14 RC-218 | Lo emite hoy | — | — |
+| 39 | `cert_broad_wildcard` | infrastructure | low | 8.00 | #14 RC-218 | Lo emite hoy | — | — |
+| 40 | `cert_new_issuer` | infrastructure | medium | 10.00 | #14 RC-218 | Lo emite hoy | — | — |
 
 Por categoría: infrastructure 21, digital_identity 4, configuration 8 y data_leaks 7. Los secretos y los enlaces para compartir en repos públicos (#16) van a data_leaks y los correos en commits a digital_identity, como pide #30.
 
