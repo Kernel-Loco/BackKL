@@ -99,6 +99,14 @@ services:
       # InternetDB: exposed_iot_device, exposed_ot_device y outdated_software salen de sus etiquetas y, sin ellas,
       # quedan sin cobertura (docs/servicios_externos.md). El valor va solo en el .env, nunca en git.
       SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      # Asistente (#38): endpoints compatibles con OpenAI. Los secretos solo viven en .env; sin configuración,
+      # el endpoint responde 503 y no sustituye la respuesta por texto inventado.
+      IA_BASE_URL: ${IA_BASE_URL:-}
+      IA_API_KEY: ${IA_API_KEY:-}
+      IA_MODELO: ${IA_MODELO:-openai/gpt-oss-120b}
+      IA_RESPALDO_BASE_URL: ${IA_RESPALDO_BASE_URL:-}
+      IA_RESPALDO_API_KEY: ${IA_RESPALDO_API_KEY:-}
+      IA_RESPALDO_MODELO: ${IA_RESPALDO_MODELO:-openai/gpt-oss-120b}
       # Explorador de la base para la demo (/demo y /db), siempre con sesión (RC-58). Con false
       # esas rutas no existen. Nunca true en producción.
       DEMO_EXPLORER: ${DEMO_EXPLORER:-false}
