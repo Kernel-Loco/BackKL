@@ -1,6 +1,6 @@
-# Base de datos de Cirdan (PostgreSQL 16)
+# Base de datos de LowTide (PostgreSQL 16)
 
-Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirdan_esquema.dbml), en esta carpeta, que se ve como diagrama pegando su contenido en el editor de la izquierda de https://dbdiagram.io/d), creada el 2 oct 2026 en un contenedor Docker local y mostrada en vivo en la revisión del 2 oct.
+Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cirdan_esquema.dbml), en esta carpeta, que se ve como diagrama pegando su contenido en el editor de la izquierda de https://dbdiagram.io/d), creada el 2 oct 2026 en un contenedor Docker local y mostrada en vivo en la revisión del 2 oct.
 
 ## Carpetas
 
@@ -9,10 +9,11 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `migraciones/` | Cambios de esquema numerados (`NNN_descripcion.sql`), en orden. Una migración que ya entró a dev no se edita, se agrega otra |
 | `semillas/` | Datos de demo y de prueba, que se cargan después de las migraciones |
 | `consultas/` | Scripts de psql que se corren a mano sobre la base cargada |
+| `respaldo/` | Respaldo diario cifrado y restauración en una base nueva (RC-233). Ver «Respaldar y restaurar» |
 
 | Archivo | Qué hace |
 |---|---|
-| `cirdan_esquema.dbml` | Modelo lógico de la base (24 tablas en 7 grupos: las 23 de la migración inicial más la de la 003). Lo que la base hace distinto está en «Decisiones y desviaciones respecto al DBML» |
+| `cirdan_esquema.dbml` | Modelo lógico de la base (25 tablas en 7 grupos: las 23 de la migración inicial más la de la 003 y la de la 011). Lo que la base hace distinto está en «Decisiones y desviaciones respecto al DBML» |
 | `migraciones/001_esquema_inicial.sql` | Extensiones, rol, función de tenant, 23 tablas, índices, triggers, RLS, GRANT y COMMENT ON TABLE |
 | `migraciones/002_login.sql` | Función `login_lookup()` para iniciar sesión sin abrir RLS (#25) |
 | `migraciones/003_textos_reglas.sql` | Tabla `scoring_rule_texts` con el título, qué significa y qué hacer de las 30 reglas del juego v1, y la FK de `scoring_rules.code` a esa tabla, para que toda regla tenga texto (RC-66, #30). Catálogo global sin RLS, `cirdan_app` solo lee |
@@ -23,6 +24,21 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `migraciones/008_limite_diario_fuentes.sql` | Límite diario de consultas por fuente (RC-184, #13b): `daily_limit`, `daily_used` y `daily_used_on` en `data_sources` (día UTC) y las funciones `reserve_source_quota()` y `adjust_source_quota()`, SECURITY DEFINER de `postgres`, que son lo único que mueve el contador. `cirdan_app` no tiene UPDATE: lee las columnas y ejecuta las funciones, y con ellas puede mover `daily_used` del día (el ajuste acepta cualquier delta) |
 | `migraciones/009_version_modelo_score.sql` | Guarda la versión del clasificador ML y el motivo de fallback a reglas en cada snapshot de score (#36) |
 | `migraciones/010_motivo_correccion_score.sql` | Agrega `correction` a los motivos de `domain_scores.reason`, para una fila que corrige un score guardado mal sin escaneo ni cambio de reglas (RC-72) |
+| `migraciones/011_mapeo_marcos.sql` | Tabla `scoring_rule_framework_mappings` con el mapeo de las 30 reglas de entonces a MITRE ATT&CK (Enterprise v19), ISO/IEC 27001:2022 y CIS Controls v8.1 (identificadores, nombres breves y enlaces), con la FK de cada mapeo a su texto de `scoring_rule_texts` (#68, RC-131). Catálogo global sin RLS, `cirdan_app` solo lee. No se puede correr dos veces: la segunda falla en el CREATE TABLE y se deshace sin cambiar nada |
+| `migraciones/012_garantia_mapeo_marcos.sql` | FK diferida de `scoring_rule_texts.code` al mapeo de la 011, para que todo texto (y toda regla) tenga su mapeo siempre y no solo al aplicar la 011, y `created_at` y `updated_at` en el mapeo. Corrige el mapeo de la 011: técnica de ATT&CK solo con relación directa, enlaces fijos a la v19, 11 controles de ISO y CIS en 10 reglas y el comentario de la tabla (#68, RC-131). Necesita la 011 |
+| `migraciones/013_pesos_por_organizacion.sql` | Conserva v1 como plantilla global y habilita juegos versionados de pesos/reglas por organización con RLS (#32) |
+| `migraciones/014_cves_desde_recolectores.sql` | Da a `cirdan_app` INSERT sobre `description`, `cvss_base_score`, `cvss_vector` y `published_at` de `cves`, solo al crear la fila (sin UPDATE), para que el orquestador guarde las CVE que la fuente `web` trae de la NVD (#18, RC-46). Va antes que la semilla 012: sin ella, un escaneo de `web` que trae CVE falla al insertarlas y queda `failed` |
+| `migraciones/015_tipo_activo_api_doc.sql` | Agrega `api_doc` al CHECK de `assets.asset_type`: la documentación de un servicio web (Swagger u OpenAPI, o la página de Swagger UI o de ReDoc) que un sitio del dominio deja a la vista, con su URL en `value` y su sitio como activo padre (#63, RC-118). En una transacción, pone en el CHECK la lista fija de los 7 tipos y vuelve a escribir los comentarios de `assets`. Se puede correr otra vez mientras ninguna migración posterior cambie ese CHECK o esos comentarios: después ya no, porque los regresaría a como los deja la 015. Va antes que la semilla 013 |
+| `migraciones/016_api_key_lookup.sql` | Llaves de API (#87, RC-129): función `api_key_lookup(hash)` para que la API encuentre una llave vigente antes de conocer la empresa, sin abrir RLS. A `cirdan_app` le deja UPDATE solo sobre `last_used_at`, `revoked_at` y `updated_at` de `api_keys` e INSERT sin `id`, `created_at`, `last_used_at`, `revoked_at` ni `updated_at`, para que la vigencia de 90 días se mida siempre desde la fecha real de alta, y un trigger impide reactivar una llave revocada |
+| `migraciones/017_superadmin_plataforma.sql` | Superadmin de la plataforma (RC-332): tabla `platform_admins` con RLS forzado, una política que niega todo y sin ningún permiso para `cirdan_app`, funciones `is_platform_admin(user)` (pide cuenta activa, TOTP activo y empresa en trial o active) y `platform_organizations(user)`, y actor `platform` en `audit_log`, con el id del superadmin en `details->>'platform_user_id'`. RLS no cambia. Va antes de reconstruir la API |
+| `migraciones/018_passkeys.sql` | Passkeys (WebAuthn, RC-331): tabla `webauthn_credentials` con solo la parte pública de cada passkey (`credential_id` único, llave pública COSE, contador, transports, aaguid, si el proveedor la respalda, nombre, alta y último uso), con RLS ENABLE, FORCE y `tenant_isolation`, y la FK compuesta a `users`. Función `passkey_lookup(credential_id)`, SECURITY DEFINER de `postgres` como `login_lookup()`, que solo devuelve la credencial de un usuario activo de una empresa en `trial` o `active`, nunca su nombre. A `cirdan_app` le da SELECT y DELETE, INSERT sin `id`, `created_at` ni `last_used_at`, y UPDATE solo sobre `sign_count`, `last_used_at` y `backed_up`. Solo crea y se puede correr otra vez sin error |
+| `migraciones/019_texto_contenedores_internetdb.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `exposed_container_api` (T1133, ISO A.8.20, CIS 4.4), la regla de los puertos de Docker, etcd, Kubernetes y kubelet que ve Shodan InternetDB (#17, RC-224). Va antes de la semilla 020. Se puede correr otra vez sin error, pero vuelve a firmar el texto: no se corre otra vez si una migración posterior cambió el texto |
+| `migraciones/020_textos_reglas_portada.sql` | Textos, firma de ErnestoDL y mapeo a marcos de `directory_listing` (CWE-548, sin técnica de ATT&CK, ISO A.8.9, CIS 4.1) y `debug_page_exposed` (CWE-215, T1592.002, ISO A.8.31, CIS 16.8), las dos reglas de la portada de la visita web (#111, RC-228). Va antes de la semilla 021. Se puede correr otra vez sin error |
+| `migraciones/021_textos_tls_sitio.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `tls_certificate_invalid` y `tls_legacy_only`, las 2 reglas del saludo TLS de la visita web (#121, RC-239). Sin técnica de ATT&CK, con ISO A.8.24 y CIS 3.10 como `cert_expired`. Va antes de la semilla 022 |
+| `migraciones/022_texto_enlaces_nube_repos.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `file_share_link_in_repo`, un enlace para compartir de Google Drive, OneDrive o SharePoint, o Dropbox, en un repo público (#16, RC-247). ATT&CK T1593.003 como `secret_in_public_repo` e ISO A.8.3 y CIS 3.3 como `public_bucket`. Va antes de la semilla 023 |
+| `migraciones/023_texto_ia_internetdb.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `exposed_ai_service` (sin técnica de ATT&CK, ISO A.8.20, CIS 4.4), la regla de los puertos por omisión de Ollama, LM Studio, Gradio, ComfyUI, Ray Dashboard, Qdrant y Milvus que ve Shodan InternetDB (#144, RC-262). Va antes de la semilla 024. Se puede correr otra vez sin error, pero vuelve a firmar el texto: no se corre otra vez si una migración posterior cambió el texto |
+| `migraciones/024_bandas_por_organizacion.sql` | Bandas de riesgo por cliente (RC-237, #118): `band_medium_from`, `band_high_from` y `band_critical_from` en `scoring_rule_sets`, NOT NULL, con 40, 60 y 80 en los juegos que ya existen. CHECK `scoring_rule_sets_band_cutoffs_ck`: medio desde 10, al menos 10 valores por banda y crítico a más tardar en 91. Trigger `scoring_rule_sets_copiar_cortes_bi`: un juego nuevo sin cortes copia los de la última versión de su organización o los del global activo. `cirdan_app` no recibe permisos nuevos: sigue solo con UPDATE de `is_active`, así los cortes de una versión no cambian. Va antes de reconstruir la API. Solo se corre una vez: la segunda falla en el ADD COLUMN |
+| `migraciones/025_textos_higiene_certificados.sql` | Texto, firma de ErnestoDL y mapeo a marcos de `cert_internal_name` (T1596.003, ISO A.8.31, CIS 16.8), `cert_broad_wildcard` (sin técnica de ATT&CK, ISO A.8.24, CIS 3.10) y `cert_new_issuer` (T1588.004, ISO A.8.24, CIS 3.10), las 3 reglas de higiene de certificados de `ct_logs` (#14, RC-218). Va antes de la semilla 025. Se puede correr otra vez sin error |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -34,20 +50,33 @@ Implementación real del modelo lógico de Cirdan ([`cirdan_esquema.dbml`](cirda
 | `semillas/009_score_demo_motor.sql` | Corrige con el motor de score (#31) el score de los tres dominios de Acme, que la 001 guardó a mano (68, 54 y 31) y no salía de sus hallazgos: acme-demo.mx queda en 60 y acme-tienda.mx y acme-portal.mx en 0 (RC-72). Agrega filas con `reason = correction`, así que el score anterior queda en el histórico. Necesita la migración 010 |
 | `semillas/010_corrige_procedencia_009.sql` | Corrige las tres filas que cargó la primera versión de la 009, con `rules_change`, un motivo de fallback a reglas y una hora que no eran ciertos, y deja el antes y el después en `audit_log` (RC-72, desviación 16). En una base nueva no hace nada. Necesita la migración 010 |
 | `semillas/011_shodan_nombres.sql` | Sube el límite diario de `shodan` a 1840 consultas, 10 corridas de 184, porque el tope de nombres que resuelve pasó de 10 a 50 (RC-55, #23). Solo cambia la fila si no tiene límite o si tiene el 640 de la 007. Un límite puesto a mano menor que 184 queda igual y da un WARNING, porque no le cabe ninguna corrida. Necesita la 007 |
+| `semillas/012_visita_web.sql` | Fuente `web` (la visita de la actividad 6 del Anexo A: tecnologías, versión sin soporte con endoflife.date y CVE con la NVD), sembrada encendida, con `keep_raw_payload` = true y límite diario de 1840 consultas, 10 corridas de 184 (#18, RC-46). Necesita la migración 008 y la 014: la 014 va primero, porque con la fuente encendida el orquestador inserta las CVE con su CVSS |
+| `semillas/013_api_docs.sql` | Fuente `api_docs` (la actividad 9 del Anexo A: hasta 10 rutas fijas de documentación de APIs por sitio, solo GET), sembrada apagada, con `keep_raw_payload` = true y límite diario de 2640 consultas, 10 corridas de 264 (#63, RC-118). Necesita la migración 008 y la 015. Se enciende con otra semilla cuando el aviso de la actividad nueva esté dado a cada cliente |
+| `semillas/014_cupo_ct_logs.sql` | Sube el límite diario de `ct_logs` de 200 a 400 consultas, 11 corridas de 36, porque cada escaneo ya busca dominios parecidos en crt.sh (RC-226, #109). Solo cambia la fila si tiene el 200 de la 005 |
+| `semillas/015_organizacion_lowtide.sql` | Organización LowTide (plan Business) con lowtidesec.com, el dominio del producto, con su TXT verificado por DoH, su carta firmada por el titular y un solo admin, `equipo@lowtidesec.com`, con el hash de relleno que no abre nada (RC-329, #210). La contraseña y el MFA se ponen fuera del repo |
+| `semillas/016_superadmin_lowtide.sql` | `equipo@lowtidesec.com` pasa a superadmin de la plataforma (RC-332). Necesita la 017 y la semilla 015. Sin TOTP activo la cuenta no es superadmin |
+| `semillas/017_subfinder_commoncrawl.sql` | Prende la fuente `subfinder`, que la 005 sembró apagada, con su única fuente, `commoncrawl`, y baja su límite diario de 400 a 390 consultas, 29 corridas de 13 peticiones HTTP al índice de Common Crawl sin fallas, porque cada una reserva 25 con los reintentos, o 15 de peor caso (RC-184, #14b). Solo cambia el límite si tiene el 400 de la 005 y avisa con un WARNING si es menor que 25. Necesita la 005 y va después de reconstruir la API |
+| `semillas/019_subfinder_apagado.sql` | Apaga otra vez la fuente `subfinder`, que la 017 prendió, porque el índice de Common Crawl da 504 casi siempre y el escaneo quedaba `partial` por eso (RC-337, decisión 6 de `docs/servicios_externos.md`). No toca el límite de 390. Necesita la 005 y no importa el orden con la API |
+| `semillas/020_regla_contenedores.sql` | La regla `exposed_container_api` (infrastructure, high, tope 25) en el juego v1, id 31, y en cada otro juego que ya existe, también los de una organización (#17, RC-224). Necesita la migración 019 y va antes de reconstruir la API: sin la regla, un puerto de contenedores hace fallar la fuente `shodan` entera. Se puede correr otra vez sin error |
+| `semillas/021_reglas_portada.sql` | Las reglas `directory_listing` (configuration, medium, tope 10) y `debug_page_exposed` (configuration, high, tope 25) en el juego v1, ids 32 y 33, y en cada otro juego que ya existe, también los de una organización (#111, RC-228). Necesita la migración 020 y va antes de reconstruir la API: sin las reglas, un hallazgo de la portada hace fallar la fuente `web` entera. Se puede correr otra vez sin error |
+| `semillas/022_reglas_tls_sitio.sql` | Reglas 34 y 35 del juego v1, `tls_certificate_invalid` y `tls_legacy_only` (infrastructure, medium, peso 1.000 y tope 10.00), y las mismas en cada otro juego que ya existe, también los de una organización (#121, RC-239, desviación 15). Necesita la migración 021 y va antes de reconstruir la API |
+| `semillas/023_regla_enlaces_nube_repos.sql` | Regla 36 del juego v1, `file_share_link_in_repo` (data_leaks, medium, peso 1.000 y tope 10.00), y la misma en cada otro juego que ya existe, también los de una organización (#16, RC-247, desviación 15). Necesita la migración 022 y va antes de reconstruir la API |
+| `semillas/024_regla_ia.sql` | La regla `exposed_ai_service` (infrastructure, high, tope 25) en el juego v1, id 37, y en cada otro juego que ya existe, también los de una organización (#144, RC-262, desviación 15). Necesita la migración 023 y va antes de reconstruir la API: sin la regla, un puerto de inteligencia artificial hace fallar la fuente `shodan` entera. Se puede correr otra vez sin error |
+| `semillas/025_reglas_higiene_certificados.sql` | Reglas 38 a 40 del juego v1, `cert_internal_name` y `cert_broad_wildcard` (infrastructure, low, peso 1.000 y tope 8.00) y `cert_new_issuer` (infrastructure, medium, peso 1.000 y tope 10.00), y las mismas en cada otro juego que ya existe, también los de una organización (#14, RC-218, desviación 15). Necesita la migración 025 y va antes de reconstruir la API |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
 | `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
-| `consultas/conteo_tablas.sql` | Las 24 tablas con filas y RLS, más el resumen de objetos |
+| `consultas/conteo_tablas.sql` | Las 25 tablas con filas y RLS, más el resumen de objetos |
 
 ## Qué se creó
 
 - Contenedor `cirdan-pg16` (imagen `postgres:16.15`), puerto `127.0.0.1:5433`, volumen `cirdan-pg16-data`, zona horaria America/Mexico_City.
-- Base `cirdan` con las 24 tablas en los 7 grupos del DBML, 58 FK (compuestas por `organization_id` y, donde importa, `domain_id`, más la de `scoring_rules.code` a `scoring_rule_texts` de la migración 003), 68 índices (únicos, parciales y de consulta), 13 triggers y 18 políticas RLS.
+- Base `cirdan` con 27 tablas: las 26 de los 7 grupos del DBML (`webauthn_credentials` llegó con la 018) y `platform_admins`, de la 017, que no está en el DBML. 64 FK (compuestas por `organization_id` y, donde importa, `domain_id`, más la de `scoring_rules.code` a `scoring_rule_texts` de la migración 003, la del mapeo a su texto de la 011 y la del texto a su mapeo de la 012), 76 índices (únicos, parciales y de consulta), 14 triggers y 22 políticas RLS. Son los conteos de una base nueva con las migraciones 001 a 018 (16 nov, RC-331).
 - Rol de aplicación `cirdan_app`: sin superusuario, sin `BYPASSRLS`, con privilegios mínimos (sin UPDATE/DELETE en `audit_log`, `domain_scores`, `score_contributions` ni `dns_txt_verifications`; en `domain_authorizations` solo puede cambiar `revoked_at`; en `scans` no puede fijar `queued_at`; no puede leer `data_sources.api_key_enc` ni hacer UPDATE en `data_sources`: desde la 008 el contador diario solo lo mueven `reserve_source_quota()` y `adjust_source_quota()`, que `cirdan_app` sí puede ejecutar, así que puede mover `daily_used` del día porque el ajuste acepta cualquier delta). Desde la migración 004 tampoco puede crear tablas ni vistas temporales.
-- RLS con ENABLE + FORCE en las 18 tablas por cliente. Las políticas comparan `organization_id` (o `id` en `organizations`) con `app_current_org()`, que devuelve `NULLIF(current_setting('app.current_org', true), '')::uuid`. Sin tenant no se ve nada.
+- RLS con ENABLE + FORCE en las 21 tablas por cliente: las 18 de la 001, `scoring_rule_sets` y `scoring_rules` desde la 013 y `webauthn_credentials` desde la 018. Además, `platform_admins` (017) tiene RLS forzado con una política que niega todo. Las políticas de las 21 comparan `organization_id` (o `id` en `organizations`) con `app_current_org()`, que devuelve `NULLIF(current_setting('app.current_org', true), '')::uuid`. Sin tenant no se ve nada.
 - Triggers: cadena de hashes SHA-256 por organización en `audit_log` (chain_seq, prev_hash, row_hash); bloqueo de UPDATE, DELETE y TRUNCATE en `audit_log`, `dns_txt_verifications`, `domain_scores` y `score_contributions`; `domain_authorizations` inmutable salvo `revoked_at`; `scans` exige autorización vigente y TXT `match` de la última hora; `scan_source_runs` rechaza `raw_payload` si la fuente tiene `keep_raw_payload = false` (HIBP).
 - Datos de Acme Demo (plan Starter), los mismos de las pantallas de Figma, más Beta Corp solo para la prueba de aislamiento. La semilla 002 agrega Grupo Olmardo (plan Business) con el dominio de prueba olmardo.com.
-- Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200 y `subfinder` 400 consultas por día UTC, de toda la plataforma. La semilla 006 pone 400 a `github`, donde cada intento a la API de GitHub y cada clon cuentan como consulta, y la semilla 007 pone 640 a `shodan`, que la 011 sube a 1840, donde cuentan cada intento HTTP (Cert Spotter e InternetDB) y cada A. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una fuente de su lista blanca consultada en una corrida, no una petición HTTP.
-- `subfinder` queda sembrada apagada (`enabled = false`), como `censys` en la semilla 001. Se prende con otra semilla cuando #8 (RC-40) revise los términos de sus 8 fuentes, haya una grabación de `subfinder` para olmardo.com y el contenedor pueda escribir en `respuestas_grabadas/` (hoy no, el Dockerfile copia `cirdan/` como root). Así la demo en reproducir de S12 no la muestra fallida.
+- Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200, que la semilla 014 sube a 400, y `subfinder` 400 consultas por día UTC, que la semilla 017 baja a 390, de toda la plataforma. La semilla 006 pone 400 a `github`, donde cada intento a la API de GitHub y cada clon cuentan como consulta, y la semilla 007 pone 640 a `shodan`, que la semilla 011 sube a 1840, donde cuentan cada intento HTTP (Cert Spotter e InternetDB) y cada A. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una petición HTTP desde la semilla 017. Con la 005 sola era una fuente de su lista blanca consultada en una corrida.
+- La semilla 005 sembró `subfinder` apagada (`enabled = false`), como `censys` en la semilla 001, para que la demo en reproducir de S12 no la mostrara fallida. La semilla 017 la prende con una sola fuente, `commoncrawl`, la única de las 20 de subfinder 2.17.0 cuyos términos permiten el uso automático y mostrar sus datos a terceros (decisión 6 de `docs/servicios_externos.md`, 15 nov). La semilla 019 (RC-337) la vuelve a apagar el 17 nov porque el índice da 504 casi siempre. Desde el 15 nov `subfinder.py` ya no corre el binario: pide el índice de Common Crawl directo.
 - `github` sí queda sembrada encendida (semilla 006): un dominio sin organización declarada en `ORGS_GITHUB_DECLARADAS` no consulta nada, y en reproducir un dominio sin grabación no falla. En los dos casos la fuente queda `succeeded` con sus 2 códigos sin cobertura. La excepción es el cupo: el orquestador reserva las 16 consultas de `github` antes de llamar al recolector, así que si ya no caben en el límite del día la fuente queda `failed` por falta de cupo, aunque el dominio no tenga organización declarada.
 
 ## Cómo cargarla
@@ -85,6 +114,21 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/008_limite_diario_fuentes.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/009_version_modelo_score.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/010_motivo_correccion_score.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/011_mapeo_marcos.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/012_garantia_mapeo_marcos.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/013_pesos_por_organizacion.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/014_cves_desde_recolectores.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/015_tipo_activo_api_doc.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/016_api_key_lookup.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/017_superadmin_plataforma.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/018_passkeys.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/019_texto_contenedores_internetdb.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/020_textos_reglas_portada.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/021_textos_tls_sitio.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/022_texto_enlaces_nube_repos.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/023_texto_ia_internetdb.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/024_bandas_por_organizacion.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/025_textos_higiene_certificados.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -97,6 +141,20 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/009_score_demo_motor.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/010_corrige_procedencia_009.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/011_shodan_nombres.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/012_visita_web.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/013_api_docs.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/014_cupo_ct_logs.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/015_organizacion_lowtide.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/016_superadmin_lowtide.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/017_subfinder_commoncrawl.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/018_shodan_host.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/019_subfinder_apagado.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/020_regla_contenedores.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/021_reglas_portada.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/022_reglas_tls_sitio.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/023_regla_enlaces_nube_repos.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/024_regla_ia.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/025_reglas_higiene_certificados.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -175,7 +233,7 @@ Cada una corre en una sola transacción y se puede correr otra vez sin error: la
 docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limit, enabled FROM data_sources WHERE daily_limit IS NOT NULL ORDER BY code"
 ```
 
-Con las dos da `ct_logs|200|t` y `subfinder|400|f` (sembrada apagada). Que las dos funciones tengan `search_path` fijo y no sean de PUBLIC lo revisan la sección [12] de `prueba_rls.sql` y la prueba 12 de `pruebas/test_aislamiento.py`. El día del contador es UTC, explícito en las funciones, y no el de México que fija `cirdan/db.py`: a las 18:00 de Monterrey empieza otro día de cupo. El día nunca retrocede: una reserva hecha en una transacción que empezó antes de medianoche UTC suma sobre el día nuevo si otra ya lo marcó. Margen aceptado: una corrida que reservó antes de medianoche UTC y ajusta después no toca el día nuevo, así que ese día puede pasar su límite hasta en el `MAX_CONSULTAS` de esa corrida.
+Con las dos da `ct_logs|200|t` y `subfinder|400|f` (sembrada apagada). Con la semilla 014 `ct_logs` pasa a 400, con la semilla 017 queda `subfinder|390|t` y con la 019, `subfinder|390|f`. Que las dos funciones tengan `search_path` fijo y no sean de PUBLIC lo revisan la sección [12] de `prueba_rls.sql` y la prueba 12 de `pruebas/test_aislamiento.py`. El día del contador es UTC, explícito en las funciones, y no el de México que fija `cirdan/db.py`: a las 18:00 de Monterrey empieza otro día de cupo. El día nunca retrocede: una reserva hecha en una transacción que empezó antes de medianoche UTC suma sobre el día nuevo si otra ya lo marcó. Margen aceptado: una corrida que reservó antes de medianoche UTC y ajusta después no toca el día nuevo, así que ese día puede pasar su límite hasta en el `MAX_CONSULTAS` de esa corrida.
 
 Para la fuente `github` (RC-50, #16) basta la semilla 006, que necesita la 008. El orden con la API no importa: la API anterior salta las fuentes sin recolector en `REGISTRO`, y la nueva sin la semilla no corre `github`, porque el escaneo solo toma las fuentes de `data_sources`. Va antes de reconstruir la API para que el primer escaneo ya la incluya:
 
@@ -194,6 +252,42 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, enabled, k
 ```
 
 Da `shodan|t|t|640`. Corre en una sola transacción y se puede correr otra vez sin error: solo pone el límite si la fila todavía no tiene uno, así no pisa uno puesto a mano. No agrega tablas ni políticas. Las páginas de Cert Spotter que pide `shodan` cuentan en su límite, no en el de `ct_logs`.
+
+Para los dominios parecidos de cada escaneo (RC-226, #109) va la semilla 014, que necesita la 005. Con la API nueva una corrida de `ct_logs` reserva 36, y con el 200 de la 005 solo caben 5 corridas por día en el peor caso y 12 escaneos en vivo. La 014 lo sube a 400, con 11 corridas de peor caso y 27 escaneos en vivo. El orden con la API no importa: sin la 014 los escaneos corren igual, con menos cupo. Solo cambia la fila si tiene el 200 de la 005, así no pisa uno puesto a mano, y se puede correr otra vez sin error:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/014_cupo_ct_logs.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limit FROM data_sources WHERE code = 'ct_logs'"
+```
+
+Da `ct_logs|400`.
+
+Para la organización LowTide con lowtidesec.com (RC-329, #210) va la semilla 015, que no necesita ninguna otra semilla nueva. No va antes ni después de la API: solo agrega una empresa, su dominio, su carta, su verificación del alta y su admin. Corre en una sola transacción y no se puede correr dos veces, porque los UUID son fijos:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/015_organizacion_lowtide.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT o.name, d.fqdn, d.status FROM domains d JOIN organizations o ON o.id = d.organization_id WHERE d.fqdn = 'lowtidesec.com'"
+```
+
+Da `LowTide|lowtidesec.com|verified`.
+
+Para prender `subfinder` (RC-184, #14b) va la semilla 017, que necesita la 005, y va **después** de reconstruir la API. La API anterior corre el binario de subfinder con las 8 fuentes de antes, que no pasaron la revisión de términos, así que con la semilla 017 aplicada y esa API un escaneo las consultaría. La API nueva sin la semilla 017 no cambia nada: la fuente sigue apagada. Si la demo corre en `reproducir`, antes de la semilla 017 se graba olmardo.com (una consulta en vivo a Common Crawl, ver el README de la raíz) y se reconstruye la API para que la imagen copie la grabación: sin ella, `subfinder` sale `succeeded` en reproducir con el aviso de que no se revisó Common Crawl, y sin subdominios. Corre en una sola transacción y se puede correr otra vez sin error: solo prende la fila si está apagada y solo cambia el límite si tiene el 400 de la 005. Con la 019 aplicada no se vuelve a correr: prende la fuente otra vez sin ningún aviso. Sin la fila de `subfinder` falla sin cambiar nada:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/017_subfinder_commoncrawl.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limit, enabled FROM data_sources WHERE code = 'subfinder'"
+```
+
+Da `subfinder|390|t`.
+
+Para apagar `subfinder` otra vez (RC-337) va la semilla 019, que necesita la 005. No importa el orden con la API: la semilla no entra en la imagen. Cada escaneo lee las fuentes con `enabled` una sola vez, al empezar (`fuentes_activas`), así que uno que ya corría la sigue corriendo y puede quedar `partial` por ella: se aplica sin escaneos en curso. Corre en una sola transacción y se puede correr otra vez sin error: solo apaga la fila si está prendida y no toca el límite. Sin la fila de `subfinder` falla sin cambiar nada:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/019_subfinder_apagado.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT code, daily_limit, enabled FROM data_sources WHERE code = 'subfinder'"
+```
+
+Da `subfinder|390|f`.
 
 Para el tope de 50 nombres de `shodan` (RC-55, #23) va la semilla 011, que necesita la 007. Va antes de reconstruir la API: con el tope nuevo una corrida reserva 184, y con el 640 de la 007 solo caben 3 corridas por día en el peor caso:
 
@@ -227,7 +321,8 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT column_name FROM
 
 Debe devolver ambas columnas. En una base nueva, `cargar_cirdan.sh` aplica 009 junto con las migraciones anteriores.
 
-Para que el score guardado de los dominios de Acme sea el que dan sus hallazgos (RC-72) van la migración 010 y las semillas 009 y 010. No cambian la API, así que el orden con la API no importa. La 010 agrega `correction` a los motivos de `domain_scores.reason`. La 009 agrega el score que da el motor con `reason = correction`, porque `domain_scores` y `score_contributions` no aceptan UPDATE. La semilla 010 corrige las filas de la primera versión de la 009, que decían `rules_change`, `artefacto_ml_no_disponible` y una hora del 28 oct que no eran ciertos. Apaga el trigger de solo inserción de toda la tabla dentro de su transacción, y su UPDATE solo toca esas tres filas, con los valores viejos exactos en el WHERE. Deja en `audit_log` una fila `score.corrected` por cada una con lo que decía antes y falla si alguna queda sin corregir (desviación 16):
+
+Para que el score guardado de los dominios de Acme sea el que dan sus hallazgos (RC-72) van la migración 010 y las semillas 009 y 010. No cambian la API, así que el orden con la API no importa. La 013 agrega `correction` a los motivos de `domain_scores.reason`. La 009 agrega el score que da el motor con `reason = correction`, porque `domain_scores` y `score_contributions` no aceptan UPDATE. La semilla 010 corrige las filas de la primera versión de la 009, que decían `rules_change`, `artefacto_ml_no_disponible` y una hora del 28 oct que no eran ciertos. Apaga el trigger de solo inserción de toda la tabla dentro de su transacción, y su UPDATE solo toca esas tres filas, con los valores viejos exactos en el WHERE. Deja en `audit_log` una fila `score.corrected` por cada una con lo que decía antes y falla si alguna queda sin corregir (desviación 16):
 
 ```bash
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/010_motivo_correccion_score.sql
@@ -238,6 +333,173 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT d.fqdn, s.score,
 
 Da seis filas: el score de septiembre de cada dominio con `scan` y después el corregido con `correction` y sin motivo de fallback, que es 60 para acme-demo.mx y 0 para acme-portal.mx y acme-tienda.mx. Cada archivo corre en una sola transacción y se puede correr otra vez sin error: la 009 no repite filas y la semilla 010 ya no encuentra nada que corregir.
 
+Para el mapeo a marcos (#68, RC-131) van la 011 y la 012, en ese orden, y la base va antes de reconstruir la API, como con la 003. Primero se trae el código (`git pull`), después se aplican las que falten y al final se reconstruye la API con `docker compose up -d --build api`. La API de esta versión hace JOIN a `scoring_rule_framework_mappings` en los hallazgos y en la explicación, y `/db/tables` la cuenta, así que sin la 011 `/api/v1/domains/{fqdn}/findings`, `/api/v1/findings/{id}/explanation` y `/db/tables` responden 500. La API anterior no lee la tabla y funciona igual con las dos aplicadas. Antes de aplicar nada, revisa con esta consulta qué falta: da `f|0` sin ninguna de las dos, `t|0` con la 011 sola y `t|1` con las dos:
+
+```bash
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT to_regclass('public.scoring_rule_framework_mappings') IS NOT NULL, (SELECT count(*) FROM pg_constraint WHERE conname = 'scoring_rule_texts_mapping_fk')"
+```
+
+Con `t|1` ya están las dos, pero una 012 de antes de que corrigiera el mapeo también da `t|1`, así que la 012 se corre igual, salvo que ya esté aplicada una migración posterior (ver abajo): se puede repetir y solo toca las filas que siguen como las dejó la 011 o una 012 anterior. Antes de correr cualquiera, respalda la base. El respaldo queda dentro del contenedor y se pierde si se recrea, también con el `docker compose up -d --build api` del final si recrea `cirdan-pg16` (antes, `docker compose --dry-run up -d --build api` dice si lo haría):
+
+```bash
+MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 pg_dump -U postgres -Fc -f /tmp/cirdan_antes_011.dump cirdan
+```
+
+Si el `--dry-run` dice que recreará `cirdan-pg16`, antes de reconstruir la API saca una copia del respaldo fuera del repo con `MSYS_NO_PATHCONV=1 docker cp cirdan-pg16:/tmp/cirdan_antes_011.dump ../cirdan_antes_011.dump`. En ese caso, al final se borra esa copia con `rm ../cirdan_antes_011.dump`, porque el respaldo del contenedor ya se perdió.
+
+Solo con `f|0` corre la 011. Con `t|0` sáltala, porque no se puede correr dos veces: su CREATE TABLE no lleva IF NOT EXISTS, así que la segunda vez falla con `relation "scoring_rule_framework_mappings" already exists` y se deshace sin cambiar nada:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/011_mapeo_marcos.sql
+```
+
+Después, con `f|0`, `t|0` o `t|1` (con `t|1`, solo si no hay una migración posterior aplicada), corre la 012:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/012_garantia_mapeo_marcos.sql
+```
+
+Cada una corre en una sola transacción, y la consulta de arriba debe dar `t|1`. La 012 sí se puede correr otra vez sin error y sin frenar las lecturas del mapeo. Falla sin cambiar nada si falta la 011, si algún texto de `scoring_rule_texts` no tiene mapeo o si en 5 s no consigue un bloqueo porque otra sesión tiene las tablas (en ese caso se vuelve a correr). Agrega la FK de `scoring_rule_texts.code` al mapeo, diferida hasta el COMMIT, y `created_at` y `updated_at` al mapeo. Después corrige el mapeo de la 011 con UPDATE por código: las técnicas de ATT&CK y sus razones, los enlaces fijos a la v19 y 11 controles de ISO y CIS en 10 reglas (2 de ISO y 9 de CIS). Cada UPDATE solo toca las filas que siguen como las dejó la 011 o una 012 anterior (en ATT&CK, un enlace sin `/versions/`, y las 5 reglas de puertos abiertos que una 012 anterior dejó sin técnica en la v19, con su razón; en ISO y CIS, el control y la edición de la 011), así que la segunda vez no encuentra ninguna y no mueve `updated_at`. Correrla después de una migración que cambie el mapeo no deshace ese mapeo, salvo que esa migración vuelva a poner el valor exacto de la 011 o de una 012 anterior. Los COMMENT de la 012 sí se escriben otra vez en cada corrida y pisarían los de una migración posterior, así que con una migración posterior ya aplicada la 012 no se vuelve a correr. Con las dos, el resumen de `conteo_tablas.sql` da tablas=25, fk=60 e indices=69, y ya con la API reconstruida `python -m unittest -v pruebas/test_api_v1.py` pasa. Cuando pase, borra el respaldo con `MSYS_NO_PATHCONV=1 docker exec cirdan-pg16 rm /tmp/cirdan_antes_011.dump`, o su copia de afuera si se recreó `cirdan-pg16`.
+
+Desde la 012, `scoring_rule_texts` y el mapeo se apuntan entre sí, así que un respaldo con `--data-only` ya no se restaura sin `--disable-triggers`. Respalda la base completa con `pg_dump -Fc`, como arriba.
+
+Desde la 012, una regla nueva trae su mapeo en la misma migración que su texto y en la misma transacción: primero el INSERT del texto y después el del mapeo, porque la FK del mapeo al texto se revisa en el momento y la del texto al mapeo en el COMMIT. Si falta el mapeo, la migración entera se deshace. Solo una regla que nunca se usó (sin filas en `findings` ni en `score_contributions`, que no admite DELETE) se puede borrar: en una sola transacción se borran sus filas de `scoring_rules` en todos los juegos, después el mapeo y al final el texto. La prueba 4b de `pruebas/test_catalogo_reglas.py` lee sin base los INSERT del mapeo de todas las migraciones, no solo de la 011, y revisa que tengan los mismos códigos que los textos, sin repetidos. No revisa las versiones de los marcos ni lee el orden, las transacciones ni los UPDATE del SQL: eso lo revisan la base al cargarla y la prueba 15. Sí falla si un archivo de `db/` que puede cambiar el catálogo es nuevo o cambió y no tiene su huella ([Huellas de db/](#huellas-de-db)). Si un texto queda sin mapeo, la FK diferida de la 012 hace fallar la carga. La prueba 15 de `pruebas/test_aislamiento.py` revisa la base ya cargada: los 40 textos y los 40 mapeos con los mismos códigos, toda regla de `scoring_rules` con su mapeo, las versiones de los marcos de cada fila, que cada enlace de ATT&CK vaya fijo a su versión y a su técnica, los CHECK y los NOT NULL de la 011, los NOT NULL de `created_at` y `updated_at` de la 012, la FK diferida de la 012 y que el texto de las 31 reglas OSINT (#14 a #20 en `docs/codigos_reglas.md`) lo firmó ErnestoDL, como pide la prueba 10 de `pruebas/test_catalogo_reglas.py`. Compara los CHECK con los que escribe la misma base para el texto de la 011, así no depende de la versión de Postgres. La prueba 14 revisa que la FK frena un texto sin mapeo y el borrado de un mapeo. Un mapeo ya aplicado se corrige en una migración nueva con un `UPDATE scoring_rule_framework_mappings SET ..., updated_at = now() WHERE rule_code = '...';` por código, sin tocar `rule_code` ni `created_at`, y la prueba 15 revisa las versiones como quedan después. Un cambio de versión de ATT&CK (por ejemplo, de Enterprise v19 a v20) va igual, en una migración nueva con UPDATE de los mapeos. Ese UPDATE también cambia los enlaces a la versión nueva (`/versions/v20/`), que revisa la prueba 15, y vuelve a revisar cada técnica contra su descripción en esa versión. Como en la 012, solo toca las filas que siguen con la versión anterior, así se puede correr otra vez sin deshacer nada. En el mismo cambio se pone la versión nueva en el trío que espera la prueba 15, en `pruebas/test_api_v1.py`, en las notas de `attack_version` y `attack_source_url` de `cirdan_esquema.dbml`, en la entrada de MITRE ATT&CK de `NOTICE`, en la fila de MITRE ATT&CK de `docs/servicios_externos.md` y en la fila de la 011 de la tabla de arriba, y la huella de la migración nueva en `HUELLAS_DB`. Las reglas que entren después traen su mapeo con la versión nueva. Una edición nueva de ISO 27001 o de CIS Controls no sigue esta receta, porque cambia el contrato de la API v1: las llaves `iso_27001_2022` y `cis_controls_v8_1` de `cirdan/api/v1.py` llevan la edición, los CHECK de la 011 sobre `iso_control_id` (A.5 a A.8) y `cis_safeguard_id` (1 a 18) siguen esas ediciones, y cambian también `pruebas/test_api_v1.py` y las notas del DBML. La migración que borre una regla tendrá que enseñarle a las pruebas 3, 4 y 4b a leer ese borrado y bajar el 40 de la prueba 15.
+
+Para la fuente `web` (RC-46, #18) van la migración 014 y la semilla 012, en ese orden, y las dos antes de reconstruir la API. La 014 es obligatoria, no un extra: la semilla 012 enciende la fuente, la visita trae cada CVE de la NVD con su descripción, CVSS, vector y fecha, y el orquestador inserta esas columnas en `cves`. Sin la 014, `cirdan_app` solo puede insertar `cve_id`, el INSERT falla por permiso, el escaneo queda `failed`, `whois` (que corre después de `web`) no corre y no hay score. Con la 014 y sin la 012 no pasa nada: la API nueva no corre una fuente que no está en `data_sources`. La API anterior salta la fuente `web` porque no conoce su recolector, así que la base puede ir antes sin romperla. Las dos se pueden correr otra vez sin error:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/014_cves_desde_recolectores.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/012_visita_web.sql
+```
+
+Para la fuente `api_docs` (RC-118, #63) van la migración 015 y la semilla 013, en ese orden, y las dos antes de reconstruir la API. La 015 agrega `api_doc` al CHECK de `assets.asset_type` y la 013 da de alta la fuente apagada, así que después de las dos ningún escaneo cambia: la fuente no corre hasta que otra semilla la encienda. Sin la 015, una API nueva con la fuente encendida falla al guardar el primer `api_doc` y el escaneo queda `failed`. La API anterior no conoce el recolector y salta la fuente, así que la base puede ir antes sin romperla. Las dos se pueden correr otra vez sin error:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/015_tipo_activo_api_doc.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/013_api_docs.sql
+```
+
+Para las llaves de API (RC-129, #87) va la migración 016, antes de reconstruir la API. La API nueva llama a `api_key_lookup()` en cada petición que trae `Authorization: Bearer`, y sin la función esa petición responde 500. Las peticiones con la cookie de sesión no la usan. La API anterior no conoce las llaves y con la 016 ya aplicada sigue igual: no hace UPDATE ni INSERT sobre `api_keys`, así que recortarle esos privilegios no le cambia nada.
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/016_api_key_lookup.sql
+```
+
+Para el superadmin de la plataforma (RC-332) van la migración 017 y la semilla 016, en ese orden, y las dos antes de reconstruir la API. La API nueva llama a `is_platform_admin()` en cada inicio de sesión, dentro de la transacción del login: sin la 017, todo login con contraseña o con MFA responde 500. La API anterior no llama a las funciones nuevas ni escribe el actor `platform`, así que la base puede ir antes sin romperla. La 017 toma ACCESS EXCLUSIVE sobre `audit_log` para cambiar sus CHECK; si en 5 s no lo consigue, falla sin cambiar nada y se vuelve a correr. Las dos se pueden correr otra vez sin error. La semilla 016 necesita la 015; sin ella no hace nada. `equipo@lowtidesec.com` es superadmin solo con TOTP activo: hasta entonces entra como Admin de LowTide, y después de activarlo vuelve a iniciar sesión:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/017_superadmin_plataforma.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/016_superadmin_lowtide.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT u.email, public.is_platform_admin(u.id) FROM platform_admins p JOIN users u ON u.id = p.user_id"
+```
+
+Da `equipo@lowtidesec.com|f` mientras la cuenta no tenga TOTP y `equipo@lowtidesec.com|t` cuando ya lo tenga.
+
+Para las passkeys (RC-331) va la migración 018, antes de reconstruir la API. Sin la tabla, la API nueva responde 500 en `GET /api/v1/auth/passkeys`, en el registro, en `/passkeys/login/verify` y en `/mfa/enable`, que al activar TOTP borra las passkeys de la cuenta. El login con contraseña y TOTP no la usa, y `demo-accounts` se salta el borrado de las passkeys de demo mientras la tabla no exista, así que la API arranca. La API anterior no conoce la tabla ni la función, así que con la 017 ya aplicada sigue igual. La 017 solo crea, no toca filas que ya existen, y se puede correr otra vez sin error.
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/018_passkeys.sql
+```
+
+Para los contenedores de Shodan InternetDB (#17, RC-224) van la migración 019 y después la semilla 020, las dos antes de reconstruir la API. Con la API nueva y sin la regla, el primer puerto de Docker, etcd, Kubernetes o kubelet hace fallar la fuente `shodan` entera del escaneo (`contrato.validar`). La semilla pone la regla en el juego v1 y en cada otro juego que ya existe, con un `LOCK` de `scoring_rule_sets` para que un cambio de pesos al mismo tiempo no deje un juego sin ella. Las dos se pueden correr otra vez sin error, pero la 019 vuelve a firmar el texto. En el siguiente escaneo de `shodan`, un `exposed_service` ya guardado en uno de esos 7 puertos se cierra como `resolved` y se abre un `exposed_container_api` con la fecha de ese día, porque la huella del hallazgo lleva el código. Si el viejo estaba en `accepted` o `false_positive` se queda así y el nuevo sale `open`: hay que marcarlo otra vez.
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/019_texto_contenedores_internetdb.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/020_regla_contenedores.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT (SELECT count(*) FROM scoring_rules WHERE code = 'exposed_container_api') = (SELECT count(*) FROM scoring_rule_sets)"
+```
+
+Da `t`.
+
+Para la portada de la visita web (#111, RC-228) van la migración 020 y después la semilla 021, las dos antes de reconstruir la API. Con la API nueva y sin las reglas, el primer hallazgo de la portada hace fallar la fuente `web` entera del escaneo (`contrato.validar`). La semilla pone las reglas en el juego v1 y en cada otro juego que ya existe. Las dos se pueden correr otra vez sin error.
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/020_textos_reglas_portada.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/021_reglas_portada.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM scoring_rules WHERE code IN ('directory_listing', 'debug_page_exposed')"
+```
+
+Da el doble del número de juegos de `scoring_rule_sets`.
+
+Para las 2 reglas del saludo TLS de la visita web (RC-239, #121) van la migración 021 y la semilla 022, en ese orden, después de la 020 y la 021 de la portada, y las dos antes de reconstruir la API. La visita nueva emite `tls_certificate_invalid` y `tls_legacy_only`, y el orquestador rechaza un hallazgo cuyo código no está en el juego activo: sin la 022, el escaneo de un sitio con un certificado inválido o que solo acepta TLS 1.0 o 1.1 falla. La API anterior no emite esos códigos y con las dos ya aplicadas sigue igual. La 022 agrega las reglas a v1 y a cada otro juego que ya existe, activo o no, también los de una organización, sin crear un juego nuevo (desviación 15), con el mismo `LOCK` que la 020 de los contenedores. Un juego que la API cree después las copia del activo. Las dos se pueden correr otra vez sin error:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/021_textos_tls_sitio.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/022_reglas_tls_sitio.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM scoring_rule_sets s WHERE (SELECT count(*) FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code IN ('tls_certificate_invalid', 'tls_legacy_only')) <> 2"
+```
+
+Da `0`: ningún juego sin las 2 reglas.
+
+Para los enlaces para compartir archivos de la nube en repos (RC-247, #16) van la migración 022 y la semilla 023, en ese orden, después de la 021 y la 022 del saludo TLS, y las dos antes de reconstruir la API. El recolector de GitHub nuevo emite `file_share_link_in_repo`, y el orquestador rechaza un hallazgo cuyo código no está en el juego activo: sin la 023, el escaneo de un dominio con un enlace así en un repo de su organización declarada deja la fuente `github` en `failed`. La API anterior no emite ese código y con las dos ya aplicadas sigue igual. La 023 agrega la regla a v1 y a cada otro juego que ya existe, activo o no, también los de una organización, sin crear un juego nuevo (desviación 15), con el mismo `LOCK` que la 022. Un juego que la API cree después la copia del activo. Las dos se pueden correr otra vez sin error:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/022_texto_enlaces_nube_repos.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/023_regla_enlaces_nube_repos.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM scoring_rule_sets s WHERE NOT EXISTS (SELECT 1 FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code = 'file_share_link_in_repo')"
+```
+
+Da `0`: ningún juego sin la regla.
+
+Para los servicios de inteligencia artificial de Shodan InternetDB (#144, RC-262) van la migración 023 y después la semilla 024, después de la 022 y la 023 de los enlaces para compartir en repos, y las dos antes de reconstruir la API. Con la API nueva y sin la regla, el primer puerto de Ollama, LM Studio, Gradio, ComfyUI, Ray Dashboard, Qdrant o Milvus hace fallar la fuente `shodan` entera del escaneo (`contrato.validar`). La semilla pone la regla en el juego v1 y en cada otro juego que ya existe, con el mismo `LOCK` que la 020. Las dos se pueden correr otra vez sin error, pero la 023 vuelve a firmar el texto. En el siguiente escaneo de `shodan`, un `exposed_service` ya guardado en uno de esos 8 puertos se cierra como `resolved` y se abre un `exposed_ai_service` con la fecha de ese día, porque la huella del hallazgo lleva el código. Si el viejo estaba en `accepted` o `false_positive` se queda así y el nuevo sale `open`: hay que marcarlo otra vez.
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/023_texto_ia_internetdb.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/024_regla_ia.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT (SELECT count(*) FROM scoring_rules WHERE code = 'exposed_ai_service') = (SELECT count(*) FROM scoring_rule_sets)"
+```
+
+Da `t`.
+
+Para las bandas por cliente (RC-237, #118) va la migración 024 antes de reconstruir la API: la API nueva lee `band_medium_from`, `band_high_from` y `band_critical_from` en cada consulta de score y sin ellas falla. La API anterior no las lee y con la 024 ya aplicada sigue igual. No trae semilla. Solo se corre una vez:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/024_bandas_por_organizacion.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM scoring_rule_sets WHERE (band_medium_from, band_high_from, band_critical_from) <> (40, 60, 80)"
+```
+
+Da `0` justo después de aplicarla: todos los juegos con los cortes de la plantilla.
+
+Para las 3 reglas de higiene de certificados de `ct_logs` (RC-218, #14) van la migración 025 y la semilla 025, en ese orden, después de la 023 y la 024 de los servicios de inteligencia artificial (RC-262) y de la migración 024 de las bandas por cliente (RC-237), y las dos antes de reconstruir la API. El recolector nuevo emite `cert_internal_name`, `cert_broad_wildcard` y `cert_new_issuer`, y el orquestador rechaza un hallazgo cuyo código no está en el juego activo: sin la semilla 025, el escaneo de un dominio con un nombre interno, un comodín o una autoridad nueva en sus certificados hace fallar `ct_logs` entera. La API anterior no emite esos códigos y con las dos ya aplicadas sigue igual. La semilla 025 agrega las reglas a v1 y a cada otro juego que ya existe, activo o no, también los de una organización, sin crear un juego nuevo (desviación 15), con el mismo `LOCK` que la 022, la 023 y la 024. Las dos se pueden correr otra vez sin error:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/025_textos_higiene_certificados.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/025_reglas_higiene_certificados.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM scoring_rule_sets s WHERE (SELECT count(*) FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code IN ('cert_internal_name', 'cert_broad_wildcard', 'cert_new_issuer')) <> 3"
+```
+
+Da `0`: ningún juego sin las 3 reglas.
+
+## Respaldar y restaurar
+
+`respaldo/respaldar.sh` saca `pg_dump -Fc` de `cirdan` como postgres dentro del contenedor, lo cifra con age y una llave pública, lo deja con permisos 600 en una carpeta fuera del repo con los de los últimos 7 días y, en la VM, lo sube a Azure Blob (también los que un día no se pudieron subir). `respaldo/restaurar.sh` lo descifra y lo restaura siempre en una base nueva: nunca hace DROP DATABASE ni escribe sobre `cirdan`, no crea la base si no puede descifrar y le quita TEMPORARY a PUBLIC como la migración 004. `respaldo/conteos.sql` da filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base, y `respaldo/comparar.sh` compara esa salida entre dos bases del mismo contenedor. Contra la base de la VM se corre `conteos.sql` en las dos. Cómo se arma el timer en la VM, dónde queda la llave privada y cómo se baja un respaldo, en `docs/despliegue.md`, sección 'Respaldo diario'. Los respaldos traen datos personales: nunca van a git ni a la imagen (`.gitignore` y `.dockerignore` ignoran `respaldos/`, `*.dump` y `*.dump.age`). Valkey no se respalda.
+
+Para revisar un respaldo sin tocar ninguna base: `age -d -i <archivo de la llave> <respaldo>.dump.age | docker exec -i <contenedor> pg_restore --list`, que lista lo que trae.
+
+## Huellas de db/
+
+La prueba 4b de `pruebas/test_catalogo_reglas.py` corre sin base y no sabe qué hace de verdad el SQL: si un UPDATE o un DELETE corre, en qué transacción, o si un DO o una función cambia el catálogo. Eso lo revisa la prueba 15 de `pruebas/test_aislamiento.py` en una base recién cargada. Para que no se salte, `HUELLAS_DB` guarda el SHA-256 de cada archivo de `db/` que puede cambiar el catálogo, como estaba cuando pasó la prueba 15, y la prueba 4b falla si uno es nuevo, cambió o ya no está. Los saltos de línea `\r\n` cuentan como `\n`, así la huella es la misma en Windows y en el CI. Entran:
+
+- Los archivos de `db/init/`, que deciden qué se carga y cómo.
+- Las migraciones y las semillas que nombran `scoring_rules`, `scoring_rule_texts` o `scoring_rule_framework_mappings`, o un objeto (una tabla, una vista, una función) que crea o renombra un archivo que nombra los textos o el mapeo. Los nombres de las tablas se buscan en todo el texto, con comentarios y cadenas, también entre comillas y sin distinguir mayúsculas. Los de esos objetos se buscan en el SQL sin comentarios, y una función solo cuando se llama (su nombre y un paréntesis), así una función de nombre corto no hace entrar archivos que solo traen esa palabra. Lo que se crea TEMP no cuenta, porque `cargar_cirdan.sh` corre cada archivo en su propio `psql` y lo TEMP se borra al terminar.
+- Las que traen algo que arma SQL que no se ve o cambia cómo corre: `EXECUTE`, `format(`, `U&`, un `DO` con el cuerpo entre comillas simples, `set_config`, `search_path`, `session_replication_role`, `standard_conforming_strings`, `SET NAMES`, un `client_encoding` que no es UTF8, `CREATE TRIGGER` o `RULE`, `ALTER TABLE ... USING`, `COPY`, `CALL`, `CASCADE`, `dblink`, `DROP` o `ALTER SCHEMA`, `DROP` o `REASSIGN OWNED`, una escritura en las tablas `pg_` de Postgres o un meta-comando de psql (`\i`, `\set`, `\gexec`).
+
+Hoy entran 30: `db/init/cargar_cirdan.sh`, las migraciones 001 a 008, 011 a 013 y 016 a 025, y las semillas 001, 004 y 020 a 025. La 016 no nombra el catálogo: entra porque trae `search_path` y un trigger. La 018 tampoco: entra por el `search_path` de `passkey_lookup()`. La 024 tampoco: entra por su trigger y el `search_path` de `scoring_rule_sets_copiar_cortes()`. Las demás no necesitan huella mientras no nombren esas tablas ni traigan nada de la lista.
+
+Cómo se agrega una huella:
+
+1. Abre el PR con el archivo nuevo o cambiado. El CI carga la base desde cero con todo `db/` y corre la prueba 15 en el paso de las pruebas de la base, antes que la prueba 4b en el de las pruebas sin base.
+2. Si la prueba 15 pasa y la 4b falla solo por huellas, su mensaje trae las líneas `'ruta': 'sha256',` de cada archivo. Cópialas a `HUELLAS_DB` y sube el cambio. Si la prueba 15 falla, corrige el SQL antes.
+3. Si lo pruebas antes en tu PC, que sea en una base que puedas perder: cargar `db/` desde cero en `cirdan-pg16` pide `docker compose down -v`, que borra tu base.
+
+La huella no dice que el SQL esté bien, solo que con ese archivo la base cargó y pasó la prueba 15. Lo que la prueba 15 no ve lo revisa quien revisa el PR: un texto mal escrito, un dato del mapeo equivocado que cumple los CHECK (un control de ISO o una salvaguarda de CIS que no existe en su edición, o una técnica cuya descripción no nombra lo que detecta la regla), un UPDATE que toca más filas de las que debía, un `updated_at` que no se movió, un `created_at` cambiado, un UPDATE del mapeo o el texto o el mapeo de una regla nueva en una semilla en vez de una migración, y un meta-comando de `psql` o una sentencia (un UPDATE, un COPY) que no cambió nada. Una función que otro objeto usa sin llamarla con paréntesis (un `CREATE OPERATOR` o un `CREATE AGGREGATE`) no hace entrar al archivo que usa ese objeto. Lo cubre la prueba 15 del CI. Un archivo que solo llama a una función de otro entra si esa función se creó en un archivo que nombra los textos o el mapeo. Si se creó en uno que solo trae SQL dinámico, ese archivo entra y el que la llama no, y lo cubre la prueba 15 del CI.
+Para #32, la migración 013 conserva el juego v1 como plantilla global de solo lectura y permite juegos activos por organización. Debe aplicarse antes de desplegar el `PUT /api/v1/scoring/weights`; en bases existentes:
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/013_pesos_por_organizacion.sql
+```
+
+La 013 agrega `organization_id` nullable a `scoring_rule_sets`, aplica RLS a los juegos y sus reglas, crea índices únicos para versiones/activo por scope y da a `cirdan_app` solo INSERT de versiones/reglas y UPDATE de `is_active`. Los scores históricos no se modifican. Para verificar: `SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r' AND relrowsecurity AND relforcerowsecurity;` debe dar 20; `SELECT count(*) FROM pg_policies WHERE schemaname = 'public';` debe dar 20. En una base nueva, `cargar_cirdan.sh` aplica 013 en orden.
 ## Decisiones y desviaciones respecto al DBML
 
 Las desviaciones 1, 2 y 3 se pasaron al DBML el 9 oct, así que hoy la base y el DBML ya coinciden en esos tres puntos. Se dejan en la lista para explicar por qué cambió el modelo.
@@ -245,7 +507,7 @@ Las desviaciones 1, 2 y 3 se pasaron al DBML el 9 oct, así que hoy la base y el
 1. **Severidad `critical`.** El DBML solo permite high, medium y low, pero el portal usa Critical. Se agregó `critical` a `findings.severity`, `score_contributions.severity`, `alerts.severity` y `scoring_rules.base_severity`.
 2. **Categorías del score.** Se usan las del portal (Infrastructure, Digital Identity, Configuration y Data Leaks: `infrastructure`, `digital_identity`, `configuration`, `data_leaks`) en lugar de exposed_services, vulnerabilities, configuration y breaches. Pesos del juego v1: 30, 20, 20 y 30 %.
 3. **Sentido del score.** Más alto = más exposición. La alerta salta cuando el score llega al umbral (60) o lo pasa, así que `alerts.event_type` usa `score.above_threshold` en lugar de `score.below_threshold`. `score_contributions.penalty` conserva el nombre, pero son puntos que suben la exposición.
-4. **Roles.** Solo se creó `cirdan_app`; las tablas pertenecen a `postgres`. No se crearon cirdan_owner, cirdan_maint, cirdan_web, cirdan_worker, cirdan_definer, cirdan_dispatcher ni cirdan_retention, ni las funciones api_key_lookup y audit_platform_append. `login_lookup` llegó con la migración 002 (#25): es SECURITY DEFINER de `postgres` y solo `cirdan_app` puede ejecutarla. La migración 004 le fija `search_path = pg_catalog, public, pg_temp`, le pone esquema a sus tablas y la deja devolver solo `user_id`, `organization_id`, `password_hash` y `mfa_enabled`. La 008 agrega `reserve_source_quota()` y `adjust_source_quota()` con el mismo patrón (dueño `postgres`, `search_path` que termina en `pg_temp`, tablas con esquema y EXECUTE solo para `cirdan_app`), para que la app mueva el contador diario sin UPDATE sobre `data_sources`. La excepción de retención del trigger ya compara `current_user = 'cirdan_retention'`.
+4. **Roles.** Solo se creó `cirdan_app`; las tablas pertenecen a `postgres`. No se crearon cirdan_owner, cirdan_maint, cirdan_web, cirdan_worker, cirdan_definer, cirdan_dispatcher ni cirdan_retention, ni la función audit_platform_append. `api_key_lookup(hash)` llegó con la migración 016 (#87, RC-129) con el mismo patrón que `login_lookup`: dueño `postgres` y no cirdan_definer, busca por el hash de la llave y no por el prefijo, y solo devuelve una llave sin revocar, sin vencer, de una empresa en `trial` o `active` y con un plan que incluye API. `passkey_lookup(credential_id)` llegó con la 017 (RC-331) con el mismo patrón: dueño `postgres`, `search_path` que termina en `pg_temp`, EXECUTE solo para `cirdan_app`, y solo devuelve la credencial de un usuario activo de una empresa en `trial` o `active`. `login_lookup` llegó con la migración 002 (#25): es SECURITY DEFINER de `postgres` y solo `cirdan_app` puede ejecutarla. La migración 004 le fija `search_path = pg_catalog, public, pg_temp`, le pone esquema a sus tablas y la deja devolver solo `user_id`, `organization_id`, `password_hash` y `mfa_enabled`. La 008 agrega `reserve_source_quota()` y `adjust_source_quota()` con el mismo patrón (dueño `postgres`, `search_path` que termina en `pg_temp`, tablas con esquema y EXECUTE solo para `cirdan_app`), para que la app mueva el contador diario sin UPDATE sobre `data_sources`. La excepción de retención del trigger ya compara `current_user = 'cirdan_retention'`.
 5. **Variable de tenant.** Se usa `app.current_org` con `app_current_org()`, como dice el DBML.
 6. **Trigger de `scans`.** Valida vigencia y antigüedad del TXT contra `queued_at` (que por defecto es `now()`), para poder cargar escaneos históricos de la demo. Solo `postgres` puede fijar `queued_at`: `cirdan_app` tiene GRANT INSERT por columna sin `queued_at`, así que para la app siempre es `now()` y no puede fechar un escaneo en el pasado para usar una autorización vencida.
 7. **Título del hallazgo.** El DBML no tiene columna de título. Va en `findings.evidence->>'title'`. Los nombres de fuente (HIBP API, Shodan, DNS) se traducen en la consulta desde `data_sources.code`.
@@ -254,7 +516,8 @@ Las desviaciones 1, 2 y 3 se pasaron al DBML el 9 oct, así que hoy la base y el
 10. **Convenciones.** Se agregó `created_at` en todas las tablas y `updated_at` en las que cambian, como dicen las convenciones del DBML.
 11. **Escaneos.** Se cargó un escaneo por cada dominio con score (3), porque `domain_scores.scan_id` es NOT NULL. Solo el de acme-demo.mx tiene filas en `scan_source_runs`.
 12. **Valores que no vienen en los datos de Figma** (ilustrativos): las notas por categoría de acme-tienda.mx (60, 50, 40, 60) y acme-portal.mx (40, 30, 20, 30), elegidas para que el ponderado dé 54 y 31; pesos y topes de las reglas; nombre y fecha de la brecha (`DemoBreach-2026`, 18 Jun 2026); activos con IPs de documentación; tokens TXT salvo el de partner-example.com; hashes de contraseña y secretos (marcadores). partner-example.com no tiene autorización cargada (vigencia "—") y old-example.net está en `paused`.
-13. **Sin filas en `api_keys` ni `cves`.** El plan Starter no incluye API, y ningún hallazgo de la demo apunta a un CVE.
+13. **Sin filas en `api_keys` ni `cves`.** El plan Starter no incluye API, y ningún hallazgo de la demo apunta a un CVE. Las llaves se crean desde la API (`POST /api/v1/api-keys`, #87) y ninguna semilla trae una. `check_plan_limits()` no existe: que el plan incluya API lo revisa la ruta al crear la llave y `api_key_lookup()` cada vez que se usa.
 14. **Fuera de la base, como dice el DBML.** check_plan_limits (FastAPI), el cifrado AES-GCM y la verificación diaria de la cadena. Hoy solo existe el cifrado del secreto TOTP (`cirdan/auth/totp.py`). check_plan_limits y la verificación diaria son plan, igual que los roles y las funciones del punto 4. El DBML es el diseño objetivo, y sus notas marcan qué existe hoy en dev y qué tarjeta trae lo que falta.
-15. **Juego v1 completado después de activarse.** El DBML dice que un juego es inmutable una vez activado y que cambiar un peso crea un juego nuevo. Aun así, v1 se completó con las 30 reglas de #14 a #20 y de #62 a #64 antes de #31 (RC-60), porque todavía ningún score se calcula con un juego. La semilla 004 agrega las 23 reglas nuevas con weight 1.000 y no cambia las 7 de la semilla 001 ni `category_weights`. Desde #31, cualquier cambio de reglas o pesos crea v2 (RC-66, #30).
+15. **Juego v1 completado después de activarse.** El DBML dice que un juego es inmutable una vez activado y que cambiar un peso crea un juego nuevo. Aun así, v1 se completó con las 30 reglas de #14 a #20 y de #62 a #64 antes de #31 (RC-60), porque todavía ningún score se calcula con un juego. La semilla 004 agrega las 23 reglas nuevas con weight 1.000 y no cambia las 7 de la semilla 001 ni `category_weights`. Desde #31, cualquier cambio de reglas o pesos crea v2 (RC-66, #30). La excepción es una regla con un código que ningún hallazgo guardado trae, como `exposed_container_api` (#17, RC-224, semilla 020): entra en v1 y en cada otro juego que ya existe, también los de una organización, sin juego nuevo. Ningún score ya calculado cambia porque ninguno usa ese código, y sin la regla en el juego activo de una organización el primer hallazgo con ese código haría fallar su fuente entera (`contrato.validar`). Así entraron también `directory_listing` y `debug_page_exposed` (#111, RC-228, semilla 021), las 2 del saludo TLS de la visita web (#121, RC-239, semilla 022), la de los enlaces para compartir en repos (#16, RC-247, semilla 023) `exposed_ai_service` (#144, RC-262, semilla 024) y las 3 de higiene de certificados de `ct_logs` (#14, RC-218, semilla 025), y v1 queda con 40 reglas.
 16. **Una corrección con el trigger apagado.** `domain_scores` es de solo inserción para todos, también para `postgres`. La semilla 010 (RC-72) es la única excepción: apaga `domain_scores_block_ud` dentro de su transacción para corregir `reason`, `model_fallback_reason` y `computed_at` de los tres scores de Acme que cargó la primera versión de la semilla 009, con los valores viejos exactos en el WHERE. No cambia el score, las notas ni los aportes, deja en `audit_log` una fila `score.corrected` por cada score con el antes y el después, vuelve a encender el trigger antes del COMMIT y falla si alguna fila queda sin corregir. La prueba 13 de `pruebas/test_aislamiento.py` revisa que el trigger siga encendido. Un score mal guardado de aquí en adelante se corrige con una fila nueva con `reason = correction`, sin apagar el trigger.
+17. **La llave de API no va en `actor_api_key_id`.** El DBML trae `audit_log.actor_api_key_id` con FK a `api_keys`, pero `audit_log` no deja borrar ni cambiar filas, así que una llave con un solo evento ya no se podría borrar nunca. Desde RC-312 (decisión de Ernesto del 17 nov), `audit()` de `cirdan/db.py` deja `actor_type = 'api_key'`, `actor_api_key_id` en NULL y el id de la llave en `details.api_key_id`. Una tarjeta que registre otra acción hecha con llave sigue esta forma.

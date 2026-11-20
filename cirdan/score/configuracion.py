@@ -1,0 +1,157 @@
+"""Validación y resolución del juego de pesos activo (#32) y de sus cortes de bandas (RC-237)."""
+from decimal import Decimal, InvalidOperation
+
+from psycopg.types.json import Jsonb
+
+from cirdan.score import criterio, motor
+
+
+def validar_pesos(pesos):
+    """Devuelve pesos normalizados o falla si no son las cuatro categorías y suman exactamente 1."""
+    if not isinstance(pesos, dict) or set(pesos) != set(criterio.CATEGORIAS):
+        raise ValueError('se requieren exactamente las cuatro categorías del score')
+
+    decimales = {}
+    for categoria in criterio.CATEGORIAS:
+        valor = pesos[categoria]
+        if isinstance(valor, bool):
+            raise ValueError('cada peso debe ser un número entre 0 y 1')
+        try:
+            peso = Decimal(str(valor))
+        except (InvalidOperation, ValueError):
+            raise ValueError('cada peso debe ser un número entre 0 y 1') from None
+        if not peso.is_finite() or not Decimal('0') <= peso <= Decimal('1'):
+            raise ValueError('cada peso debe ser un número entre 0 y 1')
+        decimales[categoria] = peso
+
+    if sum(decimales.values()) != Decimal('1'):
+        raise ValueError('los pesos deben sumar 1')
+    return {categoria: float(peso) for categoria, peso in decimales.items()}
+
+
+def juego_activo(conn, org):
+    """Prefiere el set de la organización y usa el global como plantilla si aún no tiene uno."""
+    return conn.execute(
+        'SELECT id::text, version, category_weights, activated_at, validated_by, organization_id::text, '
+        'band_medium_from, band_high_from, band_critical_from '
+        'FROM scoring_rule_sets WHERE is_active AND (organization_id = %s OR organization_id IS NULL) '
+        'ORDER BY CASE WHEN organization_id = %s THEN 0 ELSE 1 END, version DESC LIMIT 1',
+        (org, org),
+    ).fetchone()
+
+
+def bloquear_pesos(conn, org):
+    """Candado de la transacción para cambiar pesos o guardar un score con el juego activo (RC-62).
+
+    PUT /scoring/weights lo toma antes de crear la versión nueva y recalcular, y el orquestador antes de guardar el
+    score de un escaneo. Así el score de un escaneo que termina mientras alguien cambia los pesos o sale con los
+    pesos nuevos, o lo ve el recálculo y lo copia con ellos.
+    """
+    # org pasa por uuid para que la llave sea la misma aunque la línea de comandos la reciba en mayúsculas.
+    conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s::uuid::text, 32))', (str(org),))
+
+
+def reglas_del_juego(conn, rule_set_id):
+    """Reglas de un juego por código, con lo que necesitan el orquestador y el motor."""
+    return {r['code']: r for r in conn.execute(
+        'SELECT id::text, code, category, base_severity, weight, max_penalty FROM scoring_rules '
+        'WHERE rule_set_id = %s', (rule_set_id,)).fetchall()}
+
+
+def pesos_del_juego(rule_set):
+    return {k: float(v) for k, v in rule_set['category_weights'].items()}
+
+
+def cortes_de_fila(fila):
+    """Cortes {'medium', 'high', 'critical'} de una fila que trae las columnas de la migración 024."""
+    return {'medium': fila['band_medium_from'], 'high': fila['band_high_from'],
+            'critical': fila['band_critical_from']}
+
+
+def cortes_del_juego(conn, rule_set_id):
+    """Cortes del juego de reglas con que se calcula o se calculó un score. Falla si el juego no existe o no se ve."""
+    fila = conn.execute('SELECT band_medium_from, band_high_from, band_critical_from FROM scoring_rule_sets '
+                        'WHERE id = %s', (rule_set_id,)).fetchone()
+    if fila is None:
+        raise ValueError('no se encontró el juego de reglas %s' % rule_set_id)
+    return cortes_de_fila(fila)
+
+
+def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False, saltados=None):
+    """Inserta un snapshot rules_change por dominio con score previo, sin modificar históricos. Devuelve cuántos.
+
+    El piso y la banda salen de los cortes del juego `rule_set_id` (RC-237), así un cambio de cortes también cambia
+    el número. Con `solo_otro_juego` deja fuera los dominios cuyo último snapshot ya usa `rule_set_id` (RC-310).
+    Un dominio con score ML y un hallazgo puntuable sin severidad congelada en ese score lanza ValueError. Si se pasa
+    la lista `saltados`, ese dominio no se recalcula, su domain_id se agrega a la lista y los demás siguen (RC-310).
+    """
+    anteriores = conn.execute(
+        'SELECT DISTINCT ON (domain_id) domain_id::text, scan_id::text, id::text AS score_id, '
+        'rule_set_id::text, partial_coverage, method, model_version, model_fallback_reason '
+        'FROM domain_scores WHERE organization_id = %s '
+        'ORDER BY domain_id, computed_at DESC, created_at DESC, id DESC',
+        (org,),
+    ).fetchall()
+    if solo_otro_juego:
+        anteriores = [anterior for anterior in anteriores if anterior['rule_set_id'] != str(rule_set_id)]
+    if not anteriores:
+        return 0
+
+    cortes = cortes_del_juego(conn, rule_set_id)
+    reglas = {regla['code']: regla for regla in conn.execute(
+        'SELECT id::text, code, category, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
+        (rule_set_id,),
+    ).fetchall()}
+    campos_explicativos = ('confidence', 'shap', 'model_prediction', 'explanation_model_version')
+
+    recalculados = 0
+    for anterior in anteriores:
+        filas = conn.execute(
+            'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status, '
+            'previous.severity AS score_severity, previous.factors AS previous_factors '
+            'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id '
+            'LEFT JOIN score_contributions previous ON previous.finding_id = f.id AND previous.score_id = %s '
+            'WHERE f.organization_id = %s AND f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
+            (anterior['score_id'], org, anterior['domain_id'], list(motor.ESTADOS_PUNTUABLES)),
+        ).fetchall()
+        if anterior['method'] == 'ml' and any(fila['score_severity'] is None for fila in filas):
+            # Antes de insertar nada de este dominio, así saltarlo no deja un snapshot a medias.
+            if saltados is None:
+                raise ValueError('faltan severidades ML congeladas para recalcular el dominio %s' %
+                                 anterior['domain_id'])
+            saltados.append(anterior['domain_id'])
+            continue
+        hallazgos = []
+        factores_previos = {}
+        for fila in filas:
+            if anterior['method'] == 'ml':
+                fila['severity'] = fila['score_severity']
+            hallazgos.append(fila)
+            factores_previos[fila['id']] = fila['previous_factors'] or {}
+
+        calculo = motor.calcular(hallazgos, reglas, pesos, cortes)
+        for aporte in calculo['contributions']:
+            anteriores_factors = factores_previos.get(aporte['finding_id'], {})
+            for campo in campos_explicativos:
+                if campo in anteriores_factors:
+                    aporte['factors'][campo] = anteriores_factors[campo]
+
+        score_id = conn.execute(
+            'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
+            'reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) '
+            # clock_timestamp(), como el score del escaneo: el orden de computed_at es el del candado de pesos.
+            "VALUES (%s, %s, %s, %s, %s, %s, 'rules_change', %s, %s, %s, %s, clock_timestamp()) RETURNING id::text",
+            (org, anterior['domain_id'], anterior['scan_id'], rule_set_id, calculo['score'],
+             Jsonb(calculo['category_scores']), anterior['method'], anterior['model_version'],
+             anterior['model_fallback_reason'], anterior['partial_coverage']),
+        ).fetchone()['id']
+
+        for aporte in calculo['contributions']:
+            conn.execute(
+                'INSERT INTO score_contributions (organization_id, score_id, finding_id, rule_id, penalty, severity, factors) '
+                'VALUES (%s, %s, %s, %s, %s, %s, %s)',
+                (org, score_id, aporte['finding_id'], aporte['rule_id'], aporte['penalty'], aporte['severity'],
+                 Jsonb(aporte['factors'])),
+            )
+        recalculados += 1
+    return recalculados

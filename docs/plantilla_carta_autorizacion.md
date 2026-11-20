@@ -1,11 +1,11 @@
 # Carta de autorización para el análisis pasivo de exposición en internet
 
-Plantilla de LowTide (tarjeta #6, RC-36). Va junto con la [política de uso ético](politica_uso_etico.md), que la carta pide aceptar en su sección 10.
+Plantilla de LowTide (tarjeta #6, RC-36). Va junto con la [política de uso ético](politica_uso_etico.md) y la [política de seguridad y privacidad](politica_seguridad_privacidad.md) (#78, RC-39), que la carta pide aceptar en su sección 10.
 
 - Los campos entre corchetes los llena la empresa. Lo que guarda la base está marcado con (base). La tabla `domain_authorizations` también guarda la ruta del PDF firmado (`signed_document_key`), su huella sha256 (`signed_document_sha256`) y el administrador que lo cargó (`accepted_by`). El alcance (plan, GitHub, Docker Hub y exclusiones) solo queda en el PDF.
 - Se firma una carta por cada dominio raíz, porque la base guarda una autorización por dominio.
 - Un administrador de la empresa sube el PDF firmado al portal (máximo 5 MB, tarjeta #26). LowTide guarda su huella sha256.
-- Sin una carta vigente y sin revocar, el dominio no entra a ningún análisis (punto 1 de la sección 1 de la política).
+- Sin una carta vigente y sin revocar, el dominio no entra a ningún análisis (punto 1 de la sección 1 de la política de uso ético).
 - Plantilla académica del equipo Kernel Loco. Antes de usarla con un cliente real, incluido el dominio del socio formador de la tarjeta #76, debe revisarla un abogado o el área legal de esa empresa.
 
 ---
@@ -49,15 +49,16 @@ Si la empresa verifica su dominio en Have I Been Pwned para la cuenta del equipo
 
 ## 6. Datos personales
 
-Son datos personales los correos del dominio que aparezcan en el sitio, en certificados, en commits públicos o en brechas, los usuarios de GitHub con correo del dominio, los perfiles públicos ligados al dominio y el nombre, cargo y correo de quien firma esta carta. Pueden ser de empleados, exempleados o proveedores. LowTide descarta los correos que no son del dominio.
+Son datos personales los correos del dominio que aparezcan en el sitio, en certificados, en commits públicos o en brechas, los usuarios de GitHub con correo del dominio y los perfiles públicos ligados al dominio. Pueden ser de empleados, exempleados o proveedores. LowTide descarta los correos que no son del dominio.
 
-- La empresa es la responsable de esos datos y el equipo los trata por cuenta de la empresa, solo para este análisis y con las medidas de seguridad de la política de seguridad de LowTide. Los integrantes guardan confidencialidad aun después del curso.
-- Para hacer el análisis, algunos terceros reciben datos: Have I Been Pwned recibe el dominio o los correos encontrados, Shodan e InternetDB reciben las IPs del dominio, GitHub y Docker Hub reciben los nombres de la organización y de los namespaces, las fuentes de subdominios reciben el dominio y el proveedor de IA del portal recibe el título, la categoría y la severidad de los hallazgos, sin correos. LowTide se aloja en [proveedor y región].
+- La empresa es la responsable de esos datos y el equipo los trata por cuenta de la empresa, solo para este análisis y con las medidas de seguridad de la [política de seguridad y privacidad de LowTide](politica_seguridad_privacidad.md). Los integrantes guardan confidencialidad aun después del curso.
+- Del nombre, cargo y correo de quien firma esta carta, de la copia de su identificación y de su poder, y de los usuarios del portal, el responsable es el equipo, con su propio aviso de privacidad.
+- Para hacer el análisis, algunos terceros reciben datos: Have I Been Pwned recibe el dominio o los correos encontrados, Shodan e InternetDB reciben las IPs del dominio, GitHub y Docker Hub reciben los nombres de la organización y de los namespaces, las fuentes de subdominios, los registros RDAP y los servidores WHOIS (para los dominios .mx, el de NIC México) reciben el dominio, los resolvedores DNS públicos de Cloudflare y de Google reciben las consultas de DNS, y Cloudflare recibe el tráfico del túnel. El proveedor de IA del portal, Cloudflare Workers AI con Groq de respaldo, recibe el título, la categoría y la severidad de los hallazgos, sin correos, y la pregunta que escribe el usuario. Resend, que mandará desde acceso@lowtidesec.com el correo de inicio de sesión del portal, recibirá la dirección de correo de cada usuario y su enlace y los tratará en Estados Unidos. LowTide se aloja en [proveedor y región].
 - LowTide no guarda contraseñas ni el valor de un secreto, solo su tipo, su ubicación y una huella. Si alguno llega a guardarse por error, el equipo lo borra y avisa al contacto de la empresa en cuanto lo detecta.
-- Los hallazgos resueltos, los análisis, las alertas y los reportes se borran 12 meses después. Un hallazgo abierto se conserva mientras siga abierto. Al terminar el servicio, o antes si la empresa lo pide por escrito, el equipo borra sus hallazgos, activos y reportes en un plazo de [30] días y le confirma el borrado. La carta firmada, los datos de quien firma, las verificaciones del registro TXT, los scores y la bitácora se conservan [plazo] solo como prueba de la autorización y de lo que hizo cada persona.
-- Si una vulneración de seguridad afecta estos datos, el equipo avisa a la empresa en un plazo de [24] horas para que ella informe a las personas afectadas.
+- Los hallazgos resueltos, los análisis, las alertas, los reportes y los scores se borran 12 meses después. Un hallazgo abierto se conserva mientras siga abierto. Al terminar el servicio, o antes si la empresa lo pide por escrito, el equipo borra sus hallazgos, activos y reportes en un plazo de [30] días y le confirma el borrado. La carta firmada, los datos de quien firma, las verificaciones del registro TXT y la bitácora se conservan [plazo] solo como prueba de la autorización y de lo que hizo cada persona.
+- Si una vulneración de seguridad afecta los datos de los que la empresa es responsable, el equipo le avisa en un plazo de [24] horas para que ella informe a las personas afectadas. Si afecta los datos de quien firma o de los usuarios del portal, el equipo les avisa directo.
 - Si un empleado ejerce sus derechos ARCO ante el equipo, el equipo reenvía la solicitud a la empresa en un plazo de [5] días hábiles y sigue sus instrucciones.
-- La empresa informa a sus empleados de este monitoreo en su aviso de privacidad. El aviso de privacidad del equipo, para los datos de quien firma y de los usuarios del portal, está en [enlace].
+- La empresa informa a sus empleados de este monitoreo en su aviso de privacidad. El aviso de privacidad del equipo, para los datos de quien firma y de los usuarios del portal, está en https://lowtidesec.com/privacidad.
 
 ## 7. Confidencialidad
 
@@ -76,7 +77,7 @@ Los resultados son información sensible de seguridad. Solo los ve el equipo. No
 
 - Empresa, para avisos y para suspender el análisis: [nombre], [correo], [teléfono].
 - Equipo: [nombre], [papel en el equipo], [correo].
-- Las peticiones de LowTide salen de la IP [IP de salida] y se identifican con el User-Agent [User-Agent de LowTide], para que la empresa las reconozca y no las bloquee ni las reporte como ataque. Si la empresa ve tráfico que no corresponde a esta carta, avisa al contacto del equipo, que detiene el análisis y lo revisa.
+- Las peticiones de LowTide salen de la IP [IP de salida] y se identifican con el User-Agent `lowtide-osint/0.1 (+https://github.com/Kernel-Loco)`, para que la empresa las reconozca y no las bloquee ni las reporte como ataque. Si la empresa ve tráfico que no corresponde a esta carta, avisa al contacto del equipo, que detiene el análisis y lo revisa.
 - Los hallazgos, incluidos los críticos, se ven en el portal en cuanto termina cada análisis. El servicio es académico y no tiene un horario de atención garantizado.
 
 ## 10. Declaraciones de la empresa
@@ -84,7 +85,7 @@ Los resultados son información sensible de seguridad. Solo los ve el equipo. No
 - Es titular o controla el dominio, la organización de GitHub y los namespaces de Docker Hub de la sección 2, y tiene derecho a autorizar el análisis de todos sus subdominios.
 - Avisará al equipo si vende o deja el dominio. En ese caso esta carta termina.
 - Sabe que LowTide es un servicio académico y gratuito, sin garantía de encontrar todo lo que está expuesto.
-- Conoce y acepta la política de uso ético de LowTide (`docs/politica_uso_etico.md` en el repositorio BackKL), en especial su sección 7.
+- Conoce y acepta la política de uso ético de LowTide (`docs/politica_uso_etico.md` en el repositorio BackKL), en especial su sección 7, y la política de seguridad y privacidad de LowTide (`docs/politica_seguridad_privacidad.md` en el mismo repositorio) en su versión vigente al firmar. Si una política choca con esta carta, manda la carta, y lo que la política marca como pendiente no cambia lo que la carta promete.
 
 ## Firmas
 

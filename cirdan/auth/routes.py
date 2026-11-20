@@ -1,24 +1,23 @@
-"""Endpoints de inicio de sesión: /api/v1/auth/login, /mfa/verify, /logout, /me y /password.
+"""Endpoints de inicio de sesión: /api/v1/auth/captcha, /login, /mfa/verify, /mfa/setup, /mfa/enable, /logout, /me,
+/password y las passkeys (/passkeys, RC-331).
 
 Los errores de credenciales usan siempre el mismo mensaje y el mismo tiempo, exista o no el
 correo, para que nadie pueda saber qué cuentas existen.
 """
 import base64
-import io
 import logging
+import re
+import uuid
 
-import pyotp
-import qrcode
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+import psycopg
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from cirdan.auth import captcha
-from cirdan.auth import passwords, sessions, totp
-from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session
+from cirdan.auth import captcha, passwords, sessions, totp, webauthn
+from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session, is_platform_admin
 from cirdan.db import audit, transaction
-from cirdan.config import config
 
 router = APIRouter(prefix='/api/v1/auth', tags=['sesión'])
 log = logging.getLogger(__name__)
@@ -27,28 +26,19 @@ INVALID = 'Correo o contraseña incorrectos.'
 LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
-ADMIN_MFA_REQUIRED = 'Activa MFA para iniciar sesión con una cuenta admin.'
-CAPTCHA_REQUIRED = config('CAPTCHA_REQUIRED', 'true').lower() == 'true'
+CAPTCHA_INVALID = 'No se pudo comprobar que no eres un robot. Espera a que termine la verificación e inténtalo de nuevo.'
 
 
 class LoginIn(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=passwords.MAX_LENGTH)
-    captcha: dict | str | None = None
+    # Opcional en el modelo para que, si falta, el portal reciba CAPTCHA_INVALID y no un 422 sin explicación.
+    captcha: str | None = Field(default=None, max_length=captcha.MAX_PAYLOAD)
 
 
 class MfaIn(BaseModel):
     mfa_token: str = Field(min_length=10, max_length=100)
-    code: str = Field(pattern=r'^\d{6}$')
-
-
-class MfaSetupIn(BaseModel):
-    current_password: str = Field(min_length=1, max_length=passwords.MAX_LENGTH)
-
-
-class MfaEnableIn(BaseModel):
-    setup_token: str = Field(min_length=10, max_length=100)
-    code: str = Field(pattern=r'^\d{6}$')
+    code: str = Field(pattern=totp.CODE_PATTERN)
 
 
 class PasswordIn(BaseModel):
@@ -68,13 +58,37 @@ def _user(conn, user_id):
     return conn.execute(USER_SQL, (user_id,)).fetchone()
 
 
+def platform_view(session, user):
+    """Lo que /me agrega para el superadmin (RC-332). `user` es la fila de USER_SQL, leída con la empresa de la cuenta.
+    En una empresa ajena, organization_id y organization_name son los de la empresa activa y role el de la sesión.
+    platform_admin pide la bandera de la sesión y también la base: si se le quitó el permiso o el TOTP con la sesión
+    en su empresa, el portal deja de mostrar el selector. Un permiso nuevo sigue pidiendo volver a iniciar sesión."""
+    admin = session.platform_admin and is_platform_admin(session.user_id)
+    out = {'platform_admin': admin}
+    if admin:
+        out.update(home_organization_id=user['organization_id'], home_organization_name=user['organization_name'])
+    if session.acting_elsewhere:
+        with transaction(session.org_id) as conn:
+            org = conn.execute('SELECT id::text, name FROM organizations').fetchone()
+        if not org:
+            sessions.delete(session.token)
+            raise HTTPException(401, SESSION_ENDED)
+        out.update(organization_id=org['id'], organization_name=org['name'], role=session.role)
+    return out
+
+
 def _start_session(response, conn, user, ip, via):
-    """Crea la sesión, pone la cookie y lo deja en la bitácora."""
+    """Crea la sesión, pone la cookie y lo deja en la bitácora. Siempre empieza en la empresa de la cuenta."""
     conn.execute('UPDATE users SET last_login_at = now() WHERE id = %s', (user['id'],))
     audit(conn, user['organization_id'], 'auth.login_succeeded', user['id'], ip, 'user', user['id'], {'via': via})
-    token = sessions.create({'user_id': user['id'], 'org_id': user['organization_id'], 'role': user['role'], 'email': user['email']})
+    platform = bool(conn.execute('SELECT public.is_platform_admin(%s) AS ok', (user['id'],)).fetchone()['ok'])
+    token = sessions.create({'user_id': user['id'], 'org_id': user['organization_id'], 'role': user['role'],
+                             'email': user['email'], 'home_org_id': user['organization_id'], 'platform_admin': platform})
     response.set_cookie(COOKIE, token, httponly=True, secure=COOKIE_SECURE, samesite='lax', path='/')
-    return _user(conn, user['id'])
+    row = _user(conn, user['id'])
+    session = Session(token=token, user_id=user['id'], org_id=user['organization_id'], role=user['role'],
+                      email=user['email'], home_org_id=user['organization_id'], platform_admin=platform)
+    return dict(row, **platform_view(session, row), **sessions.limits())
 
 
 def _clear_fails(email):
@@ -96,51 +110,180 @@ def _audit_bad_password(org, user_id, ip):
         log.exception('No se pudo escribir auth.login_failed del usuario %s', user_id)
 
 
-@router.get('/captcha', summary='Obtiene un reto ALTCHA para el inicio de sesión')
-def captcha_challenge():
-    return captcha.nuevo_reto()
+def _bad_password(org, user_id, ip):
+    return JSONResponse({'detail': INVALID}, status_code=401,
+                        background=BackgroundTask(_audit_bad_password, org, user_id, ip))
 
 
-@router.post('/login', summary='Correo y contraseña; si la cuenta tiene MFA, pide el código')
+# Etiquetas de letras, números y guiones separadas por puntos, con la última (el TLD) empezando con letra.
+_DOMINIO = re.compile(r'(?:[a-z0-9-]{1,63}\.)+[a-z][a-z0-9-]{1,62}')
+NO_ES_DOMINIO = 'no-es-dominio'
+
+
+def _email_domain(email):
+    """Del correo que no existe solo queda el dominio, nunca el correo completo (RC-302, decisión 2b de Ernesto). Si lo
+    que sigue a la última '@' no tiene forma de dominio, queda un marcador fijo: alguien que escribe la contraseña en
+    el campo del correo ('Clave@Marzo2026' o 'juan@empresa.com MiClave') no deja un pedazo de ella en el log."""
+    dominio = email.rpartition('@')[2].lower()
+    if '@' in email and len(dominio) <= 253 and _DOMINIO.fullmatch(dominio):
+        return dominio
+    return NO_ES_DOMINIO
+
+
+def _log_unknown_email(email, ip):
+    # Sin empresa no cabe en audit_log (su RLS pide organization_id = app_current_org()): va al log de la API (RC-302,
+    # decisión 1a). Corre después del 401, como _audit_bad_password con el correo que existe. %r escapa los saltos de
+    # línea, así que un correo o una IP con '\n' no inventan otra línea del log.
+    log.warning('auth.login_failed de un correo que no existe: ip=%r dominio=%r', ip, _email_domain(email))
+
+
+def _locked(task):
+    # El mismo 429 de siempre con una tarea después de la respuesta. Con raise HTTPException la tarea no correría.
+    return JSONResponse({'detail': LOCKED}, status_code=429, headers={'Retry-After': str(sessions.LOCK_SECONDS)},
+                        background=task)
+
+
+def _lock_kinds(por_correo, por_ip):
+    return [kind for kind, nuevo in (('email', por_correo), ('ip', por_ip)) if nuevo]
+
+
+def _record_login_locked(email, ip):
+    """El 429 de /login, en la bitácora de la empresa si el correo existe o en el log de la API si no (RC-302). Corre
+    después de la respuesta: el 429 sale antes de buscar el correo y así sigue, igual de rápido exista o no.
+    Solo el primero de cada ventana de bloqueo, por correo y por IP, porque audit_log no se purga."""
+    try:
+        por_correo, por_ip = sessions.first_lock('login', email, ip)
+    except Exception:
+        log.exception('No se pudo revisar en Valkey si el 429 del inicio de sesión ya tenía aviso')
+        return
+    if not (por_correo or por_ip):
+        return
+    lock = _lock_kinds(por_correo, por_ip)
+    try:
+        with transaction() as conn:
+            found = conn.execute('SELECT user_id, organization_id FROM login_lookup(%s)', (email,)).fetchone()
+        if not found:
+            log.warning('auth.login_locked de un correo que no existe: ip=%r dominio=%r bloqueo=%s',
+                        ip, _email_domain(email), '+'.join(lock))
+            return
+        org, user_id = str(found['organization_id']), str(found['user_id'])
+        with transaction(org) as conn:
+            audit(conn, org, 'auth.login_locked', user_id, ip, 'user', user_id, {'lock': lock})
+    except Exception:
+        log.exception('No se pudo escribir auth.login_locked')
+        _forget_lock_quietly('login', email, ip, por_correo, por_ip)
+
+
+def _record_mfa_locked(org, user_id, email, ip):
+    """El 429 de /mfa/verify en la bitácora de la empresa (RC-302). Solo el primero de cada ventana de bloqueo, por
+    correo y, para la IP, por empresa: con una IP bloqueada, el 429 de otra empresa también deja su evento."""
+    try:
+        por_correo, por_ip = sessions.first_lock('mfa', email, ip, org)
+    except Exception:
+        log.exception('No se pudo revisar en Valkey si el 429 del código del usuario %s ya tenía aviso', user_id)
+        return
+    if not (por_correo or por_ip):
+        return
+    try:
+        with transaction(org) as conn:
+            audit(conn, org, 'auth.mfa_locked', user_id, ip, 'user', user_id, {'lock': _lock_kinds(por_correo, por_ip)})
+    except Exception:
+        log.exception('No se pudo escribir auth.mfa_locked del usuario %s', user_id)
+        _forget_lock_quietly('mfa', email, ip, por_correo, por_ip, org)
+
+
+def _forget_lock_quietly(event, email, ip, por_correo, por_ip, org=None):
+    try:
+        sessions.forget_lock(event, email, ip, por_correo, por_ip, org)
+    except Exception:
+        log.exception('No se pudo quitar la marca del aviso de bloqueo después de un error')
+
+
+def _refund_quietly(email, ip, ticket):
+    # Si Valkey también falla, sale la excepción original y el intento vence solo en 15 min.
+    try:
+        sessions.refund_login_attempt(email, ip, ticket)
+    except Exception:
+        log.exception('No se pudo devolver el intento de inicio de sesión después de un error')
+
+
+@router.get('/captcha', summary='Reto del captcha (prueba de trabajo ALTCHA) para el siguiente inicio de sesión')
+def get_captcha(response: Response):
+    response.headers.update(NO_STORE)
+    return captcha.new_challenge()
+
+
+@router.post('/login',summary='Correo, contraseña y captcha; si la cuenta tiene MFA, pide el código')
 def login(body: LoginIn, request: Request, response: Response):
+    # El captcha va antes que todo: sin él no se busca el correo ni se mira el bloqueo, así que la respuesta no dice
+    # nada de la cuenta. No cuenta como fallo de contraseña: si contara, cualquiera bloquearía un correo ajeno sin
+    # hacer la prueba de trabajo. Se gasta aunque después falle la contraseña.
+    if not captcha.verify(body.captcha):
+        raise HTTPException(400, CAPTCHA_INVALID)
     email = body.email.strip().lower()
     ip = client_ip(request)
-    if CAPTCHA_REQUIRED and not captcha.verificar(body.captcha):
-        raise HTTPException(400, 'Resuelve el captcha e inténtalo de nuevo.')
+    # El intento cuenta como fallo del correo y de la IP antes de buscar la cuenta, en un solo paso de Valkey (RC-270).
+    # Revisado y contado por separado, 30 contraseñas a la vez leían todas el contador en 0 y se revisaban todas.
+    # Va antes de buscar el correo, así que el 429 sale igual exista o no la cuenta.
+    ticket = sessions.take_login_attempt(email, ip)
+    if not ticket:
+        # Quién era la cuenta se busca después de mandar el 429 (RC-302).
+        return _locked(BackgroundTask(_record_login_locked, email, ip))
 
-    if sessions.is_locked(email, ip):
-        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
-
-    with transaction() as conn:
-        found = conn.execute('SELECT * FROM login_lookup(%s)', (email,)).fetchone()
+    try:
+        with transaction() as conn:
+            found = conn.execute('SELECT * FROM login_lookup(%s)', (email,)).fetchone()
+        if found:
+            good = passwords.verify_password(found['password_hash'], body.password, str(found['user_id']))
+        else:
+            passwords.burn_time(body.password)
+    except Exception:
+        # La base o la huella fallaron y la contraseña no se llegó a revisar: el 500 no es un fallo y no cuenta. El
+        # relleno del correo que no existe va en el mismo try: si su error contara, el contador diría qué correos existen.
+        _refund_quietly(email, ip, ticket)
+        raise
     if not found:
-        passwords.burn_time(body.password)
-        sessions.register_fail(email, ip)
-        raise HTTPException(401, INVALID)
+        # La línea del log va después del 401, como la bitácora del correo que existe (RC-302).
+        return JSONResponse({'detail': INVALID}, status_code=401,
+                            background=BackgroundTask(_log_unknown_email, email, ip))
 
     org, user_id = str(found['organization_id']), str(found['user_id'])
-    if not passwords.verify_password(found['password_hash'], body.password):
-        sessions.register_fail(email, ip)
-        # La bitácora se escribe después de mandar el 401. Escrita antes, la conexión y el INSERT
-        # hacían que un correo que existe tardara unos 17 ms más que uno que no existe.
+    if not good:
+        # El fallo ya contó arriba. La bitácora se escribe después de mandar el 401. Escrita antes, la conexión y el
+        # INSERT hacían que un correo que existe tardara unos 17 ms más que uno que no existe.
         # Con raise HTTPException la tarea no correría: por eso se devuelve el mismo 401 a mano.
-        return JSONResponse({'detail': INVALID}, status_code=401,
-                            background=BackgroundTask(_audit_bad_password, org, user_id, ip))
+        return _bad_password(org, user_id, ip)
+    # La contraseña es correcta: el intento no fue un fallo y se devuelve, al correo y a la IP.
+    sessions.refund_login_attempt(email, ip, ticket)
 
     with transaction(org) as conn:
-        row = conn.execute(
-            'SELECT role, mfa_enabled_at IS NOT NULL AND totp_secret_enc IS NOT NULL AS mfa_enabled '
-            'FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
-        if not row:
-            raise HTTPException(401, INVALID)
-        if row['role'] == 'admin' and not row['mfa_enabled']:
-            audit(conn, org, 'auth.admin_mfa_required', user_id, ip, 'user', user_id)
-            raise HTTPException(403, ADMIN_MFA_REQUIRED)
-        if passwords.needs_rehash(found['password_hash']):
-            conn.execute('UPDATE users SET password_hash = %s WHERE id = %s', (passwords.hash_password(body.password), user_id))
-        if row['mfa_enabled']:
+        if passwords.needs_rehash(found['password_hash'], user_id):
+            # Una huella vieja sin cifrar queda cifrada en este mismo inicio de sesión (RC-330). Solo si nadie la
+            # cambió desde la búsqueda: así un cambio de contraseña en paralelo no se pisa con la anterior.
+            # Sin fila cambiada, otra petición guardó una huella nueva mientras tanto: la de un login en paralelo de
+            # la misma cuenta (doble clic), que la cifró con esta misma contraseña, o la de un cambio de contraseña.
+            # Se relee y solo entra si la contraseña también abre la huella que quedó.
+            if not conn.execute('UPDATE users SET password_hash = %s WHERE id = %s AND password_hash = %s',
+                                (passwords.hash_password(body.password, user_id), user_id,
+                                 found['password_hash'])).rowcount:
+                actual = conn.execute('SELECT password_hash FROM users WHERE id = %s', (user_id,)).fetchone()
+                if not actual or not passwords.verify_password(actual['password_hash'], body.password, user_id):
+                    # Ya no abre la huella de ahora: vuelve a contar como fallo y queda en la bitácora como el otro 401.
+                    sessions.register_fail(email, ip)
+                    return _bad_password(org, user_id, ip)
+        if found['mfa_enabled']:
             # Los fallos del correo se borran hasta que el código sea correcto. Borrados aquí, quien
             # tiene la contraseña repetiría el login y 5 códigos sin llegar nunca al bloqueo.
+            return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
+        # login_lookup() no devuelve el rol (migración 004): se lee aquí con RLS, como en /mfa/verify.
+        # FOR NO KEY UPDATE (RC-154), como el UPDATE de last_login_at que viene: un alta de TOTP a la vez espera
+        # a que esta sesión entre al índice y la cierra, o esta lectura espera al alta y la ve ya activa. Con FOR
+        # SHARE dos logins a la vez de la misma cuenta chocaban en un deadlock al subir al lock del UPDATE.
+        row = conn.execute('SELECT role, %s AS mfa_enabled FROM users WHERE id = %%s AND is_active FOR NO KEY UPDATE'
+                           % MFA_ENABLED_SQL, (user_id,)).fetchone()
+        if not row:  # se desactivó la cuenta entre la búsqueda y aquí
+            raise HTTPException(401, INVALID)
+        if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
         user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': email}, ip, 'password')
     _clear_fails(email)
@@ -160,37 +303,27 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
     ip = client_ip(request)
     org, user_id, email = pending['org_id'], pending['user_id'], pending['email']
     if not sessions.take_mfa_attempt(email, ip):
-        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+        return _locked(BackgroundTask(_record_mfa_locked, org, user_id, email, ip))
     with transaction(org) as conn:
         row = conn.execute(
             'SELECT email::text, role, totp_secret_enc, last_totp_step FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
         if not row or not row['totp_secret_enc']:
             sessions.delete_mfa(body.mfa_token)
             raise HTTPException(401, MFA_EXPIRED)
-        try:
-            secret = totp.decrypt_secret(row['totp_secret_enc'], user_id)
-        except Exception:
-            log.exception('Secreto TOTP inválido para user_id=%s', user_id)
-            sessions.delete_mfa(body.mfa_token)
-            raise HTTPException(401, MFA_EXPIRED)
-        step = totp.verify_code(secret, body.code, row['last_totp_step'])
+        step = totp.verify_code(totp.decrypt_secret(row['totp_secret_enc'], user_id), body.code, row['last_totp_step'])
+        # La fila se leyó sin bloquearla: el UPDATE solo guarda el paso si ninguna otra petición (otro /mfa/verify o el
+        # registro de una passkey) gastó ese código o uno posterior desde la lectura. Si no cambia nada, es un código usado.
+        if step is not None and not conn.execute(
+                'UPDATE users SET last_totp_step = %s WHERE id = %s AND (last_totp_step IS NULL OR last_totp_step < %s)',
+                (step, user_id, step)).rowcount:
+            step = None
         if step is None:
-            # El primer fallo del mfa_token deja evidencia; los siguientes solo repiten ruido.
-            if pending.get('attempts', 0) == 0:
-                audit(conn, org, 'auth.mfa_failed', user_id, ip, 'user', user_id)
+            audit(conn, org, 'auth.mfa_failed', user_id, ip, 'user', user_id)
             fail = True
         else:
-            used = conn.execute(
-                'UPDATE users SET last_totp_step = %s WHERE id = %s AND (last_totp_step IS NULL OR last_totp_step < %s) '
-                'RETURNING id', (step, user_id, step)).fetchone()
-            if not used:
-                if pending.get('attempts', 0) == 0:
-                    audit(conn, org, 'auth.mfa_failed', user_id, ip, 'user', user_id)
-                fail = True
-            else:
-                fail = False
-                sessions.delete_mfa(body.mfa_token)
-                user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, 'totp')
+            fail = False
+            sessions.delete_mfa(body.mfa_token)
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, 'totp')
     if fail:
         sessions.register_mfa_fail(ip)
         raise HTTPException(401, MFA_INVALID)
@@ -198,98 +331,478 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
     return {'user': user}
 
 
+MFA_ALREADY = 'La verificación en dos pasos ya está activa en tu cuenta.'
+MFA_SETUP_EXPIRED = 'El código QR venció o ya se usaron sus 5 intentos. Empieza de nuevo.'
+WRONG_PASSWORD = 'La contraseña actual no es correcta.'
+SESSION_ENDED = 'Tu sesión terminó. Vuelve a iniciar sesión.'
+NO_STORE = {'Cache-Control': 'no-store'}
+MFA_ENABLED_SQL = 'mfa_enabled_at IS NOT NULL AND totp_secret_enc IS NOT NULL'
+
+
+class MfaSetupIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=passwords.MAX_LENGTH)
+
+
+class MfaEnableIn(BaseModel):
+    code: str = Field(pattern=totp.CODE_PATTERN)
+
+
+@router.post('/mfa/setup', summary='Alta de TOTP, paso 1: con la contraseña, un secreto nuevo con su QR')
+def mfa_setup(body: MfaSetupIn, request: Request, response: Response, session: Session = Depends(current_session)):
+    # Pide la contraseña para que una cookie robada no baste para atar la cuenta a la app de otra persona.
+    # Una contraseña equivocada cuenta para el bloqueo del login, igual que en /login.
+    ip = client_ip(request)
+    if sessions.is_locked(session.email, ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    with transaction(session.own_org_id) as conn:
+        row = conn.execute('SELECT email::text, password_hash, %s AS mfa_enabled FROM users WHERE id = %%s AND is_active'
+                           % MFA_ENABLED_SQL, (session.user_id,)).fetchone()
+        if not row:
+            sessions.delete(session.token)
+            raise HTTPException(401, SESSION_ENDED)
+        bad_password = not passwords.verify_password(row['password_hash'], body.current_password, session.user_id)
+        if bad_password:
+            audit(conn, session.own_org_id, 'auth.mfa_setup_failed', session.user_id, ip, 'user', session.user_id,
+                  {'reason': 'password'})
+        elif row['mfa_enabled']:
+            raise HTTPException(409, MFA_ALREADY)
+        else:
+            audit(conn, session.own_org_id, 'auth.mfa_setup_started', session.user_id, ip, 'user', session.user_id)
+    if bad_password:
+        sessions.register_fail(session.email, ip)
+        raise HTTPException(400, WRONG_PASSWORD)
+    secret = totp.new_secret()
+    # En Valkey va cifrado con la misma llave y el mismo dato asociado que en la base: quien lea Valkey no lo puede usar.
+    sessions.create_mfa_setup(session.user_id, base64.b64encode(totp.encrypt_secret(secret, session.user_id)).decode())
+    uri = totp.provisioning_uri(secret, row['email'])
+    response.headers.update(NO_STORE)
+    return {'otpauth_uri': uri, 'secret': secret, 'qr_svg': totp.qr_svg_data_uri(uri),
+            'expires_in_seconds': sessions.MFA_SETUP_SECONDS}
+
+
+@router.post('/mfa/enable', summary='Alta de TOTP, paso 2: guarda el secreto solo si el código de la app es válido')
+def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(current_session)):
+    # El intento se gasta antes de revisar el código, como en /mfa/verify: en paralelo tampoco pasan de 5.
+    pending = sessions.take_mfa_setup(session.user_id)
+    if not pending:
+        raise HTTPException(400, MFA_SETUP_EXPIRED)
+    ip = client_ip(request)
+    secret = totp.decrypt_secret(base64.b64decode(pending['secret_enc']), session.user_id)
+    removed = []
+    with transaction(session.own_org_id) as conn:
+        # FOR UPDATE: dos códigos válidos a la vez no guardan dos secretos; el segundo ve la cuenta ya activa.
+        row = conn.execute('SELECT %s AS mfa_enabled FROM users WHERE id = %%s AND is_active FOR UPDATE' % MFA_ENABLED_SQL,
+                           (session.user_id,)).fetchone()
+        if not row:
+            sessions.delete_mfa_setup(session.user_id)
+            sessions.delete(session.token)
+            raise HTTPException(401, SESSION_ENDED)
+        if row['mfa_enabled']:
+            sessions.delete_mfa_setup(session.user_id)
+            raise HTTPException(409, MFA_ALREADY)
+        step = totp.verify_code(secret, body.code)
+        if step is None:
+            audit(conn, session.own_org_id, 'auth.mfa_enable_failed', session.user_id, ip, 'user', session.user_id)
+        else:
+            # last_totp_step con el paso de este código: el mismo código no sirve después para iniciar sesión.
+            conn.execute('UPDATE users SET totp_secret_enc = %s, mfa_enabled_at = now(), last_totp_step = %s, '
+                         'updated_at = now() WHERE id = %s',
+                         (totp.encrypt_secret(secret, session.user_id), step, session.user_id))
+            audit(conn, session.own_org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
+            # Las passkeys de la cuenta se registraron sin TOTP, solo con la contraseña (RC-331): quien la tenía pudo dar
+            # de alta la suya y seguiría entrando sin el código. Se borran y se vuelven a registrar con el código.
+            removed = _delete_passkeys(conn, session, ip, 'mfa_enabled')
+            # Las demás sesiones de la cuenta entraron sin el segundo factor: se cierran y solo queda la que activó.
+            # Va antes del commit y con la fila bloqueada: si Valkey falla, el alta no se guarda y se puede repetir.
+            sessions.delete_others(session.user_id, session.token)
+    if step is None:
+        sessions.register_mfa_fail(ip)
+        raise HTTPException(400, MFA_INVALID)
+    sessions.delete_mfa_setup(session.user_id)
+    return {'mfa_enabled': True, 'passkeys_removed': len(removed)}
+
+
 @router.post('/logout', status_code=204, summary='Cierra la sesión y la borra del servidor')
 def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
-    data = sessions.get(token)
-    if data:
-        with transaction(data['org_id']) as conn:
-            audit(conn, data['org_id'], 'auth.logout', data['user_id'], client_ip(request), 'user', data['user_id'])
-    sessions.delete(token)
+    # La cookie se borra antes de tocar Valkey y ninguna falla de Valkey sale de aquí: con una excepción, el 500 de
+    # main.py no lleva el Set-Cookie de este Response y el navegador conservaría la cookie.
     response.delete_cookie(COOKIE, path='/', httponly=True, secure=COOKIE_SECURE, samesite='lax')
+    try:
+        data = sessions.get(token)
+    except Exception:  # se intenta borrar igual: la sesión puede existir aunque no se haya podido leer
+        data = None
+        log.exception('No se pudo leer la sesión al cerrar sesión. Se borró la cookie y se intenta borrar la sesión')
+    # Primero se borran la sesión y la cookie: si la base falla al escribir el evento, la persona igual sale (RC-314).
+    try:
+        sessions.delete(token)
+    except Exception:  # puede seguir en Valkey hasta que venza por inactividad: no se escribe auth.logout
+        log.exception('No se pudo borrar de Valkey la sesión del usuario %s al cerrar sesión. Se borró la cookie',
+                      data['user_id'] if data else 'desconocido')
+        return
+    if data:
+        # La bitácora va en la empresa de la cuenta, aunque un superadmin cierre sesión desde otra (RC-332).
+        home = data.get('home_org_id') or data['org_id']
+        try:
+            with transaction(home) as conn:
+                audit(conn, home, 'auth.logout', data['user_id'], client_ip(request), 'user', data['user_id'])
+        except Exception:  # la sesión ya no existe: se responde 204 y la falla queda en el log, sin el token
+            log.exception('No se pudo escribir auth.logout del usuario %s', data['user_id'])
 
 
 @router.get('/me', summary='Usuario de la sesión')
 def me(session: Session = Depends(current_session)):
-    with transaction(session.org_id) as conn:
+    with transaction(session.own_org_id) as conn:
         user = _user(conn, session.user_id)
     if not user:  # se desactivó la cuenta con la sesión abierta
         sessions.delete(session.token)
         raise HTTPException(401, 'Tu sesión terminó. Vuelve a iniciar sesión.')
-    return user
+    return dict(user, **platform_view(session, user), **sessions.limits(session.created_at))
 
 
-@router.post('/password', status_code=204, summary='Cambia la contraseña del usuario de la sesión')
+COMMON_PASSWORD = 'Esa contraseña es muy común. Elige otra.'
+WRONG_PASSWORD_LAST = 'La contraseña actual no es correcta. Por seguridad cerramos tu sesión: vuelve a iniciarla.'
+
+
+def _clear_password_attempts(user_id):
+    # Corre con la contraseña ya cambiada. Si Valkey falla aquí, el contador vence solo en 15 min: un 500 diría que no
+    # cambió cuando sí cambió.
+    try:
+        sessions.clear_password_attempts(user_id)
+    except Exception:
+        log.exception('No se pudieron borrar los intentos de cambio de contraseña del usuario %s', user_id)
+
+
+@router.post('/password', summary='Cambia la contraseña del usuario de la sesión y borra sus passkeys')
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
-    ip = client_ip(request)
-    if sessions.is_password_locked(session.user_id, ip):
+    # La lista de contraseñas comunes (RC-281) va primero: no revisa la contraseña actual, así que no gasta un intento.
+    if passwords.is_common(body.new_password):
+        raise HTTPException(400, COMMON_PASSWORD)
+    # El intento se cuenta antes de revisar la contraseña actual (RC-290), como en /mfa/verify: en paralelo tampoco se
+    # revisan más de 5. Es un contador del usuario, aparte del login: quien tiene una cookie robada no bloquea el
+    # inicio de sesión del dueño, y el quinto fallo le cierra la sesión.
+    attempt = sessions.take_password_attempt(session.user_id)
+    if attempt > sessions.MAX_PASSWORD_ATTEMPTS:
         raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
-    with transaction(session.org_id) as conn:
-        row = conn.execute('SELECT password_hash FROM users WHERE id = %s', (session.user_id,)).fetchone()
-        if not row or not passwords.verify_password(row['password_hash'], body.current_password):
-            sessions.register_password_fail(session.user_id, ip)
-            raise HTTPException(401, 'La contraseña actual no es correcta.')
-        conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
-                     (passwords.hash_password(body.new_password), session.user_id))
-        audit(conn, session.org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
-    sessions.clear_password_fails(session.user_id)
-
-
-@router.post('/mfa/setup', summary='Inicia el alta de TOTP y devuelve una llave y QR')
-def setup_mfa(body: MfaSetupIn, request: Request, session: Session = Depends(current_session)):
     ip = client_ip(request)
-    with transaction(session.org_id) as conn:
-        row = conn.execute(
-            'SELECT password_hash, mfa_enabled_at IS NOT NULL AND totp_secret_enc IS NOT NULL AS mfa_enabled '
-            'FROM users WHERE id = %s AND is_active', (session.user_id,)).fetchone()
-        if not row:
-            raise HTTPException(401, 'Tu sesión terminó. Vuelve a iniciar sesión.')
-        if row['mfa_enabled']:
-            raise HTTPException(409, 'MFA ya está activo en esta cuenta.')
-        if not passwords.verify_password(row['password_hash'], body.current_password):
-            raise HTTPException(401, 'La contraseña actual no es correcta.')
+    last = attempt == sessions.MAX_PASSWORD_ATTEMPTS
+    with transaction(session.own_org_id) as conn:
+        # FOR NO KEY UPDATE: dos cambios a la vez con la contraseña actual ya no dan 204 los dos. El segundo espera el
+        # commit del primero y revisa contra el hash nuevo (si no, ganaba el último, que podía ser el de una cookie
+        # robada). No FOR UPDATE: chocaría con el FOR KEY SHARE de la llave de audit_log a users y un login fallido a la
+        # vez daría deadlock con el lock de la cadena. Es el mismo lock que toma el login.
+        row = conn.execute('SELECT password_hash FROM users WHERE id = %s FOR NO KEY UPDATE',
+                           (session.user_id,)).fetchone()
+        ok = bool(row) and passwords.verify_password(row['password_hash'], body.current_password, session.user_id)
+        if not ok and last:
+            audit(conn, session.own_org_id, 'auth.password_change_locked', session.user_id, ip, 'user', session.user_id,
+                  {'attempts': attempt})
+            # Antes del commit: si Valkey falla, el evento no queda sin que la sesión se haya cerrado.
+            sessions.delete(session.token)
+        elif ok:
+            conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
+                         (passwords.hash_password(body.new_password, session.user_id), session.user_id))
+            # Sin TOTP una passkey se registra solo con la contraseña (RC-331): quien tenía la anterior pudo dar de
+            # alta la suya y seguiría entrando, como MFA, después del cambio. Se borran y se vuelven a registrar con
+            # la nueva. El borrado va antes de cualquier audit(): así no se espera una fila de passkey con el candado
+            # de la bitácora.
+            removed = _delete_passkeys(conn, session, ip, 'password_changed')
+            audit(conn, session.own_org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
+            # Las demás sesiones de la cuenta se cierran y queda la que cambió. Va antes del commit, como en
+            # /mfa/enable: si Valkey falla, la contraseña no cambia y se puede repetir.
+            sessions.delete_others(session.user_id, session.token)
+    if not ok:
+        if last:
+            response = JSONResponse({'detail': WRONG_PASSWORD_LAST}, status_code=400)
+            response.delete_cookie(COOKIE, path='/', httponly=True, secure=COOKIE_SECURE, samesite='lax')
+            return response
+        raise HTTPException(400, WRONG_PASSWORD)
+    _clear_password_attempts(session.user_id)
+    return {'passkeys_removed': len(removed)}
 
-    secret = pyotp.random_base32()
-    setup_token = sessions.create_totp_setup({
-        'user_id': session.user_id,
-        'org_id': session.org_id,
-        'email': session.email,
-        'secret': secret,
-    })
-    uri = pyotp.TOTP(secret).provisioning_uri(name=session.email, issuer_name='LowTide')
-    image = qrcode.make(uri)
-    buffer = io.BytesIO()
-    image.save(buffer, format='PNG')
-    qr_data_uri = 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode()
-    return {'setup_token': setup_token, 'secret': secret, 'qr_uri': uri, 'qr_data_uri': qr_data_uri}
+
+def _delete_passkeys(conn, session, ip, reason):
+    """Borra todas las passkeys de la cuenta de la sesión y deja un auth.passkey_deleted por cada una. En la bitácora
+    va solo el id: el nombre es texto libre y audit_log no se puede borrar ni anonimizar."""
+    removed = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s RETURNING id::text',
+                           (session.user_id,)).fetchall()
+    for passkey in removed:
+        audit(conn, session.own_org_id, 'auth.passkey_deleted', session.user_id, ip, 'passkey', passkey['id'],
+              {'reason': reason})
+    return removed
 
 
-@router.post('/mfa/enable', summary='Confirma el código TOTP y guarda el secreto nuevo')
-def enable_mfa(body: MfaEnableIn, request: Request, session: Session = Depends(current_session)):
-    pending = sessions.take_totp_setup(body.setup_token)
-    if not pending:
-        raise HTTPException(401, 'El alta TOTP expiró o ya fue usada.')
-    if pending['user_id'] != session.user_id or pending['org_id'] != session.org_id:
-        sessions.delete_totp_setup(body.setup_token)
-        raise HTTPException(403, 'El alta TOTP no pertenece a esta sesión.')
+# ------------------------------------------------------------------ passkeys (RC-331)
+# Otra forma de entrar, además de contraseña y TOTP, que siguen sirviendo. La passkey exige verificación del usuario
+# (huella, rostro o PIN del dispositivo), así que entrar con ella cuenta como MFA: no se pide el código TOTP después.
 
+PASSKEYS_OFF = 'Las passkeys no están disponibles en este servidor.'
+PASSKEY_INVALID = 'No se pudo entrar con esa passkey. Inténtalo de nuevo o entra con tu correo y contraseña.'
+PASSKEY_EXPIRED = 'La solicitud de la passkey venció. Inténtalo de nuevo.'
+PASSKEY_REG_INVALID = 'No se pudo registrar la passkey. Inténtalo de nuevo.'
+PASSKEY_REG_EXPIRED = 'La solicitud venció o ya se usó. Empieza de nuevo.'
+PASSKEY_CODE_REQUIRED = 'Escribe el código de 6 dígitos de tu app autenticadora.'
+PASSKEY_DUPLICATE = 'Esa passkey ya está registrada.'
+PASSKEY_NOT_FOUND = 'No existe esa passkey.'
+PASSKEY_OPTIONS_LIMIT = ('Se pidieron demasiadas passkeys desde tu red. Espera 15 minutos o entra con tu correo y '
+                         'contraseña.')
+MAX_PASSKEYS = 10
+PASSKEY_LIMIT = 'Ya tienes %d passkeys. Borra una para registrar otra.' % MAX_PASSKEYS
+PASSKEY_COLUMNS = 'id::text, name, created_at, last_used_at, backed_up, transports'
+
+
+class PasskeyRegisterOptionsIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=passwords.MAX_LENGTH)
+    # Solo si la cuenta tiene TOTP. Sin él, quien robe la cookie y la contraseña registraría su passkey y se saltaría
+    # el segundo factor para siempre.
+    code: str | None = Field(default=None, pattern=totp.CODE_PATTERN)
+
+
+class PasskeyRegisterVerifyIn(BaseModel):
+    credential: dict
+    name: str = Field(min_length=1, max_length=60)
+
+
+class PasskeyLoginVerifyIn(BaseModel):
+    login_token: str = Field(min_length=10, max_length=100)
+    credential: dict
+
+
+def _passkeys_on():
+    if not webauthn.configured():
+        raise HTTPException(503, PASSKEYS_OFF)
+
+
+def _audit_passkey_login_failed(org, user_id, ip, reason):
+    # Como _audit_bad_password: si la bitácora falla, queda en el log y el 401 sale igual.
+    try:
+        with transaction(org) as conn:
+            audit(conn, org, 'auth.login_failed', user_id, ip, 'user', user_id, {'reason': 'passkey', 'detail': reason})
+    except Exception:
+        log.exception('No se pudo escribir auth.login_failed (passkey) del usuario %s', user_id)
+
+
+@router.post('/passkeys/register/options',
+             summary='Registrar passkey, paso 1: con la contraseña y, si hay TOTP, un código, las opciones de WebAuthn')
+def passkey_register_options(body: PasskeyRegisterOptionsIn, request: Request, response: Response,
+                             session: Session = Depends(current_session)):
+    _passkeys_on()
     ip = client_ip(request)
-    step = totp.verify_code(pending['secret'], body.code)
-    if step is None:
-        raise HTTPException(401, MFA_INVALID)
-
-    with transaction(session.org_id) as conn:
-        row = conn.execute(
-            'SELECT id FROM users WHERE id = %s AND is_active AND mfa_enabled_at IS NULL',
-            (session.user_id,)).fetchone()
+    if sessions.is_locked(session.email, ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    # El intento se cuenta antes de revisar la contraseña, con el mismo contador por usuario que /password (RC-290):
+    # contado después, las peticiones en paralelo pasaban todas con el contador en 0 y se revisaban más de 5 (R3-1).
+    if sessions.take_password_attempt(session.user_id) > sessions.MAX_PASSWORD_ATTEMPTS:
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    fail = None
+    # La fila del usuario solo se ve con RLS de su empresa: own_org_id, como /mfa/* y /password, para que un superadmin
+    # que trabaja en otra empresa registre, vea y borre las suyas (R3-14, RC-332).
+    with transaction(session.own_org_id) as conn:
+        # FOR NO KEY UPDATE, como en /login: otra petición que gaste un código de esta cuenta espera a esta. /mfa/verify
+        # no bloquea la fila al leer, pero su UPDATE solo guarda un paso posterior al guardado.
+        row = conn.execute('SELECT email::text, full_name, password_hash, totp_secret_enc, last_totp_step, %s AS mfa_enabled '
+                           'FROM users WHERE id = %%s AND is_active FOR NO KEY UPDATE' % MFA_ENABLED_SQL,
+                           (session.user_id,)).fetchone()
         if not row:
-            sessions.delete_totp_setup(body.setup_token)
-            raise HTTPException(409, 'MFA ya está activo en esta cuenta.')
-        encrypted = totp.encrypt_secret(pending['secret'], session.user_id)
-        conn.execute(
-            'UPDATE users SET totp_secret_enc = %s, mfa_enabled_at = now(), last_totp_step = %s, updated_at = now() '
-            'WHERE id = %s',
-            (encrypted, step, session.user_id),)
-        audit(conn, session.org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
-    sessions.delete_totp_setup(body.setup_token)
-    return {'mfa_enabled': True}
+            sessions.delete(session.token)
+            raise HTTPException(401, SESSION_ENDED)
+        existing = []
+        if not passwords.verify_password(row['password_hash'], body.current_password, session.user_id):
+            fail = 'password'
+        else:
+            # La contraseña es correcta: el contador vuelve a 0, como en /password. Va antes del 409 de abajo, que si
+            # no gastaría un intento por cada vez que se pide con 10 passkeys.
+            _clear_password_attempts(session.user_id)
+            existing = [r['credential_id'] for r in conn.execute(
+                'SELECT credential_id FROM webauthn_credentials WHERE user_id = %s', (session.user_id,)).fetchall()]
+            # Antes del código: con 10 passkeys no se gasta el código ni se cuenta un intento.
+            if len(existing) >= MAX_PASSKEYS:
+                raise HTTPException(409, PASSKEY_LIMIT)
+        if fail:
+            pass
+        elif row['mfa_enabled'] and not body.code:
+            raise HTTPException(400, PASSKEY_CODE_REQUIRED)
+        elif row['mfa_enabled']:
+            # El código cuenta como fallo del correo antes de revisarlo, como en /mfa/verify.
+            if not sessions.take_mfa_attempt(session.email, ip):
+                raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+            step = totp.verify_code(totp.decrypt_secret(row['totp_secret_enc'], session.user_id), body.code,
+                                    row['last_totp_step'])
+            if step is None or not conn.execute(
+                    'UPDATE users SET last_totp_step = %s WHERE id = %s AND (last_totp_step IS NULL OR last_totp_step < %s)',
+                    (step, session.user_id, step)).rowcount:
+                fail = 'code'
+        if fail:
+            audit(conn, session.own_org_id, 'auth.passkey_registration_failed', session.user_id, ip, 'user',
+                  session.user_id, {'reason': fail})
+        else:
+            audit(conn, session.own_org_id, 'auth.passkey_registration_started', session.user_id, ip, 'user',
+                  session.user_id)
+    if fail == 'password':
+        sessions.register_fail(session.email, ip)
+        raise HTTPException(400, WRONG_PASSWORD)
+    if fail == 'code':
+        sessions.register_mfa_fail(ip)
+        raise HTTPException(400, MFA_INVALID)
+    if row['mfa_enabled']:
+        _clear_fails(session.email)  # el código fue correcto, como en /mfa/verify
+    options, challenge = webauthn.registration_options(session.user_id, row['email'], row['full_name'], existing)
+    sessions.create_passkey_registration(session.user_id, session.token, challenge,
+                                         sessions.password_tag(row['password_hash']))
+    response.headers.update(NO_STORE)
+    return {'options': options, 'expires_in_seconds': sessions.PASSKEY_SECONDS}
+
+
+@router.post('/passkeys/register/verify', status_code=201,
+             summary='Registrar passkey, paso 2: guarda la passkey si la respuesta del navegador es válida')
+def passkey_register_verify(body: PasskeyRegisterVerifyIn, request: Request, session: Session = Depends(current_session)):
+    _passkeys_on()
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, 'Ponle un nombre a la passkey.')
+    # El reto se gasta antes de revisar la respuesta: una respuesta que no sirve obliga a empezar de nuevo, con la
+    # contraseña y el código.
+    pending = sessions.take_passkey_registration(session.user_id, session.token)
+    if pending is None:
+        raise HTTPException(400, PASSKEY_REG_EXPIRED)
+    challenge, password_tag = pending
+    ip = client_ip(request)
+    try:
+        data = webauthn.verify_registration(body.credential, challenge)
+    except webauthn.PasskeyError as exc:
+        log.info('Registro de passkey rechazado del usuario %s: %s', session.user_id, exc)
+        with transaction(session.own_org_id) as conn:
+            audit(conn, session.own_org_id, 'auth.passkey_registration_failed', session.user_id, ip, 'user',
+                  session.user_id, {'reason': 'response'})
+        raise HTTPException(400, PASSKEY_REG_INVALID)
+    with transaction(session.own_org_id) as conn:
+        user = conn.execute('SELECT password_hash FROM users WHERE id = %s AND is_active FOR NO KEY UPDATE',
+                            (session.user_id,)).fetchone()
+        if not user:
+            sessions.delete(session.token)
+            raise HTTPException(401, SESSION_ENDED)
+        # Con la fila bloqueada, la contraseña debe ser la misma con la que se pidió el reto: un cambio de contraseña
+        # en medio ya borró las passkeys, y este registro, empezado con la anterior, tampoco se guarda.
+        if sessions.password_tag(user['password_hash']) != password_tag:
+            raise HTTPException(400, PASSKEY_REG_EXPIRED)
+        # Con la fila bloqueada, la sesión debe seguir viva: /mfa/enable borra las passkeys y cierra las demás sesiones
+        # con la fila bloqueada. Una de esas sesiones que ya pasó current_session no guarda la suya después (R4).
+        if not sessions.get(session.token):
+            raise HTTPException(401, SESSION_ENDED)
+        count = conn.execute('SELECT count(*) AS n FROM webauthn_credentials WHERE user_id = %s',
+                             (session.user_id,)).fetchone()['n']
+        if count >= MAX_PASSKEYS:
+            raise HTTPException(409, PASSKEY_LIMIT)
+        try:
+            with conn.transaction():
+                row = conn.execute(
+                    'INSERT INTO webauthn_credentials (organization_id, user_id, credential_id, public_key, sign_count, '
+                    'transports, aaguid, backed_up, name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) '
+                    'RETURNING ' + PASSKEY_COLUMNS,
+                    (session.own_org_id, session.user_id, data['credential_id'], data['public_key'], data['sign_count'],
+                     data['transports'], data['aaguid'], data['backed_up'], name)).fetchone()
+        except psycopg.errors.UniqueViolation:
+            raise HTTPException(409, PASSKEY_DUPLICATE)
+        # Sin el nombre: es texto libre y audit_log no se puede borrar ni anonimizar.
+        audit(conn, session.own_org_id, 'auth.passkey_registered', session.user_id, ip, 'passkey', row['id'],
+              {'backed_up': data['backed_up']})
+    return row
+
+
+@router.post('/passkeys/login/options', summary='Entrar con passkey, paso 1: las opciones de WebAuthn y su token')
+def passkey_login_options(request: Request, response: Response):
+    _passkeys_on()
+    ip = client_ip(request)
+    # Una IP bloqueada por fallos no pide retos. Aparte, cada IP pide como máximo MAX_PASSKEY_OPTIONS_IP cada 15 min:
+    # el autollenado pide uno en cada carga del login, así que pasarse no es un fallo y lleva su propio mensaje.
+    if sessions.is_ip_locked(ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    if not sessions.take_passkey_options(ip):
+        raise HTTPException(429, PASSKEY_OPTIONS_LIMIT, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    options, challenge = webauthn.authentication_options()
+    response.headers.update(NO_STORE)
+    return {'options': options, 'login_token': sessions.create_passkey_login(challenge),
+            'expires_in_seconds': sessions.PASSKEY_SECONDS}
+
+
+@router.post('/passkeys/login/verify', summary='Entrar con passkey, paso 2: revisa la firma y crea la sesión')
+def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response: Response):
+    _passkeys_on()
+    ip = client_ip(request)
+    if sessions.is_ip_locked(ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    # El reto se gasta antes de todo: cada login_token revisa una sola respuesta.
+    challenge = sessions.take_passkey_login(body.login_token)
+    if challenge is None:
+        raise HTTPException(401, PASSKEY_EXPIRED)
+    credential_id = webauthn.credential_id_of(body.credential)
+    found = None
+    if credential_id:
+        with transaction() as conn:
+            found = conn.execute('SELECT * FROM passkey_lookup(%s)', (credential_id,)).fetchone()
+    if not found:
+        sessions.register_ip_fail(ip)
+        raise HTTPException(401, PASSKEY_INVALID)
+    org, user_id, email = str(found['organization_id']), str(found['user_id']), found['email'].lower()
+    if sessions.is_locked(email, ip):
+        # Igual que una passkey que no existe (401 y un fallo de la IP): un 429 diría que la credencial es de un correo
+        # bloqueado. El motivo queda solo en la bitácora.
+        sessions.register_ip_fail(ip)
+        return JSONResponse({'detail': PASSKEY_INVALID}, status_code=401,
+                            background=BackgroundTask(_audit_passkey_login_failed, org, user_id, ip, 'locked'))
+    reason = None
+    # El userHandle no entra en la firma: se compara para que la respuesta sea coherente con la credencial. Lo que ata la
+    # respuesta a la cuenta es la firma con la llave pública guardada que devolvió passkey_lookup().
+    if webauthn.user_handle_of(body.credential) != webauthn.user_handle(user_id):
+        reason = 'user_handle'
+    else:
+        try:
+            new_count, backed_up = webauthn.verify_authentication(body.credential, challenge, found['public_key'],
+                                                                  found['sign_count'])
+        except webauthn.PasskeyError as exc:
+            log.info('Entrada con passkey rechazada del usuario %s: %s', user_id, exc)
+            reason = 'response'
+    if reason:
+        sessions.register_fail(email, ip)
+        return JSONResponse({'detail': PASSKEY_INVALID}, status_code=401,
+                            background=BackgroundTask(_audit_passkey_login_failed, org, user_id, ip, reason))
+    with transaction(org) as conn:
+        row = conn.execute('SELECT role, email::text FROM users WHERE id = %s AND is_active FOR NO KEY UPDATE',
+                           (user_id,)).fetchone()
+        if not row:  # se desactivó la cuenta entre la búsqueda y aquí
+            reason = 'inactive'
+        # Solo si nadie la borró ni la usó con otro contador desde la búsqueda: si no, puede ser una respuesta repetida
+        # o un autenticador clonado, y queda en la bitácora.
+        elif not conn.execute('UPDATE webauthn_credentials SET sign_count = %s, backed_up = %s, last_used_at = now() '
+                              'WHERE id = %s AND user_id = %s AND sign_count = %s',
+                              (new_count, backed_up, found['passkey_id'], user_id, found['sign_count'])).rowcount:
+            reason = 'sign_count_race'
+        else:
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
+                                                   'email': row['email']}, ip, 'passkey')
+    if reason:
+        sessions.register_fail(email, ip)
+        return JSONResponse({'detail': PASSKEY_INVALID}, status_code=401,
+                            background=BackgroundTask(_audit_passkey_login_failed, org, user_id, ip, reason))
+    _clear_fails(email)
+    return {'user': user}
+
+
+@router.get('/passkeys', summary='Passkeys de la cuenta de la sesión')
+def passkeys_list(response: Response, session: Session = Depends(current_session)):
+    with transaction(session.own_org_id) as conn:
+        rows = conn.execute('SELECT ' + PASSKEY_COLUMNS + ' FROM webauthn_credentials WHERE user_id = %s '
+                            'ORDER BY created_at', (session.user_id,)).fetchall()
+    response.headers.update(NO_STORE)
+    return {'passkeys': rows, 'available': webauthn.configured(), 'max': MAX_PASSKEYS}
+
+
+@router.delete('/passkeys/{passkey_id}', status_code=204, summary='Borra una passkey de la cuenta de la sesión')
+def passkeys_delete(passkey_id: uuid.UUID, request: Request, session: Session = Depends(current_session)):
+    with transaction(session.own_org_id) as conn:
+        row = conn.execute('DELETE FROM webauthn_credentials WHERE id = %s AND user_id = %s RETURNING id',
+                           (passkey_id, session.user_id)).fetchone()
+        if not row:
+            raise HTTPException(404, PASSKEY_NOT_FOUND)
+        audit(conn, session.own_org_id, 'auth.passkey_deleted', session.user_id, client_ip(request), 'passkey',
+              passkey_id, {'reason': 'user'})

@@ -1,12 +1,12 @@
 """Características del reto para el ML (#33 a #36): tipo, antigüedad, exposición y sensibilidad.
 
 Salen de la evidencia del hallazgo con una sola rúbrica, la de sensibilidad(). El lote de #33 la usa. Hoy la API
-(cirdan/api/v1.py:26-27) y crt.sh (crtsh.py:390, 398 y 435) todavía ponen la sensibilidad fija por código. Que adopten
-calcular() va en otra tarjeta, antes de #36. Mientras tanto el modelo ve en producción valores distintos a los del lote.
+(cirdan/api/v1.py:26-27) todavía pone la sensibilidad fija por código. Que la adopte va en otra tarjeta, antes de #36.
+crt.sh ya usa calcular() en todos sus códigos desde RC-218 (comentario 10256).
 
-calcular() ya acepta lo que crt.sh pone hoy en la evidencia: vence en cert_expired y primer_certificado en
-lookalike_domain, y lo que pone rdap.py: por_vencer_desde en domain_expiring_soon. crt.sh no pone not_before en
-cert_expiring_soon, y ningún recolector pone primera_vez. Sin esas fechas la antigüedad cuenta desde detected_at o
+calcular() acepta lo que crt.sh pone en la evidencia: vence en cert_expired, emitido en cert_expiring_soon,
+primer_certificado en lookalike_domain y primera_vez en cert_internal_name, cert_broad_wildcard y cert_new_issuer, y lo
+que pone rdap.py: por_vencer_desde en domain_expiring_soon. Sin esas fechas la antigüedad cuenta desde detected_at o
 asset_first_seen, como v1.py:67-74, si quien llama las pasa. Los códigos de shodan.py no traen fecha: InternetDB no
 la da.
 
@@ -31,8 +31,8 @@ ACTIVOS_DIRECTOS = ('ip', 'service')                          # v1.py:80
 DESDE = {
     'breach_exposure': ('breach_date',),             # la brecha (v1.py:69-70)
     'cert_expired': ('not_after', 'vence'),          # el vencimiento (v1.py:71-72). crt.sh lo pone en vence
-    'cert_expiring_soon': ('not_before',),           # la emisión (crtsh.py:397)
-    'lookalike_domain': ('primer_certificado',),     # el primer certificado del parecido (crtsh.py:434)
+    'cert_expiring_soon': ('not_before', 'emitido'), # la emisión. crt.sh la pone en emitido
+    'lookalike_domain': ('primer_certificado',),     # el primer certificado del parecido (crtsh._parecidos)
     'domain_expiring_soon': ('por_vencer_desde',),   # el vencimiento menos 30 días (rdap.hallazgo_vencimiento)
 }
 

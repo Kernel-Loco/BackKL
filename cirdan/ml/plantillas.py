@@ -265,7 +265,7 @@ OTROS_TLD = ('net', 'org', 'info')
 
 
 def variantes_de_crtsh(marca):
-    """Las variantes de marca.com que crt.sh consulta con --con-parecidos (crtsh.candidatos_parecidos), en orden."""
+    """Las variantes de marca.com que crt.sh consulta en cada escaneo (crtsh.candidatos_parecidos, #109), en orden."""
     return crtsh.candidatos_parecidos(marca + '.com', crtsh.MAX_CANDIDATOS)
 
 

@@ -36,9 +36,9 @@ from psycopg.types.json import Jsonb
 from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
-from cirdan.recolectores import REGISTRO, cargar
-from cirdan.recolectores.contrato import Resultado, ejecutar, siguiente_estado
-from cirdan.score import motor
+from cirdan.recolectores import REGISTRO, cargar, certspotter
+from cirdan.recolectores.contrato import COLUMNAS_CVES, CVE_VALIDA, Resultado, ejecutar, siguiente_estado
+from cirdan.score import configuracion, motor
 
 log = logging.getLogger(__name__)
 
@@ -63,8 +63,12 @@ TXT_DETALLE = {
 }
 FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
 
-# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 16 minutos solo de HTTP (sus 2 búsquedas y
-# las 4 páginas de Cert Spotter, cada consulta con 3 intentos), y el DNS de los nombres vencidos no tiene tope.
+# Marca de vida del escaneo. Una corrida de crt.sh puede tardar unos 15 minutos solo de HTTP: 865 s en el peor caso,
+# con crt.sh arriba y lento (120 s de sus 2 búsquedas juntas, PLAZO_PRINCIPAL de crtsh.py, RC-218, 180 s de las 4
+# páginas de Cert Spotter con 2 intentos de 20 s, 95 s de %marca% con 2 intentos de 45 s y 470 s de las 10 variantes,
+# que es PRESUPUESTO_VARIANTES de crtsh.py, con 20 s en el primer intento y hasta 45 s en el segundo, o 45 s desde el primero
+# si crt.sh viene lento: el presupuesto no cambia, #109, RC-226).
+# Quedan 335 s antes de TOPE_CORRIDA, y el DNS de los nombres vencidos tiene PLAZO_DNS (300 s de crtsh.py, RC-288).
 # Por eso, mientras corre una fuente, un hilo aparte marca vida cada LATIDO, hasta TOPE_CORRIDA: una corrida
 # colgada para siempre deja de marcar y el escaneo se da por caído pasado ABANDONO.
 LATIDO = 60                           # segundos entre marcas
@@ -80,6 +84,17 @@ ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta f
 # Reproducir no sale a la red: no reserva ni ajusta.
 MODOS_CON_CUPO = ('vivo', 'grabar')
 SIN_CUPO = 'Sin cupo diario: %s no tiene cupo para una corrida completa hoy (día UTC).'
+
+# Costo medido del escaneo (#52, RC-87): se guarda en scans.stats para el costo interno, pero GET /api/v1/scans y
+# GET /api/v1/scans/{id} no lo entregan al portal ni a las llaves de API. Las demás llaves de stats salen igual.
+STATS_INTERNAS = frozenset({'queries', 'queries_by_source', 'seconds_by_source', 'duration_seconds'})
+
+
+def stats_publicas(stats):
+    """scans.stats sin las llaves de STATS_INTERNAS. Un stats en NULL se queda en None."""
+    if stats is None:
+        return None
+    return {k: v for k, v in stats.items() if k not in STATS_INTERNAS}
 
 # Los hallazgos de una empresa se guardan de una fuente a la vez (RC-55). Dos dominios de la misma empresa pueden dar
 # la misma huella (un repo de GitHub declarado en los dos, el certificado de un subdominio) y escanearse a la vez:
@@ -202,8 +217,11 @@ def abandonar_vencidos(conn, org, domain_id=None, scan_id=None):
     return ids
 
 
-def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None):
+def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None, platform=None):
     """Revisa autorización y TXT y, si todo cumple, crea el escaneo. Nunca escanea sin los dos.
+
+    `platform` es el superadmin que lo pide desde una empresa ajena (RC-332), con user_id None: va a la bitácora
+    con actor 'platform' y el escaneo queda sin requested_by.
 
     `consultar` reemplaza la consulta DNS real (pruebas). Sin él, solo se consultan en vivo los
     dominios de DOMINIOS_EN_VIVO.
@@ -255,10 +273,11 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
         if motivos:
             detalle = _texto(motivos, txt_resultado)
             audit(c, org, 'scan.rejected', user_id, ip, 'domain', domain['id'],
-                  {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado})
+                  {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado}, platform=platform)
             return Solicitud(fqdn, False, motivos, detalle, domain_id=domain['id'], txt=txt_resultado)
 
-        audit(c, org, 'scan.requested', user_id, ip, 'scan', scan_id, {'fqdn': fqdn, 'trigger': trigger})
+        audit(c, org, 'scan.requested', user_id, ip, 'scan', scan_id, {'fqdn': fqdn, 'trigger': trigger},
+              platform=platform)
         return Solicitud(fqdn, True, scan_id=scan_id, domain_id=domain['id'], txt=txt_resultado,
                          detalle='Escaneo de %s en curso.' % fqdn)
 
@@ -280,6 +299,13 @@ def _latido(org, scan_id, conn=None):
 # llave: el secreto de GitHub su repo en 'repo', el puerto de Shodan su IP en 'ip' (la CVE, con '/cve'), y el correo
 # sus repos en 'repos', que sirven solo si no se cortaron en MAX_REPOS_ACTIVO (5) de github.py. La vigencia de un
 # certificado de ct_logs la arma con 'host' y 'vence', como _parte de crtsh.py (RC-55).
+# Hallazgos de ct_logs que se cierran por fecha en toda corrida de la fuente que respondió, aunque sea parcial (RC-55 y
+# RC-218): (código, campo de la evidencia, días). Se cierra si el campo es anterior a la hora del escaneo menos esos
+# días. cert_new_issuer deja de ser reciente a los crtsh.VENTANA_EMISOR_DIAS de emitido o al vencer, y
+# cert_internal_name cuenta hasta crtsh.VENTANA_VENCIDOS_DIAS después de vencer su certificado más reciente.
+CIERRE_POR_FECHA = (('cert_expiring_soon', 'vence', 0), ('cert_new_issuer', 'vence', 0),
+                    ('cert_new_issuer', 'emitido', 90), ('cert_internal_name', 'vence', 365))
+
 PARTES = ('''COALESCE(evidence->'partes', '''
           '''CASE WHEN jsonb_typeof(evidence->'repo') = 'string' THEN jsonb_build_array(evidence->'repo') END, '''
           '''CASE WHEN jsonb_typeof(evidence->'ip') = 'string' THEN '''
@@ -289,6 +315,13 @@ PARTES = ('''COALESCE(evidence->'partes', '''
           '''CASE WHEN evidence->>'origen' IN ('crtsh', 'certspotter') AND jsonb_typeof(evidence->'host') = 'string' '''
           '''AND jsonb_typeof(evidence->'vence') = 'string' '''
           '''THEN jsonb_build_array((evidence->>'host') || '@' || (evidence->>'vence')) END, '[]'::jsonb)''')
+
+
+def _cve_de(hallazgo):
+    """La CVE de un hallazgo (su evidencia 'cve', como la ponen Shodan y la visita web), o None si no trae una con la
+    forma del CHECK de cves.cve_id."""
+    cve = hallazgo.evidencia.get('cve') if isinstance(hallazgo.evidencia, dict) else None
+    return cve if isinstance(cve, str) and CVE_VALIDA.fullmatch(cve) else None
 
 
 def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, reglas, ahora=None):
@@ -355,6 +388,22 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
             previas[bytes(f['fingerprint']).hex()] = f['partes']
     abiertos = set()
 
+    # Las CVE van a la tabla global cves antes que los hallazgos que las nombran (llave foránea de findings.cve_id). Las
+    # filas de la NVD que trae el recolector (Resultado.cves, la visita web) entran completas y las demás, como las que
+    # Shodan deduce, entran como stub. Nunca se actualiza una que ya está: eso es del cargador diario de inteligencia
+    # (#69, RC-127), que llena el CVSS de los stubs, y cirdan_app no tiene UPDATE en cves (migraciones 001 y 014, #18).
+    # Como shodan corre antes que web (fuentes_activas va por code), una CVE que los dos ven queda como stub hasta el
+    # cargador: la API toma entonces el CVSS de la evidencia del hallazgo (cirdan/api/v1.py).
+    for fila in resultado.cves:
+        columnas = [c for c in COLUMNAS_CVES if c in fila]
+        conn.execute(
+            'INSERT INTO cves ({c}) VALUES ({v}) ON CONFLICT (cve_id) DO NOTHING'.format(
+                c=', '.join(columnas), v=', '.join(['%s'] * len(columnas))),
+            [fila[c] for c in columnas])
+    con_fila = {f['cve_id'] for f in resultado.cves}
+    for cve in sorted({_cve_de(h) for h in resultado.hallazgos} - con_fila - {None}):
+        conn.execute('INSERT INTO cves (cve_id) VALUES (%s) ON CONFLICT (cve_id) DO NOTHING', (cve,))
+
     for hallazgo in resultado.hallazgos:
         regla = reglas.get(hallazgo.codigo)
         if not regla:
@@ -379,15 +428,17 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         huella = bytes.fromhex(hallazgo.huella)
         finding_id = conn.execute(
             'INSERT INTO findings (organization_id, domain_id, asset_id, rule_id, source_id, fingerprint, severity, '
-            "status, evidence, detected_at, last_scan_id) VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, now(), %s) "
+            "status, evidence, cve_id, detected_at, last_scan_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, now(), %s) "
             'ON CONFLICT (organization_id, fingerprint) DO UPDATE SET '
             'domain_id = EXCLUDED.domain_id, asset_id = EXCLUDED.asset_id, rule_id = EXCLUDED.rule_id, '
             'source_id = EXCLUDED.source_id, severity = EXCLUDED.severity, evidence = EXCLUDED.evidence, '
+            'cve_id = EXCLUDED.cve_id, '
             'status = CASE WHEN findings.status = %s THEN %s ELSE findings.status END, '
             'resolved_at = CASE WHEN findings.status = %s THEN NULL ELSE findings.resolved_at END, '
             'last_scan_id = EXCLUDED.last_scan_id, updated_at = now() RETURNING id::text',
             (org, domain_id, asset_id, regla['id'], source_id, huella, hallazgo.severidad,
-             Jsonb(evidencia), scan_id, 'resolved', 'open', 'resolved'),
+             Jsonb(evidencia), _cve_de(hallazgo), scan_id, 'resolved', 'open', 'resolved'),
         ).fetchone()['id']
         if previos.get(huella) in (None, 'resolved'):  # no existía o estaba resuelto: ahora queda abierto
             abiertos.add(finding_id)
@@ -401,9 +452,12 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
     # Un certificado por vencer cuyo vencimiento ya pasó se cierra en toda corrida de su fuente que respondió, aunque no
     # lo haya visto: ya no está por vencer, y si la fuente siempre queda parcial (crt.sh solo con la búsqueda por nombre,
     # o más certificados de los que caben en las páginas de Cert Spotter) nunca llegaría la corrida completa que lo
-    # cierra (RC-55). 'vence' es un isoformat en UTC
-    # (crtsh._fecha): se compara como texto con la hora del escaneo en el mismo formato, así una fecha rota no lo cierra
+    # cierra (RC-55). Igual los de higiene que crt.sh ya no daría por fecha (CIERRE_POR_FECHA, RC-218). Las fechas de la
+    # evidencia son isoformat en UTC
+    # (crtsh._fecha): se comparan como texto con la hora del corte en el mismo formato, así una fecha rota no lo cierra
     # ni tumba la transacción.
+    cortes = [((ahora or datetime.now(timezone.utc)) - timedelta(days=dias)).astimezone(timezone.utc).isoformat()
+              for _, _, dias in CIERRE_POR_FECHA]
     cerrados = {f['id'] for f in conn.execute(
         "UPDATE findings SET status = 'resolved', resolved_at = now(), last_scan_id = %(scan)s, updated_at = now() "
         "WHERE domain_id = %(dominio)s AND source_id = %(fuente)s AND status = 'open' "
@@ -413,20 +467,23 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         'AND (%(revisados)s::text[] IS NULL OR (jsonb_array_length({p}) > 0 AND CASE '
         'WHEN %(sin_revisar)s::text[] IS NULL THEN {p} <@ to_jsonb(%(revisados)s::text[]) '
         'ELSE NOT ({p} ?| %(sin_revisar)s::text[]) END))) '
-        "OR (rule_id IN (SELECT id FROM scoring_rules WHERE code = 'cert_expiring_soon') "
-        "AND jsonb_typeof(evidence->'vence') = 'string' "
-        "AND evidence->>'vence' ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}(\\.\\d{{1,6}})?\\+00:00$' "
-        "AND (evidence->>'vence') COLLATE \"C\" < %(ahora)s)) RETURNING id::text".format(p=PARTES),
+        'OR EXISTS (SELECT 1 FROM unnest(%(codigos)s::text[], %(campos)s::text[], %(cortes)s::text[]) '
+        'AS c(codigo, campo, corte) JOIN scoring_rules r ON r.code = c.codigo WHERE r.id = findings.rule_id '
+        "AND jsonb_typeof(evidence->c.campo) = 'string' "
+        "AND evidence->>c.campo ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}(\\.\\d{{1,6}})?\\+00:00$' "
+        "AND (evidence->>c.campo) COLLATE \"C\" < c.corte)) RETURNING id::text".format(p=PARTES),
         {'scan': scan_id, 'dominio': domain_id, 'fuente': source_id,
          'huellas': huellas + [bytes.fromhex(h) for h in resultado.omitidos],
          'sin_cobertura': list(resultado.sin_cobertura), 'revisados': resultado.revisados,
-         'sin_revisar': resultado.sin_revisar,
-         'ahora': (ahora or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()},
+         'sin_revisar': resultado.sin_revisar, 'codigos': [c for c, _, _ in CIERRE_POR_FECHA],
+         'campos': [c for _, c, _ in CIERRE_POR_FECHA], 'cortes': cortes},
     ).fetchall()}
     return abiertos, cerrados
 
 
-def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, parcial):
+def _preparar_score(conn, domain_id, scan_id):
+    """Hallazgos puntuables y predicciones del modelo. No depende de los pesos, así que corre antes de tomar el
+    candado de pesos y no hace esperar al PUT ni a los cierres de otros escaneos de la organización (RC-62)."""
     filas = conn.execute(
         'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status, f.evidence, '
         'a.asset_type, a.first_seen_at AS asset_first_seen, f.detected_at, sc.queued_at AS scan_at, '
@@ -459,14 +516,24 @@ def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, pa
     except Exception as error:
         fallback_reason = 'inferencia_ml_no_disponible'
         log.warning('El score del escaneo %s usará reglas: %s', scan_id, type(error).__name__)
+    return {'filas': filas, 'metodo': metodo, 'model_version': model_version, 'fallback_reason': fallback_reason,
+            'predicciones': predicciones, 'explicaciones_ml': explicaciones_ml,
+            'version_explicacion': version_explicacion}
 
+
+def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, parcial, preparado=None):
+    p = preparado or _preparar_score(conn, domain_id, scan_id)
+    filas, predicciones, explicaciones_ml = p['filas'], p['predicciones'], p['explicaciones_ml']
+    metodo, model_version, fallback_reason = p['metodo'], p['model_version'], p['fallback_reason']
+    version_explicacion = p['version_explicacion']
     hallazgos_score = []
     for hallazgo in filas:
         copia = dict(hallazgo)
-        if predicciones is not None:
+        if predicciones is not None and copia['id'] in predicciones:
             copia['severity'] = predicciones[copia['id']]['severity']
         hallazgos_score.append(copia)
-    calculo = motor.calcular(hallazgos_score, reglas, pesos)
+    # Los cortes de bandas del juego con que se guarda el score: mueven el piso y la banda (RC-237).
+    calculo = motor.calcular(hallazgos_score, reglas, pesos, configuracion.cortes_del_juego(conn, rule_set_id))
     if explicaciones_ml is not None:
         for aporte in calculo['contributions']:
             prediccion = explicaciones_ml.get(aporte['finding_id'])
@@ -478,7 +545,9 @@ def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, pa
     score_id = conn.execute(
         'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
         'reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) '
-        "VALUES (%s, %s, %s, %s, %s, %s, 'scan', %s, %s, %s, %s, now()) "
+        # clock_timestamp() y no now(): se guarda después de tomar el candado de pesos, así que un rules_change del
+        # PUT que corrió antes queda con hora menor y uno que corre después con hora mayor (RC-62).
+        "VALUES (%s, %s, %s, %s, %s, %s, 'scan', %s, %s, %s, %s, clock_timestamp()) "
         'RETURNING id::text',
         (org, domain_id, scan_id, rule_set_id, calculo['score'], Jsonb(calculo['category_scores']), metodo,
          model_version, fallback_reason, parcial),
@@ -555,8 +624,14 @@ def _ya_no_corre(org, scan_id, conn, corridas):
     return {'scan_id': scan_id, 'status': scan['status'], 'stats': scan['stats'] or {}, 'sources': corridas}
 
 
+@certspotter.un_escaneo()  # cada llamada abre el suyo y lo cierra al volver, también con una excepción
 def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None, dormir=None):
     """Ejecuta los recolectores de un escaneo aceptado y deja el estado de cada fuente.
+
+    Cada página de Cert Spotter sale a la red una sola vez en el escaneo: la primera fuente que la pide la consulta y
+    las demás reusan lo que recibió, un 429 o una falla incluidos (certspotter.un_escaneo, RC-326). Lo reusado no
+    cuenta en sus consultas ni en su cupo diario. Un reintento a 1, 5 o 25 minutos vuelve a pedir lo que falló, salvo
+    un 429 (certspotter.nuevo_intento).
 
     Un recolector que falla no tumba el escaneo. En vivo, su fuente queda en 'retrying' y se vuelve a
     correr ahí mismo a 1, 5 y 25 minutos (siguiente_estado, #13). Mientras corre o espera, el escaneo marca
@@ -573,8 +648,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
     se muestran como 0 hallazgos, o si revisó solo una parte de lo suyo (revisados, en stats.sources_partial).
-    crt.sh nunca busca dominios parecidos desde aquí, porque consulta
-    variantes que pueden ser de terceros: lookalike_domain siempre queda en sin_cobertura. Devuelve un resumen.
+    crt.sh busca dominios parecidos en cada escaneo, solo en los registros de certificados (#109, RC-226): si
+    ninguna de esas búsquedas responde, si no responde la de %marca% o si el dominio no tiene marca (un subdominio,
+    un sufijo que crtsh.py no conoce o un hosting), lookalike_domain queda en sin_cobertura, nunca en 0. Si solo
+    falta la respuesta de alguna variante, ct_logs da revisados y va en stats.sources_partial. Devuelve
+    un resumen.
     En stats, assets cuenta los (tipo, valor) distintos de las fuentes que respondieron: un subdominio que dan
     ct_logs y subfinder cuenta una vez. En assets van una sola vez, con sus atributos unidos.
     new_findings cuenta los hallazgos que el escaneo dejó abiertos y antes no lo estaban: los que insertó y los que
@@ -585,25 +663,29 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     una sin revisar, salvo un cert_expiring_soon ya vencido). Un hallazgo que una fuente resuelve y otra reabre en
     el mismo escaneo quedó como estaba y no cuenta en ninguno. Los conteos solo se guardan al cerrar: lo que
     guardaron las fuentes de un escaneo que se cae o lo dan por caído no se cuenta.
+    queries, queries_by_source, seconds_by_source y duration_seconds dan el costo medido del escaneo (#52, RC-87).
     `dormir` reemplaza time.sleep (pruebas).
     """
     dormir = dormir or time.sleep
+    inicio = time.monotonic()
     fqdn = fqdn.strip().lower().rstrip('.')
     with _tx(org, conn) as c:
         fuentes = fuentes if fuentes is not None else fuentes_activas(c)
         catalogo = {f['code']: f for f in c.execute(
             'SELECT id::text, code, keep_raw_payload FROM data_sources WHERE code = ANY(%s)', (fuentes,)).fetchall()}
-        propios = [r['fqdn'] for r in c.execute('SELECT fqdn::text FROM domains WHERE fqdn <> %s', (fqdn,)).fetchall()]
+        # Solo los dominios vigentes de la organización cuentan como propios (#109, RC-226). Uno dado de baja
+        # ('removed') puede ser hoy de un tercero, y uno sin verificar ('pending_verification') no probó ser suyo:
+        # darlo de alta no debe esconder ni resolver un dominio parecido.
+        propios = [r['fqdn'] for r in c.execute(
+            "SELECT fqdn::text FROM domains WHERE fqdn <> %s AND status IN ('verified', 'paused')", (fqdn,)).fetchall()]
         domain = c.execute('SELECT id::text FROM domains WHERE fqdn = %s', (fqdn,)).fetchone()
         if not domain:
             raise ValueError('dominio no encontrado para el escaneo: %s' % fqdn)
-        rule_set = c.execute('SELECT id::text, category_weights FROM scoring_rule_sets WHERE is_active').fetchone()
+        rule_set = configuracion.juego_activo(c, org)
         if not rule_set:
             raise RuntimeError('no hay un juego de reglas activo')
-        reglas = {r['code']: r for r in c.execute(
-            'SELECT id::text, code, category, base_severity, weight, max_penalty FROM scoring_rules '
-            'WHERE rule_set_id = %s', (rule_set['id'],)).fetchall()}
-        pesos = {k: float(v) for k, v in rule_set['category_weights'].items()}
+        reglas = configuracion.reglas_del_juego(c, rule_set['id'])
+        pesos = configuracion.pesos_del_juego(rule_set)
 
     if modo == 'vivo' and not en_vivo_permitido(fqdn):
         modo = 'reproducir'  # nunca consultar en vivo un dominio fuera de DOMINIOS_EN_VIVO
@@ -612,8 +694,9 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     con_cupo = modo in MODOS_CON_CUPO
     corridas, activos, hallazgos = [], set(), 0
     nuevos, resueltos = set(), set()  # id de los hallazgos que este escaneo abrió y los que resolvió
+    tiempos = {}  # segundos de cada fuente con todos sus intentos, sin las esperas entre reintentos
     for codigo in fuentes:
-        intento, gastadas, previos = 0, 0, []
+        intento, gastadas, previos, segundos = 0, 0, [], 0.0
         modulo = cargar(codigo)
         while True:
             if not _latido(org, scan_id, conn):
@@ -626,8 +709,10 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 res = Resultado(fqdn, codigo, estado='failed', error=SIN_CUPO % codigo, avisos=[SIN_CUPO % codigo])
                 status, attempt, next_retry_at = 'failed', intento, None
             else:
+                arranque = time.monotonic()
                 with _latiendo(org, scan_id, conn):
                     res = ejecutar(modulo, fqdn, modo, ahora=ahora, propios=propios, codigos=reglas)
+                segundos += time.monotonic() - arranque
                 if dia is not None and res.consultas != reservadas:
                     _ajustar(org, codigo, dia, res.consultas - reservadas, conn)
                 momento = datetime.now(timezone.utc)
@@ -636,7 +721,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             gastadas += res.consultas
             avisos = previos + res.avisos
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
-                       'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura,
+                       'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura, 'sin_llave': res.sin_llave,
                        'cobertura_parcial': res.estado == 'succeeded' and res.revisados is not None}
             # La marca de vida y la fila van en una transacción: si lo dieron por caído mientras la fuente corría,
             # no se escribe encima de la fila que ya se cerró, y nadie lo puede dar por caído en medio.
@@ -670,9 +755,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             previos.append('Intento %d: %s' % (attempt, (res.error or '')[:300]))
             if not _esperar(org, scan_id, (next_retry_at - momento).total_seconds(), conn, dormir):
                 return _ya_no_corre(org, scan_id, conn, corridas)
+            certspotter.nuevo_intento()  # el reintento vuelve a pedir lo que falló en Cert Spotter, salvo un 429
             intento = attempt
         corridas.append({'source': codigo, 'status': status, 'error': res.error or None,
                          'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})
+        tiempos[codigo] = segundos
         if res.estado == 'succeeded':
             activos.update((a.tipo, a.valor) for a in res.activos)  # un subdominio que dan dos fuentes cuenta una vez
             hallazgos += len(res.hallazgos)
@@ -688,12 +775,37 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         stats['rules_without_coverage'] = sin_cobertura
     if a_medias:
         stats['sources_partial'] = a_medias
+    # Costo medido del escaneo (#52, RC-87): consultas de cada fuente con todos sus intentos, también las de una
+    # fuente que falló, y segundos. seconds_by_source suma lo que tardó el recolector en cada intento, sin las
+    # esperas entre reintentos. duration_seconds va del inicio de correr() hasta antes del score y sí las incluye.
+    stats['queries'] = sum(r['consultas'] for r in corridas)
+    stats['queries_by_source'] = {r['source']: r['consultas'] for r in corridas}
+    stats['seconds_by_source'] = {codigo: round(s, 3) for codigo, s in tiempos.items()}
+    stats['duration_seconds'] = round(time.monotonic() - inicio, 3)
     with _tx(org, conn) as c:
-        cerrado = c.execute("UPDATE scans SET status = %s, finished_at = now(), stats = %s, updated_at = now() "
-                            "WHERE id = %s AND status = 'running' RETURNING id", (estado, Jsonb(stats), scan_id)).fetchone()
+        # El modelo corre antes de bloquear la fila del escaneo y de tomar el candado de pesos (RC-62). Si ya lo
+        # dieron por caído no se calcula de balde: el UPDATE de abajo sigue siendo el que decide.
+        sigue = c.execute("SELECT 1 FROM scans WHERE id = %s AND status = 'running'", (scan_id,)).fetchone()
+        preparado = _preparar_score(c, domain['id'], scan_id) if sigue else None
+        # clock_timestamp(): el cierre lleva la hora de después del modelo, no la del inicio de la transacción.
+        cerrado = sigue and c.execute(
+            "UPDATE scans SET status = %s, finished_at = clock_timestamp(), stats = %s, updated_at = clock_timestamp() "
+            "WHERE id = %s AND status = 'running' RETURNING id", (estado, Jsonb(stats), scan_id)).fetchone()
         if cerrado:  # si lo dieron por caído entre la última fuente y aquí, se queda como está
-            c.execute('UPDATE domains SET last_scan_at = now(), updated_at = now() WHERE fqdn = %s', (fqdn,))
-            _guardar_score(c, org, domain['id'], scan_id, rule_set['id'], reglas, pesos, estado != 'completed')
+            c.execute('UPDATE domains SET last_scan_at = clock_timestamp(), updated_at = clock_timestamp() '
+                      'WHERE fqdn = %s', (fqdn,))
+            # Si cambiaron los pesos mientras corría (PUT /scoring/weights), el score sale con el juego activo de
+            # ahora, no con el del inicio. El candado es el del PUT: si el PUT va primero, aquí ya se ve su juego, y
+            # si va después, su recálculo ve este score y lo copia con los pesos nuevos (RC-62). Los dos guardan con
+            # clock_timestamp(), tomado ya con el candado, para que el orden de computed_at sea el del candado.
+            configuracion.bloquear_pesos(c, org)
+            vigente = configuracion.juego_activo(c, org)
+            if vigente and vigente['id'] != rule_set['id']:
+                rule_set = vigente
+                reglas = configuracion.reglas_del_juego(c, rule_set['id'])
+                pesos = configuracion.pesos_del_juego(rule_set)
+            _guardar_score(c, org, domain['id'], scan_id, rule_set['id'], reglas, pesos, estado != 'completed',
+                           preparado)
             audit(c, org, 'scan.finished', None, None, 'scan', scan_id, {'fqdn': fqdn, 'status': estado, **stats})
     if not cerrado:
         return _ya_no_corre(org, scan_id, conn, corridas)

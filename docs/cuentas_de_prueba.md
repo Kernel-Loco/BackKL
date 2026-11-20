@@ -1,10 +1,10 @@
 # Cuentas de prueba y cómo pasar el MFA
 
-Cuentas para entrar al portal LowTide en tu PC mientras desarrollamos. Son **solo de demostración**: la contraseña y los secretos de MFA son públicos a propósito y nunca deben usarse fuera de desarrollo.
+Cuentas para entrar al portal LowTide en tu PC mientras desarrollamos. Son **solo para desarrollo, el CI y las pruebas de roles y aislamiento**: la contraseña y los secretos de MFA son públicos a propósito y nunca deben usarse fuera de desarrollo. No se usan en las demos con el socio formador ni en la VM. Ahí se entra con las cuentas reales de Grupo Olmardo y con equipo@lowtidesec.com de la organización LowTide. Sus contraseñas y su MFA no se documentan.
 
 ## Antes de entrar
 
-1. **Backend:** en BackKL, ten en el `.env` la línea `DEMO_ACCOUNTS=true` (viene así en `.env.example`) y levántalo con `docker compose up -d --build`. El `--build` hace que la imagen traiga el código actual cada vez que haces pull. Cada vez que arranca, el contenedor `demo-accounts` les pone contraseña y MFA a estas cuentas.
+1. **Backend:** en BackKL, cambia en el `.env` la línea `DEMO_ACCOUNTS=false` a `DEMO_ACCOUNTS=true` (en `.env.example` viene en false para que un despliegue no las prenda) y levántalo con `docker compose up -d --build`. El `--build` hace que la imagen traiga el código actual cada vez que haces pull. Cada vez que arranca, el contenedor `demo-accounts` les pone contraseña y MFA a estas cuentas.
 2. **Portal:** en FrontKL, `npm run dev` y abre **http://localhost:3000**. Tiene que ser el puerto 3000: la API solo acepta inicios de sesión del portal en ese puerto y de su propia página en el 8000. Rechaza los que vienen de otro origen.
 3. **Explorador de la base (opcional):** pon `DEMO_EXPLORER=true` en el `.env` de BackKL y vuelve a levantarlo con `docker compose up -d --build`, porque la API lee esa línea al arrancar. Luego abre **http://127.0.0.1:8000/demo** y entra con `alex.morgan@acme-demo.mx` o `dana.cruz@beta-corp.mx`. Las tablas solo las ve un Administrador. Más detalle en 'Vista visual de la base' del README.
 
@@ -18,7 +18,7 @@ La contraseña es la misma para las cinco: **`Lowtide-Demo-2026`**
 | `maya.reed@acme-demo.mx` | Gerente | Acme Demo | Dashboard, Dominios, Detalle de dominio y Reportes e histórico, solo lectura |
 | `alex.morgan@acme-demo.mx` | Administrador | Acme Demo | Todo lo anterior, más registrar dominios, verificar el TXT, Políticas de alerta y la sección Administración |
 | `dana.cruz@beta-corp.mx` | Administrador | Beta Corp | Solo los datos de Beta Corp. Sirve para comprobar que una empresa no ve los datos de otra |
-| `admin@olmardo.com` | Administrador | Grupo Olmardo | El dominio de prueba del equipo, olmardo.com: el único que el orquestador escanea en vivo (#22) |
+| `admin@olmardo.com` | Administrador | Grupo Olmardo | Cuenta de demo con contraseña pública. Sirve para probar el escaneo de olmardo.com en tu PC. No es la de las demos con el socio |
 
 ## Cómo pasar el MFA (verificación en dos pasos)
 
@@ -62,6 +62,29 @@ Imprime el código vigente de esa cuenta. Cámbiale el correo para las otras. Es
 | «Demasiados intentos. Espera 15 minutos…» | Hubo 5 fallos con ese correo, sumando contraseñas y códigos equivocados (o 20 desde tu PC). Escribir bien la contraseña no los borra: se borran al entrar con el código correcto. Espera 15 minutos o desbloquéalo con el comando de abajo |
 | La pantalla regresa al login con «Tu sesión expiró…» | Pasaron 15 minutos sin actividad, o 8 horas desde que entraste. Vuelve a iniciar sesión |
 | «Origen no permitido» o el login no responde | El portal no está en http://localhost:3000, o el backend no está corriendo (`docker compose ps` debe mostrar los contenedores `healthy`) |
+
+## Entrar con passkey (RC-331)
+
+Una passkey es otra forma de entrar, junto a la contraseña con el código. No reemplaza a ninguna de las dos: una cuenta con passkey sigue entrando con correo, contraseña y código. Las cuentas de demo no traen passkeys en la semilla. Para probar una en tu PC:
+
+1. Entra con la cuenta de demo como siempre y abre «Mi perfil», sección «Passkeys».
+2. Escribe la contraseña de demo y, como todas las cuentas de demo tienen MFA, el código de 6 dígitos de ese momento. Ponle un nombre y confirma con Windows Hello, el PIN o la huella de tu PC, o con el gestor de contraseñas que te lo ofrezca.
+3. Cierra sesión. En el login, «Entrar con passkey» o el autollenado del campo de correo abren la passkey. Entrar con ella ya cuenta como MFA: no pide el código.
+
+Ojo con lo siguiente:
+
+- En tu PC las passkeys quedan amarradas a `localhost` (`WEBAUTHN_RP_ID`, que en `docker-compose.yml` va por omisión en `localhost`) y solo sirven en http://localhost:3000. En http://127.0.0.1:3000 no aparecen. En la VM van amarradas a `lowtidesec.com` (`docker-compose.despliegue.yml`), así que una passkey de tu PC no sirve en la VM ni al revés.
+- Una cuenta tiene como máximo 10 passkeys. Se borran desde la misma sección del perfil.
+- La passkey queda en tu dispositivo o en tu gestor de contraseñas, no en la base: la base solo guarda la llave pública, el contador, el nombre y cuándo se usó por última vez. Al rehacer Docker con `down -v` la base pierde la llave pública y la passkey de tu dispositivo deja de servir. Bórrala también de tu dispositivo o gestor.
+- Con `DEMO_ACCOUNTS=false` (o con un origen publicado) el script de demo apaga las cuentas y también borra sus passkeys de la base, porque se registraron con la contraseña y el código públicos. Bórralas también de tu dispositivo o gestor.
+- Si una cuenta sin TOTP activa la verificación en dos pasos, sus passkeys se borran: se registraron solo con la contraseña. Vuelve a registrarlas con el código.
+
+| Mensaje en el portal | Qué pasa y qué hacer |
+|---|---|
+| «No se pudo entrar con esa passkey…» | La passkey no es de este servidor (otra base, otro RP ID), se borró del perfil, la cuenta está desactivada o el dispositivo no pidió tu huella, rostro o PIN. Cada intento cuenta para el bloqueo por IP, y si la passkey existe, también para el del correo. Entra con contraseña y código |
+| «La solicitud de la passkey venció…» | Pasaron más de 5 minutos o la solicitud ya se usó. Vuelve a dar clic en «Entrar con passkey» |
+| «Se pidieron demasiadas passkeys desde tu red…» | Desde tu IP se pidieron más de 300 entradas con passkey en 15 minutos (el login pide una en cada carga). No es un bloqueo por fallos: entra con correo, contraseña y código, o espera 15 minutos |
+| «Las passkeys no están disponibles en este servidor.» | `WEBAUTHN_RP_ID` no coincide con ningún origen de `ALLOWED_ORIGINS`. En tu PC deja las dos por omisión |
 
 Para desbloquear todos los correos bloqueados, desde BackKL:
 

@@ -3,6 +3,7 @@ import csv
 import io
 import json
 
+from cirdan.exportar import escapar_formula  # noqa: F401 (también lo importan las pruebas)
 from cirdan.score import criterio, motor
 
 
@@ -19,15 +20,16 @@ def _hallazgos_con_severidad(hallazgos, severidades):
     return preparados
 
 
-def _actual(recalculado, guardado):
-    """Score 'Actual': el último guardado, el mismo que muestran /score y /domains. Sin score guardado, el recalculado."""
+def _actual(recalculado, guardado, cortes=None):
+    """Score 'Actual': el último guardado, el mismo que muestran /score y /domains. Sin score guardado, el recalculado.
+    Su banda sale de los cortes del juego con que se guardó (RC-237), los mismos con que se recalcula el 'después'."""
     if guardado is None:
         return recalculado
-    return {'score': guardado['score'], 'banda': criterio.banda(guardado['score']),
+    return {'score': guardado['score'], 'banda': criterio.banda(guardado['score'], cortes),
             'category_scores': guardado['category_scores']}
 
 
-def simular(hallazgos, reglas, pesos_categoria, action_ids, severidades=None, guardado=None):
+def simular(hallazgos, reglas, pesos_categoria, action_ids, severidades=None, guardado=None, cortes=None):
     """Devuelve el score contrafactual al resolver las acciones seleccionadas, sin escribir.
 
     El 'después' se recalcula con el motor y la reducción es lo que baja el motor al resolverlas, así que nunca
@@ -48,9 +50,9 @@ def simular(hallazgos, reglas, pesos_categoria, action_ids, severidades=None, gu
         else hallazgo
         for hallazgo in preparados
     ]
-    vigente = motor.calcular(preparados, reglas, pesos_categoria)
-    antes = _actual(vigente, guardado)
-    despues = motor.calcular(restantes, reglas, pesos_categoria)
+    vigente = motor.calcular(preparados, reglas, pesos_categoria, cortes)
+    antes = _actual(vigente, guardado, cortes)
+    despues = motor.calcular(restantes, reglas, pesos_categoria, cortes)
     return {
         'score_before': antes['score'],
         'score_after': despues['score'],
@@ -65,10 +67,13 @@ def simular(hallazgos, reglas, pesos_categoria, action_ids, severidades=None, gu
 
 
 def construir_plan(dominio, hallazgos, reglas, pesos_categoria, method='rules', severidades=None,
-                   partial_coverage=False, guardado=None):
-    """Agrupa por regla/recomendación y calcula el impacto individual de cada acción."""
+                   partial_coverage=False, guardado=None, cortes=None):
+    """Agrupa por regla/recomendación y calcula el impacto individual de cada acción.
+
+    `cortes`: los de bandas del juego del score (RC-237). Mueven el piso y la banda del antes y del después.
+    """
     preparados = _hallazgos_con_severidad(hallazgos, severidades)
-    antes = _actual(motor.calcular(preparados, reglas, pesos_categoria), guardado)
+    antes = _actual(motor.calcular(preparados, reglas, pesos_categoria, cortes), guardado, cortes)
     grupos = {}
     for hallazgo in preparados:
         if hallazgo['status'] not in ESTADOS_PLAN:
@@ -88,7 +93,7 @@ def construir_plan(dominio, hallazgos, reglas, pesos_categoria, method='rules', 
 
     acciones = []
     for codigo, grupo in grupos.items():
-        impacto = simular(preparados, reglas, pesos_categoria, [codigo], severidades, guardado)
+        impacto = simular(preparados, reglas, pesos_categoria, [codigo], severidades, guardado, cortes)
         acciones.append({
             **grupo,
             'finding_count': len(grupo['finding_ids']),
@@ -106,17 +111,6 @@ def construir_plan(dominio, hallazgos, reglas, pesos_categoria, method='rules', 
         'actions': acciones,
         'total': len(acciones),
     }
-
-
-def escapar_formula(value):
-    """Evita que texto de hallazgos se ejecute como fórmula al abrir las exportaciones."""
-    if isinstance(value, str) and value.startswith(('=', '+', '-', '@')):
-        return "'" + value
-    if isinstance(value, list):
-        return [escapar_formula(item) for item in value]
-    if isinstance(value, dict):
-        return {key: escapar_formula(item) for key, item in value.items()}
-    return value
 
 
 def exportar_json(plan):

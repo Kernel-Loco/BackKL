@@ -1,0 +1,28 @@
+{
+  "nota": "Respuesta armada a mano para las pruebas, no grabada de ningún dominio. Valores falsos.",
+  "descripcion": "Página normal detrás de Cloudflare, con un formulario con reCAPTCHA",
+  "estado": 200,
+  "cabeceras": [
+    [
+      "Content-Type",
+      "text/html; charset=UTF-8"
+    ],
+    [
+      "Server",
+      "cloudflare"
+    ],
+    [
+      "CF-RAY",
+      "0000000000000003-QRO"
+    ],
+    [
+      "CF-Cache-Status",
+      "DYNAMIC"
+    ],
+    [
+      "Set-Cookie",
+      "__cf_bm=CIRDAN_FAKE_bm; path=/; HttpOnly; Secure"
+    ]
+  ],
+  "cuerpo": "<html><head><title>Contacto</title></head><body><form><div class=\"g-recaptcha\"></div></form></body></html>"
+}

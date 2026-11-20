@@ -3,13 +3,13 @@
 Inicia sesión como una cuenta de demo (cirdan/auth/demo.py) con contraseña y código TOTP, y
 devuelve un cliente con su cookie. Necesita `docker compose up` con DEMO_ACCOUNTS=true.
 """
-import altcha
 import ast
 import base64
 import hashlib
 import hmac
 import http.cookiejar
 import json
+import os
 import struct
 import subprocess
 import time
@@ -54,17 +54,55 @@ def next_code(email):
     return totp(SECRETS[email], step)
 
 
+def psql(sql):
+    """Corre una sentencia en la base como postgres, fuera de la API."""
+    subprocess.run(['docker', 'exec', 'cirdan-pg16', 'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c', sql],
+                   check=True, capture_output=True)
+
+
 def reset():
-    """Deja las cuentas listas para la prueba: sin último código usado ni intentos fallidos."""
-    subprocess.run(['docker', 'exec', 'cirdan-pg16', 'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c',
-                    'UPDATE users SET last_totp_step = NULL'], check=True, capture_output=True)
-    subprocess.run(['docker', 'exec', 'cirdan-valkey', 'sh', '-c',
-                    'for p in "login:fail:*" "password:fail:*"; do '
+    """Deja las cuentas listas para la prueba: sin último código usado ni intentos fallidos, del login ni del cambio de
+    contraseña (pw:fail:*, RC-290)."""
+    psql('UPDATE users SET last_totp_step = NULL')
+    subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey'), 'sh', '-c',
+                    'for p in "login:fail:*" "pw:fail:*"; do '
                     'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "$p" '
-                    '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del; '
-                    'done'], check=True, capture_output=True)
+                    '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del; done'],
+                   check=True, capture_output=True)
     _last_step.clear()
-    subprocess.run(['docker', 'compose', 'run', '--rm', 'demo-accounts'], check=True, capture_output=True)
+
+
+def valkey(*argumentos):
+    """Corre valkey-cli en el contenedor de Valkey y da su salida, una línea por valor."""
+    r = subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey'), 'sh', '-c',
+                        'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning "$@"', 'sh', *argumentos],
+                       check=True, capture_output=True, text=True)
+    return r.stdout.splitlines()
+
+
+def esquema():
+    """El esquema OpenAPI de la API que corre, con app.openapi() dentro de su contenedor y con su mismo entorno.
+    /openapi.json no existe por omisión (API_DOCS, RC-303), así que no se pide por HTTP."""
+    r = subprocess.run(['docker', 'exec', 'cirdan-api', 'python', '-c',
+                        'import json; from cirdan.api.main import app; print(json.dumps(app.openapi()))'],
+                       check=True, capture_output=True, text=True, encoding='utf-8')
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def en_api(codigo):
+    """Corre código de Python dentro del contenedor de la API, con su mismo entorno, y da la última línea que imprime."""
+    contenedor = os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api')
+    r = subprocess.run(['docker', 'exec', contenedor, 'python', '-c', codigo],
+                       check=True, capture_output=True, text=True, encoding='utf-8')
+    return r.stdout.strip().splitlines()[-1]
+
+
+def api_logs():
+    """El log del contenedor de la API (stdout y stderr juntos), para buscar las líneas que no van a la base."""
+    contenedor = os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api')
+    r = subprocess.run(['docker', 'logs', contenedor], check=True, capture_output=True, text=True, encoding='utf-8',
+                       errors='replace')
+    return r.stdout + r.stderr
 
 
 class Client:
@@ -90,31 +128,44 @@ class Client:
         return self.request('GET', url, headers=headers)
 
     def post(self, url, body=None, headers=None):
-        if url.endswith('/login') and isinstance(body, dict) and 'captcha' not in body:
-            code, challenge = self.get('/api/v1/auth/captcha')
-            assert code == 200, (code, challenge)
-            reto = altcha.ChallengeV1(
-                challenge['algorithm'], challenge['challenge'], challenge['maxNumber'],
-                challenge['salt'], challenge['signature'])
-            solucion = altcha.solve_challenge_v1(reto)
-            assert solucion is not None
-            body = dict(body, captcha={
-                'algorithm': reto.algorithm,
-                'challenge': reto.challenge,
-                'number': solucion.number,
-                'salt': reto.salt,
-                'signature': reto.signature,
-            })
         return self.request('POST', url, body, headers)
 
     def cookie(self):
         return next((c for c in self.jar if c.name == 'lt_session'), None)
 
 
+def solve_captcha(challenge):
+    """Resuelve un reto ALTCHA de GET /auth/captcha como el widget del portal (PBKDF2-SHA256, contador uint32 al final
+    del nonce) y devuelve el campo `captcha` de /login. Tarda alrededor de medio segundo."""
+    params = challenge['parameters']
+    nonce, salt = bytes.fromhex(params['nonce']), bytes.fromhex(params['salt'])
+    counter = 0
+    while True:
+        key = hashlib.pbkdf2_hmac('sha256', nonce + struct.pack('>I', counter), salt, params['cost'], params['keyLength'])
+        if key.hex().startswith(params['keyPrefix']):
+            break
+        counter += 1
+    payload = {'challenge': {'parameters': params, 'signature': challenge['signature']},
+               'solution': {'counter': counter, 'derivedKey': key.hex()}}
+    return base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+def captcha(client):
+    """Un captcha resuelto y sin usar, pedido con el cliente."""
+    code, challenge = client.get(AUTH + '/captcha')
+    assert code == 200, (code, challenge)
+    return solve_captcha(challenge)
+
+
+def post_login(client, email, password, headers=None):
+    """POST /auth/login con un captcha resuelto, como el portal. Devuelve (código, cuerpo)."""
+    return client.post(AUTH + '/login', {'email': email, 'password': password, 'captcha': captcha(client)}, headers)
+
+
 def login(email):
-    """Cliente con sesión iniciada (contraseña y código TOTP)."""
+    """Cliente con sesión iniciada (captcha, contraseña y código TOTP)."""
     client = Client()
-    code, body = client.post(AUTH + '/login', {'email': email, 'password': PASSWORD})
+    code, body = post_login(client, email, PASSWORD)
     assert code == 200 and body['mfa_required'], (code, body)
     code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': next_code(email)})
     assert code == 200, (code, body)

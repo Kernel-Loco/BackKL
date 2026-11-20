@@ -7,6 +7,8 @@ Cada empresa entra con la sesión de una cuenta de demo: la empresa sale de la s
 no de un encabezado (#25).
 """
 import unittest
+import urllib.error
+import urllib.request
 
 from pruebas import sesion
 
@@ -23,9 +25,29 @@ class ApiCirdan(unittest.TestCase):
         cls.beta = sesion.login('dana.cruz@beta-corp.mx')
 
     def test_1_entra_como_rol_sin_privilegios(self):
+        # RC-291: el rol ya no sale en /health. Se lee con la misma conexión de la API (cirdan.db.transaction y su
+        # DATABASE_URL), dentro de su contenedor.
+        self.assertEqual(sesion.en_api(
+            'from cirdan.db import transaction\n'
+            'with transaction() as conn:\n'
+            "    print(conn.execute('SELECT current_user AS rol').fetchone()['rol'])"), 'cirdan_app')
+
+    def test_1b_health_solo_dice_ok(self):
+        # RC-291: /health no pide sesión, así que no da la versión de PostgreSQL ni el rol de la base.
         code, body = sesion.Client().get('/health')
-        self.assertEqual(code, 200)
-        self.assertEqual(body['role'], 'cirdan_app')
+        self.assertEqual((code, body), (200, {'status': 'ok'}))
+
+    def test_1c_health_falla_si_la_base_no_contesta(self):
+        # Con la base caída health() no responde ok: la excepción de la conexión llega al 500 de FastAPI.
+        self.assertEqual(sesion.en_api(
+            'import cirdan.db, psycopg\n'
+            "cirdan.db.DSN = 'postgresql://nadie@127.0.0.1:1/nada?connect_timeout=2'\n"
+            'from cirdan.api.main import health\n'
+            'try:\n'
+            '    health()\n'
+            "    print('respondio')\n"
+            'except psycopg.OperationalError:\n'
+            "    print('fallo')"), 'fallo')
 
     def test_2_acme_ve_sus_cinco_dominios_con_score(self):
         code, body = self.acme.get('/domains')
@@ -64,6 +86,25 @@ class ApiCirdan(unittest.TestCase):
         # Los dos modos los prueba pruebas/test_explorador.py dentro del contenedor.
         code, body = sesion.Client().get('/db/tables/users/rows', headers={'X-Organization': BETA})
         self.assertIn(code, (401, 404), body)
+
+    def test_8_toda_respuesta_trae_la_proteccion_contra_marcos_y_nosniff(self):
+        # RC-283: también los errores y el 403 que da el middleware de origen antes de llegar a una ruta. /docs no
+        # existe con el API_DOCS por omisión (RC-303).
+        casos = (('GET', '/health', None, 200), ('GET', '/domains', None, 401), ('GET', '/no-existe', None, 404),
+                 ('GET', '/docs', None, 404), ('POST', '/api/v1/auth/logout', 'https://otro.example', 403))
+        for metodo, ruta, origen, esperado in casos:
+            req = urllib.request.Request(sesion.BASE + ruta, method=metodo,
+                                         headers={'Origin': origen} if origen else {})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    estado, cabeceras = r.status, r.headers
+            except urllib.error.HTTPError as e:
+                estado, cabeceras = e.code, e.headers
+            with self.subTest(ruta=ruta):
+                self.assertEqual(estado, esperado)
+                self.assertEqual(cabeceras.get_all('X-Frame-Options'), ['DENY'])
+                self.assertEqual(cabeceras.get_all('X-Content-Type-Options'), ['nosniff'])
+                self.assertEqual(cabeceras.get_all('Content-Security-Policy'), ["frame-ancestors 'none'"])
 
 
 if __name__ == '__main__':

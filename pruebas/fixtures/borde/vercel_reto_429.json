@@ -1,0 +1,24 @@
+{
+  "nota": "Respuesta armada a mano para las pruebas, no grabada de ningún dominio. Valores falsos.",
+  "descripcion": "Security Checkpoint de Vercel: 429 con la cabecera x-vercel-mitigated (forma sin verificar en vivo)",
+  "estado": 429,
+  "cabeceras": [
+    [
+      "Content-Type",
+      "text/html; charset=utf-8"
+    ],
+    [
+      "Server",
+      "Vercel"
+    ],
+    [
+      "X-Vercel-Id",
+      "qro1::0000-0000000000000-000000000000"
+    ],
+    [
+      "X-Vercel-Mitigated",
+      "challenge"
+    ]
+  ],
+  "cuerpo": "<html><head><title>Vercel Security Checkpoint</title></head><body>Revisando el navegador</body></html>"
+}

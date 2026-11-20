@@ -563,7 +563,7 @@ class Rdap(unittest.TestCase):
                 manejador.redirect_request(req, io.BytesIO(), 302, 'Found', {}, destino)
             self.assertEqual((e.exception.codigo, e.exception.host), (302, 'rdap.verisign.com'))
 
-        def redirige(req, plazo, cronometro):
+        def redirige(req, plazo, cronometro, familia=None):
             raise transporte.Redirigida(301, 'rdap.verisign.com')
         with mock.patch.object(transporte, 'abrir', redirige), self.assertRaises(rdap.RespuestaIlegible) as e:
             rdap._descargar(VERISIGN + 'domain/olmardo.com', 15)
@@ -590,7 +590,8 @@ class Rdap(unittest.TestCase):
         pedidas = []
 
         def abrir(partes):
-            def f(req, plazo, cronometro):
+            def f(req, plazo, cronometro, familia=None):
+                self.assertEqual(familia, socket.AF_INET)   # RDAP solo por IPv4 (#181, RC-299)
                 pedidas.append((req, plazo))
                 return Respuesta(partes)
             return f
@@ -713,7 +714,8 @@ class Rdap(unittest.TestCase):
         for url in ('https://:clave@rdap.example/', 'https://usuario:clave@rdap.example/', 'https://rdap.example/v1\\x/',
                     'https://rdap.example/v 1/', 'https://rdap.example/\tv1/', 'https://rdap.example/?',
                     'https://rdap.example/#', 'https://192.168.0.10/', 'https://[::1]/', 'https://10.0.0.1:8443/rdap/',
-                    'https://rdap.exámple/', 'https://rdap.example/\udc80/'):
+                    'https://rdap.exámple/', 'https://rdap.example/\udc80/', 'https://rdap.example:8443/',
+                    'https://rdap.example:6379/', 'https://rdap.example:80/', 'https://rdap.example:0/'):
             with self.subTest(url=url):
                 self.assertIsNone(rdap._url_https(url))
                 bootstrap = {'services': [[['com'], [url]]]}
@@ -1566,12 +1568,14 @@ class Transporte(unittest.TestCase):
         self.assertIs(s, segunda)
         self.assertEqual((primera.plazos, primera.cerrado, segunda.plazos, segunda.cerrado), ([5], True, [5, 5], False))
         self.assertEqual(red.pedidas, [(HOST_TLS, 443, Red.SOCK_STREAM)])
-        # Las dos colgadas: no pasa del plazo y cierra las dos
+        # Las dos colgadas: no pasa del plazo, cierra las dos y lanza SinConexion, un PlazoVencido (RC-46)
         reloj = [1000.0]
         red = Red(['2600::1', '1.2.3.4'], colgadas={'2600::1', '1.2.3.4'}, reloj=reloj)
         conexion = transporte._Conexion(HOST_TLS, plazo=1010.0, cronometro=lambda: reloj[0])
-        with mock.patch.object(transporte, 'socket', red), self.assertRaises(TimeoutError):
+        with mock.patch.object(transporte, 'socket', red), self.assertRaises(transporte.SinConexion) as error:
             conexion._conectar((HOST_TLS, 443))
+        self.assertIsInstance(error.exception, transporte.PlazoVencido)
+        self.assertIsInstance(error.exception.__cause__, TimeoutError)
         self.assertEqual((reloj[0], [x.cerrado for x in red.sockets]), (1010.0, [True, True]))
         # Sin IPv6 en el kernel se pasa a la IPv4. Con el plazo ya vencido no se crea ningún socket
         red = Red(['2600::1', '1.2.3.4'], sin_familia={10})

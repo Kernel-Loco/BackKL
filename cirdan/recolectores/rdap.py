@@ -91,7 +91,7 @@ from datetime import datetime, timedelta, timezone
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import transporte
+from cirdan.recolectores import contrato, transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos)
@@ -107,7 +107,7 @@ NOMBRE_RDAP = 'RDAP'         # atribución: va en los atributos y la evidencia
 NOMBRE_WHOIS = 'WHOIS'       # atribución cuando el registro salió del puerto 43
 IANA_WHOIS = 'whois.iana.org'   # da el servidor WHOIS de cada TLD (línea 'whois:'), sin tabla fija
 PUERTO_WHOIS = 43
-AGENTE = 'cirdan-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
+AGENTE = contrato.AGENTE   # uno solo para todas las fuentes (contrato.py)
 NO_DISPONIBLE = 'No disponible'
 
 DIAS_POR_VENCER = 30         # vence en menos de esto = hallazgo (texto de la regla, migración 003)
@@ -126,8 +126,7 @@ TIMEOUT_WHOIS = 10           # segundos por conversación, de getaddrinfo al úl
 RESERVA_WHOIS = 30           # segundos de TIEMPO_CORRIDA que RDAP deja para el respaldo
 MAX_BYTES_WHOIS = 64 * 1024  # tope de una respuesta WHOIS. La de whois.mx, con sus avisos, pesa unos 4 KB
 MAX_DIRECCIONES = 2          # direcciones del servidor WHOIS que se prueban
-# Prefijos NAT64 (RFC 6052 y RFC 8215): llevan una IPv4 en los últimos 32 bits, que también tiene que ser pública.
-NAT64 = (ipaddress.ip_network('64:ff9b::/96'), ipaddress.ip_network('64:ff9b:1::/48'))
+NAT64 = transporte.NAT64    # los prefijos NAT64 viven en transporte.py, con publica()
 # Peor caso de una corrida para el límite diario (#13b): el bootstrap y el dominio por RDAP, y whois.iana.org y el
 # servidor del TLD por el puerto 43, cada uno con sus intentos: 10. No hay semilla nueva: el daily_limit de 60 de la
 # semilla 008 alcanza para 6 corridas en el peor caso. Una corrida normal gasta 2 (3 en .mx) y el orquestador ajusta
@@ -215,7 +214,9 @@ def _descargar(url, timeout, cronometro=None):
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE,
                                                'Accept': 'application/rdap+json, application/json'})
     try:
-        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES, cronometro)
+        # Solo IPv4, como la visita web: el nombre del servidor RDAP llega del bootstrap de IANA, y una AAAA que el DNS
+        # de la red arma con su propio prefijo de NAT64 no puede llevar la petición a una IPv4 interna (#181, RC-299)
+        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES, cronometro, familia=socket.AF_INET)
     except transporte.PlazoVencido:
         raise SinTiempo('whois: la respuesta tardó más de %s s' % timeout) from None
     except transporte.Redirigida as e:
@@ -242,20 +243,7 @@ def _resolver(host, espera):
     return salida['direcciones']
 
 
-def _publica(ip):
-    """True si `ip` es una dirección pública: un servidor WHOIS que resuelve a 127.0.0.1, 10.x o 169.254.169.254 no se
-    usa, así un DNS que miente no abre conexiones dentro de la red del contenedor. is_global da True en 64:ff9b::/96
-    aunque por dentro sea 127.0.0.1 (64:ff9b::7f00:1), y en una red con NAT64 esa conexión llega a la IPv4: en los
-    prefijos de NAT64 también se revisa la IPv4 de los últimos 32 bits. 6to4 (2002::/16) no se repite aquí: ipaddress
-    ya lo da como no global en la versión de la imagen (2002:7f00:1::1 da False)."""
-    try:
-        direccion = ipaddress.ip_address(ip.split('%')[0])
-    except ValueError:
-        return False
-    if direccion.version == 6 and any(direccion in red for red in NAT64) \
-            and not ipaddress.IPv4Address(int(direccion) & 0xFFFFFFFF).is_global:
-        return False
-    return direccion.is_global
+_publica = transporte.publica   # se movió a transporte.py (#18, RC-46): _conectar la usa en cada petición HTTPS
 
 
 def _conversar(host, consulta, timeout, cronometro=None):
@@ -320,14 +308,16 @@ def _conversar(host, consulta, timeout, cronometro=None):
 def _url_https(url):
     """La URL base de un servidor RDAP, terminada en '/', o None si no es https limpia: ASCII imprimible sin espacios,
     sin usuario ni contraseña ('@'), sin '\\', '?' ni '#' (aunque la consulta o el fragmento queden vacíos), y con un
-    nombre de host (no una IP)."""
+    nombre de host (no una IP) y, si trae puerto, uno de transporte.PUERTOS (#181, RC-299)."""
     if not isinstance(url, str) or len(url) > MAX_URL or not (url.isascii() and url.isprintable()) \
             or any(c in url for c in ' @\\?#'):
         return None
     try:
         partes = urllib.parse.urlsplit(url)
-        partes.port   # lanza ValueError con un puerto roto
+        puerto = partes.port   # lanza ValueError con un puerto roto
     except ValueError:
+        return None
+    if puerto is not None and puerto not in transporte.PUERTOS:
         return None
     if partes.scheme.lower() != 'https' or not partes.hostname or not HOST_VALIDO.fullmatch(partes.hostname) \
             or partes.query or partes.fragment:

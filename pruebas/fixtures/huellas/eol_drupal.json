@@ -1,0 +1,13 @@
+{
+  "_nota": "Armada a mano con la forma de la API v1 de endoflife.date (/api/v1/products/drupal/). Ciclos y fechas de ejemplo, no consultados.",
+  "schema_version": "1.0.0",
+  "result": {
+    "name": "drupal",
+    "releases": [
+      {"name": "11", "isEol": false, "eolFrom": null, "latest": {"name": "11.0.5"}},
+      {"name": "10.2", "isEol": true, "eolFrom": "2024-12-11", "latest": {"name": "10.2.11"}},
+      {"name": "10", "isEol": false, "eolFrom": null, "latest": {"name": "10.3.6"}},
+      {"name": "7", "isEol": true, "eolFrom": "2025-01-05", "latest": {"name": "7.103"}}
+    ]
+  }
+}

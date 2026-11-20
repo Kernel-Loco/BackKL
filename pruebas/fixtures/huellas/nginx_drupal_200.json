@@ -1,0 +1,10 @@
+{
+  "_nota": "Respuesta armada a mano con señales públicas de nginx sin marca de distribución, Drupal 7 y jQuery. No es una grabación de ningún dominio.",
+  "estado": 200,
+  "cabeceras": [
+    ["Server", "nginx/1.18.0"],
+    ["X-Generator", "Drupal 7 (https://www.drupal.org)"],
+    ["Expires", "Sun, 19 Nov 1978 05:00:00 GMT"]
+  ],
+  "cuerpo": "<html><head><script src=\"/sites/all/libraries/jquery-1.12.4.min.js\"></script></head><body><script>var datos = {\"drupal_internal__nid\": 1};</script></body></html>"
+}

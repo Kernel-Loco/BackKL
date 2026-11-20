@@ -13,14 +13,19 @@ Los nombres que dan otras fuentes no se usan: eso necesita pasar datos entre fue
 
 CDN (politica_uso_etico.md, punto 5: de una IP de CDN solo se registra que existe). Solo se consultan las IPv4 globales
 que no son multicast, reservadas ni de 192.88.99.0/24 (consultable). No se consultan las de los rangos IPv4 de
-Cloudflare (RANGOS_CLOUDFLARE) ni las que llegan por una cadena CNAME en la que cualquier nombre, intermedio o final,
-termina en un sufijo de SUFIJOS_CDN (CDN y bordes compartidos conocidos). La cadena sale de la misma respuesta del A,
-sin consultas extra (_cadena_cname). Tampoco las de un ASN que es solo de un CDN o un proxy inverso, aunque no haya
-CNAME a la vista (geoip.cdn_por_asn con la base local de DB-IP Lite, #15b, RC-166). Un ASN mixto de nube y CDN
-(Amazon, Microsoft, Google) no cuenta, porque una IP suya puede ser un servidor de la empresa: ahí el CDN sale solo por
-el CNAME. Quedan como activo ip con su marca y sin consulta. Si aun así InternetDB trae el tag 'cdn', sus datos se
-descartan con un aviso. Sin la base de ASN de DB-IP ese filtro no corre: las IP de un CDN sin CNAME conocido se
-consultan igual y el aviso de base faltante lo dice (SIN_CDN_POR_ASN).
+Cloudflare (RANGOS_CLOUDFLARE), las de los rangos IPv4 publicados de CloudFront, Azure Front Door y los bordes propios
+de Google (RANGOS_CDN, de rangos_cdn.json, sin red) ni las que llegan por una cadena CNAME en la que cualquier nombre,
+intermedio o final, termina en un sufijo de SUFIJOS_CDN (CDN y bordes compartidos conocidos). La cadena sale de la
+misma respuesta del A, sin consultas extra (_cadena_cname). Tampoco las de un ASN que es solo de un CDN o un proxy
+inverso, aunque no haya CNAME a la vista (geoip.cdn_por_asn con la base local de DB-IP Lite, #15b, RC-166). Un ASN
+mixto de nube y CDN (Amazon, Microsoft, Google) no cuenta, porque una IP suya puede ser un servidor de la empresa: ahí
+el CDN sale por sus rangos publicados o por el CNAME (RC-49, H11 de la auditoría del 12 nov). Quedan como activo ip
+con su marca y sin consulta. Si aun así InternetDB o la API de host traen el tag 'cdn', sus datos se descartan con un
+aviso. Una IP
+sin ASN conocido, porque falta la base de ASN de DB-IP o porque la base no la trae, no se consulta (RC-49, H11 de la
+auditoría del 12 nov): sin el ASN no se puede descartar que sea de un CDN. Queda como activo ip con internetdb
+'sin_asn' y la cobertura parcial, así no se cierran sus hallazgos de antes. El aviso de base faltante lo dice
+(SIN_CDN_POR_ASN) y, con la base abierta, SIN_ASN cuenta cuántas fueron.
 
 Devuelve:
 - un activo ip por IP, con 'hosts' (los nombres que resuelven a ella) e 'internetdb' con puertos, tags, CPE, cuántos
@@ -34,27 +39,49 @@ Devuelve:
   - 22, 23, 5900, 5901, 5985 y 5986: exposed_remote_admin (alta).
   - 21, 139, 445, 548, 873 y 2049: exposed_file_sharing (alta).
   - 1433, 1521, 3306, 5432, 5984, 6379, 9042, 9200, 11211 y 27017: exposed_database (alta).
+  - 2375 y 2376 (Docker), 6443 (Kubernetes), 10250 y 10255 (kubelet) y 2379 y 2380 (etcd): exposed_container_api
+    (alta, RC-224), con el servicio que suele escuchar ahí (SERVICIO_CONTENEDORES) y NOTA_CONTENEDORES en la
+    evidencia: InternetDB solo da el número del puerto, así que no se sabe si el servicio pide autenticación. Saberlo
+    pediría conectarse al servidor, y eso no se hace.
+  - 11434 (Ollama), 1234 (LM Studio), 7860 (Gradio), 8188 (ComfyUI), 8265 (Ray Dashboard), 6333 y 6334 (Qdrant) y
+    19530 (Milvus): exposed_ai_service (alta, RC-262), con el producto que suele escuchar ahí (SERVICIO_IA) y NOTA_IA
+    en la evidencia, por la misma razón. Los puertos genéricos que también usan servicios de IA (3000, 5000, 8000,
+    8080 y 8888) siguen en exposed_service, y el 80 y el 443 en el activo web sin hallazgo.
   - 80 y 443, y los de correo (25, 110, 143, 465, 587, 993 y 995): activo service sin hallazgo.
   - los industriales (102, 502, 789, 1911, 2404, 4911, 9600, 20000, 44818 y 47808): exposed_service con
-    puerto_industrial en la evidencia. exposed_ot_device necesita la API de host de Shodan.
+    puerto_industrial en la evidencia. exposed_ot_device sale de la etiqueta 'ics', no del puerto.
   - cualquier otro, como 8080 o 50000: exposed_service (baja).
 - known_vulnerability (media) sobre el activo ip, uno por CVE con la CVE como clave, hasta MAX_CVE por IP (las más
   recientes por año y número, y un aviso con cuántas se omitieron). Cada CVE se normaliza a 'CVE-<año>-<número>' sin
   ceros de más antes de quitar repetidas. Son CVE que Shodan deduce de la versión (deducida_por_version), con las CPE
   de esa IP. KEV y EPSS son de #69 (RC-127).
-Los tags solo van a los atributos. 'honeypot' descarta los hallazgos y servicios de esa IP con un aviso. Los nombres de
-InternetDB que no son del dominio no se guardan, solo se cuentan (hostnames_ajenos). Si una IP los trae, puede ser un
-dato de quien tuvo la IP antes: la evidencia lleva posible_dato_de_otro_dueno y queda un aviso. Sin nombres ajenos esa
+- exposed_ot_device (crítica) con la etiqueta 'ics', exposed_iot_device (alta) con 'iot' y outdated_software (alta) con
+  'eol-product' o 'eol-os', sobre el activo ip, uno por código y por IP, con las etiquetas en la evidencia y su parte
+  PARTE_ETIQUETAS (RC-220 y RC-337). Las etiquetas salen de InternetDB (fuente_datos 'Shodan InternetDB', sin fecha) o
+  de la API de host (fuente_datos 'Shodan', con puerto, producto, versión y fecha de cada servicio).
+Las demás etiquetas solo van a los atributos. 'honeypot', de InternetDB o de la API de host, descarta los hallazgos y
+servicios de esa IP con un aviso. Los nombres de
+InternetDB y de la API de host (hostnames y domains) que no son del dominio no se guardan, solo se cuentan
+(hostnames_ajenos). Si una IP los trae, puede ser un dato de quien tuvo la IP antes: la evidencia lleva
+posible_dato_de_otro_dueno y queda un aviso. Sin nombres ajenos esa
 marca no sale, aunque el dato sea de otro dueño: InternetDB no da fechas ni nombres que lo digan.
 
-Sin llave de Shodan (#8, RC-40) no hay API de host ni fechas: exposed_iot_device, exposed_ot_device y outdated_software
-(SIN_LLAVE) van siempre a sin_cobertura. InternetDB tampoco dice cuándo vio cada puerto ni si es tcp o udp: la
-evidencia lleva vigencia 'sin_fecha', fuente_sin_fecha y nota_vigencia (NOTA_SIN_FECHA: el dato puede ser viejo o de
+Etiquetas y llave (RC-220 y RC-337). Que InternetDB no traiga una etiqueta no prueba que la IP no la tenga: InternetDB no
+dice cuándo vio cada puerto ni trae banners. Por eso los códigos de SIN_LLAVE sin hallazgos van a sin_cobertura, salvo
+que la API de host de Shodan (GET /shodan/host/<ip>, nunca /shodan/scan ni la búsqueda) haya respondido completa por
+todas las IP de una corrida sin otros recortes: entonces cuentan como revisados. La API de host se consulta solo con
+SHODAN_API_KEY puesta (crear_cliente la lee), para las mismas IP que van a InternetDB, con PAUSA_INTERNETDB entre una y
+otra, y su respuesta se graba limpia (limpiar_host), sin la URL. La llave va en ?key= de la URL y nunca sale en la
+grabación, los avisos ni los errores (_tapar). Un 404, un error o el tope de tiempo dejan esa IP sin revisar en sus
+etiquetas. Con un hallazgo de etiqueta y otra IP sin revisar, revisados y sin_revisar llevan la parte
+'<ip>/etiquetas', así no se cierra lo de una IP que no se pudo revisar. Sin la llave nada de esto corre y la parte de
+etiquetas nunca queda revisada. Como InternetDB no da fechas ni dice si un puerto es tcp o udp, lo que sale de InternetDB
+lleva en la evidencia vigencia 'sin_fecha', fuente_sin_fecha y nota_vigencia (NOTA_SIN_FECHA: el dato puede ser viejo o de
 quien tuvo la IP antes), el protocolo es tcp salvo PUERTOS_UDP, y el activo service lleva protocolo_supuesto.
 
 Cobertura. Si algo quedó sin revisar (Cert Spotter caído o con 429, nombres o IP cortados por MAX_NOMBRES o MAX_IPS, un
 A fallido, una IP sin respuesta, una respuesta 200 de InternetDB sin 'ports' o con campos que no se pueden leer, el 429
-de InternetDB o el tope de tiempo), los códigos de CODIGOS sin hallazgos también van a sin_cobertura. Uno con
+de InternetDB o el tope de tiempo), los códigos de CODIGOS_PUERTOS sin hallazgos también van a sin_cobertura. Uno con
 hallazgos no puede ir ahí (validar() lo rechaza) y solo queda el aviso. Para eso cada puerto lleva su IP como parte y
 cada CVE su IP con PARTE_CVE, y revisados lleva las partes que sí quedaron revisadas completas: las de las IP que
 InternetDB respondió sin los campos rotos que las deciden (_partes_revisadas), más las privadas y las de un CDN, que
@@ -82,13 +109,15 @@ intento solo gastaría cupo.
 
 Modos: 'vivo' consulta. 'grabar' además guarda lo ya limpio en cirdan/recolectores/respuestas_grabadas/shodan/<dominio>/
 (las páginas de Cert Spotter reducidas a lo que lee certspotter.certificado(), cada A con estado, IP y su cadena CNAME,
-y cada IP de InternetDB limpia o 'sin_datos'), todo al final y solo si la corrida no tuvo ninguna falla. Los únicos
+y cada IP de InternetDB limpia o 'sin_datos' y, con la llave, su respuesta de la API de host limpia o 'sin_datos', sin
+la llave ni la URL), todo al final y solo si la corrida no tuvo ninguna falla. Los únicos
 recortes que no impiden grabar son los topes deterministas (TOPES: PAGINAS_CT, MAX_NOMBRES y MAX_IPS, más el de MAX_CVE,
 que no deja la cobertura parcial), porque otra corrida los repetiría igual. Cualquier falla (un 429, la red, un A sin
 respuesta, el tope de tiempo, una respuesta que no se puede leer, un 4xx, una página o una emisión de Cert Spotter rota
 o campos rotos de InternetDB) deja intacta la grabación anterior, como github.py con SIN_CUOTA, con el aviso NO_SE_GRABO
-al principio de los avisos. Una grabación fallida tampoco la toca. 'reproducir' solo lee esa grabación. Sin grabación
-del dominio, reproducir da los 9 códigos en sin_cobertura y un aviso, no failed, para que la demo no muestre la fuente
+al principio de los avisos. Una grabación fallida tampoco la toca. 'reproducir' solo lee esa grabación, sin llave: usa la API de host solo si la grabación trae alguna respuesta suya
+(una grabación hecha sin llave reproduce como antes de RC-337). Sin grabación
+del dominio, reproducir da los 11 códigos en sin_cobertura y un aviso, no failed, para que la demo no muestre la fuente
 caída. dnspython se importa solo al consultar de verdad (_resolver_a), como registros_dns.py.
 
     python -m cirdan.recolectores.shodan olmardo.com --reproducir
@@ -116,7 +145,7 @@ from pathlib import Path
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import certspotter, geoip, transporte
+from cirdan.recolectores import certspotter, contrato, geoip, transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos, en_alcance_nombre)
@@ -124,19 +153,35 @@ from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoRespond
 FUENTE = 'shodan'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'shodan'
 
-# Código de regla -> severidad base. Los seis existen en el catálogo de reglas (semillas 001 y 004).
-CODIGOS = {'exposed_rdp': 'high', 'exposed_remote_admin': 'high', 'exposed_file_sharing': 'high',
-           'exposed_database': 'high', 'exposed_service': 'low', 'known_vulnerability': 'medium'}
-# Sin la llave de Shodan (#8) no se pueden revisar: van siempre a sin_cobertura y no entran en CODIGOS.
-SIN_LLAVE = ('exposed_iot_device', 'exposed_ot_device', 'outdated_software')
+# Código de regla -> severidad base, la del catálogo de reglas (semillas 001 y 004). Los de puertos y CVE salen de los
+# puertos y las CVE de InternetDB.
+CODIGOS_PUERTOS = {'exposed_rdp': 'high', 'exposed_remote_admin': 'high', 'exposed_file_sharing': 'high',
+                   'exposed_database': 'high', 'exposed_container_api': 'high', 'exposed_ai_service': 'high',
+                   'exposed_service': 'low',
+                   'known_vulnerability': 'medium'}
+# Los de etiquetas salen de las etiquetas que Shodan pone a la IP (RC-220 y RC-337).
+CODIGOS_ETIQUETA = {'exposed_iot_device': 'high', 'exposed_ot_device': 'critical', 'outdated_software': 'high'}
+CODIGOS = dict(CODIGOS_PUERTOS, **CODIGOS_ETIQUETA)
+# Etiqueta de Shodan -> código. 'honeypot' no da código: descarta la IP.
+ETIQUETAS = {'ics': 'exposed_ot_device', 'iot': 'exposed_iot_device', 'eol-product': 'outdated_software',
+             'eol-os': 'outdated_software'}
+# Los códigos de etiquetas, que sin una etiqueta no se pueden dar por revisados sin la API de host (con la llave de
+# Shodan, #8). Sin hallazgos van a sin_cobertura salvo con la API de host completa en todas las IP. El nombre es de RC-40.
+SIN_LLAVE = tuple(CODIGOS_ETIQUETA)
 
 URL_INTERNETDB = 'https://internetdb.shodan.io/'
 NOMBRE_INTERNETDB = 'Shodan InternetDB'          # atribución: va en los atributos y la evidencia
-AGENTE = 'cirdan-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
+URL_HOST = 'https://api.shodan.io/shodan/host/'   # la única ruta de la API de Shodan que se pide, nunca scan ni search
+NOMBRE_HOST = 'Shodan'                           # fuente_datos de lo que sale de la API de host
+# La forma de una llave de Shodan (32 letras y dígitos), con margen: con otra no se usa ni se manda. Solo caracteres
+# que no cambian una URL. El guion bajo deja que las pruebas usen el prefijo CIRDAN_FAKE_ (AGENTS.md regla 7)
+LLAVE_VALIDA = re.compile(r'[A-Za-z0-9_]{20,64}')
+LLAVE_TAPADA = '***'                             # lo que queda en un texto en lugar de la llave (_tapar)
+AGENTE = contrato.AGENTE   # uno solo para todas las fuentes (contrato.py)
 ORIGEN = 'cert_spotter_a'                        # de dónde salió la IP: un nombre de Cert Spotter y su A
 RESOLVEDORES = ('1.1.1.1', '8.8.8.8')            # públicos y fijos, como registros_dns.py. Nunca el DNS del sistema
 
-PAGINAS_CT = 2               # páginas de Cert Spotter: casi siempre la página y la vacía que cierra
+PAGINAS_CT = certspotter.COMPARTIDAS  # 2 páginas de Cert Spotter: casi siempre la página y la vacía que cierra
 INTENTOS_CT = 2              # intentos por página, como certspotter.COMPLEMENTO
 TIMEOUT_CT = 20              # segundos por página
 MAX_NOMBRES = 50             # nombres que se resuelven, con la raíz. Con más no se saben todas las IP y la corrida
@@ -156,9 +201,16 @@ MAX_ESPERA = 15              # lo más que se espera un Retry-After, aunque pida
 # Segundos que los A le dejan a InternetDB (RC-55): una petición y una pausa por IP. Sin esto, con MAX_NOMBRES nombres
 # unos pocos A que no responden (35 s cada uno con sus intentos) se comen la corrida y no se consulta ninguna IP
 RESERVA_INTERNETDB = MAX_IPS * (TIMEOUT_HTTP + PAUSA_INTERNETDB)
+# Lo mismo para la API de host, solo con la llave. Con ella, Cert Spotter y los A tienen 140 s de los 360 en vez de 250:
+# con varios A que no responden, se cortan más nombres que sin llave (parcial 'tiempo')
+RESERVA_HOST = MAX_IPS * (TIMEOUT_HTTP + PAUSA_INTERNETDB)
 MAX_BYTES = 1024 * 1024      # tope de una respuesta HTTP
-# Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición HTTP o DNS.
-MAX_CONSULTAS = PAGINAS_CT * INTENTOS_CT + MAX_NOMBRES * INTENTOS + MAX_IPS * INTENTOS
+MAX_BYTES_HOST = 8 * 1024 * 1024   # la API de host trae los banners completos, que pueden pasar de 1 MB
+MAX_SERVICIOS = 50           # servicios de la API de host que se graban por IP, por puerto
+MAX_SERVICIOS_EVIDENCIA = 10   # de esos, los que van en la evidencia de un hallazgo de etiqueta
+MAX_TEXTO = 80               # caracteres del producto o la versión de un servicio
+# Peor caso de una corrida para el límite diario (#13b): cada intento de cada petición HTTP o DNS, con la API de host.
+MAX_CONSULTAS = PAGINAS_CT * INTENTOS_CT + MAX_NOMBRES * INTENTOS + MAX_IPS * INTENTOS + MAX_IPS * INTENTOS
 
 # Puertos por familia. Las listas no se cruzan (pruebas/test_shodan.py lo revisa).
 PUERTOS = {
@@ -166,7 +218,30 @@ PUERTOS = {
     'exposed_remote_admin': (22, 23, 5900, 5901, 5985, 5986),
     'exposed_file_sharing': (21, 139, 445, 548, 873, 2049),
     'exposed_database': (1433, 1521, 3306, 5432, 5984, 6379, 9042, 9200, 11211, 27017),
+    'exposed_container_api': (2375, 2376, 2379, 2380, 6443, 10250, 10255),
+    # Servidores de modelos, interfaces y bases de vectores de IA (RC-262). Cada uno es el puerto por omisión de la
+    # documentación oficial del producto, revisada el 18 nov 2026:
+    'exposed_ai_service': (
+        11434,   # Ollama: 'Ollama binds 127.0.0.1 port 11434 by default', https://docs.ollama.com/faq
+        1234,    # LM Studio: servidor en http://localhost:1234, https://lmstudio.ai/docs/developer/rest/quickstart
+        7860,    # Gradio: GRADIO_SERVER_PORT, por omisión 7860, https://www.gradio.app/guides/environment-variables
+        8188,    # ComfyUI: --port, por omisión 8188, https://docs.comfy.org/development/comfyui-server/startup-flags
+        8265,    # Ray Dashboard: puerto 8265 del nodo principal,
+                 # https://docs.ray.io/en/latest/cluster/configure-manage-dashboard.html
+        6333,    # Qdrant: service.http_port, por omisión 6333,
+                 # https://qdrant.tech/documentation/ops-configuration/configuration/
+        6334,    # Qdrant: service.grpc_port, por omisión 6334,
+                 # https://qdrant.tech/documentation/ops-configuration/configuration/
+        19530,   # Milvus: proxy.port, por omisión 19530, https://milvus.io/docs/configure_proxy.md
+    ),
 }
+# Qué servicio suele escuchar en cada puerto de exposed_container_api (RC-224). Es lo que suele ser, no lo que es:
+# InternetDB solo da el número del puerto.
+SERVICIO_CONTENEDORES = {2375: 'Docker', 2376: 'Docker', 2379: 'etcd', 2380: 'etcd', 6443: 'Kubernetes',
+                         10250: 'kubelet', 10255: 'kubelet'}
+# Lo mismo para exposed_ai_service (RC-262): el producto cuyo puerto por omisión es ese, no el que de verdad escucha.
+SERVICIO_IA = {11434: 'Ollama', 1234: 'LM Studio', 7860: 'Gradio', 8188: 'ComfyUI', 8265: 'Ray Dashboard',
+               6333: 'Qdrant', 6334: 'Qdrant', 19530: 'Milvus'}
 PUERTOS_WEB = (80, 443)
 PUERTOS_CORREO = (25, 110, 143, 465, 587, 993, 995)   # exposed_service habla de 'entradas distintas de sitios web y correo'
 PUERTOS_INDUSTRIALES = (102, 502, 789, 1911, 2404, 4911, 9600, 20000, 44818, 47808)
@@ -178,6 +253,14 @@ RANGOS_CLOUDFLARE = tuple(ipaddress.ip_network(r) for r in (
     '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
     '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
     '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'))
+# Rangos IPv4 publicados de CloudFront ('cloudfront'), Azure Front Door ('azure_front_door') y los bordes propios de
+# Google ('google', goog.json menos cloud.json), para las nubes mixtas que geoip.CDN_POR_ASN no lista (RC-49, H11).
+# rangos_cdn.py los arma desde los archivos de cada nube, bajados una vez con OK. Se leen sin red y
+# RANGOS_CDN_FECHA dice de qué día son: cambian (Azure publica cada semana).
+_RANGOS_CDN = json.loads((Path(__file__).resolve().parent / 'rangos_cdn.json').read_text(encoding='utf-8'))
+RANGOS_CDN_FECHA = _RANGOS_CDN['procedencia']['descargado']
+RANGOS_CDN = tuple((ipaddress.ip_network(r), cdn) for cdn, redes in sorted(_RANGOS_CDN['rangos'].items())
+                   for r in redes)
 # Sufijo de cualquier nombre de la cadena CNAME, intermedio o final -> CDN o borde compartido. Una IP que llega por una
 # cadena con uno de estos no se consulta. Sufijos públicos conocidos, sin verificar en vivo, hasta #15b.
 SUFIJOS_CDN = {'cdn.cloudflare.net': 'cloudflare', 'cloudfront.net': 'cloudfront', 'akamaiedge.net': 'akamai',
@@ -204,27 +287,57 @@ CAMPOS = ('ports', 'tags', 'cpes', 'vulns', 'hostnames')   # los de una respuest
 
 # Avisos con texto fijo.
 SIN_GRABACION_DOMINIO = 'shodan: no hay grabación de Shodan de este dominio, no se revisó InternetDB'
+_LIMITE_CDN = ('no se detecta un CDN que no llegue por un CNAME conocido, cuyo ASN no esté en '
+               'geoip.CDN_POR_ASN y cuya IP no esté en los rangos publicados de CloudFront, Azure Front Door y los bordes '
+               'de Google del %s (en las nubes mixtas, por ejemplo Cloud CDN en un balanceador de Google Cloud, que '
+               'comparte rangos con las VM, y otros fuera de la lista)' % RANGOS_CDN_FECHA)
 LIMITES = ('shodan: solo IPv4 y sin la llave de Shodan (#8): exposed_iot_device, exposed_ot_device y outdated_software '
-           'quedan sin cobertura, y no se detecta un CDN que no llegue por un CNAME conocido y cuyo ASN no esté en '
-           'geoip.CDN_POR_ASN (las nubes mixtas como Amazon, Microsoft o Google, y otros fuera de la lista), ni ninguno '
-           'sin la base de DB-IP')
+           'salen solo con las etiquetas de InternetDB y sin ellas quedan sin cobertura, y ' + _LIMITE_CDN)
+LIMITES_CON_LLAVE = ('shodan: solo IPv4. exposed_iot_device, exposed_ot_device y outdated_software se revisan con las '
+                     'etiquetas de la API de host de Shodan solo en las IP que Shodan conoce, y ' + _LIMITE_CDN)
+LLAVE_MAL = 'shodan: SHODAN_API_KEY no tiene la forma de una llave de Shodan, no se usó la API de host'
+LLAVE_RECHAZADA = 'shodan: la API de host rechazó la llave (%d), no se consultaron %s'
+ETIQUETAS_PARCIAL = ('shodan: la API de host respondió completa por %d de %d IP del dominio: exposed_iot_device, '
+                     'exposed_ot_device y outdated_software solo quedan revisados en esas')
+PARTE_ETIQUETAS = '/etiquetas'   # las etiquetas de una IP son otra parte que sus puertos y sus CVE
 # Lo que shodan agrega al aviso de geoip.aviso_sin_base cuando falta la base de ASN: el filtro de CDN por ASN no corrió.
-SIN_CDN_POR_ASN = 'las IP de un CDN sin un CNAME conocido no se pudieron descartar por ASN y se consultaron igual en InternetDB'
+SIN_CDN_POR_ASN = ('las IP fuera de los rangos de CDN y sin un CNAME de CDN no se consultaron en InternetDB, porque '
+                   'sin el ASN no se puede descartar que sean de un CDN')
+# Las IP que la base de ASN abierta no trae, por la misma razón.
+SIN_ASN = 'shodan: %s sin ASN en la base de DB-IP no se consultaron en InternetDB, porque no se puede descartar un CDN: %s'
 SIN_IP = 'shodan: ninguna IP pública del dominio fuera de un CDN, no hubo nada que consultar en InternetDB'
 PARCIAL = 'shodan: cobertura parcial'
 PARTE_CVE = '/cve'   # las CVE de una IP son otra parte que sus puertos: 'vulns' roto no frena el cierre de sus puertos
-NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiempo o una respuesta que no se puede leer), '
+NO_SE_GRABO = ('shodan: la corrida tuvo fallas (un 429, la red, el tope de tiempo, una respuesta que no se puede leer o IP '
+               'sin ASN), '
                'no se grabó y se conserva la grabación anterior')
 NOTA_SIN_FECHA = ('InternetDB no dice cuándo vio este dato: puede ser viejo o de quien tuvo la IP antes que el dominio')
+# La de exposed_container_api (RC-224): 'puede permitir', nunca 'permite', porque no se sabe si pide autenticación.
+NOTA_CONTENEDORES = ('InternetDB solo dice que el puerto estaba abierto: no dice si el servicio pide autenticación ni '
+                     'cuándo lo vio. Si no la pide, puede permitir a cualquiera manejar los contenedores o leer la '
+                     'configuración y las claves que guarda.')
+# La de exposed_ai_service (RC-262), con la misma regla: InternetDB no dice si pide autenticación ni qué responde.
+NOTA_IA = ('InternetDB solo dice que el puerto estaba abierto: no dice si el servicio pide autenticación, qué responde '
+           'ni cuándo lo vio. Si no la pide, puede permitir a cualquiera usar los modelos o leer los datos que guarda.')
+# Código con servicio probable -> (producto que suele escuchar en cada puerto, nota de autenticación de la evidencia).
+PROBABLES = {'exposed_container_api': (SERVICIO_CONTENEDORES, NOTA_CONTENEDORES),
+             'exposed_ai_service': (SERVICIO_IA, NOTA_IA)}
 
 TITULOS = {
     'exposed_rdp': 'Shodan vio abierto el escritorio remoto (puerto %d) en %s',
     'exposed_remote_admin': 'Shodan vio abierta una entrada de administración remota (puerto %d) en %s',
     'exposed_file_sharing': 'Shodan vio abierto un servicio para compartir archivos (puerto %d) en %s',
     'exposed_database': 'Shodan vio abierta una base de datos (puerto %d) en %s',
+    'exposed_container_api': 'Shodan vio abierto el puerto %d, que suele ser de %s, en %s',
+    'exposed_ai_service': 'Shodan vio abierto el puerto %d, que suele ser de %s, en %s',
     'exposed_service': 'Shodan vio abierto el puerto %d en %s',
 }
 TITULO_CVE = 'Vulnerabilidad conocida %s por la versión que Shodan vio en %s'
+TITULOS_ETIQUETA = {
+    'exposed_ot_device': 'Shodan marca como equipo de control industrial (%s) a %s',
+    'exposed_iot_device': 'Shodan marca como dispositivo conectado (%s) a %s',
+    'outdated_software': 'Shodan marca software sin soporte del fabricante (%s) en %s',
+}
 
 
 class LimiteAlcanzado(FuenteNoResponde):
@@ -252,17 +365,18 @@ _NO_ENCONTRADO = object()    # el 404, dentro de _http
 
 # ---------------------------------------------------------------- consultas a la red
 
-def _descargar(url, timeout, cronometro=None):
-    """El cuerpo de la respuesta, de a lo más MAX_BYTES. La única función que hace HTTP.
+def _descargar(url, timeout, cronometro=None, tope=MAX_BYTES):
+    """El cuerpo de la respuesta, de a lo más `tope` bytes. La única función que hace HTTP.
 
     `timeout` es el plazo absoluto de toda la petición, de getaddrinfo al último bloque del cuerpo, no solo de cada
     operación de socket (transporte.descargar): si se pasa, lanza SinTiempo. Así un servidor que manda el cuerpo de a
     poco no estira la corrida. Una redirección no se sigue y da RespuestaIlegible. `cronometro` es time.monotonic por
-    omisión."""
+    omisión. Va por certspotter.descargar: una página de Cert Spotter que otra fuente ya pidió en este escaneo no sale a
+    la red (RC-326). Las demás URL pasan tal cual."""
     cronometro = cronometro or time.monotonic
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/json'})
     try:
-        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES, cronometro)
+        return certspotter.descargar(req, cronometro() + timeout, tope, cronometro)
     except transporte.PlazoVencido:
         raise SinTiempo('shodan: la respuesta tardó más de %s s' % timeout) from None
     except transporte.Redirigida as e:
@@ -431,6 +545,117 @@ def limpiar_internetdb(datos, dominio):
             'hostnames_ajenos': ajenos, 'rotos': sorted(rotos)}
 
 
+def _texto(x):
+    """El producto o la versión de un servicio: texto imprimible de una línea, de a lo más MAX_TEXTO caracteres, o None
+    si no viene. ValueError si no es texto."""
+    if x is None:
+        return None
+    if not isinstance(x, str):
+        raise ValueError('forma inesperada')
+    x = ''.join(c for c in ' '.join(x.split()) if c.isprintable())
+    return x[:MAX_TEXTO] or None
+
+
+def _visto(x):
+    """La fecha de un servicio de la API de host ('2026-11-10T12:34:56.123456', UTC) como '2026-11-10T12:34:56Z'.
+    ValueError si no es una fecha."""
+    if not isinstance(x, str) or len(x) > 40:
+        raise ValueError('forma inesperada')
+    d = datetime.fromisoformat(x.strip())
+    d = d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
+    return d.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _servicio(b, grabado):
+    """Un servicio limpio, {puerto, protocolo, producto, version, visto, tags}, de un banner de la API de host (`grabado`
+    False: port, transport, product, version, timestamp y tags) o de lo ya grabado. ValueError si algo no se puede
+    leer. Nunca guarda el banner, el HTML, los certificados ni los nombres: solo esos seis campos."""
+    if not isinstance(b, dict):
+        raise ValueError('forma inesperada')
+    claves = (('puerto', 'protocolo', 'producto', 'version', 'visto', 'tags') if grabado else
+              ('port', 'transport', 'product', 'version', 'timestamp', 'tags'))
+    puerto, protocolo_, producto, version, visto, tags = (b.get(k) for k in claves)
+    if not (_entero(puerto) and 1 <= puerto <= 65535) or protocolo_ not in ('tcp', 'udp'):
+        raise ValueError('forma inesperada')
+    tags = [] if tags is None else tags
+    if not isinstance(tags, list) or not all(isinstance(t, str) and TAG_VALIDO.fullmatch(t) for t in tags):
+        raise ValueError('forma inesperada')
+    return {'puerto': puerto, 'protocolo': protocolo_, 'producto': _texto(producto), 'version': _texto(version),
+            'visto': _visto(visto), 'tags': sorted(set(tags))}
+
+
+def limpiar_host(datos, dominio):
+    """Lo que se usa y se graba de una respuesta de la API de host, o None si no es un objeto.
+
+    {'sin_datos': True} es el 404 y {'cdn': True} el tag 'cdn': como en InternetDB, de esa IP no se guarda nada más
+    (docs/politica_uso_etico.md, sección 2, punto 5). Si no, {tags, servicios, hostnames_ajenos, rotos}: las
+    etiquetas de la IP, cuántos nombres de hostnames y domains no son de `dominio` y, por puerto y protocolo, el
+    servicio visto más reciente (_servicio), hasta MAX_SERVICIOS. 'rotos' lista 'tags' si no viene o trae algo que no
+    se puede leer y 'data' si los servicios no vienen o uno no se puede leer: esa IP no queda revisada en sus
+    etiquetas. Lee igual la respuesta de Shodan y lo que ya grabó. Nada más de la respuesta se guarda: ni nombres,
+    ni banners, ni ubicación, ni CVE (las da InternetDB)."""
+    if not isinstance(datos, dict):
+        return None
+    if datos.get('sin_datos') is True:
+        return {'sin_datos': True}
+    if datos.get('cdn') is True or (isinstance(datos.get('tags'), list) and 'cdn' in datos['tags']):
+        return {'cdn': True}
+    grabado = 'servicios' in datos
+    rotos = ({c for c in datos.get('rotos') if c in ('tags', 'data')} if grabado and isinstance(datos.get('rotos'), list)
+             else set())
+    crudas = datos.get('tags')
+    if not isinstance(crudas, list):   # un 200 sin 'tags' no dice que no tenga ninguna
+        rotos.add('tags')
+        crudas = []
+    tags = sorted({t for t in crudas if isinstance(t, str) and TAG_VALIDO.fullmatch(t)})
+    if len(tags) != len({t if isinstance(t, str) else repr(t) for t in crudas}):
+        rotos.add('tags')
+    banners = datos.get('servicios' if grabado else 'data')
+    if not isinstance(banners, list):
+        rotos.add('data')
+        banners = []
+    por_puerto = {}
+    for b in banners:
+        try:
+            s = _servicio(b, grabado)
+        except (ValueError, TypeError, OverflowError):
+            rotos.add('data')
+            continue
+        clave = (s['puerto'], s['protocolo'])
+        if clave not in por_puerto or s['visto'] > por_puerto[clave]['visto']:
+            por_puerto[clave] = s
+    servicios = [por_puerto[k] for k in sorted(por_puerto)][:MAX_SERVICIOS]
+    # Los nombres que no son del dominio solo se cuentan, como en limpiar_internetdb: pueden ser de quien tuvo la IP
+    nombres = [_nombre(n) for campo in ('hostnames', 'domains') if isinstance(datos.get(campo), list)
+               for n in datos[campo]]
+    ajenos = len({n for n in nombres if n and not en_alcance_nombre(n, dominio)}) + sum(1 for n in nombres if not n)
+    previos = datos.get('hostnames_ajenos', 0)
+    ajenos += previos if _entero(previos) and previos > 0 else 0
+    return {'tags': tags, 'servicios': servicios, 'hostnames_ajenos': ajenos, 'rotos': sorted(rotos)}
+
+
+def _tapar(texto, llave):
+    """`texto` sin la llave: ni la llave misma ni lo que siga a un 'key=' (una URL de la API de host en un error)."""
+    texto = str(texto)
+    if llave:
+        texto = texto.replace(llave, LLAVE_TAPADA)
+    return re.sub(r'(?i)key=[^&\s\'"]*', 'key=' + LLAVE_TAPADA, texto)
+
+
+def _tapada(error, llave):
+    """Otro error de la misma clase que `error`, con su texto sin la llave y sus marcas (sin_tiempo y codigo)."""
+    nuevo = type(error)(_tapar(error, llave))
+    for marca in ('sin_tiempo', 'codigo'):
+        if hasattr(error, marca):
+            setattr(nuevo, marca, getattr(error, marca))
+    return nuevo
+
+
+def _llave_de_config():
+    """SHODAN_API_KEY del entorno o del .env, o '' sin ella. Solo la lee crear_cliente."""
+    return (config('SHODAN_API_KEY', '') or '').strip()
+
+
 # ---------------------------------------------------------------- cliente, grabación y reproducción
 
 class ClienteShodan:
@@ -439,12 +664,19 @@ class ClienteShodan:
 
     `descargar(url, timeout)` y `resolver(nombre, lifetime)` hacen la consulta. Si no se pasan, se usan _descargar y
     _resolver_a, buscados en el módulo en cada consulta, así una prueba los puede cambiar con mock.patch.object.
-    `cronometro` y `dormir` son time.monotonic y time.sleep por omisión. `consultas` suma cada intento de cada petición HTTP o DNS."""
+    `cronometro` y `dormir` son time.monotonic y time.sleep por omisión. `consultas` suma cada intento de cada petición HTTP o DNS.
+    `llave` es la de la API de host de Shodan: sin ella ('', por omisión) no se consulta. Solo crear_cliente la pasa,
+    desde SHODAN_API_KEY. Al reproducir no se usa."""
+
+    PREFIJO = 'shodan: '             # lo que abre sus errores. La visita web (visita.py) hereda el cliente con el suyo
+    TIEMPO_CORRIDA = TIEMPO_CORRIDA
+    TOPES = TOPES
 
     def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, descargar=None, resolver=None, nueva=False, reloj=None,
-                 cronometro=None, dormir=None):
+                 cronometro=None, dormir=None, llave=''):
         self.modo = modo
-        self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj)
+        self.llave = '' if modo == 'reproducir' else (llave or '')
+        self.grabadora = Grabadora(carpeta, modo, nueva=nueva, reloj=reloj, sobre=True)
         self.descargar, self.resolver = descargar, resolver
         self.cronometro = cronometro or time.monotonic
         self.dormir = dormir or time.sleep
@@ -463,16 +695,28 @@ class ClienteShodan:
     def hay_grabacion(self):
         return any(Path(self.grabadora.carpeta).glob('*.json'))
 
+    def usa_host(self):
+        """(True si la corrida consulta la API de host, aviso o None). En vivo y al grabar, con una llave con forma de
+        llave de Shodan (con otra forma, el aviso LLAVE_MAL, sin su valor). Al reproducir, si la grabación trae alguna
+        respuesta de la API de host."""
+        if self.modo == 'reproducir':
+            return any(Path(self.grabadora.carpeta).glob('host_*.json')), None   # contrato.nombre_archivo('host:<ip>')
+        if not self.llave:
+            return False, None
+        if not LLAVE_VALIDA.fullmatch(self.llave):
+            return False, LLAVE_MAL
+        return True, None
+
     def empezar(self):
         self.inicio = self.cronometro()
 
     def restante(self):
         """Segundos que le quedan a la corrida, sin la reserva. Al reproducir no hay consultas y no hay tope."""
         if self.modo == 'reproducir':
-            return TIEMPO_CORRIDA
+            return self.TIEMPO_CORRIDA
         if self.inicio is None:
             self.inicio = self.cronometro()
-        return TIEMPO_CORRIDA - self.reserva - (self.cronometro() - self.inicio)
+        return self.TIEMPO_CORRIDA - self.reserva - (self.cronometro() - self.inicio)
 
     def esperar(self, segundos):
         """El dormir de con_reintentos. Si después de esperar `segundos` quedaría menos de MIN_INTENTO más HOLGURA para
@@ -487,7 +731,7 @@ class ClienteShodan:
     def degradada(self, parcial=()):
         """True si la corrida tuvo alguna falla: una consulta que falló, de cualquier tipo, o una razón de cobertura
         parcial (`parcial`, de _revisar) que no es un tope determinista de TOPES. Con eso 'grabar' no escribe."""
-        return bool(self.fallas) or bool(set(parcial) - set(TOPES))
+        return bool(self.fallas) or bool(set(parcial) - set(self.TOPES))
 
     def terminar(self):
         """La corrida terminó: graba todo lo pendiente. Una corrida que falla no llega aquí y no toca la grabación."""
@@ -501,8 +745,14 @@ class ClienteShodan:
 
     def _de_disco(self, consulta):
         """(True, datos) si sale de la grabación. Una corrida con fallas ya no se graba, pero una grabación de antes o
-        editada a mano puede traer una falla: se lanza otra vez, con su clase y su texto, y no se lee como datos."""
-        del_disco, datos = self.grabadora.de_disco(consulta)
+        editada a mano puede traer una falla: se lanza otra vez, con su clase y su texto, y no se lee como datos. Un
+        archivo vacío, truncado, que no es JSON o sin su sobre {grabado, datos} es una consulta que no llegó
+        (FuenteNoResponde), nunca un error que tumbe la fuente ni una respuesta sin datos: vale para toda consulta,
+        también el A y las páginas de Cert Spotter."""
+        try:
+            del_disco, datos = self.grabadora.de_disco(consulta)
+        except (ValueError, KeyError, TypeError, AttributeError):   # SinGrabacion no es ninguna de estas
+            raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta) from None
         if del_disco and isinstance(datos, dict) and 'falla' in datos:
             raise FALLAS.get(datos.get('tipo'), FuenteNoResponde)(str(datos['falla'])[:300])
         return del_disco, datos
@@ -517,27 +767,50 @@ class ClienteShodan:
             self.fallas += 1
             raise
 
-    def _http(self, url, intentos, timeout, que, sin_reintento=()):
+    def _transporte(self, url, timeout):
+        """La petición HTTP por omisión: _descargar, buscada en el módulo en cada consulta (mock.patch.object). La
+        visita web la cambia por la suya, con otro tope de bytes."""
+        return _descargar(url, timeout)
+
+    def _transporte_host(self, url, timeout, que='la API de host'):
+        """La petición HTTP de la API de host: _descargar con MAX_BYTES_HOST. El ValueError de transporte.descargar (una
+        respuesta de más de MAX_BYTES_HOST, de otro tipo de contenido o sin https) daría lo mismo otra vez: es
+        RespuestaIlegible, que no se reintenta. Sin el texto del ValueError, que puede traer la URL con la llave. `que`
+        nombra la IP, como en los demás avisos de host()."""
+        error = None
+        try:
+            return _descargar(url, timeout, tope=MAX_BYTES_HOST)
+        except ValueError as e:
+            error = RespuestaIlegible(self.PREFIJO + '%s dio una respuesta que no se puede leer (%s: más de %d bytes, '
+                                      'otro tipo de contenido o sin https)' % (que, type(e).__name__, MAX_BYTES_HOST))
+        raise error
+
+    def _http(self, url, intentos, timeout, que, sin_reintento=(), turno=None, peticion=None, contar=True):
         """JSON de `url` con hasta `intentos` intentos dentro del tiempo de la corrida. None solo con un 404. Un 429
         lanza LimiteAlcanzado, y otro 4xx, un 200 vacío o 'null' o una redirección RespuestaIlegible, sin reintentar.
         Si un 5xx o un 408 traen Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le
-        alcanza a la corrida, pero nunca más de MAX_ESPERA."""
+        alcanza a la corrida, pero nunca más de MAX_ESPERA. `turno()`, si se pasa, corre antes de cada intento, también
+        de los reintentos: la visita web espera ahí el ritmo de la NVD. `peticion` cambia la petición por omisión
+        (_transporte), salvo que el cliente traiga `descargar`. Un RespuestaIlegible por un 4xx lleva el código en
+        `codigo`. Con `contar` en False los intentos no suman a `consultas`: lo que repite certspotter.descargar."""
         pedida = {}   # el Retry-After del último intento
 
         def intento():
             pedida.clear()
+            if turno:
+                turno()
             limite = min(timeout, self.restante())
             if limite < MIN_INTENTO:
-                raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de consultar %s' % que)
-            self.consultas += 1
+                raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de consultar %s' % que)
+            self.consultas += 1 if contar else 0
             try:
-                cuerpo = (self.descargar or _descargar)(url, limite)
+                cuerpo = (self.descargar or peticion or self._transporte)(url, limite)
             except SinTiempo:
                 # La respuesta se pasó de su plazo. Si con eso se acabó la corrida, es el corte por tiempo. Si no, es
                 # una respuesta lenta y cuenta como una falla de red, que con_reintentos reintenta.
                 if self.restante() < MIN_INTENTO:
-                    raise SinTiempo('shodan: se acabó el tiempo de la corrida mientras se leía %s' % que) from None
-                raise TimeoutError('shodan: %s tardó más de %s s en responder' % (que, limite)) from None
+                    raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida mientras se leía %s' % que) from None
+                raise TimeoutError(self.PREFIJO + '%s tardó más de %s s en responder' % (que, limite)) from None
             except urllib.error.HTTPError as e:
                 codigo, espera = e.code, (e.headers or {}).get('Retry-After')
                 pedida['segundos'] = min(transporte.retry_after(e.headers) or 0, MAX_ESPERA)   # aunque pida más
@@ -546,18 +819,20 @@ class ClienteShodan:
                 if codigo == 404:
                     return _NO_ENCONTRADO
                 if codigo == 429:
-                    raise LimiteAlcanzado('shodan: %s llegó a su límite de consultas (429, Retry-After %s s)'
+                    raise LimiteAlcanzado(self.PREFIJO + '%s llegó a su límite de consultas (429, Retry-After %s s)'
                                           % (que, espera or '?')) from None
                 if codigo in sin_reintento or (codigo < 500 and codigo != 408):
-                    raise RespuestaIlegible('shodan: %s respondió %d' % (que, codigo)) from None
+                    ilegible = RespuestaIlegible(self.PREFIJO + '%s respondió %d' % (que, codigo))
+                    ilegible.codigo = codigo
+                    raise ilegible from None
                 raise
             if not cuerpo or not cuerpo.strip():
-                raise RespuestaIlegible('shodan: %s respondió sin cuerpo' % que)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió sin cuerpo' % que)
             datos = json.loads(cuerpo)
             if datos is None:
-                raise RespuestaIlegible('shodan: %s respondió null' % que)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió null' % que)
             return datos
-        intento.__name__ = 'shodan: %s no respondió' % que
+        intento.__name__ = self.PREFIJO + '%s no respondió' % que
         datos = con_reintentos(intento, intentos=intentos, esperas=ESPERAS,
                                dormir=lambda segundos: self.esperar(max(segundos, pedida.get('segundos') or 0)))
         return None if datos is _NO_ENCONTRADO else datos
@@ -566,20 +841,24 @@ class ClienteShodan:
               sin_reintento=(), texto=None, valida=None):
         """La lista JSON de `url`, con la misma firma de ClienteCrtsh.pedir, así certspotter.certificados() la usa sin
         cambios. Se graba la página reducida (reducir_pagina). Una respuesta que no es lista, o con la que `valida`
-        da False, cuenta como una que no llegó y no se reintenta."""
+        da False, cuenta como una que no llegó y no se reintenta. Una página que otra fuente ya pidió en este escaneo
+        (certspotter.repetida, RC-326) se lee de lo que ella recibió, en un solo intento, sin pausa y sin contarla en
+        `consultas`."""
         del_disco, datos = self._de_disco(consulta)
         if del_disco:
             if not isinstance(datos, list):
-                raise FuenteNoResponde('shodan: la grabación de %s no se puede leer' % consulta)
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta)
         else:
             que = '%s (%s)' % (fuente, texto or consulta)
+            repetida = certspotter.repetida(url)
 
             def pagina():
-                if pausa:
+                if pausa and not repetida:
                     self.dormir(pausa)
-                datos = self._http(url, intentos, timeout or TIMEOUT_CT, que, sin_reintento)
+                datos = self._http(url, 1 if repetida else intentos, timeout or TIMEOUT_CT, que, sin_reintento,
+                                   contar=not repetida)
                 if not isinstance(datos, list) or (valida and not valida(datos)):
-                    raise RespuestaIlegible('shodan: %s respondió algo que no se puede leer' % que)
+                    raise RespuestaIlegible(self.PREFIJO + '%s respondió algo que no se puede leer' % que)
                 return reducir_pagina(datos)
             datos = self._consultar(consulta, pagina)
             self._grabar(consulta, datos)
@@ -596,15 +875,15 @@ class ClienteShodan:
             try:
                 return limpiar_a(datos['estado'], datos['ips'], datos.get('cnames', datos.get('cname')))
             except (ValueError, KeyError, TypeError, AttributeError):
-                raise FuenteNoResponde('shodan: la grabación de %s no se puede leer' % consulta) from None
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta) from None
 
         def intento():
             limite = min(TIMEOUT_DNS, self.restante())
             if limite < MIN_INTENTO:
-                raise SinTiempo('shodan: se acabó el tiempo de la corrida antes de resolver %s' % nombre)
+                raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de resolver %s' % nombre)
             self.consultas += 1
             return limpiar_a(*(self.resolver or _resolver_a)(nombre, limite))
-        intento.__name__ = 'shodan: el DNS no respondió al A de %s' % nombre
+        intento.__name__ = self.PREFIJO + 'el DNS no respondió al A de %s' % nombre
 
         datos = self._consultar(consulta, lambda: con_reintentos(intento, intentos=INTENTOS, esperas=ESPERAS,
                                                                  errores=(ConsultaFallida,), dormir=self.esperar))
@@ -619,7 +898,7 @@ class ClienteShodan:
         if del_disco:
             limpio = limpiar_internetdb(datos, dominio)
             if limpio is None:
-                raise FuenteNoResponde('shodan: la grabación de %s no se puede leer' % consulta)
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta)
             return limpio
         que = 'InternetDB (%s)' % ip
 
@@ -629,9 +908,53 @@ class ClienteShodan:
             crudo = self._http(URL_INTERNETDB + ip, INTENTOS, TIMEOUT_HTTP, que)
             limpio = {'sin_datos': True} if crudo is None else limpiar_internetdb(crudo, dominio)
             if limpio is None:
-                raise RespuestaIlegible('shodan: %s respondió algo que no es un objeto' % que)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió algo que no es un objeto' % que)
             return limpio
         limpio = self._consultar(consulta, consulta_ip)
+        self._grabar(consulta, limpio)
+        return limpio
+
+    def host(self, ip, dominio, pausa=0):
+        """Lo que la API de host de Shodan sabe de `ip`, ya limpio (limpiar_host). Un 404 es {'sin_datos': True}.
+
+        La llave solo va en la URL que se manda. Todo error que sale de aquí es de las clases de FuenteNoResponde y
+        lleva su texto sin la llave (_tapada); uno inesperado sale como RespuestaIlegible con solo su clase, así su
+        texto, que puede traer la URL, no llega a los avisos ni a scan_source_runs.error."""
+        consulta = 'host:' + ip   # el nombre de la grabación, sin la llave
+        del_disco, datos = self._de_disco(consulta)
+        if del_disco:
+            limpio = limpiar_host(datos, dominio)
+            if limpio is None:
+                raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta)
+            return limpio
+        llave = self.llave
+        que = 'la API de host (%s)' % ip
+
+        def consulta_ip():
+            if pausa:
+                self.dormir(pausa)
+            crudo = self._http(URL_HOST + ip + '?key=' + llave, INTENTOS, TIMEOUT_HTTP, que,
+                               peticion=lambda url, timeout: self._transporte_host(url, timeout, que))
+            limpio = {'sin_datos': True} if crudo is None else limpiar_host(crudo, dominio)
+            if limpio is None:
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió algo que no es un objeto' % que)
+            return limpio
+        # El error tapado se lanza fuera del except: dentro, su __context__ guardaría el original, y detrás de él el
+        # HTTPError o el KeyError con la URL y la llave (como keyvault._con_reintentos)
+        tapada = None
+        try:
+            limpio = self._consultar(consulta, consulta_ip)
+        except FuenteNoResponde as e:
+            tapada = _tapada(e, llave)
+        except Exception as e:   # noqa: BLE001 - nunca el texto: puede traer la URL con la llave
+            self.fallas += 1
+            tapada = RespuestaIlegible(self.PREFIJO + '%s falló (%s)' % (que, type(e).__name__))
+        if tapada is not None:
+            raise tapada
+        if limpio.get('rotos'):
+            # Una respuesta que no se puede leer entera es una falla, como los campos rotos de InternetDB: 'grabar'
+            # no pisa la grabación anterior
+            self.fallas += 1
         self._grabar(consulta, limpio)
         return limpio
 
@@ -643,8 +966,9 @@ def carpeta_de(dominio):
 
 def crear_cliente(modo, dominio):
     """Cliente para el orquestador (#13): 'vivo' consulta, 'reproducir' usa la grabación del dominio y 'grabar' empieza
-    una grabación nueva."""
-    return ClienteShodan(modo=modo, carpeta=carpeta_de(dominio), nueva=(modo == 'grabar'))
+    una grabación nueva. En vivo y al grabar lleva la llave de SHODAN_API_KEY, si está puesta (RC-337)."""
+    return ClienteShodan(modo=modo, carpeta=carpeta_de(dominio), nueva=(modo == 'grabar'),
+                         llave='' if modo == 'reproducir' else _llave_de_config())
 
 
 def _en_vivo_permitido(dominio):
@@ -678,11 +1002,15 @@ def consultable(ip):
 
 
 def cdn_de(ip, cnames=()):
-    """El CDN de una IP: 'cloudflare' por sus rangos, el del sufijo de cualquier nombre de su cadena CNAME (intermedio o
-    final, con SUFIJOS_CDN o CDN_NUMERADOS), o None. `cnames` es un nombre o una lista de nombres."""
+    """El CDN de una IP: 'cloudflare' por sus rangos, el de RANGOS_CDN (CloudFront, Azure Front Door o Google) por los
+    suyos, el del sufijo de cualquier nombre de su cadena CNAME (intermedio o final, con SUFIJOS_CDN o CDN_NUMERADOS), o
+    None. `cnames` es un nombre o una lista de nombres."""
     direccion = ipaddress.ip_address(ip)
     if any(direccion in red for red in RANGOS_CLOUDFLARE):
         return 'cloudflare'
+    for red, cdn in RANGOS_CDN:
+        if direccion in red:
+            return cdn
     if isinstance(cnames, str):
         cnames = (cnames,)
     for cname in sorted(c for c in cnames or () if c):
@@ -727,11 +1055,20 @@ def _evidencia(titulo, ip, hosts, datos):
 
 def hallazgo_puerto(codigo, dominio, servicio, ip, puerto, hosts, datos, ahora):
     """Un hallazgo de puerto sobre su activo service. Las características salen de la rúbrica (caracteristicas.py)."""
-    titulo = TITULOS[codigo] % (puerto, _donde(hosts))
+    if codigo in PROBABLES:
+        titulo = TITULOS[codigo] % (puerto, PROBABLES[codigo][0][puerto], _donde(hosts))
+    else:
+        titulo = TITULOS[codigo] % (puerto, _donde(hosts))
     evidencia = dict(_evidencia(titulo, ip, hosts, datos), puerto=puerto, protocolo=protocolo(puerto),
                      protocolo_supuesto=True)
     if puerto in PUERTOS_INDUSTRIALES:
         evidencia['puerto_industrial'] = True
+    if codigo in PROBABLES:
+        # Lo que suele ser y no lo que es: sin conectarse no se sabe el servicio ni si pide autenticación (RC-224 y
+        # RC-262)
+        servicios, nota = PROBABLES[codigo]
+        evidencia.update(servicio_probable=servicios[puerto], servicio_supuesto=True,
+                         autenticacion='desconocida', nota_autenticacion=nota)
     return Hallazgo(codigo, CODIGOS[codigo], servicio, titulo, evidencia,
                     rubrica.calcular(codigo, 'service', evidencia, ahora), _huella(codigo, dominio, servicio),
                     partes=[ip])
@@ -746,9 +1083,72 @@ def hallazgo_cve(dominio, ip, cve, hosts, datos, ahora):
                     _huella(codigo, dominio, ip, cve), clave=cve, partes=[ip + PARTE_CVE])
 
 
+def _servicios_de(h, etiquetas):
+    """Los servicios de la API de host para la evidencia: los que llevan una de `etiquetas` en su banner o, si ninguno,
+    todos, hasta MAX_SERVICIOS_EVIDENCIA, sin sus tags."""
+    suyos = [s for s in h['servicios'] if set(s['tags']) & set(etiquetas)] or h['servicios']
+    return [{k: s[k] for k in ('puerto', 'protocolo', 'producto', 'version', 'visto')}
+            for s in suyos[:MAX_SERVICIOS_EVIDENCIA]]
+
+
+def hallazgo_etiqueta(codigo, dominio, ip, hosts, etiquetas, d, h, ahora):
+    """Un hallazgo de etiqueta (RC-220 y RC-337) sobre el activo ip, con la parte '<ip>/etiquetas'. Si la API de host
+    trae la etiqueta (`h`), la evidencia lleva sus servicios con fecha y fuente_datos 'Shodan', y las que solo trae
+    InternetDB van en etiquetas_internetdb, con nota_vigencia. Si solo la trae InternetDB (`d`), la evidencia es la de
+    InternetDB, sin fecha."""
+    titulo = TITULOS_ETIQUETA[codigo] % (', '.join(etiquetas), _donde(hosts))
+    del_host = [t for t in etiquetas if t in h['tags']] if h else []
+    if del_host:
+        servicios = _servicios_de(h, del_host)
+        evidencia = {'title': titulo, 'ip': ip, 'hosts': hosts, 'tags': h['tags'], 'fuente_datos': NOMBRE_HOST,
+                     'servicios': servicios}
+        fechas = [s['visto'] for s in servicios]
+        if fechas:
+            evidencia.update(vigencia='con_fecha', ultima_vez=max(fechas))
+        else:
+            evidencia.update(vigencia='sin_fecha', fuente_sin_fecha=True)
+        solo_idb = [t for t in etiquetas if t not in del_host]
+        if solo_idb:
+            # Las que solo trae InternetDB no tienen fecha: van aparte, con su nota, y no se presentan como de la API de
+            # host
+            evidencia.update(etiquetas_internetdb=solo_idb, nota_vigencia=NOTA_SIN_FECHA)
+        if (d and d.get('hostnames_ajenos')) or h.get('hostnames_ajenos'):
+            evidencia['posible_dato_de_otro_dueno'] = True
+    else:
+        evidencia = _evidencia(titulo, ip, hosts, d)
+        if h and h.get('hostnames_ajenos'):
+            evidencia['posible_dato_de_otro_dueno'] = True
+    evidencia['etiquetas'] = etiquetas
+    return Hallazgo(codigo, CODIGOS[codigo], ip, titulo, evidencia, rubrica.calcular(codigo, 'ip', evidencia, ahora),
+                    _huella(codigo, dominio, ip), partes=[ip + PARTE_ETIQUETAS])
+
+
+def _aviso_ajenos_host(res, ip, h):
+    """El aviso de los nombres de otro dominio que trae la API de host en `ip`, como el de InternetDB."""
+    if h and h.get('hostnames_ajenos'):
+        res.avisos.append('shodan: la API de host trae en %s %s de otro dominio: sus datos pueden ser de quien tuvo la '
+                          'IP antes' % (ip, _cuantos(h['hostnames_ajenos'], 'nombre', 'nombres')))
+
+
+def _etiquetas(res, dominio, ip, hosts, d, h, honeypot, ahora):
+    """Los hallazgos de etiquetas de una IP, uno por código: con las etiquetas de InternetDB (`d`, o None si no
+    respondió o dio 404) y las de la API de host (`h`, o None). Una IP honeypot no da ninguno."""
+    if ip in honeypot:
+        if d is None:
+            res.avisos.append('shodan: la API de host marca %s como honeypot, no se sacan hallazgos de esa IP' % ip)
+        return
+    de_idb = set(d['tags']) if d else set()
+    de_host = set(h['tags']) if h and not h.get('sin_datos') else set()
+    for codigo in CODIGOS_ETIQUETA:
+        etiquetas = sorted(t for t in de_idb | de_host if ETIQUETAS.get(t) == codigo)
+        if etiquetas:
+            res.hallazgos.append(hallazgo_etiqueta(codigo, dominio, ip, hosts, etiquetas, d, h if de_host else None,
+                                                   ahora))
+
+
 def _sin_cobertura(res, aviso):
     res.avisos.append(aviso)
-    res.sin_cobertura = list(CODIGOS) + list(SIN_LLAVE)
+    res.sin_cobertura = list(CODIGOS)
     return res
 
 
@@ -764,11 +1164,24 @@ def recolectar(dominio, cliente=None, ahora=None, propios=()):
     cliente = cliente or crear_cliente('vivo', dominio)
     if cliente.modo == 'reproducir' and not cliente.hay_grabacion():
         return _sin_cobertura(res, SIN_GRABACION_DOMINIO)
+    # Solo se tapa una llave con la forma de LLAVE_VALIDA, la única que se manda: una mal formada nunca sale en una URL,
+    # y taparla estropearía los avisos y el error (con SHODAN_API_KEY=0, cada '0' sería '***')
+    llave = getattr(cliente, 'llave', '') or ''
+    llave = llave if LLAVE_VALIDA.fullmatch(llave) else ''
+    tapada = None
     try:
         cliente.empezar()
         _revisar(res, cliente, dominio, ahora or datetime.now(timezone.utc))
+    except FuenteNoResponde as e:
+        if not llave:
+            raise e from None
+        tapada = _tapada(e, llave)   # se lanza fuera del except, sin el original en __context__ (host)
     finally:
         res.consultas = cliente.consultas
+        if llave:   # otra vez, por si un aviso trajo la llave por otro camino
+            res.avisos = [_tapar(a, llave) for a in res.avisos]
+    if tapada is not None:
+        raise tapada
     return res
 
 
@@ -801,8 +1214,58 @@ def _partes_revisadas(ip, marca, d):
         [ip + PARTE_CVE] if 'vulns' not in rotos else [])
 
 
+def _etiquetas_revisadas(ip, marca, d, h, con_host):
+    """True si la parte '<ip>/etiquetas' quedó revisada completa. Las privadas y las de un CDN, que una corrida completa
+    tampoco consulta y que nunca dan hallazgos de etiquetas, cuentan revisadas, igual que el tag cdn de InternetDB y
+    como sus otras partes (_partes_revisadas). Las demás, solo con la respuesta completa (sin 'rotos') de la API de
+    host. Un 404, un error o el tope de tiempo no. Sin la llave, ninguna de las demás."""
+    if marca is not None:
+        return not marca.get('internetdb')
+    if (d is not None and d.get('cdn')) or (h is not None and h.get('cdn')):
+        return True
+    return con_host and h is not None and not h.get('sin_datos') and not h['rotos']
+
+
+def _revisar_host(res, cliente, consultar, datos):
+    """La API de host por cada IP de `consultar` que InternetDB no marcó como CDN, con PAUSA_INTERNETDB entre una y
+    otra. Devuelve {ip: limpio} de las que respondieron (también el 404). Un 429 o la llave rechazada (401 o 403) cortan
+    las demás. Ninguna falla tumba la fuente: esas IP quedan sin revisar en sus etiquetas."""
+    pedir = [ip for ip in consultar if not (datos.get(ip) or {}).get('cdn')]
+    respuestas, sin_tiempo = {}, 0
+    for i, ip in enumerate(pedir):
+        if cliente.restante() < MIN_RESTANTE:
+            sin_tiempo = len(pedir) - i
+            # El tope de tiempo es una falla aunque no se haya pedido nada: 'grabar' no pisa la grabación anterior con
+            # una sin estas host_*.json (el SinTiempo que sale de host() ya cuenta, en _consultar)
+            cliente.fallas += 1
+            break
+        try:
+            respuestas[ip] = cliente.host(ip, res.dominio, pausa=PAUSA_INTERNETDB if i else 0)
+        except LimiteAlcanzado as e:
+            res.avisos.append('%s. No se consultaron %s' % (e, _cuantos(len(pedir) - i, 'IP', 'IP')))
+            break
+        except SinTiempo:
+            sin_tiempo = len(pedir) - i
+            break
+        except SinGrabacion as e:
+            res.avisos.append('shodan: %s' % e)
+        except RespuestaIlegible as e:
+            if getattr(e, 'codigo', None) in (401, 403):
+                res.avisos.append(LLAVE_RECHAZADA % (e.codigo, _cuantos(len(pedir) - i, 'IP', 'IP')))
+                break
+            res.avisos.append(str(e))
+        except FuenteNoResponde as e:
+            res.avisos.append(str(e))
+    if sin_tiempo:
+        res.avisos.append('shodan: el tiempo de la corrida cortó %s en la API de host' % _cuantos(sin_tiempo, 'IP', 'IP'))
+    return respuestas
+
+
 def _revisar(res, cliente, dominio, ahora):
     parcial = []    # por qué la cobertura quedó parcial
+    con_host, aviso_llave = cliente.usa_host()
+    if aviso_llave:
+        res.avisos.append(aviso_llave)
 
     # 1. Nombres de Cert Spotter, más la raíz
     try:
@@ -825,7 +1288,7 @@ def _revisar(res, cliente, dominio, ahora):
 
     # 2. Un A por nombre, sin tocar RESERVA_INTERNETDB: el lifetime, las esperas y el corte de cada A la descuentan
     por_ip, cnames, fallas_a, sin_grabar, sin_tiempo = {}, {}, [], [], 0
-    cliente.reserva = RESERVA_INTERNETDB
+    cliente.reserva = RESERVA_INTERNETDB + (RESERVA_HOST if con_host else 0)
     try:
         for i, nombre in enumerate(nombres):
             if cliente.restante() < MIN_RESTANTE:
@@ -873,24 +1336,33 @@ def _revisar(res, cliente, dominio, ahora):
 
     # 3. Qué IP se consultan: públicas (consultable), fuera de un CDN en toda su cadena CNAME y fuera de un ASN de CDN.
     # La ubicación sale de la base local, sin red: las bases se piden una vez por corrida y solo si alguna IP es
-    # ubicable (con solo IP privadas no se busca nada y el aviso de base faltante no diría nada cierto). Sin la base de
-    # ASN el filtro de CDN por ASN queda apagado y esas IP se consultan igual: el mismo aviso lo dice (SIN_CDN_POR_ASN).
+    # ubicable (con solo IP privadas no se busca nada y el aviso de base faltante no diría nada cierto). Una IP sin ASN
+    # conocido no se consulta: sin la base de ASN lo dice el aviso de base faltante (SIN_CDN_POR_ASN) y, con la base
+    # abierta, SIN_ASN.
     ips = sorted(por_ip, key=ipaddress.ip_address)
     bases = geoip.bases_por_omision() if any(geoip.ubicable(ip) for ip in ips) else None
     ubicadas = {ip: geoip.ubicar(ip, bases) for ip in ips}
     aviso_geo = None if bases is None else geoip.aviso_sin_base(FUENTE, bases, sin_asn=SIN_CDN_POR_ASN)
     if aviso_geo:
         res.avisos.append(aviso_geo)
-    marcas, consultar = {}, []
+    marcas, consultar, sin_asn = {}, [], []
     for ip in ips:
         if not consultable(ip):
             marcas[ip] = {'no_publica': True}
             continue
-        cdn = cdn_de(ip, cnames.get(ip, ())) or geoip.cdn_por_asn(ubicadas[ip]['asn'])
+        asn = ubicadas[ip]['asn']
+        cdn = cdn_de(ip, cnames.get(ip, ())) or geoip.cdn_por_asn(asn)
         if cdn:
             marcas[ip] = {'cdn': cdn}
+        elif isinstance(asn, bool) or not isinstance(asn, int):   # 'No disponible': no se sabe si es de un CDN
+            marcas[ip] = {'internetdb': 'sin_asn'}
+            sin_asn.append(ip)
         else:
             consultar.append(ip)
+    if sin_asn:
+        parcial.append('asn')
+        if not (aviso_geo and bases.asn is None):   # sin la base, el aviso de base faltante ya lo dijo
+            res.avisos.append(SIN_ASN % (_cuantos(len(sin_asn), 'IP', 'IP'), _lista(sin_asn)))
     # Las IP de la raíz van primero: con MAX_NOMBRES nombres las de los subdominios no la dejan fuera de MAX_IPS (RC-55)
     consultar.sort(key=lambda ip: (dominio not in por_ip[ip], ipaddress.ip_address(ip)))
     if len(consultar) > MAX_IPS:
@@ -937,24 +1409,47 @@ def _revisar(res, cliente, dominio, ahora):
     if not consultar and not parcial:
         res.avisos.append(SIN_IP)
 
+    # 4b. La API de host por IP, solo con la llave (RC-337). Sus fallas no dejan parcial lo de InternetDB: solo las
+    # etiquetas de esa IP quedan sin revisar
+    host = _revisar_host(res, cliente, consultar, datos) if con_host else {}
+    honeypot = {ip for ip in ips if 'honeypot' in (datos.get(ip) or {}).get('tags', ())
+                or 'honeypot' in (host.get(ip) or {}).get('tags', ())}
+    cdn_host = {ip for ip, h in host.items() if h.get('cdn')}
+
     # 5. Activos y hallazgos
     for ip in ips:
         hosts = sorted(por_ip[ip])
         atributos = dict({'hosts': hosts, 'fuente': FUENTE, 'origen': ORIGEN}, **ubicadas[ip])
         atributos.update(marcas.get(ip, {}))
+        if ip in host:
+            h = host[ip]
+            atributos['shodan_host'] = ('sin_datos' if h.get('sin_datos') else 'descartada_cdn' if h.get('cdn') else {
+                'tags': h['tags'], 'puertos': sorted({s['puerto'] for s in h['servicios']})})
         d = datos.get(ip)
         if ip in marcas:
             atributos.setdefault('internetdb', 'no_consultada')
             res.activos.append(Activo('ip', ip, atributos))
             continue
+        if ip in cdn_host:
+            # Como el tag cdn de InternetDB: de una IP de CDN solo queda que existe, sin sus datos ni hallazgos
+            # (docs/politica_uso_etico.md, sección 2, punto 5)
+            atributos.update(cdn='shodan_host', internetdb=('sin_respuesta' if d is None else 'sin_datos'
+                                                            if d.get('sin_datos') else 'descartada_cdn'))
+            res.activos.append(Activo('ip', ip, atributos))
+            res.avisos.append('shodan: la API de host marca %s como CDN, se descartaron sus datos' % ip)
+            continue
         if d is None:
             atributos['internetdb'] = 'sin_respuesta'
             res.activos.append(Activo('ip', ip, atributos))
+            _aviso_ajenos_host(res, ip, host.get(ip))
+            _etiquetas(res, dominio, ip, hosts, None, host.get(ip), honeypot, ahora)
             continue
         atributos['fuente_datos'] = NOMBRE_INTERNETDB   # solo en las IP que InternetDB sí respondió
         if d.get('sin_datos'):
             atributos['internetdb'] = 'sin_datos'
             res.activos.append(Activo('ip', ip, atributos))
+            _aviso_ajenos_host(res, ip, host.get(ip))
+            _etiquetas(res, dominio, ip, hosts, None, host.get(ip), honeypot, ahora)
             continue
         if d.get('cdn'):
             atributos.update(cdn='internetdb', internetdb='descartada_cdn')
@@ -971,9 +1466,14 @@ def _revisar(res, cliente, dominio, ahora):
         if d['hostnames_ajenos']:
             res.avisos.append('shodan: InternetDB trae en %s %s de otro dominio: sus datos pueden ser de quien tuvo la '
                               'IP antes' % (ip, _cuantos(d['hostnames_ajenos'], 'nombre', 'nombres')))
+        _aviso_ajenos_host(res, ip, host.get(ip))
         if 'honeypot' in d['tags']:
             res.avisos.append('shodan: InternetDB marca %s como honeypot, no se sacan hallazgos de esa IP' % ip)
             continue
+        if ip in honeypot:
+            res.avisos.append('shodan: la API de host marca %s como honeypot, no se sacan hallazgos de esa IP' % ip)
+            continue
+        _etiquetas(res, dominio, ip, hosts, d, host.get(ip), honeypot, ahora)
         for puerto in d['ports']:
             servicio = '%s:%d/%s' % (ip, puerto, protocolo(puerto))
             res.activos.append(Activo('service', servicio, {
@@ -990,17 +1490,32 @@ def _revisar(res, cliente, dominio, ahora):
             res.avisos.append('shodan: %s trae %d CVE, se reportan las %d más recientes y se omitieron %d'
                               % (ip, len(d['vulns']), MAX_CVE, len(d['vulns']) - MAX_CVE))
 
-    # 6. Cobertura
-    res.avisos.append(LIMITES)
-    res.sin_cobertura = list(SIN_LLAVE)
-    if parcial:
-        con_hallazgos = {h.codigo for h in res.hallazgos}
-        res.sin_cobertura = [c for c in CODIGOS if c not in con_hallazgos] + list(SIN_LLAVE)
-        res.avisos.append('%s, se revisaron %d de %d IP del dominio en InternetDB'
-                          % (PARCIAL, len(datos), len(consultar) + sum(1 for m in marcas.values() if m.get('internetdb'))))
-        res.revisados = [parte for ip in ips for parte in _partes_revisadas(ip, marcas.get(ip), datos.get(ip))]
+    # 6. Cobertura. Las etiquetas quedan revisadas solo con la API de host completa en todas las IP y sin otro recorte.
+    # Si no, sus códigos sin hallazgos van a sin_cobertura y, si alguno trae hallazgos, revisados y sin_revisar llevan
+    # la parte de etiquetas de cada IP, para no cerrar lo de una IP que no se revisó (#23)
+    res.avisos.append(LIMITES_CON_LLAVE if con_host else LIMITES)
+    con_hallazgos = {h.codigo for h in res.hallazgos}
+    etiquetas_ok = [ip for ip in ips if _etiquetas_revisadas(ip, marcas.get(ip), datos.get(ip), host.get(ip), con_host)]
+    etiquetas_completas = con_host and not parcial and len(etiquetas_ok) == len(ips)
+    if con_host and not etiquetas_completas:
+        res.avisos.append(ETIQUETAS_PARCIAL % (len(etiquetas_ok), len(ips)))
+    sin_etiquetas = [] if etiquetas_completas else [c for c in SIN_LLAVE if c not in con_hallazgos]
+    res.sin_cobertura = sin_etiquetas
+    # Con la llave, una IP que la API de host revisó completa cuenta como revisada en sus etiquetas aunque ninguna IP
+    # traiga hallazgos de etiqueta: así no depende de otra IP que se cierre lo suyo (docs/codigos_reglas.md)
+    if parcial or (not etiquetas_completas and (con_hallazgos & set(SIN_LLAVE) or (con_host and etiquetas_ok))):
+        res.sin_cobertura = ([c for c in CODIGOS_PUERTOS if c not in con_hallazgos] if parcial else []) + sin_etiquetas
+        if parcial:
+            res.avisos.append('%s, se revisaron %d de %d IP del dominio en InternetDB' % (
+                PARCIAL, len(datos), len(consultar) + sum(1 for m in marcas.values() if m.get('internetdb'))))
+        res.revisados = [parte for ip in ips for parte in
+                         _partes_revisadas(ip, marcas.get(ip), {'cdn': True} if ip in cdn_host else datos.get(ip))
+                         + ([ip + PARTE_ETIQUETAS] if ip in etiquetas_ok else [])]
         if todas_las_ip:
-            res.sin_revisar = [parte for ip in ips for parte in (ip, ip + PARTE_CVE) if parte not in res.revisados]
+            res.sin_revisar = [parte for ip in ips for parte in (ip, ip + PARTE_CVE, ip + PARTE_ETIQUETAS)
+                               if parte not in res.revisados]
+    # Sin la API de host, las etiquetas faltan por la llave. Con ella, lo que falte es cobertura parcial (RC-229)
+    res.sin_llave = [] if con_host else [c for c in sin_etiquetas if c in res.sin_cobertura]
     # Una corrida con fallas no pisa una grabación completa (como github.py con SIN_CUOTA). El aviso va primero, para
     # que entre en los 10 que guarda el orquestador
     if cliente.modo == 'grabar' and cliente.degradada(parcial):
@@ -1039,14 +1554,15 @@ def resumen(res):
 
 def codigo_salida(res):
     """0 si la corrida fue completa, 1 si el resultado queda en 'failed', 2 si la cobertura quedó parcial y 3 si
-    --grabar no escribió por una falla (NO_SE_GRABO). El aviso fijo LIMITES y los códigos de SIN_LLAVE, que salen en
-    toda corrida, no cuentan."""
+    --grabar no escribió por una falla (NO_SE_GRABO). Los avisos fijos LIMITES y LIMITES_CON_LLAVE y los códigos de
+    SIN_LLAVE, que salen en toda corrida sin la API de host completa, no cuentan. Tampoco revisados cuando solo le
+    faltan partes de etiquetas: es la misma cobertura de SIN_LLAVE, por IP. Una corrida a la que le falta otra parte
+    (un puerto o una CVE) siempre trae el aviso PARCIAL (recolectar, paso 6)."""
     if res.estado == 'failed':
         return 1
     if NO_SE_GRABO in res.avisos:
         return 3
-    parcial = (res.revisados is not None or set(res.sin_cobertura) - set(SIN_LLAVE)
-               or any(a.startswith(PARCIAL) for a in res.avisos))
+    parcial = set(res.sin_cobertura) - set(SIN_LLAVE) or any(a.startswith(PARCIAL) for a in res.avisos)
     return 2 if parcial else 0
 
 
@@ -1054,7 +1570,8 @@ def _main(argv=None):
     # En Windows, cuando la salida no es la consola (Git Bash, una tubería), Python usa cp1252 y los acentos se rompen.
     if (getattr(sys.stdout, 'encoding', '') or '').lower().replace('-', '') != 'utf8' and hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
-    p = argparse.ArgumentParser(description='Servicios y CVE que Shodan InternetDB ya vio en las IP públicas del dominio')
+    p = argparse.ArgumentParser(description='Servicios, CVE y etiquetas que Shodan ya vio en las IP públicas del dominio '
+                                            '(InternetDB y, con SHODAN_API_KEY, la API de host)')
     p.add_argument('dominio')
     modo = p.add_mutually_exclusive_group()
     modo.add_argument('--grabar', action='store_true',

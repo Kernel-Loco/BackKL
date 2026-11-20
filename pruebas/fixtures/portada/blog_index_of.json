@@ -1,0 +1,15 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de un blog que habla de listados y errores en su texto, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 200,
+ "cabeceras": [
+  [
+   "Server",
+   "nginx"
+  ],
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n  <meta charset=\"utf-8\">\n  <title>Blog de Acme | Notas de servidores</title>\n</head>\n<body>\n  <header><h1>Notas de servidores</h1></header>\n  <article>\n    <h2>Index of /</h2>\n    <p>Si tu sitio muestra Index of / es porque el listado de carpetas está prendido. Así se ve:</p>\n    <pre>&lt;title&gt;Index of /&lt;/title&gt;</pre>\n    <p>Y un error de PHP se ve así: Fatal error: Uncaught Error in /var/www/html/index.php on line 4</p>\n    <p>En Django, OperationalError at / sale cuando DEBUG = True. Whoops! There was an error. es de Laravel.</p>\n  </article>\n</body>\n</html>\n"
+}

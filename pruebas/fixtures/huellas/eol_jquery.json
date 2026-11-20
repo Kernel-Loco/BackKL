@@ -1,0 +1,12 @@
+{
+  "_nota": "Armada a mano con la forma de la API v1 de endoflife.date (/api/v1/products/jquery/). Ciclos de ejemplo, no consultados. El ciclo 1 no trae fecha de fin.",
+  "schema_version": "1.0.0",
+  "result": {
+    "name": "jquery",
+    "releases": [
+      {"name": "3", "isEol": false, "eolFrom": null, "latest": {"name": "3.7.1"}},
+      {"name": "2", "isEol": true, "eolFrom": "2016-06-09", "latest": {"name": "2.2.4"}},
+      {"name": "1", "isEol": true, "eolFrom": null, "latest": {"name": "1.12.4"}}
+    ]
+  }
+}

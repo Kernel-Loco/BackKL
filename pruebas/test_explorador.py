@@ -9,6 +9,7 @@ omisión, y otra con DEMO_EXPLORER=true:
 Las sesiones se crean con cirdan.auth.sessions, igual que al iniciar sesión, y se borran al final.
 Solo leen: la base queda igual.
 """
+import asyncio
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 from cirdan.api.explorer import TABLES
 from cirdan.auth import sessions
@@ -104,10 +106,15 @@ class ExploradorApagado(Explorador):
                     self.assertEqual(self.api.get(ruta, sesion, org=BETA)[0], 404)
 
     def test_2_tampoco_salen_en_la_documentacion(self):
-        code, body = self.api.get('/openapi.json')
-        self.assertEqual(code, 200)
-        self.assertEqual([p for p in body['paths'] if p.startswith('/db')], [])
-        self.assertIn('/domains', body['paths'])
+        # /openapi.json no existe por omisión (API_DOCS, RC-303): el esquema sale de app.openapi() en otro proceso con
+        # el mismo DEMO_EXPLORER=false de esta API.
+        r = subprocess.run([sys.executable, '-c',
+                            'import json; from cirdan.api.main import app; print(json.dumps(app.openapi()))'],
+                           env=dict(os.environ, DEMO_EXPLORER='false'), check=True, capture_output=True, text=True,
+                           encoding='utf-8', timeout=60)
+        paths = json.loads(r.stdout.strip().splitlines()[-1])['paths']
+        self.assertEqual([p for p in paths if p.startswith('/db')], [])
+        self.assertIn('/domains', paths)
         self.assertEqual(self.api.get('/domains', self.acme)[0], 200, 'el resto de la API sigue igual')
 
 
@@ -142,12 +149,14 @@ class ExploradorEncendido(Explorador):
         self.assertEqual(body['organization'], 'Beta Corp')
         filas = {t['table']: t['rows'] for t in body['tables']}
         self.assertEqual((filas['domains'], filas['findings'], filas['users']), (1, 1, 1))
-        # Las 24 tablas: si una tabla nueva del explorador entra sin RLS, falla aquí. scoring_rule_texts no tiene
-        # RLS pero es un catálogo global, y sus textos no nombran a ningún cliente
+        # Las 25 tablas: si una tabla nueva del explorador entra sin RLS, falla aquí. scoring_rule_texts y
+        # scoring_rule_framework_mappings no tienen RLS, pero son catálogos globales que no nombran clientes.
         for tabla in TABLES:
             with self.subTest(tabla=tabla):
                 filas = self.filas(tabla, self.beta, ACME)
-                self.assertLessEqual({f.get('organization_id', 'Beta Corp') for f in filas}, {'Beta Corp'})
+                organizaciones = {f.get('organization_id', 'Beta Corp') for f in filas}
+                permitidas = {'Beta Corp', '—'} if tabla == 'scoring_rule_sets' else {'Beta Corp'}
+                self.assertLessEqual(organizaciones, permitidas)
                 texto = json.dumps(filas, ensure_ascii=False).lower()
                 self.assertNotIn('acme', texto)
                 self.assertNotIn('olmardo', texto)
@@ -155,6 +164,28 @@ class ExploradorEncendido(Explorador):
         dominios = [d['fqdn'] for d in self.filas('domains', self.beta, ACME)]
         self.assertNotIn('acme-demo.mx', dominios)
         self.assertNotIn('olmardo.com', dominios)
+
+    def test_5b_de_cves_solo_las_que_nombran_sus_hallazgos(self):
+        """cves no tiene RLS y la llenan los escaneos de todas las empresas (#18): una CVE que nombra un hallazgo de
+        Acme la ve Acme y no Beta, y una que no nombra ningún hallazgo suyo no la ve ninguna."""
+        from cirdan.db import transaction
+        de_acme, de_nadie = 'CVE-2099-46001', 'CVE-2099-46002'
+        with transaction(ACME) as conn:
+            for cve in (de_acme, de_nadie):
+                conn.execute('INSERT INTO cves (cve_id) VALUES (%s) ON CONFLICT (cve_id) DO NOTHING', (cve,))
+            hallazgo = conn.execute('SELECT id FROM findings WHERE cve_id IS NULL LIMIT 1').fetchone()['id']
+            conn.execute('UPDATE findings SET cve_id = %s WHERE id = %s', (de_acme, hallazgo))
+
+        def limpiar():
+            with transaction(ACME) as conn:
+                conn.execute('UPDATE findings SET cve_id = NULL WHERE id = %s', (hallazgo,))
+        self.addCleanup(limpiar)
+        de = lambda sesion, org: [f['cve_id'] for f in self.filas('cves', sesion, org)]
+        self.assertEqual(de(self.acme, BETA), [de_acme])
+        self.assertEqual(de(self.beta, ACME), [])
+        for sesion, cuantas in ((self.acme, 1), (self.beta, 0)):
+            tablas = {t['table']: t['rows'] for t in self.api.get('/db/tables', sesion)[1]['tables']}
+            self.assertEqual(tablas['cves'], cuantas)
 
     def test_6_la_pagina_demo_inicia_sesion_y_no_manda_el_encabezado(self):
         # La página no trae datos: los pide con la cookie. Sin sesión muestra el inicio de sesión.
@@ -179,6 +210,54 @@ class ExploradorEncendido(Explorador):
                     self.assertEqual(body['detail'], SIN_PERMISO)
             self.assertEqual(self.api.get('/api/v1/domains/txt', token)[0], 403, 'la misma regla que la API v1')
             self.assertEqual(self.api.get('/domains', token)[0], 200, 'los dominios de la página sí le responden')
+
+    def test_8_las_cartas_no_dan_los_datos_de_quien_firma(self):
+        # RC-274. El explorador no sabe si una carta sigue vigente, y los datos de quien firma una revocada o vencida
+        # están en bloqueo (sección 5.6 de la política). La semilla de Acme trae old-example.net, vencida el 15 ago.
+        code, body = self.api.get('/db/tables/domain_authorizations/rows', self.acme)
+        self.assertEqual(code, 200, body)
+        self.assertEqual(len(body['rows']), 4, body)
+        self.assertEqual([c for c in body['columns'] if c.startswith('signer_')], [], body['columns'])
+        self.assertIn('valid_until', body['columns'])
+        texto = json.dumps(body, ensure_ascii=False)
+        for dato in ('it@old-example.net', 'security@acme-demo.mx', 'Old Example IT', 'Acme Demo Security'):
+            self.assertNotIn(dato, texto)
+
+
+class ErrorSinManejar(unittest.TestCase):
+    """RC-283: el 500 de un error que ninguna ruta maneja también sale con las tres cabeceras.
+
+    Llama a la aplicación en el mismo proceso, sin servidor, con la base de /health cambiada por una que falla.
+    """
+
+    def test_1_el_500_trae_la_proteccion_contra_marcos_y_nosniff(self):
+        from cirdan.api import main
+
+        def base_caida(*args, **kwargs):
+            raise ConnectionError('base caída de prueba')
+
+        scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': 'GET', 'scheme': 'http',
+                 'path': '/health', 'raw_path': b'/health', 'query_string': b'', 'headers': [],
+                 'client': ('127.0.0.1', 1), 'server': ('127.0.0.1', 80)}
+        mensajes = []
+
+        async def receive():
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+        async def send(mensaje):
+            mensajes.append(mensaje)
+
+        with mock.patch.object(main, 'transaction', base_caida):
+            # Starlette manda el 500 y después vuelve a lanzar el error para que el servidor lo registre
+            with self.assertRaises(ConnectionError):
+                asyncio.run(main.app(scope, receive, send))
+        inicio = [m for m in mensajes if m['type'] == 'http.response.start']
+        self.assertEqual([m['status'] for m in inicio], [500])
+        cabeceras = [(k.decode().lower(), v.decode()) for k, v in inicio[0]['headers']]
+        for nombre, valor in main.CABECERAS_SEGURIDAD.items():
+            self.assertEqual([v for k, v in cabeceras if k == nombre.lower()], [valor], nombre)
+        cuerpo = b''.join(m.get('body', b'') for m in mensajes if m['type'] == 'http.response.body')
+        self.assertEqual(cuerpo, b'Internal Server Error')
 
 
 if __name__ == '__main__':
