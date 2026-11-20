@@ -276,6 +276,7 @@ class Orquestador(unittest.TestCase):
         nuevo = {}
 
         def cambia_pesos_y_corre(*a, **k):  # lo que deja el PUT, en la misma transacción de la prueba
+            configuracion.bloquear_pesos(self.conn, ACME)
             self.conn.execute('UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = %s AND is_active',
                               (ACME,))
             nuevo['id'] = self.uno(
@@ -286,6 +287,8 @@ class Orquestador(unittest.TestCase):
                 'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
                 'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
                 (nuevo['id'], inicial['id']))
+            # y el recálculo del PUT, que deja un rules_change con el juego nuevo antes del cierre (RC-310)
+            configuracion.recalcular_scores(self.conn, ACME, nuevo['id'], pesos)
             return contrato.ejecutar(*a, **k)
 
         with mock.patch.object(orquestador, 'ejecutar', cambia_pesos_y_corre):
@@ -299,6 +302,14 @@ class Orquestador(unittest.TestCase):
                                      'ON r.id = sc.rule_id WHERE sc.score_id = %s AND r.rule_set_id = %s',
                                      score['id'], nuevo['id'])['n']
         self.assertGreater(reglas_del_aporte, 0)
+        # RC-310: el rules_change del PUT quedó antes, y el del escaneo es el último snapshot del dominio, el que leen
+        # /domains y el recálculo de pesos.
+        del_put = self.uno("SELECT count(*) AS n FROM domain_scores WHERE domain_id = %s AND reason = 'rules_change' "
+                           'AND rule_set_id = %s', s.domain_id, nuevo['id'])['n']
+        self.assertEqual(del_put, 1)
+        ultimo = self.uno('SELECT id::text, reason, rule_set_id::text FROM domain_scores WHERE domain_id = %s '
+                          'ORDER BY computed_at DESC, created_at DESC, id DESC LIMIT 1', s.domain_id)
+        self.assertEqual((ultimo['id'], ultimo['reason'], ultimo['rule_set_id']), (score['id'], 'scan', nuevo['id']))
 
     def test_2a1_si_los_cortes_cambian_a_mitad_del_escaneo_el_score_sale_con_los_nuevos(self):
         """RC-237: un PUT que solo cambia los cortes de bandas mientras corre la fuente. El score del escaneo guarda el
