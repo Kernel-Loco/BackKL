@@ -97,7 +97,7 @@ jobs:
       - name: Pruebas de la base y la API
         run: >-
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
-          pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_bitacora_descargas.py pruebas/test_llaves_api.py
+          pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_bitacora_descargas.py pruebas/test_inventario_activos.py pruebas/test_llaves_api.py
           pruebas/test_superadmin.py
           pruebas/test_respaldo.py
 
