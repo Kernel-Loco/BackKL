@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from cirdan.auth.deps import Session, current_session, require_roles
+from cirdan.auth.deps import Session, comprobar_cookie_segura, current_session, require_roles
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
@@ -35,6 +35,9 @@ async def _arranque(app):
     # `docker compose logs api`, y no en el primer inicio de sesión (#49, RC-91). Igual con la llave de las huellas de
     # contraseña (RC-330), que además tiene que ser otra que la del MFA aunque una venga del .env y la otra de Key
     # Vault.
+    # Antes que las llaves, que pueden tardar con Key Vault: publicada por HTTPS, la cookie de sesión va con Secure
+    # o la API no arranca (RC-286).
+    comprobar_cookie_segura()
     passwords.comprobar_llave(totp.comprobar_llave())
     yield
 
