@@ -59,6 +59,14 @@ services:
       # de su secreto en Key Vault, una de las dos (cirdan/auth/passwords.py).
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
       PASSWORD_HASH_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_KEY_VAULT_SECRET_URL:-}
+      # Rotación de esa llave (RC-333, docs/despliegue.md): la versión de la actual y, mientras se rota, la anterior
+      # con la misma regla de una de las dos. Sin ellas, versión 1 y sin anterior.
+      PASSWORD_HASH_KEY_VERSION: ${PASSWORD_HASH_KEY_VERSION:-}
+      PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY: ${PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY:-}
+      PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL:-}
+      # Contraseñas filtradas (RC-334): consulta a api.pwnedpasswords.com en cada cambio de contraseña. Apagada en tu
+      # PC y en el CI. Prendida en la VM (docker-compose.despliegue.yml).
+      PWNED_PASSWORDS_ENABLED: ${PWNED_PASSWORDS_ENABLED:-false}
       CARTA_ALTA_ENABLED: ${CARTA_ALTA_ENABLED:-false}
       CARTA_STORAGE_DIR: /var/lib/cirdan/cartas
       CARTA_ENCRYPTION_KEY: ${CARTA_ENCRYPTION_KEY:-}
@@ -129,6 +137,9 @@ services:
       TOTP_KEY_VAULT_SECRET_URL: ${TOTP_KEY_VAULT_SECRET_URL:-}
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
       PASSWORD_HASH_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_KEY_VAULT_SECRET_URL:-}
+      PASSWORD_HASH_KEY_VERSION: ${PASSWORD_HASH_KEY_VERSION:-}
+      PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY: ${PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY:-}
+      PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL:-}
       DEMO_ACCOUNTS: ${DEMO_ACCOUNTS:-false}
       # Vacía cuenta como sin poner: vale la lista local por omisión.
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}

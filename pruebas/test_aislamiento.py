@@ -213,6 +213,45 @@ class LimiteDiario(unittest.TestCase):
                 self.assertEqual(config, 'true,search_path=pg_catalog, public, pg_temp,false')
 
 
+# Rotación de la llave de las huellas (migración 026, RC-333): el comando lista las empresas con huellas de una
+# versión, que cirdan_app no ve por RLS. Mismo patrón que login_lookup().
+HUELLAS_POR_VERSION = "'public.password_hash_version_orgs(integer)'::regprocedure"
+# Una cuenta de Acme con la versión 77 y una de Beta con la 7, dentro de una transacción que se deshace.
+VERSIONES = """BEGIN;
+UPDATE users SET password_hash = 'lt77$x' WHERE id = '30000000-0000-4000-8000-000000000003';
+UPDATE users SET password_hash = 'lt7$x' WHERE id = (SELECT min(id::text)::uuid FROM users WHERE organization_id = '%s');
+SET LOCAL ROLE cirdan_app;
+SELECT count(*) FROM users;
+SELECT coalesce(string_agg(organization_id::text, ',' ORDER BY organization_id), '-') FROM password_hash_version_orgs(7);
+SELECT coalesce(string_agg(organization_id::text, ',' ORDER BY organization_id), '-') FROM password_hash_version_orgs(77);
+SELECT count(*) FROM password_hash_version_orgs(0);
+SELECT count(*) FROM password_hash_version_orgs(10000);
+SELECT count(*) FROM password_hash_version_orgs(NULL);
+ROLLBACK;
+""" % BETA
+
+
+class HuellasPorVersion(unittest.TestCase):
+
+    def test_12b_security_definer_con_search_path_fijo_y_sin_public(self):
+        config = scalar("SELECT prosecdef || ',' || array_to_string(proconfig, ';') || ','"
+                        " || has_function_privilege('public', oid, 'EXECUTE') || ','"
+                        " || has_function_privilege('cirdan_app', oid, 'EXECUTE') FROM pg_proc WHERE oid = %s;"
+                        % HUELLAS_POR_VERSION)
+        self.assertEqual(config, 'true,search_path=pg_catalog, public, pg_temp,false,true')
+
+    def test_12c_devuelve_solo_ids_de_empresa(self):
+        self.assertEqual(scalar("SELECT pg_get_function_result(%s);" % HUELLAS_POR_VERSION),
+                         'TABLE(organization_id uuid)')
+
+    def test_12d_solo_las_empresas_con_huellas_de_esa_version(self):
+        ok, out, err = psql(VERSIONES, user='postgres')
+        self.assertTrue(ok, err)
+        # 0: sin empresa, cirdan_app no ve ninguna cuenta. La versión 7 no es la 77 ('lt7$' no es prefijo de
+        # 'lt77$'). Fuera de 1 a 9999 o NULL no devuelve nada.
+        self.assertEqual(out.splitlines(), ['0', BETA, ACME, '0', '0', '0'])
+
+
 # Corrección del score de Acme (migración 010 y semillas 009 y 010, RC-72): la semilla 010 apaga el
 # trigger de solo inserción dentro de su transacción. Aquí se revisa que quedó encendido.
 class CorreccionScore(unittest.TestCase):

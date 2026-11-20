@@ -40,6 +40,7 @@ MAX_PASSKEY_OPTIONS_IP = 300  # el autollenado pide uno en cada carga del login:
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
 MAX_PASSWORD_ATTEMPTS = 5  # cambio de contraseña: intentos por usuario en LOCK_SECONDS (RC-290)
+MAX_PWNED_CHECKS = 10  # consultas a Pwned Passwords por usuario en LOCK_SECONDS (RC-334)
 
 
 @cache
@@ -479,3 +480,12 @@ def take_password_attempt(user_id):
 
 def clear_password_attempts(user_id):
     _valkey().delete(_password_key(user_id))
+
+
+def take_pwned_check(user_id):
+    """Cuenta una consulta a Pwned Passwords del usuario y devuelve su número: 1 a MAX_PWNED_CHECKS salen a la API, uno
+    mayor se revisa solo con la lista local (RC-334). Va antes de take_password_attempt, que no gasta, así que sin este
+    tope una sesión podría mandar consultas a la API sin límite desde la IP de la VM. No se borra al cambiar la
+    contraseña: es un tope de consultas, no de fallos."""
+    check, = _count('pw:pwned:user:' + _digest(str(user_id)))
+    return check

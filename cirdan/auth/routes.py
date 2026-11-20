@@ -461,6 +461,8 @@ def me(session: Session = Depends(current_session)):
 
 
 COMMON_PASSWORD = 'Esa contraseña es muy común. Elige otra.'
+PWNED_PASSWORD = 'Esa contraseña salió en una filtración conocida. Elige otra.'
+NEW_PASSWORD_PROBLEMS = {'comun': COMMON_PASSWORD, 'filtrada': PWNED_PASSWORD}
 WRONG_PASSWORD_LAST = 'La contraseña actual no es correcta. Por seguridad cerramos tu sesión: vuelve a iniciarla.'
 
 
@@ -475,9 +477,19 @@ def _clear_password_attempts(user_id):
 
 @router.post('/password', summary='Cambia la contraseña del usuario de la sesión y borra sus passkeys')
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
-    # La lista de contraseñas comunes (RC-281) va primero: no revisa la contraseña actual, así que no gasta un intento.
-    if passwords.is_common(body.new_password):
-        raise HTTPException(400, COMMON_PASSWORD)
+    # La lista de contraseñas comunes (RC-281) y Pwned Passwords (RC-334) van primero: no revisan la contraseña actual,
+    # así que no gastan un intento, y la consulta a la API (hasta 2 s) no espera con la fila de la cuenta bloqueada.
+    # Por eso las consultas a la API llevan su propio tope por usuario: pasado, se revisa solo con la lista local.
+    topada = []
+
+    def permitir():
+        if sessions.take_pwned_check(session.user_id) > sessions.MAX_PWNED_CHECKS:
+            topada.append(True)
+            return False
+        return True
+    revision = passwords.revisar_nueva(body.new_password, permitir)
+    if revision.problema:
+        raise HTTPException(400, NEW_PASSWORD_PROBLEMS[revision.problema])
     # El intento se cuenta antes de revisar la contraseña actual (RC-290), como en /mfa/verify: en paralelo tampoco se
     # revisan más de 5. Es un contador del usuario, aparte del login: quien tiene una cookie robada no bloquea el
     # inicio de sesión del dueño, y el quinto fallo le cierra la sesión.
@@ -508,6 +520,13 @@ def change_password(body: PasswordIn, request: Request, session: Session = Depen
             # de la bitácora.
             removed = _delete_passkeys(conn, session, ip, 'password_changed')
             audit(conn, session.own_org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
+            if revision.sin_respuesta:
+                # Pwned Passwords no respondió en 2 s y la nueva solo pasó la lista local (decisión 2 de RC-334). Sin
+                # la contraseña ni su SHA-1.
+                # Con el tope por usuario pasado, el motivo lo dice.
+                audit(conn, session.own_org_id, 'auth.pwned_check_unavailable', session.user_id, ip, 'user',
+                      session.user_id, {'fallback': 'common_list', 'reason': 'rate_limited'} if topada
+                      else {'fallback': 'common_list'})
             # Las demás sesiones de la cuenta se cierran y queda la que cambió. Va antes del commit, como en
             # /mfa/enable: si Valkey falla, la contraseña no cambia y se puede repetir.
             sessions.delete_others(session.user_id, session.token)
