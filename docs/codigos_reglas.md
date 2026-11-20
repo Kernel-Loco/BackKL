@@ -32,8 +32,8 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 13 | `email_in_public_commits` | digital_identity | low | 8.00 | #16 RC-50 | Lo emite hoy |
 | 14 | `breach_exposure_old` | data_leaks | high | 25.00 | #19 RC-54 | Planeado |
 | 15 | `breach_exposure_no_passwords` | data_leaks | medium | 10.00 | #19 RC-54 | Planeado |
-| 16 | `personal_email_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado |
-| 17 | `email_pattern_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado |
+| 16 | `personal_email_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Lo emite hoy |
+| 17 | `email_pattern_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Lo emite hoy |
 | 18 | `exposed_remote_admin` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
 | 19 | `exposed_file_sharing` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |
 | 20 | `exposed_database` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy |

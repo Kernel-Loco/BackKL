@@ -240,13 +240,16 @@ def _motivo(error):
     return 'red'
 
 
-def _visitar(url, timeout, cronometro=None):
+def _visitar(url, timeout, cronometro=None, saludo=None, limpiar=True):
     """La respuesta de un sitio a GET `url`, ya limpia (limpiar_visita), en una sola petición sin reintentos y dentro
     de `timeout` segundos. La única función que pide a un sitio del cliente: las pruebas la cambian con
-    mock.patch.object. Nunca lanza por el sitio: lo que no terminó es {'sin_respuesta': motivo}."""
+    mock.patch.object. Nunca lanza por el sitio: lo que no terminó es {'sin_respuesta': motivo}.
+    `saludo` son las llaves extra que transporte llena del saludo TLS ({'correos': None} trae los correos del
+    certificado, para identidad.py, #20). Con `limpiar` en False la página sale sin limpiar_visita: quien llama la
+    reduce."""
     cronometro = cronometro or time.monotonic
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': ACEPTA, 'Accept-Language': IDIOMA})
-    req.saludo = {}   # transporte lo llena con la versión y el cifrado del saludo TLS, si lo hubo (RC-239)
+    req.saludo = dict(saludo or {})   # transporte lo llena con la versión y el cifrado del saludo TLS (RC-239)
     try:
         estado, cabeceras, cuerpo, cortado = transporte.visitar(req, cronometro() + timeout, MAX_BYTES_SITIO,
                                                                 cronometro)
@@ -267,7 +270,7 @@ def _visitar(url, timeout, cronometro=None):
     visita = {'estado': estado, 'cabeceras': cabeceras, 'cuerpo': _texto(cuerpo, cabeceras), 'cortado': cortado}
     if req.saludo:
         visita['tls'] = dict(req.saludo)
-    return limpiar_visita(visita)
+    return limpiar_visita(visita) if limpiar else visita
 
 
 def _texto(cuerpo, cabeceras):
@@ -392,6 +395,9 @@ class ClienteWeb(shodan.ClienteShodan):
     PREFIJO = 'web: '
     TIEMPO_CORRIDA = TIEMPO_CORRIDA
     TOPES = TOPES
+    # Cómo queda cada visita antes de analizarla y de grabarla. identidad.py (#20, RC-56) pone la suya, que solo
+    # guarda lo ya reducido.
+    limpiar = staticmethod(limpiar_visita)
 
     def __init__(self, modo='vivo', carpeta=CARPETA_GRABADAS, visitar=None, **otros):
         super().__init__(modo=modo, carpeta=carpeta, **otros)
@@ -418,21 +424,21 @@ class ClienteWeb(shodan.ClienteShodan):
         try:
             del_disco, datos = self._de_disco(consulta)
             if del_disco:
-                self.vistas[consulta] = limpiar_visita(datos)
+                self.vistas[consulta] = self.limpiar(datos)
                 return self.vistas[consulta]
         except (ValueError, KeyError, TypeError, AttributeError):   # una grabación truncada o editada
-            raise FuenteNoResponde('web: la grabación de %s no se puede leer' % url) from None
+            raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % url) from None
         if self.pedidas:
             self.dormir(PAUSA_SITIO)
         limite = min(timeout, self.restante())
         if limite < shodan.MIN_INTENTO:
-            raise SinTiempo('web: se acabó el tiempo de la corrida antes de visitar %s' % url)
+            raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de visitar %s' % url)
         self.pedidas += 1
         self.consultas += 1
-        datos = limpiar_visita((self.visitar or _visitar)(url, limite))
+        datos = self.limpiar((self.visitar or _visitar)(url, limite))
         if datos.get('sin_respuesta') == 'tiempo' and limite < timeout:
             # No tuvo sus `timeout` segundos: lo que se acabó fue la corrida, no es que el sitio no responda
-            raise SinTiempo('web: se acabó el tiempo de la corrida mientras se visitaba %s' % url)
+            raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida mientras se visitaba %s' % url)
         if contar and datos.get('sin_respuesta') in FALLAS_DE_RED:
             self.fallas += 1
         self._grabar(consulta, datos)

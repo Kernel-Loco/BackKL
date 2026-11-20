@@ -44,7 +44,9 @@ El saludo TLS de la visita (#121, RC-239). Si la petición trae el atributo `sal
 llena con la versión y el cifrado que se negociaron (SSLSocket.version() y cipher()), después de revisar el
 certificado. Es el mismo saludo de la petición, con el mismo contexto: no hay otro saludo para verlo. Un certificado
 que no se pudo verificar o un servidor que no acepta TLS 1.2 ni 1.3 (el mínimo de ssl.create_default_context) salen
-como el OSError de siempre, y visita.py lee su verify_code o su alerta de versión.
+como el OSError de siempre, y visita.py lee su verify_code o su alerta de versión. Si el dict ya trae la llave
+'correos' (identidad.py, #20, RC-56), también la llena con los correos del certificado ya verificado: el emailAddress
+de su sujeto y los rfc822Name de su subjectAltName, de SSLSocket.getpeercert(), en el mismo saludo.
 
 retry_after() lee la cabecera Retry-After, para que un 5xx que la trae espere lo que pide antes de otro intento.
 """
@@ -265,6 +267,23 @@ class _ConPlazo:
             # El saludo ya terminó y se revisó el certificado: la versión y el cifrado que se negociaron (RC-239)
             cifrado = self.sock.cipher()
             self.saludo.update(version=self.sock.version(), cifrado=cifrado[0] if cifrado else None)
+            if 'correos' in self.saludo:
+                self.saludo['correos'] = correos_del_certificado(self.sock.getpeercert())
+
+
+def correos_del_certificado(cert):
+    """Los correos (textos) del certificado de SSLSocket.getpeercert(): el emailAddress de su sujeto y los 'email' de
+    su subjectAltName, sin repetir y en el orden en que vienen. Lista vacía si no trae ninguno o no se puede leer."""
+    correos = []
+    try:
+        pares = [par for rdn in cert.get('subject') or () for par in rdn]
+        pares += [('emailAddress', v) for tipo, v in cert.get('subjectAltName') or () if tipo == 'email']
+        for tipo, valor in pares:
+            if tipo == 'emailAddress' and isinstance(valor, str) and valor not in correos:
+                correos.append(valor)
+    except (AttributeError, TypeError, ValueError):
+        return []
+    return correos
 
 
 class _Conexion(_ConPlazo, http.client.HTTPSConnection):

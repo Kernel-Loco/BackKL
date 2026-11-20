@@ -1252,7 +1252,7 @@ def domain_assets(fqdn: str, session: Session = Depends(session_or_api_key)):
     rows = _query(session, '''
         SELECT a.id::text, a.asset_type AS type, a.value, p.value AS parent, a.attributes, a.first_seen_at, a.last_seen_at
           FROM assets a JOIN domains d ON d.id = a.domain_id LEFT JOIN assets p ON p.id = a.parent_asset_id
-         WHERE d.fqdn = %s ORDER BY array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email'], a.asset_type), a.value
+         WHERE d.fqdn = %s ORDER BY array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email','profile'], a.asset_type), a.value
     ''', (fqdn,))
     return {'items': rows, 'total': len(rows)}
 
