@@ -100,7 +100,9 @@ EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=200s --retries=5 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
 # --proxy-headers: X-Forwarded-For solo se toma en cuenta si quien conecta está en FORWARDED_ALLOW_IPS
-# (ver docker-compose.yml). Por omisión nadie de fuera, porque el portal (Next) no lo agrega.
+# (ver docker-compose.yml). Por omisión nadie de fuera, porque el portal (Next) no lo limpia: reenvía el que mande el
+# navegador y solo pone la IP de quien le conecta si no viene. En el despliegue, Cloudflare agrega la IP real al final y
+# uvicorn la toma de derecha a izquierda (docker-compose.despliegue.yml, comentario 10389 de RC-277).
 # --no-server-header: sin el encabezado 'server: uvicorn', que dice el servidor a quien escanee (comentario 10063 de
 # RC-91).
 CMD ["python", "-m", "uvicorn", "cirdan.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", \

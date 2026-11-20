@@ -25,7 +25,7 @@ from cirdan.api.plataforma import router as platform_router
 from cirdan.api.v1 import router as v1_router
 from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
-from cirdan.config import ORIGENES_LOCALES, config
+from cirdan.config import config, origenes_permitidos
 from cirdan.db import transaction
 
 
@@ -168,8 +168,8 @@ class TopeDeCuerpo:
 # Así el 413 también sale con CABECERAS_SEGURIDAD.
 app.add_middleware(TopeDeCuerpo)
 
-# Orígenes que pueden mandar POST con la cookie: el portal y la propia API.
-ALLOWED_ORIGINS = {o.strip() for o in config('ALLOWED_ORIGINS', ORIGENES_LOCALES).split(',')}
+# Orígenes que pueden mandar POST con la cookie: el portal y la propia API. Vacía vale como sin poner (RC-277).
+ALLOWED_ORIGINS = set(origenes_permitidos())
 
 
 @app.middleware('http')

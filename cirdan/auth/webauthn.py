@@ -21,7 +21,7 @@ from webauthn.helpers.structs import (AuthenticatorSelectionCriteria, Authentica
                                       PublicKeyCredentialDescriptor, ResidentKeyRequirement,
                                       UserVerificationRequirement)
 
-from cirdan.config import ORIGENES_LOCALES, config
+from cirdan.config import config, origenes_permitidos
 
 RP_NAME = 'LowTide'
 # Lo que tarda el navegador en dejar de esperar a la persona. El reto en Valkey vive 5 min (sessions.PASSKEY_SECONDS).
@@ -53,9 +53,8 @@ def _origin_ok(origin, rp):
 @cache
 def origins():
     """Orígenes de ALLOWED_ORIGINS que pueden usar passkeys de este RP ID, sin barra final."""
-    allowed = (config('ALLOWED_ORIGINS') or ORIGENES_LOCALES).split(',')
     rp = rp_id()
-    return sorted({o.strip().rstrip('/') for o in allowed if o.strip() and _origin_ok(o.strip(), rp)})
+    return sorted({o for o in origenes_permitidos() if _origin_ok(o, rp)})
 
 
 def configured():
