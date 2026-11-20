@@ -1,0 +1,183 @@
+#cloud-config
+# Primer arranque de la VM de Terraform (#81, RC-132). Hace lo mismo que los pasos a mano de docs/despliegue.md:
+#   1. lowtide-imds: la regla 'Solo la API llega a IMDS', antes de que exista Docker.
+#   2. Docker Engine y Compose desde el repositorio oficial de Docker.
+#   3. lowtide-arranque: clona BackKL y FrontKL, arma el .env sin salir de la VM y levanta
+#      docker-compose.yml + docker-compose.despliegue.yml.
+# Este archivo no lleva secretos: Terraform lo guarda en su estado y Azure en los datos de la VM.
+# Se sigue con `sudo cloud-init status --wait` y `sudo journalctl -u lowtide-arranque -f`.
+
+package_update: true
+package_upgrade: true
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - iptables
+  - python3
+
+write_files:
+  # Igual que en docs/despliegue.md, 'Solo la API llega a IMDS' (pruebas/test_terraform.py lo compara).
+  - path: /etc/systemd/system/lowtide-imds.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Solo la API de LowTide llega a IMDS (BackKL docs/despliegue.md)
+      Before=docker.service
+      PartOf=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/bin/sh -c 'iptables -N DOCKER-USER 2>/dev/null; iptables -C DOCKER-USER -d 169.254.169.254/32 ! -s 10.249.93.20/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 ! -s 10.249.93.20/32 -j DROP'
+
+      [Install]
+      WantedBy=multi-user.target
+      RequiredBy=docker.service
+
+  - path: /etc/systemd/system/lowtide-arranque.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Clona y levanta LowTide con docker compose (BackKL docs/terraform.md)
+      Requires=docker.service lowtide-imds.service
+      After=docker.service lowtide-imds.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      # La primera vez compila la API y el portal: en una B2s tarda de 10 a 20 minutos.
+      TimeoutStartSec=45min
+      ExecStart=/usr/local/sbin/lowtide-arranque
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/sbin/lowtide-arranque
+    permissions: "0750"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      # Sin la regla de IMDS la pila no se levanta: con la identidad de la VM, cualquier contenedor podría pedir su token.
+      iptables -C DOCKER-USER -d 169.254.169.254/32 ! -s 10.249.93.20/32 -j DROP
+
+      install -d -m 0755 /opt/lowtide
+      cd /opt/lowtide
+      [ -d BackKL/.git ] || git clone --depth 1 --branch '${rama}' https://github.com/Kernel-Loco/BackKL.git
+      [ -d FrontKL/.git ] || git clone --depth 1 --branch '${rama}' https://github.com/Kernel-Loco/FrontKL.git
+
+      python3 /usr/local/sbin/lowtide-env
+      cd BackKL
+      # Sin túnel propio no se levanta cloudflared: ningún nombre público llega a esta VM.
+      servicios="db valkey api demo-accounts portal"
+      if ! grep -qx 'TUNNEL_TOKEN=sin-tunel' .env; then
+        servicios="$servicios cloudflared"
+      fi
+      docker compose up -d --build $servicios
+      docker compose ps
+
+  - path: /usr/local/sbin/lowtide-env
+    permissions: "0750"
+    content: |
+      """Arma /opt/lowtide/BackKL/.env sin que ningún secreto salga de la VM (#81, RC-132).
+
+      Contraseñas y llaves al azar, como el CI (.github/workflows/pruebas.yml): esta VM empieza con su propia base,
+      sin cuentas reales. Si el .env ya existe no lo toca, porque la base ya se creó con esas contraseñas.
+      El token del túnel, si hay, se lee de Key Vault con la identidad de la VM (como cirdan/auth/keyvault.py).
+      Nunca va en los argumentos de un proceso ni en la salida.
+      """
+      import base64
+      import json
+      import os
+      import secrets
+      import sys
+      import time
+      import urllib.parse
+      import urllib.request
+
+      CARPETA = '/opt/lowtide/BackKL'
+      RUTA = CARPETA + '/.env'
+      NOMBRE_PUBLICO = '${nombre_publico}'
+      TUNEL_SECRETO_URL = '${tunel_secreto_url}'
+
+
+      def clave():
+          return secrets.token_urlsafe(24)
+
+
+      def llave():
+          return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+
+
+      def token_tunel():
+          if not TUNEL_SECRETO_URL:
+              return 'sin-tunel'
+          consulta = urllib.parse.urlencode({'api-version': '2018-02-01', 'resource': 'https://vault.azure.net'})
+          fin = time.monotonic() + 900
+          while True:
+              try:
+                  pedido = urllib.request.Request(
+                      'http://169.254.169.254/metadata/identity/oauth2/token?' + consulta, headers={'Metadata': 'true'})
+                  with urllib.request.urlopen(pedido, timeout=10) as r:
+                      acceso = json.load(r)['access_token']
+                  pedido = urllib.request.Request(
+                      TUNEL_SECRETO_URL + '?api-version=7.4', headers={'Authorization': 'Bearer ' + acceso})
+                  with urllib.request.urlopen(pedido, timeout=10) as r:
+                      return json.load(r)['value']
+              except Exception as e:  # 403 mientras Azure propaga el rol recién dado
+                  motivo = getattr(e, 'code', None) or type(e).__name__
+                  if time.monotonic() > fin:
+                      sys.exit('lowtide-env: no se pudo leer el token del túnel de Key Vault (' + str(motivo) + ')')
+                  print('lowtide-env: esperando el rol de Key Vault (' + str(motivo) + ')', flush=True)
+                  time.sleep(20)
+
+
+      if os.path.exists(RUTA):
+          print('lowtide-env: el .env ya existe, no se cambia')
+          sys.exit(0)
+
+      poner = {
+          'POSTGRES_PASSWORD': clave(),
+          'CIRDAN_APP_PASSWORD': clave(),
+          'VALKEY_PASSWORD': clave(),
+          'TOTP_ENCRYPTION_KEY': llave(),
+          'PASSWORD_HASH_ENCRYPTION_KEY': llave(),
+          'COOKIE_SECURE': 'true',
+          'ALLOWED_ORIGINS': 'https://' + NOMBRE_PUBLICO,
+          'WEBAUTHN_RP_ID': NOMBRE_PUBLICO,
+          'COMPOSE_FILE': 'docker-compose.yml:docker-compose.despliegue.yml',
+          'COMPOSE_PATH_SEPARATOR': ':',
+          'TUNNEL_TOKEN': token_tunel(),
+      }
+      lineas = []
+      with open(CARPETA + '/.env.example', encoding='utf-8') as ejemplo:
+          for linea in ejemplo:
+              nombre = linea.split('=', 1)[0].lstrip('# ').strip()
+              if nombre in poner and '=' in linea:
+                  linea = nombre + '=' + poner.pop(nombre) + '\n'
+              lineas.append(linea)
+      lineas += [nombre + '=' + valor + '\n' for nombre, valor in poner.items()]
+      texto = ''.join(lineas)
+      for relleno in ('cambia_esta_clave', 'genera_tu_llave'):
+          if relleno in texto:
+              sys.exit('lowtide-env: quedó un valor de ejemplo en el .env (' + relleno + ')')
+
+      fd = os.open(RUTA + '.nuevo', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+      with os.fdopen(fd, 'w', encoding='utf-8') as nuevo:
+          nuevo.write(texto)
+      os.replace(RUTA + '.nuevo', RUTA)
+      print('lowtide-env: .env listo (' + ('con' if TUNEL_SECRETO_URL else 'sin') + ' túnel)')
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl enable --now lowtide-imds.service
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - sh -c 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list'
+  - apt-get update -q
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - systemctl enable --now docker.service
+  # --no-block: cloud-init termina y la compilación sigue en segundo plano.
+  - systemctl enable --now --no-block lowtide-arranque.service
