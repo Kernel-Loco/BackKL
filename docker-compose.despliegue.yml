@@ -57,6 +57,8 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Falta ALLOWED_ORIGINS en .env, ver docs/despliegue.md}
       # El despliegue siempre va con HTTPS (Cloudflare): la cookie de sesión solo viaja cifrada.
       COOKIE_SECURE: "true"
+      # El respaldo del volumen de cartas aún no existe; nunca habilitar el alta en este despliegue.
+      CARTA_ALTA_ENABLED: "false"
       # Las passkeys quedan amarradas a lowtidesec.com (RC-331): sirven en https://lowtidesec.com y en su www, que vienen
       # de ALLOWED_ORIGINS. Si el dominio cambia, dejan de servir y se entra con contraseña y TOTP.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-lowtidesec.com}

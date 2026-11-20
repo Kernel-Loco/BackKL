@@ -9,6 +9,24 @@ navegador → Cloudflare (HTTPS) → cloudflared ─borde─ portal ─interna�
 
 ## Antes de levantar
 
+**Alta de dominios:** por ahora no se puede habilitar en el despliegue. El volumen `cirdan-cartas` guarda cartas cifradas,
+pero el respaldo descrito más abajo solo incluye la base y no ese volumen. El despliegue fija `CARTA_ALTA_ENABLED=false`
+y la API también rechaza el alta con `COOKIE_SECURE=true`. Antes de activarla se necesita implementar y probar respaldo
+y restauración coordinados de la base, las cartas y la llave, además de revisar la política de retención. La verificación
+TXT de dominios ya registrados sí funciona para los que estén en `DOMINIOS_EN_VIVO`.
+
+Para pruebas locales sin datos reales: monta el volumen mediante `docker compose`, pon `CARTA_ALTA_ENABLED=true` y
+una llave aleatoria `CARTA_ENCRYPTION_KEY` de 32 bytes en base64 url-safe, diferente de las del MFA y contraseñas.
+El directorio del contenedor es `/var/lib/cirdan/cartas`, privado del usuario de la API. Fuera de Docker se debe
+configurar `CARTA_STORAGE_DIR` con un directorio absoluto, privado y persistente. Como alternativa a la llave directa,
+`CARTA_KEY_VAULT_SECRET_URL` acepta una URL versionada de Azure Key Vault; nunca se configuran ambas. No se debe cambiar
+ni perder la llave: todavía no hay herramienta de rotación. El PDF se cifra con AES-256-GCM y la base guarda su SHA-256
+y nombre opaco, no la carta en claro. La API comprueba la estructura básica del PDF, no su firma: el administrador
+confirma que la carta firmada autoriza el dominio. Si una transacción falla después de escribir el archivo puede quedar
+un archivo cifrado huérfano; no se borra automáticamente porque el resultado de una confirmación fallida puede ser
+incierto. No se debe borrar ninguno sin conciliarlo primero con `domain_authorizations.signed_document_key` de todas las
+empresas y con los respaldos.
+
 1. FrontKL clonado junto a BackKL (`../FrontKL`), o su ruta en `PORTAL_DIR`.
 2. `.env` copiado de `.env.example`, con contraseñas propias y además:
    - `ALLOWED_ORIGINS=https://lowtidesec.com,https://www.lowtidesec.com`. Van los dos porque el túnel publica los dos nombres y el navegador manda el Origin del nombre que abrió: sin el de www, la API responde 403 al login que llega por www. Sin la variable la pila no arranca. También apaga las cuentas de demo (RC-287).
