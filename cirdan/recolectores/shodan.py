@@ -181,7 +181,7 @@ AGENTE = contrato.AGENTE   # uno solo para todas las fuentes (contrato.py)
 ORIGEN = 'cert_spotter_a'                        # de dónde salió la IP: un nombre de Cert Spotter y su A
 RESOLVEDORES = ('1.1.1.1', '8.8.8.8')            # públicos y fijos, como registros_dns.py. Nunca el DNS del sistema
 
-PAGINAS_CT = 2               # páginas de Cert Spotter: casi siempre la página y la vacía que cierra
+PAGINAS_CT = certspotter.COMPARTIDAS  # 2 páginas de Cert Spotter: casi siempre la página y la vacía que cierra
 INTENTOS_CT = 2              # intentos por página, como certspotter.COMPLEMENTO
 TIMEOUT_CT = 20              # segundos por página
 MAX_NOMBRES = 50             # nombres que se resuelven, con la raíz. Con más no se saben todas las IP y la corrida
@@ -371,11 +371,12 @@ def _descargar(url, timeout, cronometro=None, tope=MAX_BYTES):
     `timeout` es el plazo absoluto de toda la petición, de getaddrinfo al último bloque del cuerpo, no solo de cada
     operación de socket (transporte.descargar): si se pasa, lanza SinTiempo. Así un servidor que manda el cuerpo de a
     poco no estira la corrida. Una redirección no se sigue y da RespuestaIlegible. `cronometro` es time.monotonic por
-    omisión."""
+    omisión. Va por certspotter.descargar: una página de Cert Spotter que otra fuente ya pidió en este escaneo no sale a
+    la red (RC-326). Las demás URL pasan tal cual."""
     cronometro = cronometro or time.monotonic
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/json'})
     try:
-        return transporte.descargar(req, cronometro() + timeout, tope, cronometro)
+        return certspotter.descargar(req, cronometro() + timeout, tope, cronometro)
     except transporte.PlazoVencido:
         raise SinTiempo('shodan: la respuesta tardó más de %s s' % timeout) from None
     except transporte.Redirigida as e:
@@ -784,14 +785,14 @@ class ClienteShodan:
                                       'otro tipo de contenido o sin https)' % (que, type(e).__name__, MAX_BYTES_HOST))
         raise error
 
-    def _http(self, url, intentos, timeout, que, sin_reintento=(), turno=None, peticion=None):
+    def _http(self, url, intentos, timeout, que, sin_reintento=(), turno=None, peticion=None, contar=True):
         """JSON de `url` con hasta `intentos` intentos dentro del tiempo de la corrida. None solo con un 404. Un 429
         lanza LimiteAlcanzado, y otro 4xx, un 200 vacío o 'null' o una redirección RespuestaIlegible, sin reintentar.
         Si un 5xx o un 408 traen Retry-After, el siguiente intento espera lo que piden si es más que ESPERAS y le
         alcanza a la corrida, pero nunca más de MAX_ESPERA. `turno()`, si se pasa, corre antes de cada intento, también
         de los reintentos: la visita web espera ahí el ritmo de la NVD. `peticion` cambia la petición por omisión
         (_transporte), salvo que el cliente traiga `descargar`. Un RespuestaIlegible por un 4xx lleva el código en
-        `codigo`."""
+        `codigo`. Con `contar` en False los intentos no suman a `consultas`: lo que repite certspotter.descargar."""
         pedida = {}   # el Retry-After del último intento
 
         def intento():
@@ -801,7 +802,7 @@ class ClienteShodan:
             limite = min(timeout, self.restante())
             if limite < MIN_INTENTO:
                 raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de consultar %s' % que)
-            self.consultas += 1
+            self.consultas += 1 if contar else 0
             try:
                 cuerpo = (self.descargar or peticion or self._transporte)(url, limite)
             except SinTiempo:
@@ -840,18 +841,22 @@ class ClienteShodan:
               sin_reintento=(), texto=None, valida=None):
         """La lista JSON de `url`, con la misma firma de ClienteCrtsh.pedir, así certspotter.certificados() la usa sin
         cambios. Se graba la página reducida (reducir_pagina). Una respuesta que no es lista, o con la que `valida`
-        da False, cuenta como una que no llegó y no se reintenta."""
+        da False, cuenta como una que no llegó y no se reintenta. Una página que otra fuente ya pidió en este escaneo
+        (certspotter.repetida, RC-326) se lee de lo que ella recibió, en un solo intento, sin pausa y sin contarla en
+        `consultas`."""
         del_disco, datos = self._de_disco(consulta)
         if del_disco:
             if not isinstance(datos, list):
                 raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % consulta)
         else:
             que = '%s (%s)' % (fuente, texto or consulta)
+            repetida = certspotter.repetida(url)
 
             def pagina():
-                if pausa:
+                if pausa and not repetida:
                     self.dormir(pausa)
-                datos = self._http(url, intentos, timeout or TIMEOUT_CT, que, sin_reintento)
+                datos = self._http(url, 1 if repetida else intentos, timeout or TIMEOUT_CT, que, sin_reintento,
+                                   contar=not repetida)
                 if not isinstance(datos, list) or (valida and not valida(datos)):
                     raise RespuestaIlegible(self.PREFIJO + '%s respondió algo que no se puede leer' % que)
                 return reducir_pagina(datos)
