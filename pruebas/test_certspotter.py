@@ -20,7 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_certspotter.py
 from pruebas.test_crtsh import AHORA, SUBDOMINIOS, CrtshSimulado, cert  # noqa: E402
-from cirdan.recolectores import cargar, certspotter, contrato, crtsh, shodan, transporte  # noqa: E402
+from cirdan.recolectores import api_docs, cargar, certspotter, contrato, crtsh, shodan, transporte, visita  # noqa: E402
 
 LE = {'friendly_name': "Let's Encrypt", 'pubkey_sha256': 'b' * 64, 'name': "C=US, O=Let's Encrypt, CN=R11"}
 SSLCOM = {'friendly_name': 'SSL.com', 'pubkey_sha256': 'c' * 64, 'name': 'C=US, O=SSL Corporation, CN=Cloudflare TLS Issuing ECC CA 3'}
@@ -1083,22 +1083,32 @@ def con_red_simulada(red):
     with contextlib.ExitStack() as pila:
         for parche in (mock.patch.object(transporte, 'descargar', red.descargar),
                        mock.patch.object(transporte, 'visitar', red.visitar),
-                       mock.patch.object(crtsh, '_resolver_dns', lambda nombre, control=False: None),
-                       mock.patch.object(shodan, '_resolver_a', lambda nombre, lifetime=None: ('nxdomain', [], [])),
+                       mock.patch.object(crtsh, '_resolver_dns', lambda nombre, control=False: red.dns.append(nombre)),
+                       mock.patch.object(shodan, '_resolver_a',
+                                         lambda nombre, lifetime=None: red.dns.append(nombre) or ('nxdomain', [], [])),
                        mock.patch.object(shodan, '_llave_de_config', lambda: ''),
                        mock.patch('time.sleep', lambda segundos: None)):
             pila.enter_context(parche)
         yield
 
 
-def escanear(red, compartido=True):
-    """Lo que hace orquestador.correr con las cuatro fuentes que piden Cert Spotter, en vivo y sin red:
-    contrato.ejecutar de cada una, dentro de certspotter.un_escaneo() si `compartido`. {fuente: Resultado}."""
+def escanear(red, compartido=True, modo='vivo'):
+    """Lo que hace orquestador.correr con las cuatro fuentes que piden Cert Spotter, sin red: contrato.ejecutar de cada
+    una en `modo`, dentro de certspotter.un_escaneo() si `compartido`. {fuente: Resultado}."""
     with contextlib.ExitStack() as pila:
         pila.enter_context(con_red_simulada(red))
         if compartido:
             pila.enter_context(certspotter.un_escaneo())
-        return {codigo: contrato.ejecutar(cargar(codigo), 'acme-demo.mx', 'vivo', ahora=AHORA) for codigo in FUENTES_CT}
+        return {codigo: contrato.ejecutar(cargar(codigo), 'acme-demo.mx', modo, ahora=AHORA) for codigo in FUENTES_CT}
+
+
+@contextlib.contextmanager
+def grabaciones_en(carpeta):
+    """Las cuatro fuentes graban y reproducen en `carpeta`, nunca en respuestas_grabadas/ del repo."""
+    with contextlib.ExitStack() as pila:
+        for modulo in (api_docs, crtsh, shodan, visita):
+            pila.enter_context(mock.patch.object(modulo, 'CARPETA_GRABADAS', Path(carpeta) / modulo.__name__))
+        yield
 
 
 def lo_que_dio(res):
@@ -1106,6 +1116,12 @@ def lo_que_dio(res):
     return (res.estado, res.error, res.avisos, res.sin_cobertura, res.revisados,
             sorted(json.dumps(a.__dict__, sort_keys=True, default=str) for a in res.activos),
             sorted(json.dumps(h.__dict__, sort_keys=True, default=str) for h in res.hallazgos))
+
+
+def todo_lo_que_guarda(res):
+    """lo_que_dio más lo demás que guarda el orquestador: sin_revisar, omitidos, cves y sin_llave."""
+    return lo_que_dio(res) + (res.sin_revisar, sorted(res.omitidos),
+                              sorted(json.dumps(c, sort_keys=True, default=str) for c in res.cves), res.sin_llave)
 
 
 class UnaConsultaPorEscaneo(unittest.TestCase):
@@ -1320,6 +1336,35 @@ class UnaConsultaPorEscaneo(unittest.TestCase):
         for codigo in FUENTES_CT:
             self.assertEqual(lo_que_dio(ahora[codigo]), lo_que_dio(antes[codigo]), codigo)
         self.assertTrue(any(a.valor == 'h3-1.acme-demo.mx' for a in ahora['ct_logs'].activos))
+
+    def test_10_un_escaneo_grabado_se_reproduce_sin_pedir_cert_spotter(self):
+        """Punto 4: un escaneo grabado con las cuatro fuentes (red simulada, carpeta temporal) se reproduce dentro de
+        un_escaneo() sin ninguna petición, ni a Cert Spotter ni a otro lado, y cada fuente da lo mismo que en vivo.
+        Al grabar cada página sale una vez y las fuentes que la reusan también la graban en su carpeta."""
+        vivo, al_grabar, al_reproducir = escanear(RedSimulada()), RedSimulada(), RedSimulada()
+        paginas = [certspotter.consulta('acme-demo.mx'), certspotter.consulta('acme-demo.mx', EMISIONES[-1]['id'])]
+        with tempfile.TemporaryDirectory() as d, grabaciones_en(d):
+            grabado = escanear(al_grabar, modo='grabar')
+            self.assertEqual(al_grabar.cert_spotter, [certspotter.url('acme-demo.mx'),
+                                                      certspotter.url('acme-demo.mx', EMISIONES[-1]['id'])])
+            for codigo in FUENTES_CT:
+                cliente = cargar(codigo).crear_cliente('reproducir', 'acme-demo.mx')
+                self.assertTrue(cliente.grabadora.carpeta.is_relative_to(d), codigo)
+                for pagina in paginas:
+                    self.assertTrue(cliente.grabadora.archivo(pagina).is_file(), (codigo, pagina))
+            with con_red_simulada(al_reproducir), certspotter.un_escaneo():
+                reproducido = {codigo: contrato.ejecutar(cargar(codigo), 'acme-demo.mx', 'reproducir', ahora=AHORA)
+                               for codigo in FUENTES_CT}
+                guardadas = dict(certspotter._ESCANEO.get())
+        self.assertTrue(al_grabar.dns)  # sí pregunta al DNS simulado al grabar, así la lista vacía de abajo cuenta
+        self.assertEqual((al_reproducir.cert_spotter, al_reproducir.urls, al_reproducir.dns, guardadas),
+                         ([], [], [], {}))
+        for codigo in FUENTES_CT:
+            self.assertEqual(vivo[codigo].estado, 'succeeded', (codigo, vivo[codigo].error))
+            self.assertEqual(todo_lo_que_guarda(grabado[codigo]), todo_lo_que_guarda(vivo[codigo]), codigo)
+            self.assertEqual(todo_lo_que_guarda(reproducido[codigo]), todo_lo_que_guarda(vivo[codigo]), codigo)
+            self.assertEqual(reproducido[codigo].consultas, 0, codigo)
+        self.assertTrue(any(a.valor == 'www.acme-demo.mx' for a in reproducido['ct_logs'].activos))
 
 
 if __name__ == '__main__':
