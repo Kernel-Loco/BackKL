@@ -628,9 +628,10 @@ def _ya_no_corre(org, scan_id, conn, corridas):
 def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None, dormir=None):
     """Ejecuta los recolectores de un escaneo aceptado y deja el estado de cada fuente.
 
-    Cada página de Cert Spotter sale a la red una sola vez en todo el escaneo, también con sus reintentos: la primera
-    fuente que la pide la consulta y las demás reusan lo que recibió, un 429 o una falla incluidos
-    (certspotter.un_escaneo, RC-326). Lo reusado no cuenta en sus consultas ni en su cupo diario.
+    Cada página de Cert Spotter sale a la red una sola vez en el escaneo: la primera fuente que la pide la consulta y
+    las demás reusan lo que recibió, un 429 o una falla incluidos (certspotter.un_escaneo, RC-326). Lo reusado no
+    cuenta en sus consultas ni en su cupo diario. Un reintento a 1, 5 o 25 minutos vuelve a pedir lo que falló, salvo
+    un 429 (certspotter.nuevo_intento).
 
     Un recolector que falla no tumba el escaneo. En vivo, su fuente queda en 'retrying' y se vuelve a
     correr ahí mismo a 1, 5 y 25 minutos (siguiente_estado, #13). Mientras corre o espera, el escaneo marca
@@ -754,6 +755,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             previos.append('Intento %d: %s' % (attempt, (res.error or '')[:300]))
             if not _esperar(org, scan_id, (next_retry_at - momento).total_seconds(), conn, dormir):
                 return _ya_no_corre(org, scan_id, conn, corridas)
+            certspotter.nuevo_intento()  # el reintento vuelve a pedir lo que falló en Cert Spotter, salvo un 429
             intento = attempt
         corridas.append({'source': codigo, 'status': status, 'error': res.error or None,
                          'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})

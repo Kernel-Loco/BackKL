@@ -1186,8 +1186,8 @@ class Orquestador(unittest.TestCase):
                                              conn=self.conn)
             subio = {codigo: self.cupo(codigo)[1] - antes[codigo] for codigo in FUENTES_CT}
             return red, resumen['stats']['queries_by_source'], subio
-        for codigo in FUENTES_CT:
-            self.exige_cupo(codigo, 40)
+        for codigo in FUENTES_CT:  # cada corrida reserva su MAX_CONSULTAS, más lo que gastan los dos escaneos
+            self.exige_cupo(codigo, orquestador.cargar(codigo).MAX_CONSULTAS + 40)
         con, por_fuente, subio = escanear(compartido=True)
         self.assertEqual(len(con.cert_spotter), 2)
         self.assertEqual(subio, por_fuente)  # el cupo cuenta lo que gastó cada fuente, nada reservado de más
@@ -1196,6 +1196,34 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(subio_sin, por_fuente_sin)
         self.assertEqual({codigo: por_fuente_sin[codigo] - por_fuente[codigo] for codigo in FUENTES_CT},
                          {'api_docs': 0, 'ct_logs': 2, 'shodan': 2, 'web': 2})
+
+    def test_3c7_un_reintento_del_orquestador_vuelve_a_pedir_cert_spotter(self):
+        """RC-326, con base. Con crt.sh caído y Cert Spotter con 503, ct_logs queda en 'retrying'. Si Cert Spotter
+        vuelve antes del minuto, el reintento sí le pide las páginas otra vez, no repite la falla guardada, y ct_logs
+        termina bien con lo de Cert Spotter tras un solo reintento."""
+        red = RespaldoSimulado(crtsh=None, certspotter_caido=True)
+        esperas, antes = [], []
+
+        def descargar(req, plazo, tope, cronometro=None):
+            return red(req.full_url, 0)
+
+        def dormir(segundos):
+            esperas.append(segundos)
+            antes.append(len(red.de('api.certspotter.com')))
+            red.certspotter_caido = False
+        self.exige_cupo('ct_logs', 2 * crtsh.MAX_CONSULTAS)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                mock.patch.object(transporte, 'descargar', descargar), \
+                mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                mock.patch.object(crtsh, '_resolver_dns', lambda nombre, control=False: None), \
+                mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
+                                         conn=self.conn, dormir=dormir)
+        self.assertEqual(sum(esperas), 60)  # un solo reintento, al minuto
+        self.assertEqual(len(red.de('api.certspotter.com')) - antes[0], 2)  # la página y la vacía, otra vez a la red
+        self.assertEqual(self.corrida(s.scan_id)['status'], 'succeeded')
+        self.assertEqual(resumen['sources'][0]['status'], 'succeeded')
 
     def test_3c3_una_variante_sin_respuesta_mantiene_abierto_su_parecido(self):
         """B4 de RC-226, con base. Si %marca% responde y la variante acme-dem0.mx no, su huella va en omitidos y el

@@ -29,12 +29,15 @@ cuenta como una que no llegó, sin reintento, y si es la primera, como que Cert 
 Una sola consulta por página en cada escaneo (RC-326): ct_logs, shodan, la visita web y api_docs piden las mismas
 páginas del dominio. Dentro de un escaneo (un_escaneo, que abre orquestador.correr) la primera fuente que pide una
 página sale a la red y las demás reciben lo mismo que recibió ella: el cuerpo, un 429 con su Retry-After o una falla de
-red, sin otra petición (descargar). Así un escaneo en vivo hace 2 consultas (la página y la vacía que cierra), no 8, y
-un 429 no se vuelve a pedir en ese escaneo. Lo que se repite es lo que dio transporte.descargar, y cada fuente lo lee
+red, sin otra petición (descargar). Así un escaneo en vivo hace 2 consultas cuando el dominio cabe en una página (la
+página y la vacía que cierra), y hasta 4 si no, porque ct_logs pide hasta MAX_PAGINAS y las demás solo las COMPARTIDAS.
+Un 429 no se vuelve a pedir en ese escaneo. Lo que se repite es lo que dio transporte.descargar, y cada fuente lo lee
 con su propio cliente: deja los mismos avisos de hoy y lo graba en su carpeta como si viniera de la red. Lo repetido no
 cuenta en las consultas del cliente (repetida), así el cupo diario de cada fuente (migración 008) cuenta solo lo que
-salió, y no se reintenta: otro intento daría lo mismo. Al reproducir no hay red y nada cambia. Fuera de un escaneo (la
-terminal de cada recolector, las pruebas) cada fuente pide lo suyo, como antes.
+salió, y no se reintenta: otro intento daría lo mismo. Un reintento del orquestador a 1, 5 o 25 minutos sí vuelve a
+pedir lo que falló, salvo un 429 (nuevo_intento). Solo se guardan las COMPARTIDAS primeras páginas, las que piden todas
+las fuentes. Al reproducir no hay red y nada cambia. Fuera de un escaneo (la terminal de cada recolector, las pruebas)
+cada fuente pide lo suyo, como antes.
 """
 import contextlib
 import contextvars
@@ -52,6 +55,7 @@ NOMBRE = 'Cert Spotter'
 ORIGEN = 'certspotter'       # va en los atributos y la evidencia: de dónde salió el certificado
 PREFIJO = 'certspotter:'     # consulta de la grabadora: certspotter_<dominio>.json
 MAX_PAGINAS = 4              # cada página es una consulta del límite por hora (unas 10), la vacía que cierra también
+COMPARTIDAS = 2              # las páginas que piden todas las fuentes de un escaneo (shodan.PAGINAS_CT): se guardan
 SIN_REINTENTO = (429,)       # límite por hora alcanzado: reintentar a los 5 o 15 s solo gasta cupo
 COMPLEMENTO = {'intentos': 2, 'timeout': 20}  # con crt.sh arriba: un Cert Spotter lento no detiene el escaneo
 SIN_COBERTURA = ['cert_expired', 'cert_internal_name', 'cert_new_issuer', 'lookalike_domain']
@@ -84,6 +88,8 @@ def url(dominio, despues=None):
 # un escaneo corren una tras otra en el mismo hilo (orquestador.correr): no hace falta candado. Un hilo nuevo no hereda
 # el escaneo y pediría lo suyo, como antes: más consultas, nunca datos de otro escaneo.
 _ESCANEO = contextvars.ContextVar('certspotter_escaneo', default=None)
+# False mientras certificados() pide una página después de las COMPARTIDAS: solo ct_logs la pide, así que no se guarda.
+_COMPARTIDA = contextvars.ContextVar('certspotter_compartida', default=True)
 # Lo que dice Cert Spotter (o la red hasta él) y se repite a las demás fuentes. No se repite un ValueError: es el tope
 # de bytes, el tipo o el https del cliente que pidió, y otra fuente con otro tope sí podría leer esa página.
 REPETIBLES = (urllib.error.HTTPError, transporte.PlazoVencido, transporte.Redirigida, OSError,
@@ -123,33 +129,56 @@ def repetida(pedida):
     return True
 
 
-def _otra_vez(error):
-    """El mismo error para otra fuente. Un HTTPError va nuevo, con el código, el texto y las cabeceras (el Retry-After
-    de un 429) y sin el cuerpo, que el primero ya cerró."""
+def nuevo_intento():
+    """El orquestador la llama antes de cada reintento de una fuente (a 1, 5 o 25 minutos): olvida las fallas
+    guardadas, así el reintento vuelve a salir a la red, como antes de RC-326. Un 429 se queda: Cert Spotter ya dijo
+    que no hay cupo y otra petición solo lo gastaría. Los cuerpos que llegaron bien también se quedan."""
+    respuestas = _ESCANEO.get()
+    if respuestas is None:
+        return
+    for pedida in [p for p, r in respuestas.items() if not r.exito and getattr(r.valor, 'code', None) not in
+                   SIN_REINTENTO]:
+        del respuestas[pedida]
+
+
+def _copia(error):
+    """Otra instancia del mismo error, sin traceback, sin __context__ y sin la respuesta: lo que se guarda y lo que
+    recibe cada fuente que lo repite. Así lo guardado no retiene los marcos ni el cuerpo parcial de quien lo pidió, y
+    ninguna fuente ve lo que otra le haya hecho a la excepción. Un HTTPError va nuevo, con el código, el texto y las
+    cabeceras (el Retry-After de un 429) y sin el cuerpo. Los demás conservan sus args y sus atributos (el destino de
+    una Redirigida, el errno de un OSError)."""
     if isinstance(error, urllib.error.HTTPError):
         return urllib.error.HTTPError(error.url, error.code, error.msg, error.hdrs, None)
-    return error.with_traceback(None)
+    copia = type(error).__new__(type(error), *error.args)
+    copia.args = error.args  # un OSError con su propio __init__ (RemoteDisconnected) no los toma en __new__
+    if isinstance(error, OSError):  # solo los que trae: uno en None cambia el texto del error
+        for campo in ('errno', 'strerror', 'filename', 'filename2'):
+            if getattr(error, campo) is not None:
+                setattr(copia, campo, getattr(error, campo))
+    copia.__dict__.update(vars(error))
+    return copia
 
 
 def descargar(req, plazo, tope, cronometro=None):
     """transporte.descargar(req, plazo, tope, cronometro), salvo para una página de Cert Spotter dentro de un escaneo:
     si ya está cerrada (repetida), repite lo último que dio la red sin salir a ella. Un cuerpo de más de `tope` bytes da
-    el mismo ValueError que transporte.descargar, así cada fuente conserva su tope. Las demás URL pasan tal cual."""
+    el mismo ValueError que transporte.descargar, así cada fuente conserva su tope. Una página después de las
+    COMPARTIDAS no se guarda: ninguna otra fuente la pide. Las demás URL pasan tal cual."""
     respuestas = _ESCANEO.get()
     pedida = req.full_url
-    if respuestas is None or not pedida.startswith(URL + '?'):
+    if respuestas is None or not _COMPARTIDA.get() or not pedida.startswith(URL + '?'):
         return transporte.descargar(req, plazo, tope, cronometro)
     respuesta = respuestas.get(pedida)
     if respuesta is not None and respuesta.cerrada:
         if not respuesta.exito:
-            raise _otra_vez(respuesta.valor)
+            raise _copia(respuesta.valor)
         if len(respuesta.valor) > tope:
             raise ValueError('respuesta de más de %d bytes' % tope)
         return respuesta.valor
     try:
         cuerpo = transporte.descargar(req, plazo, tope, cronometro)
     except REPETIBLES as e:
-        respuestas[pedida] = _Respuesta(False, e)
+        respuestas[pedida] = _Respuesta(False, _copia(e))
         raise
     except BaseException:  # el tope de este cliente: lo de un intento anterior ya no es lo último que dio la red
         respuestas.pop(pedida, None)
@@ -216,7 +245,8 @@ def certificados(cliente, dominio, max_paginas=MAX_PAGINAS, **opciones):
     vencer cuya fecha ya pasó (crtsh.DANADA).
     """
     emisiones, despues, raras = [], None, 0
-    for _ in range(max_paginas):
+    for numero in range(max_paginas):
+        marca = _COMPARTIDA.set(numero < COMPARTIDAS)  # las que nadie más pide no se guardan en el escaneo (RC-326)
         try:
             respuesta = cliente.pedir(consulta(dominio, despues), url(dominio, despues), NOMBRE,
                                       sin_reintento=SIN_REINTENTO, valida=pagina_legible, texto=dominio, **opciones)
@@ -224,6 +254,8 @@ def certificados(cliente, dominio, max_paginas=MAX_PAGINAS, **opciones):
             if not emisiones:
                 raise
             break
+        finally:
+            _COMPARTIDA.reset(marca)
         pagina = [e for e in respuesta if legible(e)]
         raras += len(respuesta) - len(pagina)
         if not pagina:

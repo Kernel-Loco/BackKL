@@ -5,8 +5,10 @@ con respuestas de la misma forma que la real, y una fecha fija.
 """
 import contextlib
 import hashlib
+import http.client
 import io
 import json
+import socket
 import sys
 import tempfile
 import unittest
@@ -1211,6 +1213,113 @@ class UnaConsultaPorEscaneo(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as otra:
                     certspotter.descargar(req, 0, 100)
         self.assertEqual((otra.exception.code, otra.exception.headers.get('Retry-After')), (429, '1800'))
+
+    def test_7_un_reintento_del_orquestador_vuelve_a_pedir_lo_que_fallo(self):
+        """nuevo_intento olvida las fallas guardadas, salvo un 429, y deja los cuerpos que llegaron: el reintento del
+        orquestador sale a la red otra vez, como antes de RC-326. ct_logs se recupera si Cert Spotter ya responde."""
+        caida, limite, buena = (certspotter.url(d) for d in ('caida.mx', 'limite.mx', 'buena.mx'))
+        respuestas = {caida: urllib.error.HTTPError(caida, 503, 'Service Unavailable', None, None),
+                      limite: urllib.error.HTTPError(limite, 429, 'Too Many Requests', {'Retry-After': '1800'}, None),
+                      buena: b'[]'}
+        pedidas = []
+
+        def red(r, plazo, tope, cronometro=None):
+            pedidas.append(r.full_url)
+            respuesta = respuestas[r.full_url]
+            if isinstance(respuesta, Exception):
+                raise respuesta
+            return respuesta
+        with mock.patch.object(transporte, 'descargar', red), certspotter.un_escaneo():
+            for pagina in (caida, limite, buena):
+                with contextlib.suppress(urllib.error.HTTPError):
+                    certspotter.descargar(crtsh.urllib.request.Request(pagina), 0, 100)
+            certspotter.nuevo_intento()
+            self.assertEqual([certspotter.repetida(p) for p in (caida, limite, buena)], [False, True, True])
+            respuestas[caida] = b'[]'
+            for pagina in (caida, limite, buena):
+                with contextlib.suppress(urllib.error.HTTPError):
+                    certspotter.descargar(crtsh.urllib.request.Request(pagina), 0, 100)
+        self.assertEqual(pedidas, [caida, limite, buena, caida])  # solo la caída vuelve a la red
+        certspotter.nuevo_intento()  # fuera de un escaneo no hace nada
+
+        red = RedSimulada(certspotter_caido=True)
+        red.crtsh = None  # crt.sh caído: ct_logs depende de Cert Spotter
+
+        def ejecutar():
+            return contrato.ejecutar(cargar('ct_logs'), 'acme-demo.mx', 'vivo', ahora=AHORA)
+        with con_red_simulada(red), certspotter.un_escaneo():
+            self.assertEqual(ejecutar().estado, 'failed')
+            red.certspotter_caido = False  # Cert Spotter vuelve antes del reintento del orquestador
+            certspotter.nuevo_intento()
+            otra = ejecutar()
+        self.assertEqual(otra.estado, 'succeeded', otra.error)
+        self.assertTrue(any(a.valor == 'www.acme-demo.mx' for a in otra.activos))
+
+    def test_8_lo_guardado_es_una_copia_sin_traceback_y_cada_fuente_recibe_la_suya(self):
+        """Lo que se guarda de una falla no retiene el traceback, el __context__ ni la respuesta de quien la pidió, y
+        cada fuente que la repite recibe otra instancia, igual en tipo, args y atributos."""
+        pagina = certspotter.url('acme-demo.mx')
+        req = crtsh.urllib.request.Request(pagina)
+        errores = [urllib.error.HTTPError(pagina, 503, 'Service Unavailable', {'Retry-After': '5'},
+                                          io.BytesIO(b'cuerpo')),
+                   transporte.PlazoVencido('api.certspotter.com no terminó dentro de su plazo'),
+                   transporte.SinConexion('api.certspotter.com no aceptó la conexión dentro de su plazo'),
+                   transporte.Redirigida(301, 'api.certspotter.com', 'https://otro.example/'),
+                   ConnectionResetError(104, 'Connection reset by peer'),
+                   socket.gaierror(-2, 'Name or service not known'),
+                   http.client.RemoteDisconnected('Remote end closed connection without response'),
+                   http.client.IncompleteRead(b'[{', 10)]
+        for error in errores:
+            with self.subTest(type(error).__name__):
+                def red(r, plazo, tope, cronometro=None, error=error):
+                    try:
+                        raise KeyError('lo que la fuente manejaba')
+                    except KeyError:
+                        raise error
+                with mock.patch.object(transporte, 'descargar', red), certspotter.un_escaneo():
+                    with self.assertRaises(type(error)) as primera:
+                        certspotter.descargar(req, 0, 100)
+                    self.assertIs(primera.exception, error)  # quien la pidió recibe la de la red
+                    guardada = certspotter._ESCANEO.get()[pagina].valor
+                    self.assertIsNot(guardada, error)
+                    self.assertEqual((guardada.__traceback__, guardada.__context__, guardada.__cause__),
+                                     (None, None, None))
+                    self.assertTrue(certspotter.repetida(pagina))
+                    repetidas = []
+                    with mock.patch.object(transporte, 'descargar', sin_red):
+                        for _ in range(2):
+                            with self.assertRaises(type(error)) as otra:
+                                certspotter.descargar(req, 0, 100)
+                            repetidas.append(otra.exception)
+                self.assertIsNot(repetidas[0], repetidas[1])
+                for repetida in repetidas:
+                    self.assertIsNot(repetida, guardada)
+                    self.assertEqual((type(repetida), repetida.args, str(repetida)),
+                                     (type(error), error.args, str(error)))
+                    if isinstance(error, urllib.error.HTTPError):
+                        self.assertEqual((repetida.code, repetida.headers.get('Retry-After')), (503, '5'))
+                        self.assertEqual(repetida.read(), b'')  # sin el cuerpo ni la respuesta del primero
+                    else:
+                        self.assertEqual(vars(repetida), vars(error))
+                        self.assertEqual(getattr(repetida, 'errno', None), getattr(error, 'errno', None))
+
+    def test_9_las_paginas_que_solo_pide_ct_logs_no_se_guardan(self):
+        """Con más de COMPARTIDAS páginas, ct_logs pide la 3 y la 4 a la red (son 4 consultas por escaneo, no 2) y
+        no se guardan: ninguna otra fuente las pide. Las COMPARTIDAS primeras sí, y cada fuente da lo mismo."""
+        paginas = [[emision('91%d%d' % (n, i), ['h%d-%d.acme-demo.mx' % (n, i)], '2026-09-20T00:00:00Z',
+                            '2026-12-19T00:00:00Z') for i in range(2)] for n in range(certspotter.MAX_PAGINAS)]
+        sin, con = RedSimulada(paginas=paginas), RedSimulada(paginas=paginas)
+        antes = escanear(sin, compartido=False)
+        with con_red_simulada(con), certspotter.un_escaneo():
+            ahora = {codigo: contrato.ejecutar(cargar(codigo), 'acme-demo.mx', 'vivo', ahora=AHORA)
+                     for codigo in FUENTES_CT}
+            guardadas = sorted(certspotter._ESCANEO.get())
+        self.assertEqual(shodan.PAGINAS_CT, certspotter.COMPARTIDAS)
+        self.assertEqual(len(con.cert_spotter), certspotter.MAX_PAGINAS)  # 2 compartidas más la 3 y la 4 de ct_logs
+        self.assertEqual(guardadas, sorted(con.cert_spotter[:certspotter.COMPARTIDAS]))
+        for codigo in FUENTES_CT:
+            self.assertEqual(lo_que_dio(ahora[codigo]), lo_que_dio(antes[codigo]), codigo)
+        self.assertTrue(any(a.valor == 'h3-1.acme-demo.mx' for a in ahora['ct_logs'].activos))
 
 
 if __name__ == '__main__':

@@ -181,7 +181,7 @@ AGENTE = contrato.AGENTE   # uno solo para todas las fuentes (contrato.py)
 ORIGEN = 'cert_spotter_a'                        # de dónde salió la IP: un nombre de Cert Spotter y su A
 RESOLVEDORES = ('1.1.1.1', '8.8.8.8')            # públicos y fijos, como registros_dns.py. Nunca el DNS del sistema
 
-PAGINAS_CT = 2               # páginas de Cert Spotter: casi siempre la página y la vacía que cierra
+PAGINAS_CT = certspotter.COMPARTIDAS  # 2 páginas de Cert Spotter: casi siempre la página y la vacía que cierra
 INTENTOS_CT = 2              # intentos por página, como certspotter.COMPLEMENTO
 TIMEOUT_CT = 20              # segundos por página
 MAX_NOMBRES = 50             # nombres que se resuelven, con la raíz. Con más no se saben todas las IP y la corrida
