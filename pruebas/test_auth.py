@@ -507,6 +507,33 @@ class Login(unittest.TestCase):
         self.assertEqual(_eventos(JORDAN, 'auth.login_locked'), antes[JORDAN], 'la IP ya avisó en esta ventana')
         self.assertEqual(_eventos(MAYA, 'auth.login_locked'), antes[MAYA] + 1)
 
+    def test_27_con_la_ip_bloqueada_el_429_del_codigo_avisa_una_vez_por_empresa(self):
+        # RC-302, C2 de la revisión: el 429 de /mfa/verify ya sabe de qué empresa es la cuenta, así que la IP avisa
+        # una vez por empresa en cada ventana. MAYA es de Acme y DANA de Beta: las dos dejan su auth.mfa_locked. El
+        # segundo 429 de Acme en la misma ventana ya no suma.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        tokens = {'maya': [sesion.post_login(Client(), MAYA, PASSWORD)[1]['mfa_token'] for _ in range(2)],
+                  'dana': [sesion.post_login(Client(), DANA, PASSWORD)[1]['mfa_token']]}
+        self.assertEqual(sesion.post_login(Client(), JORDAN, 'CIRDAN_FAKE_mala')[0], 401)
+        ip, = _llaves_ip()
+        sesion.valkey('SET', ip, str(MAX_FALLOS_IP), 'KEEPTTL')
+        antes = {email: _eventos(email, 'auth.mfa_locked') for email in (MAYA, DANA)}
+
+        def codigo(token):
+            return Client().post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': '000000'})[0]
+        self.assertEqual(codigo(tokens['maya'][0]), 429)
+        self.assertEqual(_esperar(lambda: _eventos(MAYA, 'auth.mfa_locked'), antes[MAYA] + 1), antes[MAYA] + 1)
+        self.assertEqual(_ultimo_detalle(MAYA, 'auth.mfa_locked'), {'lock': ['ip']})
+        self.assertEqual(codigo(tokens['dana'][0]), 429)
+        self.assertEqual(_esperar(lambda: _eventos(DANA, 'auth.mfa_locked'), antes[DANA] + 1), antes[DANA] + 1,
+                         'Beta deja su evento aunque Acme ya avisó de la misma IP')
+        self.assertEqual(_ultimo_detalle(DANA, 'auth.mfa_locked'), {'lock': ['ip']})
+        self.assertEqual(codigo(tokens['maya'][1]), 429)
+        time.sleep(1)
+        self.assertEqual(_eventos(MAYA, 'auth.mfa_locked'), antes[MAYA] + 1, 'Acme ya avisó en esta ventana')
+        self.assertEqual(_eventos(DANA, 'auth.mfa_locked'), antes[DANA] + 1)
+
 
 def _eventos(email, accion):
     return int(scalar("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "

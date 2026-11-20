@@ -6,6 +6,7 @@ correo, para que nadie pueda saber qué cuentas existen.
 """
 import base64
 import logging
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -114,9 +115,19 @@ def _bad_password(org, user_id, ip):
                         background=BackgroundTask(_audit_bad_password, org, user_id, ip))
 
 
+# Etiquetas de letras, números y guiones separadas por puntos, con la última (el TLD) empezando con letra.
+_DOMINIO = re.compile(r'(?:[a-z0-9-]{1,63}\.)+[a-z][a-z0-9-]{1,62}')
+NO_ES_DOMINIO = 'no-es-dominio'
+
+
 def _email_domain(email):
-    # Del correo que no existe solo queda el dominio, nunca el correo completo (RC-302, decisión 2b de Ernesto).
-    return email.rpartition('@')[2][:100] if '@' in email else ''
+    """Del correo que no existe solo queda el dominio, nunca el correo completo (RC-302, decisión 2b de Ernesto). Si lo
+    que sigue a la última '@' no tiene forma de dominio, queda un marcador fijo: alguien que escribe la contraseña en
+    el campo del correo ('Clave@Marzo2026' o 'juan@empresa.com MiClave') no deja un pedazo de ella en el log."""
+    dominio = email.rpartition('@')[2].lower()
+    if '@' in email and len(dominio) <= 253 and _DOMINIO.fullmatch(dominio):
+        return dominio
+    return NO_ES_DOMINIO
 
 
 def _log_unknown_email(email, ip):
@@ -164,9 +175,10 @@ def _record_login_locked(email, ip):
 
 
 def _record_mfa_locked(org, user_id, email, ip):
-    """El 429 de /mfa/verify en la bitácora de la empresa (RC-302). Solo el primero de cada ventana de bloqueo."""
+    """El 429 de /mfa/verify en la bitácora de la empresa (RC-302). Solo el primero de cada ventana de bloqueo, por
+    correo y, para la IP, por empresa: con una IP bloqueada, el 429 de otra empresa también deja su evento."""
     try:
-        por_correo, por_ip = sessions.first_lock('mfa', email, ip)
+        por_correo, por_ip = sessions.first_lock('mfa', email, ip, org)
     except Exception:
         log.exception('No se pudo revisar en Valkey si el 429 del código del usuario %s ya tenía aviso', user_id)
         return
@@ -177,12 +189,12 @@ def _record_mfa_locked(org, user_id, email, ip):
             audit(conn, org, 'auth.mfa_locked', user_id, ip, 'user', user_id, {'lock': _lock_kinds(por_correo, por_ip)})
     except Exception:
         log.exception('No se pudo escribir auth.mfa_locked del usuario %s', user_id)
-        _forget_lock_quietly('mfa', email, ip, por_correo, por_ip)
+        _forget_lock_quietly('mfa', email, ip, por_correo, por_ip, org)
 
 
-def _forget_lock_quietly(event, email, ip, por_correo, por_ip):
+def _forget_lock_quietly(event, email, ip, por_correo, por_ip, org=None):
     try:
-        sessions.forget_lock(event, email, ip, por_correo, por_ip)
+        sessions.forget_lock(event, email, ip, por_correo, por_ip, org)
     except Exception:
         log.exception('No se pudo quitar la marca del aviso de bloqueo después de un error')
 

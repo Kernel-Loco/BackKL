@@ -432,23 +432,32 @@ return out
 '''
 
 
-def first_lock(event, email, ip):
+def _ip_mark_key(event, ip, org):
+    # Con `org` la marca de la IP es de esa empresa: el 429 del MFA ya sabe de qué empresa es la cuenta, y el primero
+    # de cada empresa en la ventana deja su auth.mfa_locked en su bitácora, aunque otra ya haya avisado de la misma IP.
+    # El 429 del login sale antes de buscar el correo, así que su marca sigue siendo una por IP.
+    bloque = _ip_bloque(ip)
+    return _lock_mark_key(event, 'ip', bloque if org is None else '%s:%s' % (bloque, org))
+
+
+def first_lock(event, email, ip, org=None):
     """Dice qué bloqueos son nuevos para `event` ('login' o 'mfa'): una tupla (correo, ip) con True solo la primera vez
-    en cada ventana de bloqueo. audit_log no se purga: sin esto, cada 429 de un ataque sería una fila más."""
+    en cada ventana de bloqueo. audit_log no se purga: sin esto, cada 429 de un ataque sería una fila más. Con `org`
+    (el MFA), la de la IP es la primera vez para esa empresa."""
     if event not in LOCK_EVENTS:
         raise ValueError(event)
     keys = (_email_key(email), _lock_mark_key(event, 'email', _digest(email.lower())),
-            _ip_key(ip), _lock_mark_key(event, 'ip', _ip_bloque(ip)))
+            _ip_key(ip), _ip_mark_key(event, ip, org))
     correo, ip_nueva = _valkey().eval(_MARK_LOCK, 4, *keys, MAX_FAILS_EMAIL, MAX_FAILS_IP, LOCK_SECONDS)
     return bool(correo), bool(ip_nueva)
 
 
-def forget_lock(event, email, ip, por_correo, por_ip):
+def forget_lock(event, email, ip, por_correo, por_ip, org=None):
     """Quita las marcas que acaba de poner first_lock, cuando el evento no se pudo escribir: así el siguiente 429 de
-    esa misma ventana lo vuelve a intentar."""
+    esa misma ventana lo vuelve a intentar. `org` es el mismo que recibió first_lock."""
     keys = [_lock_mark_key(event, 'email', _digest(email.lower()))] if por_correo else []
     if por_ip:
-        keys.append(_lock_mark_key(event, 'ip', _ip_bloque(ip)))
+        keys.append(_ip_mark_key(event, ip, org))
     if keys:
         _valkey().delete(*keys)
 

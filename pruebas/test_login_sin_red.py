@@ -489,13 +489,28 @@ class RastroDeBloqueos(unittest.TestCase):
                                                                             (self.EMAIL, self.IP)))
 
     def test_3_la_linea_lleva_ip_y_dominio_sin_el_correo_ni_saltos_de_linea(self):
-        for email, dominio in (('nadie.secreto@ejemplo.test', 'ejemplo.test'),
-                               ('nadie.secreto@ejemplo.test\nERROR inventado', 'ejemplo.test\\nERROR inventado'),
-                               ('nadie.secreto', '')):
+        # Cada caso: el correo escrito, lo que nunca debe llegar al log y el dominio que sí queda. Lo que no tiene
+        # forma de dominio queda como el marcador fijo, porque puede ser un pedazo de la contraseña (A1 de la
+        # revisión).
+        marcador = routes.NO_ES_DOMINIO
+        for email, secreto, dominio in (
+                ('nadie.secreto@ejemplo.test', 'nadie.secreto', 'ejemplo.test'),
+                ('nadie.secreto@Sub.EJEMPLO-2.test', 'nadie.secreto', 'sub.ejemplo-2.test'),
+                ('nadie.secreto@ejemplo.test\nERROR inventado', 'ERROR inventado', marcador),
+                ('nadie.secreto', 'nadie.secreto', marcador),
+                ('Clave@Marzo2026', 'marzo2026', marcador),
+                ('Clave@Marzo.2026', 'marzo.2026', marcador),
+                ('juan@empresa.com MiClave', 'miclave', marcador),
+                ('juan@empresa.com\tMiClave', 'miclave', marcador),
+                ('juan@ empresa.com', 'juan', marcador),
+                ('juan@', 'juan', marcador),
+                ('juan@.com', 'juan', marcador),
+                ('juan@' + 'a' * 250 + '.com', 'a' * 250, marcador)):
             with self.subTest(email=email), self.assertLogs(routes.log, 'WARNING') as logs:
                 routes._log_unknown_email(email, '198.51.100.1\nx')
             texto, = logs.output
-            self.assertNotIn('nadie.secreto', texto)
+            if secreto != dominio:
+                self.assertNotIn(secreto.lower(), texto.lower())
             self.assertNotIn('\n', texto)
             self.assertIn("ip='198.51.100.1\\nx' dominio='%s'" % dominio, texto)
 
@@ -508,14 +523,18 @@ class RastroDeBloqueos(unittest.TestCase):
         transaccion.assert_not_called()
 
     def test_5_si_la_base_falla_quita_la_marca_y_no_lanza(self):
-        for nombre, llamar in (('login', lambda: routes._record_login_locked(self.EMAIL, self.IP)),
-                               ('mfa', lambda: routes._record_mfa_locked('o-1', 'u-1', self.EMAIL, self.IP))):
-            with self.subTest(nombre), mock.patch.object(sessions, 'first_lock', lambda *_: (True, False)), \
+        # El MFA pasa la empresa a first_lock y a forget_lock (C2 de la revisión): su marca de IP es por empresa.
+        for nombre, llamar, org in (('login', lambda: routes._record_login_locked(self.EMAIL, self.IP), None),
+                                    ('mfa', lambda: routes._record_mfa_locked('o-1', 'u-1', self.EMAIL, self.IP),
+                                     'o-1')):
+            with self.subTest(nombre), mock.patch.object(sessions, 'first_lock',
+                                                         return_value=(True, False)) as marcar, \
                     mock.patch.object(sessions, 'forget_lock') as olvidar, \
                     mock.patch.object(routes, 'transaction', lambda org_id=None, caida=BaseCaida(): caida(org_id)), \
                     self.assertLogs(routes.log, 'ERROR') as logs:
                 llamar()
-            olvidar.assert_called_once_with(nombre, self.EMAIL, self.IP, True, False)
+            marcar.assert_called_once_with(nombre, self.EMAIL, self.IP, *(() if org is None else (org,)))
+            olvidar.assert_called_once_with(nombre, self.EMAIL, self.IP, True, False, org)
             self.assertNotIn(self.EMAIL, '\n'.join(logs.output), 'el error no lleva el correo')
 
     def test_6_si_valkey_falla_no_lanza_ni_toca_la_base(self):
@@ -556,6 +575,14 @@ class RastroDeBloqueos(unittest.TestCase):
     def test_9_first_lock_solo_acepta_login_o_mfa(self):
         with self.assertRaises(ValueError):
             sessions.first_lock('passkey', self.EMAIL, self.IP)
+
+    def test_10_la_marca_de_ip_del_mfa_es_por_empresa(self):
+        # C2 de la revisión: sin empresa la marca es la de siempre (el login); con empresa, una por empresa.
+        sin = sessions._ip_mark_key('login', self.IP, None)
+        self.assertEqual(sin, sessions._lock_mark_key('login', 'ip', self.IP))
+        acme, beta = (sessions._ip_mark_key('mfa', self.IP, org) for org in ('o-acme', 'o-beta'))
+        self.assertEqual(acme, 'login:fail:aviso:mfa:ip:%s:o-acme' % self.IP)
+        self.assertNotEqual(acme, beta)
 
 
 if __name__ == '__main__':
