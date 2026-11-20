@@ -68,7 +68,7 @@ FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
 # páginas de Cert Spotter con 2 intentos de 20 s, 95 s de %marca% con 2 intentos de 45 s y 470 s de las 10 variantes,
 # que es PRESUPUESTO_VARIANTES de crtsh.py, con 20 s en el primer intento y hasta 45 s en el segundo, o 45 s desde el primero
 # si crt.sh viene lento: el presupuesto no cambia, #109, RC-226).
-# Quedan 335 s antes de TOPE_CORRIDA, y el DNS de los nombres vencidos no tiene tope.
+# Quedan 335 s antes de TOPE_CORRIDA, y el DNS de los nombres vencidos tiene PLAZO_DNS (300 s de crtsh.py, RC-288).
 # Por eso, mientras corre una fuente, un hilo aparte marca vida cada LATIDO, hasta TOPE_CORRIDA: una corrida
 # colgada para siempre deja de marcar y el escaneo se da por caído pasado ABANDONO.
 LATIDO = 60                           # segundos entre marcas

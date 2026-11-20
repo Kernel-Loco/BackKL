@@ -9,27 +9,38 @@ a SIEM (export/siem), que por ahora pide la sesión. La empresa sale de la llave
 Una llave de un solo dominio además pasa por in_scope(): toda ruta nueva que acepte llave y lea datos
 de un dominio tiene que revisarlo, porque RLS aísla por empresa, no por dominio.
 """
+import base64
+import binascii
 import json
+import re
+import secrets
 import uuid
 from datetime import date, datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from starlette.concurrency import run_in_threadpool
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from psycopg import IsolationLevel
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
-from cirdan import orquestador, reporte, siem
+from cirdan import cartas, orquestador, reporte, siem
 from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
-from cirdan.auth.deps import Session, client_ip, current_session, in_scope, require_roles, session_or_api_key
+from cirdan.auth.deps import (Session, api_key_or_roles, client_ip, current_session, in_scope, require_roles,
+                              session_or_api_key)
 from cirdan.exportar import csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
+from cirdan.orquestador import txt as dns_txt
 from cirdan.db import audit, transaction
 from cirdan.score import cambios, cobertura, comparacion, configuracion, criterio, motor, plan as plan_accion, subcategorias
 
 router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
+# Lista, CSV, explicación y comparación de hallazgos: como en el portal (src/config/permissions.ts), el gerente no los ve y se
+# queda con los conteos por severidad de GET /domains (RC-280). Una llave de API entra igual.
+LEE_HALLAZGOS = api_key_or_roles('analyst', 'admin')
 
 # ---------------------------------------------------------------- características del reto
 # Desde #23 vienen guardadas en la evidencia. Para los hallazgos de la semilla, que no las traen, se calculan
@@ -219,6 +230,149 @@ def txt_records(session: Session = Depends(require_roles('admin'))):
     return {'items': items, 'total': len(items)}
 
 
+MAX_CARTA = 5 * 1024 * 1024
+MAX_ALTA_BODY = (MAX_CARTA + 2) // 3 * 4 + 16384
+FQDN_ALTA = re.compile(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}')
+EMAIL_ALTA = re.compile(r'[^\s@]+@[^\s@]+\.[^\s@]+')
+
+
+def _datos_alta(body):
+    campos = ('fqdn', 'signer_name', 'signer_title', 'signer_email', 'valid_from', 'valid_until', 'letter_base64')
+    if not isinstance(body, dict) or set(body) != set(campos) | {'passive_monitoring_confirmed'}:
+        raise HTTPException(422, 'Revisa los datos del dominio y de la carta.')
+    if any(not isinstance(body[c], str) for c in campos) or body['passive_monitoring_confirmed'] is not True:
+        raise HTTPException(422, 'Revisa los datos y confirma la autorización.')
+    fqdn = body['fqdn'].strip().lower().removesuffix('.')
+    name, title, email = (body[c].strip() for c in ('signer_name', 'signer_title', 'signer_email'))
+    if not FQDN_ALTA.fullmatch(fqdn):
+        raise HTTPException(422, 'Escribe un dominio válido, como ejemplo.com.')
+    if not name or not title or len(name) > 200 or len(title) > 200 or len(email) > 254 or not EMAIL_ALTA.fullmatch(email):
+        raise HTTPException(422, 'Escribe el nombre, cargo y correo de quien firma.')
+    if any('\x00' in text for text in (name, title, email)):
+        raise HTTPException(422, 'Los datos no pueden contener caracteres nulos.')
+    try:
+        start = date.fromisoformat(body['valid_from'])
+        end = date.fromisoformat(body['valid_until'])
+    except ValueError:
+        raise HTTPException(422, 'Escribe fechas válidas para la carta.') from None
+    if end <= start:
+        raise HTTPException(422, 'La fecha de fin debe ser posterior al inicio.')
+    try:
+        pdf = base64.b64decode(body['letter_base64'], validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(422, 'No se pudo leer el PDF.') from None
+    if len(pdf) > MAX_CARTA:
+        raise HTTPException(413, 'El PDF no puede superar 5 MB.')
+    if not pdf.startswith(b'%PDF-') or b'%%EOF' not in pdf[-1024:]:
+        raise HTTPException(422, 'La carta debe ser un PDF válido.')
+    return fqdn, name, title, email, start, end, pdf
+
+
+def _registrar_dominio(body, request, session):
+    if session.acting_elsewhere:
+        raise HTTPException(403, 'El alta debe hacerla un administrador de la propia empresa.')
+    fqdn, name, title, email, start, end, pdf = _datos_alta(body)
+    token = secrets.token_hex(16)
+    try:
+        with transaction(session.org_id) as conn:
+            conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 44))', (session.org_id,))
+            organization = conn.execute(
+                'SELECT o.status, coalesce(o.domain_limit_override, p.max_domains) AS limit '
+                'FROM organizations o JOIN plans p ON p.id = o.plan_id WHERE o.id = %s',
+                (session.org_id,),
+            ).fetchone()
+            if not organization or organization['status'] not in ('trial', 'active'):
+                raise HTTPException(403, 'La organización no está activa.')
+            count = conn.execute("SELECT count(*) AS total FROM domains WHERE status <> 'removed'").fetchone()['total']
+            if count >= organization['limit']:
+                raise HTTPException(409, 'La organización alcanzó su límite de dominios.')
+            domain_id = conn.execute(
+                "INSERT INTO domains (organization_id, fqdn, status, txt_token, added_by) "
+                "VALUES (%s, %s, 'pending_verification', %s, %s) RETURNING id::text",
+                (session.org_id, fqdn, token, session.user_id),
+            ).fetchone()['id']
+            key, digest = cartas.guardar(pdf, session.org_id, domain_id)
+            conn.execute(
+                'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, '
+                'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                (session.org_id, domain_id, name, title, email, key, digest, start, end, session.user_id),
+            )
+            audit(conn, session.org_id, 'domain.added', session.audit_user_id, client_ip(request), 'domain',
+                  domain_id, {'fqdn': fqdn}, platform=session.audit_platform)
+            domain = next(_domain(row) for row in conn.execute(DOMAINS_SQL).fetchall() if row['id'] == domain_id)
+    except UniqueViolation as error:
+        if error.diag.constraint_name == 'domains_organization_id_fqdn_key':
+            raise HTTPException(409, 'Ese dominio ya está registrado en esta organización.') from None
+        raise
+    return {'domain': domain, 'txt': {'fqdn': fqdn, 'status': 'missing',
+                                       'expected_value': dns_txt.esperado(token), 'checked_at': None}}
+
+
+@router.post('/domains', status_code=201, summary='Registra un dominio y su carta (solo Admin)')
+async def register_domain(request: Request, session: Session = Depends(require_roles('admin'))):
+    if not cartas.habilitado():
+        raise HTTPException(409, 'El alta de dominios no está habilitada: falta configurar el almacenamiento y su respaldo.')
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > MAX_ALTA_BODY:
+            raise HTTPException(413, 'El PDF no puede superar 5 MB.')
+        raw.extend(chunk)
+    try:
+        body = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(422, 'El cuerpo de la solicitud no es válido.') from None
+    return await run_in_threadpool(_registrar_dominio, body, request, session)
+
+
+@router.post('/domains/{fqdn}/txt/verify', summary='Verifica el TXT del dominio (solo Admin)')
+def verify_domain_txt(fqdn: str, request: Request, session: Session = Depends(require_roles('admin'))):
+    with transaction(session.org_id) as conn:
+        domain = conn.execute(
+            "SELECT id::text, fqdn::text, status, txt_token FROM domains "
+            "WHERE fqdn = %s AND status <> 'removed' FOR UPDATE", (fqdn.strip().lower().rstrip('.'),)
+        ).fetchone()
+        if not domain:
+            raise HTTPException(404, 'Dominio no encontrado para esta organización')
+        motivos, _ = orquestador._motivos_previos(conn, domain)
+        if motivos:
+            raise HTTPException(409, orquestador._texto(motivos).replace('No se puede escanear:', 'No se puede verificar el TXT:', 1))
+        if not orquestador.en_vivo_permitido(domain['fqdn']):
+            raise HTTPException(403, 'Este dominio no está habilitado para consultas DNS en vivo.')
+
+        consulta = dns_txt.consultar_dns(domain['fqdn'])
+        resultado = dns_txt.resultado(consulta, domain['txt_token'])
+        esperado = dns_txt.esperado(domain['txt_token'])
+        checked_at = conn.execute(
+            'INSERT INTO dns_txt_verifications (organization_id, domain_id, check_reason, expected_value, '
+            'observed_values, resolver_ip, result, checked_at) VALUES (%s, %s, %s, %s, %s, %s, %s, clock_timestamp()) '
+            'RETURNING checked_at',
+            (session.org_id, domain['id'], 'onboarding', esperado,
+             [esperado] if resultado == 'match' else None, consulta.resolver_ip, resultado),
+        ).fetchone()['checked_at']
+        if resultado == 'match' and domain['status'] == 'pending_verification':
+            try:
+                with conn.transaction():
+                    conn.execute(
+                        "UPDATE domains SET status = 'verified', verified_at = coalesce(verified_at, now()), "
+                        "updated_at = now() WHERE id = %s", (domain['id'],)
+                    )
+            except UniqueViolation:
+                raise HTTPException(409, 'El dominio ya está verificado por otra organización.')
+        audit(conn, session.org_id, 'domain.txt_checked', session.audit_user_id, client_ip(request), 'domain',
+              domain['id'], {'result': resultado}, platform=session.audit_platform)
+        rows = conn.execute(DOMAINS_SQL).fetchall()
+        updated = next(_domain(row) for row in rows if row['id'] == domain['id'])
+
+    if resultado == 'dns_error':
+        raise HTTPException(503, 'No se pudo consultar el DNS. Inténtalo de nuevo más tarde.')
+    return {
+        'domain': updated,
+        'txt': {'fqdn': domain['fqdn'], 'status': 'verified' if resultado == 'match' else 'missing',
+                'expected_value': esperado, 'checked_at': checked_at},
+    }
+
+
 @router.get('/domains', summary='Dominios con autorización, TXT, si se pueden escanear, score y hallazgos abiertos')
 def domains(session: Session = Depends(session_or_api_key)):
     items = [_domain(r) for r in _query(session, DOMAINS_SQL) if in_scope(session, r['id'])]
@@ -281,7 +435,7 @@ def _finding(f):
 
 
 @router.get('/domains/{fqdn}/findings', summary='Hallazgos abiertos del dominio, de más a menos severo')
-def domain_findings(fqdn: str, session: Session = Depends(session_or_api_key)):
+def domain_findings(fqdn: str, session: Session = Depends(LEE_HALLAZGOS)):
     _domain_id(session, fqdn)
     items = [_finding(f) for f in _query(session, FINDINGS_SQL, (fqdn,))]
     return {'domain': fqdn, 'items': items, 'total': len(items)}
@@ -493,7 +647,7 @@ def _registrar_descarga(conn, session, request, tipo, formato, domain_id, filas)
 
 @router.get('/domains/{fqdn}/findings/export', summary='Descarga los hallazgos abiertos del dominio en CSV o JSON')
 def export_findings(request: Request, fqdn: str, formato: str = Query(default='json'),
-                    session: Session = Depends(session_or_api_key)):
+                    session: Session = Depends(LEE_HALLAZGOS)):
     formato = _formato(formato)
     domain_id = _dominio_autorizado(session, fqdn)
     with transaction(session.org_id) as conn:
@@ -626,13 +780,13 @@ def _comparacion(session, fqdn, desde, hasta, descargar=None):
             summary='Compara hallazgo por hallazgo dos scores del histórico: nuevos, que ya no están y que siguen')
 def compare_scores(fqdn: str, desde: str = Query(..., description='score_id del histórico'),
                    hasta: str = Query(..., description='score_id del histórico'),
-                   session: Session = Depends(session_or_api_key)):
+                   session: Session = Depends(LEE_HALLAZGOS)):
     return _comparacion(session, fqdn, desde, hasta)
 
 
 @router.get('/domains/{fqdn}/score/compare/export', summary='Descarga la comparación de dos scores en CSV o JSON')
 def export_comparison(request: Request, fqdn: str, desde: str = Query(...), hasta: str = Query(...),
-                      formato: str = Query(default='json'), session: Session = Depends(session_or_api_key)):
+                      formato: str = Query(default='json'), session: Session = Depends(LEE_HALLAZGOS)):
     formato = _formato(formato)
 
     def descargar(conn, data, domain_id):
@@ -953,7 +1107,7 @@ SELECT f.id::text AS finding_id, f.domain_id::text AS domain_id, d.fqdn::text AS
 
 
 @router.get('/findings/{finding_id}/explanation', summary='Por qué el hallazgo tiene su severidad y cuánto suma al score')
-def finding_explanation(finding_id: str, session: Session = Depends(session_or_api_key)):
+def finding_explanation(finding_id: str, session: Session = Depends(LEE_HALLAZGOS)):
     try:
         finding_id = str(uuid.UUID(finding_id))
     except ValueError:

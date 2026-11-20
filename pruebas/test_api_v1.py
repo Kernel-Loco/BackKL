@@ -17,7 +17,7 @@ from pathlib import Path
 
 from cirdan.score import cobertura, criterio, subcategorias
 from pruebas import sesion
-from pruebas.test_aislamiento import psql
+from pruebas.test_aislamiento import psql, scalar
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
 PROPUESTOS = {'signer_email'}
@@ -819,6 +819,64 @@ class ApiV1(unittest.TestCase):
         self.assertEqual([(t['fqdn'], t['expected_value']) for t in txt], [('olmardo.com', 'cirdan-verification=ab439d2b39a7')])
         analista = sesion.login('jordan.tate@acme-demo.mx')
         self.assertEqual(analista.get('/api/v1/domains/txt')[0], 403)
+
+    def test_7b_el_gerente_no_lee_hallazgos_como_en_el_portal(self):
+        # RC-280: la lista, el CSV, la explicación y la comparación son de analista y admin, como Hallazgos en el
+        # portal. El gerente se queda con los conteos por severidad de /domains y con lo demás de su rol.
+        hallazgo = '80000000-0000-4000-8000-000000000001'
+        comparar = ('/api/v1/domains/acme-demo.mx/score/compare?desde=a0000000-0000-4000-8000-000000000001'
+                    '&hasta=a0000000-0000-4000-8000-000000000004')
+        exportar_comparacion = comparar.replace('/compare?', '/compare/export?') + '&formato=%s'
+        rutas = ('/api/v1/domains/acme-demo.mx/findings', '/api/v1/domains/acme-demo.mx/findings/export?formato=json',
+                 '/api/v1/domains/acme-demo.mx/findings/export?formato=csv',
+                 '/api/v1/findings/%s/explanation' % hallazgo, '/domains/acme-demo.mx/findings', comparar,
+                 exportar_comparacion % 'json', exportar_comparacion % 'csv')
+        acme = '20000000-0000-4000-8000-000000000001'
+        descargas = ("SELECT count(*) FROM audit_log WHERE organization_id = '%s' AND action = 'report.downloaded';"
+                     % acme)
+        gerente = sesion.login('maya.reed@acme-demo.mx')
+        antes = scalar(descargas, user='postgres')
+        for url in rutas + ('/api/v1/findings/no-es-un-id/explanation',
+                            '/api/v1/findings/00000000-0000-4000-8000-000000000000/explanation',
+                            '/api/v1/domains/no-existe.mx/findings', '/api/v1/domains/no-existe.mx/score/compare'
+                            '?desde=a0000000-0000-4000-8000-000000000001&hasta=a0000000-0000-4000-8000-000000000004'):
+            code, body = gerente.get(url)
+            # 403 antes de buscar: no dice si el hallazgo o el dominio existen.
+            self.assertEqual((code, body['detail']), (403, 'Tu rol no tiene permiso para esta acción.'), url)
+        # El 403 llega antes de la exportación: la bitácora no anota una descarga que no hubo.
+        self.assertEqual(scalar(descargas, user='postgres'), antes)
+        analista = sesion.login('jordan.tate@acme-demo.mx')
+        for cliente, quien in ((analista, 'analista'), (self.acme, 'admin')):
+            for url in rutas:
+                if 'formato=csv' in url:
+                    req = sesion.urllib.request.Request(sesion.BASE + url)   # el CSV no es JSON
+                    with cliente.opener.open(req, timeout=10) as r:
+                        self.assertEqual(r.status, 200, (quien, url))
+                else:
+                    self.assertEqual(cliente.get(url)[0], 200, (quien, url))
+        # Una llave de API entra igual, también junto a la cookie del gerente: el Bearer manda. Uno que no sirve es
+        # 401 y no cae a la cookie. La descarga con llave ya la prueban test_llaves_api y test_bitacora_descargas.
+        self.psql_o_falla("UPDATE organizations SET plan_id = (SELECT id FROM plans WHERE code = 'business') "
+                          "WHERE id = '%s';" % acme, 'plan business para la llave')
+        try:
+            code, body = self.acme.post('/api/v1/api-keys', {'own_use': True, 'name': 'CIRDAN_FAKE_rc280'})
+            self.assertEqual(code, 201, body)
+            llave = {'Authorization': 'Bearer ' + body['key']}
+            mala = {'Authorization': 'Bearer ' + body['key'] + 'x'}
+            for url in (rutas[0], rutas[3], comparar):
+                self.assertEqual(sesion.Client().get(url, headers=llave)[0], 200, url)
+                self.assertEqual(gerente.get(url, headers=llave)[0], 200, url)
+                self.assertEqual(gerente.get(url, headers=mala)[0], 401, url)
+        finally:
+            self.psql_o_falla("DELETE FROM api_keys WHERE name = 'CIRDAN_FAKE_rc280'; UPDATE organizations SET plan_id = "
+                              "(SELECT id FROM plans WHERE code = 'starter') WHERE id = '%s';" % acme,
+                              'quitar la llave y volver a starter')
+        # Lo que sí es del gerente sigue igual: conteos, score, histórico, plan y reporte.
+        dominio = next(d for d in self.get(gerente, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
+        self.assertEqual(set(dominio['open_findings']), {'critical', 'high', 'medium', 'low'})
+        for url in ('/api/v1/domains/acme-demo.mx/score', '/api/v1/domains/acme-demo.mx/score/history',
+                    '/api/v1/domains/acme-demo.mx/action-plan', '/api/v1/domains/acme-demo.mx/report'):
+            self.assertEqual(gerente.get(url)[0], 200, url)
 
     def test_8_plan_y_simulacion_no_modifican_hallazgos_ni_score(self):
         score_before = self.get(self.acme, '/api/v1/domains/acme-demo.mx/score')

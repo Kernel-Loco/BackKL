@@ -12,6 +12,7 @@ COOKIE_SECURE = config('COOKIE_SECURE', 'false').lower() == 'true'  # true en pr
 ROL_LLAVE = 'api_key'  # no es un rol de la base: ningún require_roles() lo deja pasar
 LLAVE_INVALIDA = 'La llave de API no es válida, venció o fue revocada.'
 SESION_TERMINADA = 'Tu sesión terminó. Vuelve a iniciar sesión.'
+SIN_PERMISO = 'Tu rol no tiene permiso para esta acción.'
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,19 @@ def require_roles(*roles):
     def dependency(request: Request) -> Session:
         session = current_session(request)
         if session.role not in roles:
-            raise HTTPException(403, 'Tu rol no tiene permiso para esta acción.')
+            raise HTTPException(403, SIN_PERMISO)
+        return session
+    return dependency
+
+
+def api_key_or_roles(*roles):
+    """Como session_or_api_key, pero con cookie solo deja pasar a esos roles de la base (RC-280).
+
+    Una llave de API entra igual que con session_or_api_key: la crea un Admin y la limita su dominio. Con cookie, otro
+    rol recibe 403, como require_roles(). Así el gerente no lee por la API lo que el portal no le muestra."""
+    def dependency(request: Request) -> Session:
+        session = session_or_api_key(request)
+        if session.role != ROL_LLAVE and session.role not in roles:
+            raise HTTPException(403, SIN_PERMISO)
         return session
     return dependency

@@ -80,6 +80,7 @@ Código de salida: 0 bien, 1 si queda en 'failed', 2 si quedan avisos.
 import argparse
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -98,7 +99,7 @@ from pathlib import Path
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import contrato
+from cirdan.recolectores import contrato, transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos, en_alcance_nombre, fecha_iso, nombre_archivo)
@@ -556,24 +557,13 @@ def _entorno(casa):
 
 
 def _descargar(url, timeout):
-    """El cuerpo de la respuesta. `timeout` vale para cada operación del socket y también para toda la respuesta, así
-    una que llega gota a gota se corta igual."""
-    fin = time.monotonic() + timeout
+    """El cuerpo de la respuesta con transporte.descargar() (RC-304): `timeout` es el plazo de toda la petición, de
+    getaddrinfo al último bloque, y el cuerpo no pasa de MAX_BYTES (ValueError). Como RDAP y Shodan, nunca sigue una
+    redirección (Redirigida), no usa los proxies del entorno y solo se conecta a direcciones públicas en el 443
+    (RC-299). El HTTPError de un 4xx o un 5xx sale tal cual, para que _api lea su código."""
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/vnd.github+json',
                                                'X-GitHub-Api-Version': VERSION_API})
-    partes, total = [], 0
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        while True:
-            if time.monotonic() > fin:
-                raise TimeoutError('la respuesta no terminó en %s s' % timeout)
-            trozo = r.read1(64 * 1024)
-            if not trozo:
-                break
-            partes.append(trozo)
-            total += len(trozo)
-            if total > MAX_BYTES:
-                raise ValueError('respuesta de más de %d bytes' % MAX_BYTES)
-    return b''.join(partes)
+    return transporte.descargar(req, time.monotonic() + timeout, MAX_BYTES, time.monotonic)
 
 
 def _archivo(consulta):
@@ -673,8 +663,13 @@ class ClienteGitHub:
 
     def _api(self, ruta, paso):
         """JSON de la API de GitHub con hasta INTENTOS intentos, dentro del tiempo de la corrida. Un 404 lanza NoExiste
-        y un 403 o 429 CuotaAgotada, sin reintentar. Lo demás sale como FuenteNoResponde con texto fijo."""
+        y un 403 o 429 CuotaAgotada, sin reintentar. Lo demás sale como FuenteNoResponde con texto fijo. Una redirección
+        (transporte.Redirigida) no se sigue ni se reintenta, y un PlazoVencido se reintenta como cualquier falla de la
+        red (RC-304)."""
         url = API + ruta
+
+        def fija():
+            return FuenteNoResponde('github: la API de GitHub no respondió (%s)' % paso)
 
         def consulta():
             limite = min(TIMEOUT_HTTP, self.restante())
@@ -683,6 +678,8 @@ class ClienteGitHub:
             self.consultas += 1
             try:
                 return json.loads(self.descargar(url, limite))
+            except transporte.Redirigida:
+                raise fija() from None   # otro intento volvería a redirigir
             except urllib.error.HTTPError as e:
                 codigo = e.code
                 e.close()
@@ -695,13 +692,14 @@ class ClienteGitHub:
                 raise
         consulta.__name__ = paso
         try:
-            return con_reintentos(consulta, intentos=INTENTOS, dormir=self.dormir)
+            return con_reintentos(consulta, intentos=INTENTOS, dormir=self.dormir,
+                                  errores=(OSError, ValueError, http.client.HTTPException, transporte.PlazoVencido))
         except (NoExiste, CuotaAgotada):
             raise
         except FuenteNoResponde as e:
             if str(e).startswith('github: '):
                 raise
-            raise FuenteNoResponde('github: la API de GitHub no respondió (%s)' % paso) from None
+            raise fija() from None
 
     def perfil(self, org, dominio):
         consulta = 'perfil:' + org

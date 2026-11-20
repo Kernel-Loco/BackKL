@@ -88,7 +88,8 @@ COPY cirdan/ cirdan/
 # Las grabaciones de las demás fuentes, como la de crt.sh, siguen de root. Una grabación hecha así se pierde al
 # recrear el contenedor: para guardarla se monta la carpeta de la fuente, como dice el README.
 RUN useradd --system --uid 10001 cirdan \
-    && chown -R cirdan:cirdan cirdan/recolectores/respuestas_grabadas/subfinder
+    && chown -R cirdan:cirdan cirdan/recolectores/respuestas_grabadas/subfinder \
+    && install -d -m 0700 -o cirdan -g cirdan /var/lib/cirdan/cartas
 USER cirdan
 
 EXPOSE 8000

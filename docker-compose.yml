@@ -59,6 +59,10 @@ services:
       # de su secreto en Key Vault, una de las dos (cirdan/auth/passwords.py).
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
       PASSWORD_HASH_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_KEY_VAULT_SECRET_URL:-}
+      CARTA_ALTA_ENABLED: ${CARTA_ALTA_ENABLED:-false}
+      CARTA_STORAGE_DIR: /var/lib/cirdan/cartas
+      CARTA_ENCRYPTION_KEY: ${CARTA_ENCRYPTION_KEY:-}
+      CARTA_KEY_VAULT_SECRET_URL: ${CARTA_KEY_VAULT_SECRET_URL:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Dominio al que quedan amarradas las passkeys (RC-331). localhost en tu PC; los orígenes salen de ALLOWED_ORIGINS.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
@@ -92,6 +96,8 @@ services:
       API_DOCS: ${API_DOCS:-false}
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - cirdan-cartas:/var/lib/cirdan/cartas
     depends_on:
       db:
         condition: service_healthy
@@ -130,3 +136,4 @@ services:
 
 volumes:
   cirdan-pg16-data:
+  cirdan-cartas:
