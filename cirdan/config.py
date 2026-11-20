@@ -40,8 +40,8 @@ def _como_origin(origen):
 def origenes_permitidos():
     """Orígenes de `ALLOWED_ORIGINS`, sin espacios ni vacíos y escritos como el Origin del navegador. Sin poner o vacía,
     ORIGENES_LOCALES: docker-compose.yml la pasa a la API con `${ALLOWED_ORIGINS:-}`, y con '' la API rechazaría toda
-    escritura con Origin (comentario 10401 de RC-277). Es la misma regla que el candado de las cuentas de demo
-    (cirdan/auth/demo.py). La usan el filtro de Origin (cirdan/api/main.py), las passkeys y la regla de RC-286."""
+    escritura con Origin (comentario 10401 de RC-277). El candado de las cuentas de demo (cirdan/auth/demo.py) toma
+    igual la vacía, pero no normaliza: ahí un origen con mayúsculas cuenta como publicado. La usan el filtro de Origin (cirdan/api/main.py), las passkeys y la regla de RC-286."""
     declarados = [_como_origin(o.strip()) for o in (config('ALLOWED_ORIGINS') or '').split(',') if o.strip()]
     return declarados or ORIGENES_LOCALES.split(',')
 
