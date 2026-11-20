@@ -1179,9 +1179,10 @@ class Orquestador(unittest.TestCase):
                                          conn=self.conn)
 
     def test_3c6_cert_spotter_se_pide_una_vez_por_pagina_en_cada_escaneo(self):
-        """RC-326, con base. Un escaneo en vivo con las cuatro fuentes que piden Cert Spotter hace 2 consultas (la
-        página y la vacía que cierra), no 8, y el cupo diario de cada fuente sube solo con lo que de verdad salió. Sin
-        compartir (certspotter.descargar directo al transporte) son 6 consultas más, 2 de ct_logs, shodan y web."""
+        """RC-326, con base. Un escaneo en vivo con las cinco fuentes que piden Cert Spotter hace 2 consultas (la
+        página y la vacía que cierra), no 10, y el cupo diario de cada fuente sube solo con lo que de verdad salió. Sin
+        compartir (certspotter.descargar directo al transporte) son 8 consultas más, 2 de ct_logs, identity, shodan y
+        web (identity desde RC-56)."""
         def escanear(compartido):
             red = RedSimulada()
             antes = {codigo: self.cupo(codigo)[1] for codigo in FUENTES_CT}
@@ -1203,10 +1204,10 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(len(con.cert_spotter), 2)
         self.assertEqual(subio, por_fuente)  # el cupo cuenta lo que gastó cada fuente, nada reservado de más
         sin, por_fuente_sin, subio_sin = escanear(compartido=False)
-        self.assertEqual(len(sin.cert_spotter), 8)
+        self.assertEqual(len(sin.cert_spotter), 10)
         self.assertEqual(subio_sin, por_fuente_sin)
         self.assertEqual({codigo: por_fuente_sin[codigo] - por_fuente[codigo] for codigo in FUENTES_CT},
-                         {'api_docs': 0, 'ct_logs': 2, 'shodan': 2, 'web': 2})
+                         {'api_docs': 0, 'ct_logs': 2, 'identity': 2, 'shodan': 2, 'web': 2})
 
     def test_3c7_un_reintento_del_orquestador_vuelve_a_pedir_cert_spotter(self):
         """RC-326, con base. Con crt.sh caído y Cert Spotter con 503, ct_logs queda en 'retrying'. Si Cert Spotter

@@ -118,7 +118,7 @@ Los `kris` de `score.json` son los de la semilla de demo (`db/semillas/001_datos
 
 - Certificados cuenta el `cert_expired` de dev.acme-demo.mx, que la semilla atribuye a `shodan` (ver `hallazgos.json`). En un escaneo real esa regla solo la emite `ct_logs`. Un KRI junta sus aportes por código de regla, sin mirar qué fuente trajo el hallazgo.
 - Certificados sale `partial` con `sources_not_run` en `['web']`, porque el escaneo sembrado no corrió la visita web, que desde RC-239 también alimenta ese KRI. En un escaneo real con `web` completo sale `ok`.
-- `coverage_gaps` trae los códigos de `api_docs`, `github` y `web` con `source_not_run`, porque el escaneo sembrado solo corrió `ct_logs`, `dns`, `whois`, `shodan` y `hibp`. Ninguna de esas corridas guarda `sin_cobertura` en su `raw_payload`.
+- `coverage_gaps` trae los códigos de `api_docs`, `github`, `identity` y `web` con `source_not_run`, porque el escaneo sembrado solo corrió `ct_logs`, `dns`, `whois`, `shodan` y `hibp`. Ninguna de esas corridas guarda `sin_cobertura` en su `raw_payload`.
 - Exposición de servicios sale con `rules_without_coverage` vacío y el score con `partial_coverage` en `false`, porque el escaneo sembrado no guarda `rules_without_coverage` en `scans.stats`. En un escaneo real `shodan` deja siempre `exposed_iot_device` y `exposed_ot_device` sin cobertura (`SIN_LLAVE` en `cirdan/recolectores/shodan.py`), así que esas dos reglas salen en `rules_without_coverage` del KRI y el score sale con `partial_coverage` en `true`.
 
 ## Explicación (`explicacion.json`)
