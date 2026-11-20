@@ -43,8 +43,8 @@ demás. Si no se sabe, sin_revisar va en None y solo se cierra lo que salió de 
 perfil de GitHub enlazado lleva también como partes los sitios que lo enlazan.
 
 La grabación guarda solo lo ya reducido (los correos del dominio, los personales enmascarados y los perfiles, y de una
-redirección su destino sin consulta y los correos de su certificado), nunca el cuerpo de una página ni un correo de
-terceros.
+redirección su destino sin correos ni valores sensibles en la consulta y los correos de su certificado), nunca el
+cuerpo de una página ni un correo de terceros.
 
 Uso:
   python -m cirdan.recolectores.identidad --reproducir olmardo.com
@@ -132,6 +132,9 @@ FORMATOS = (('nombre.apellido', re.compile(r'[a-z]{2,30}\.[a-z]{2,30}')),
 # etiqueta ('.xn--p1ai', '.x1'): sin eso el retroceso lo cortaba en un nombre del dominio que no es el del correo.
 _CORREO = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]{1,64})@((?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)"
                      r"{1,8}(?:[A-Za-z]{2,63}|xn--[A-Za-z0-9-]{1,59}))(?![A-Za-z0-9-]|\.[A-Za-z0-9])", re.A)
+# La última etiqueta del host que es una palabra con mayúscula inicial ('ti@acme.com.Gracias'): el correo cerró la frase
+# sin espacio. Sin cortarla, el host quedaba acme.com.gracias y el correo del dominio se perdía (R6 de RC-56).
+_PALABRA = re.compile(r'[A-Z][a-z]{1,62}')
 _HUELLA = re.compile(r'[0-9a-f]{64}')
 _ENMASCARADO = re.compile(r'(?:[a-z0-9])?\*\*\*@[a-z0-9.-]{3,40}')
 MIN_USUARIO_MASCARA = 4                    # con un usuario más corto la máscara no lleva su primera letra
@@ -152,7 +155,8 @@ RESERVADAS = {
                'readme', 'search', 'security', 'settings', 'site', 'sponsors', 'team', 'topics', 'trending', 'pulls',
                'issues', 'codespaces', 'signup', 'logout', 'password_reset', 'users', 'orgs', 'dashboard',
                'solutions', 'resources', 'copilot', 'why-github', 'premium-support', 'mobile', 'blog', 'partners',
-               'education', 'nonprofit', 'git-guides', 'github', 'stars', 'watching', 'gist', 'discussions', 'actions', 'packages', 'ai', 'customer', 'case-studies', 'newsroom', 'careers'},
+               'education', 'nonprofit', 'git-guides', 'github', 'stars', 'watching', 'gist', 'discussions',
+               'actions', 'packages', 'ai', 'customer', 'case-studies', 'newsroom', 'careers'},
     'gitlab': {'explore', 'help', 'users', 'dashboard', 'search', 'admin', 'projects', 'groups', 'api', '-'},
     'x': {'home', 'share', 'intent', 'i', 'search', 'hashtag', 'explore', 'settings', 'login', 'signup', 'tos',
           'privacy', 'messages', 'notifications', 'compose'},
@@ -377,10 +381,14 @@ def _correos_del_texto(texto, dominio):
     for t in (base, urllib.parse.unquote(base)):
         for m in _CORREO.finditer(t):
             correo = (m.group(1) + '@' + m.group(2)).lower()
+            tipo = _clasificar(correo, dominio)
+            corto, _, ultima = m.group(2).rpartition('.')
+            if tipo is None and '.' in corto and _PALABRA.fullmatch(ultima):
+                correo = (m.group(1) + '@' + corto).lower()
+                tipo = _clasificar(correo, dominio)
             if correo in vistos:
                 continue
             vistos.add(correo)
-            tipo = _clasificar(correo, dominio)
             if tipo is None:
                 continue
             if tipo[0] == 'dominio':
@@ -572,10 +580,42 @@ def _cert_de_redireccion(datos, dominio):
     return {'correos_cert': propios, 'personales_cert': personales}
 
 
+# Parámetros de la consulta de una redirección cuyo valor no se lee ni se graba: puede ser un correo o una credencial
+SENSIBLES = frozenset({'login_hint', 'email', 'mail', 'correo', 'user', 'username', 'usuario', 'token', 'code',
+                       'state', 'nonce', 'ticket', 'sid', 'key', 'apikey', 'api_key', 'sig', 'signature', 'otp',
+                       'samlrequest', 'samlresponse', 'relaystate'})
+PEDAZOS_SENSIBLES = ('token', 'secret', 'password', 'passwd', 'session', 'auth')
+
+
+def _sin_correos(texto, segura):
+    """`texto` tal cual, o, si trae un correo (también con %XX una o dos veces, como '%2540'), decodificado, sin los
+    correos y codificado otra vez con `segura` (sin '%': aplicarlo dos veces da lo mismo, R4 de RC-56)."""
+    doble = urllib.parse.unquote(urllib.parse.unquote(texto))
+    if not _CORREO.search(doble):
+        return texto
+    return urllib.parse.quote(_CORREO.sub('_', doble), safe=segura)
+
+
+def _consulta_sin_datos(consulta):
+    """La consulta de una redirección con sus parámetros en el mismo orden, sin correos y sin el valor de los
+    parámetros de SENSIBLES o con un pedazo de PEDAZOS_SENSIBLES en el nombre (R2 de RC-56)."""
+    if not consulta:
+        return ''
+    pares = []
+    for par in consulta.split('&'):
+        nombre, igual, valor = par.partition('=')
+        llano = urllib.parse.unquote_plus(nombre).strip().lower()
+        if llano in SENSIBLES or any(p in llano for p in PEDAZOS_SENSIBLES):
+            valor = ''
+        pares.append(_sin_correos(nombre, "/:!$'()*+,-._~") + igual + _sin_correos(valor, "/:!$'()*+,-._~?"))
+    return '&'.join(pares)
+
+
 def _destino_sin_datos(destino):
-    """El destino de una redirección como se lee y se graba (a4): sin usuario, sin consulta, sin fragmento ni
-    ';parámetros', y sin correos en la ruta. Una consulta puede traer un correo (login_hint, ref) o un token. La que no
-    se puede leer queda en None, que _recorrer trata como ilegible."""
+    """El destino de una redirección como se lee y se graba (a4): sin usuario, sin fragmento ni ';parámetros', y sin
+    correos en la ruta. La consulta se queda, sin correos ni valores sensibles (_consulta_sin_datos): sin ella, una
+    portada que redirige a /?lang=es volvía a / hasta MAX_REDIRECCIONES (R2). La ruta va tal cual si no trae un correo
+    (R4). El destino que no se puede leer queda en None, que _recorrer trata como ilegible."""
     if not isinstance(destino, str):
         return None
     try:
@@ -583,9 +623,9 @@ def _destino_sin_datos(destino):
         partes.port
     except ValueError:
         return None
-    ruta = _CORREO.sub('_', urllib.parse.unquote(partes.path.split(';', 1)[0]))
-    return urllib.parse.urlunsplit((partes.scheme, partes.netloc.rpartition('@')[2],
-                                    urllib.parse.quote(ruta, safe="/%:!$&'()*+,=-._~"), '', ''))
+    ruta = _sin_correos(partes.path.split(';', 1)[0], "/:!$&'()*+,=-._~")
+    return urllib.parse.urlunsplit((partes.scheme, partes.netloc.rpartition('@')[2], ruta,
+                                    _consulta_sin_datos(partes.query), ''))
 
 
 def _reto(datos):
@@ -858,12 +898,19 @@ def _revisar(res, cliente, dominio, ahora):
             # sitio ya no enlaza. Si no se sabe, None: solo se cierra lo que salió de partes revisadas.
             if ct_completo and gh['enumerado']:
                 res.sin_revisar = sorted(set(faltan + cortados + gh['sobran']) - set(hechos))
+            if sin_llave:
+                # R1: con revisados el orquestador cierra por partes sin mirar sin_cobertura, y cerraría los
+                # personal_email_exposed abiertos de las partes revisadas aunque sigan ahí. Sin partes revisadas no
+                # se cierra nada: lo demás espera a una corrida con la llave o completa.
+                res.revisados, res.sin_revisar = [], None
         else:
             res.sin_cobertura = list(CODIGOS)
         res.avisos.append('%s, se revisaron %d de %d sitios' % (PARCIAL, len([h for h in hechos if ':' not in h]),
                                                                 len(sitios)))
-    if sin_llave and 'personal_email_exposed' not in res.sin_cobertura:
-        res.sin_cobertura = list(res.sin_cobertura) + ['personal_email_exposed']
+    if sin_llave:
+        if 'personal_email_exposed' not in res.sin_cobertura:
+            res.sin_cobertura = list(res.sin_cobertura) + ['personal_email_exposed']
+        res.sin_llave = ['personal_email_exposed']   # R5: el portal lo muestra como falta de llave (RC-229)
     if cliente.modo == 'grabar' and cliente.degradada(parcial):
         res.avisos.insert(0, NO_SE_GRABO)
     else:
@@ -937,7 +984,10 @@ def _sitios(res, cliente, dominio, ahora, parcial):
                 parcial.append('ilegible')
                 continue
             sitio.cert = cliente.certs.get('https://%s/' % nombre)   # si su primera respuesta fue una redirección
-            _registrar(sitios, sitio, host, vista)
+            final = _registrar(sitios, sitio, host, vista)
+            if final is not None and final is not sitio and final.cert is None:
+                # R3: el destino (a -> z -> otro dominio) queda visto con los correos del certificado de su saludo
+                final.cert = cliente.certs.get(url)
     finally:
         cliente.reserva = 0
     sin_tiempo = [n for n in sin_tiempo if n not in sitios or not (sitios[n].visto or sitios[n].falta)]
@@ -954,31 +1004,31 @@ def _sitios(res, cliente, dominio, ahora, parcial):
 
 
 def _registrar(sitios, sitio, host, vista):
-    """Lo que dejó la visita de `sitio`, que terminó en `host` (él mismo o el destino de sus redirecciones)."""
+    """Lo que dejó la visita de `sitio`, que terminó en `host` (él mismo o el destino de sus redirecciones). Devuelve
+    el _Sitio al que quedó lo visto, o None si el destino ya se conocía."""
     if host != sitio.nombre:   # redirigió dentro del dominio: lo que se vio es de `host`
         sitio.visto = True
         destino = sitios.setdefault(host, _Sitio(host))
         if destino.visto or destino.falta or vista.get('ya_visitado'):
-            return
+            return None
         sitio = destino
     if vista.get('fuera') or vista.get('rechazada') or vista.get('ya_visitado'):
         sitio.visto = True   # manda a otro dominio o no tiene https ni http: no hay página del dominio que leer
-        return
-    if 'sin_respuesta' in vista:
+    elif 'sin_respuesta' in vista:
         sitio.sin_revisar(vista['sin_respuesta'])
-        return
-    if 'identidad' not in vista:   # una página que limpiar() no redujo: no se lee
+    elif 'identidad' not in vista:   # una página que limpiar() no redujo: no se lee
         sitio.sin_revisar('pagina')
-        return
-    sitio.pagina = vista
-    if vista['reto']:
-        sitio.sin_revisar('reto')
-    elif visita._error_servidor(vista):
-        sitio.sin_revisar('error_http')
-    elif vista['cortado']:
-        sitio.sin_revisar('cortado')
     else:
-        sitio.visto = True
+        sitio.pagina = vista
+        if vista['reto']:
+            sitio.sin_revisar('reto')
+        elif visita._error_servidor(vista):
+            sitio.sin_revisar('error_http')
+        elif vista['cortado']:
+            sitio.sin_revisar('cortado')
+        else:
+            sitio.visto = True
+    return sitio
 
 
 def _leer_sitio(res, sitio, junta):

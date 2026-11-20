@@ -500,6 +500,7 @@ class Revision(unittest.TestCase):
                 self.assertEqual(hallazgos(res, 'personal_email_exposed'), [])
                 self.assertIn(identidad.SIN_LLAVE, res.avisos)
                 self.assertIn('personal_email_exposed', res.sin_cobertura)
+                self.assertEqual(res.sin_llave, ['personal_email_exposed'])   # R5
                 self.assertEqual(res.avisos[0], identidad.NO_SE_GRABO)
                 self.assertFalse(list(carpeta.glob('*.json')))
                 self.assertTrue(hallazgos(res, 'email_pattern_exposed'))   # lo demás sí sale
@@ -550,17 +551,25 @@ class Revision(unittest.TestCase):
             viejo = [h for h in hallazgos(res, 'personal_email_exposed') if h.partes == [www]]
             self.assertEqual([h.evidencia['donde'] for h in viejo], [['certificado de %s' % www]])
             texto = '\n'.join(p.read_text(encoding='utf-8') for p in carpeta.glob('*.json')).lower()
-            for nunca in ('login_hint', 'cirdan_fake_', '#x'):
+            for nunca in ('login_hint=c', 'cirdan_fake_', '#x'):
                 self.assertNotIn(nunca, texto)
             otra, cliente, _ = correr({}, red=Red(ct=[], github_={}), zona=zona, modo='reproducir', carpeta=carpeta)
             self.assertEqual(cliente.consultas, 0)
             self.assertEqual((otra.activos, otra.hallazgos, otra.revisados), (res.activos, res.hallazgos, None))
 
     def test_5_el_destino_de_una_redireccion_se_lee_sin_datos(self):
-        """a4: sin usuario, consulta, fragmento, ';parámetros' ni correos en la ruta. Dos veces da lo mismo."""
-        casos = {'https://u:p@acme-demo.mx/a;jsessionid=1?ref=x@gmail.com#f': 'https://acme-demo.mx/a',
+        """a4: sin usuario, fragmento, ';parámetros' ni correos en la ruta. R2: la consulta se queda sin correos ni
+        valores sensibles. R4: una ruta sin correo va tal cual ('%2541' no pasa a '%41') y un correo codificado dos
+        veces ('%2540') también se quita. Dos veces da lo mismo."""
+        casos = {'https://u:p@acme-demo.mx/a;jsessionid=1?ref=x@gmail.com#f': 'https://acme-demo.mx/a?ref=_',
                  'https://acme-demo.mx/u/juan.perez@gmail.com/': 'https://acme-demo.mx/u/_/',
-                 'https://acme-demo.mx': 'https://acme-demo.mx'}
+                 'https://acme-demo.mx': 'https://acme-demo.mx',
+                 'https://acme-demo.mx/a%2541': 'https://acme-demo.mx/a%2541',
+                 'https://acme-demo.mx/u/juan%2540gmail.com': 'https://acme-demo.mx/u/_',
+                 'https://acme-demo.mx/?lang=es': 'https://acme-demo.mx/?lang=es',
+                 'https://acme-demo.mx/sso?login_hint=ana%40gmail.com&token=abc&Session_Id=9&next=%2Fa&code':
+                     'https://acme-demo.mx/sso?login_hint=&token=&Session_Id=&next=%2Fa&code',
+                 'https://acme-demo.mx/?ref=ana%2540gmail.com&x=1': 'https://acme-demo.mx/?ref=_&x=1'}
         for destino, esperado in casos.items():
             self.assertEqual(identidad._destino_sin_datos(destino), esperado, destino)
             self.assertEqual(identidad._destino_sin_datos(esperado), esperado, destino)
@@ -646,6 +655,86 @@ class Revision(unittest.TestCase):
         res, cliente, _ = correr(sitios, red=Red(ct=[500, pagina_ct, 500, vacia], github_=api), zona=zona)
         self.assertGreater(res.consultas, identidad.MAX_CONSULTAS // 2)
         self.assertLessEqual(res.consultas, identidad.MAX_CONSULTAS)
+
+
+class Ronda2(unittest.TestCase):
+    """Las regresiones que encontró la ronda 2 de la revisión de RC-56, cada una con su id (R1 a R7)."""
+
+    def test_1_sin_llave_una_corrida_parcial_no_cierra_correos_personales(self):
+        """R1: con más de MAX_REPOS_API repos la corrida es parcial. Con revisados, el orquestador cierra por partes sin
+        mirar sin_cobertura: sin llave, revisados va vacío y sin_revisar en None, así no se cierra ningún correo
+        personal abierto. Con la llave, la misma corrida sí da sus partes."""
+        repos = [{'name': 'r%d' % i, 'fork': False, 'disabled': False, 'private': False, 'size': 1,
+                  'pushed_at': '2026-10-%02dT10:00:00Z' % (i + 1)} for i in range(identidad.MAX_REPOS_API + 2)]
+        red = lambda: Red(github_={'/orgs/acme-demo/repos': repos})   # noqa: E731
+        con_llave, _, _ = correr(ACME, red=red())
+        self.assertIn(DOMINIO, con_llave.revisados)
+        self.assertIsNotNone(con_llave.sin_revisar)
+        with mock.patch.dict(os.environ, {identidad.LLAVE: ''}):
+            res, _, _ = correr(ACME, red=red())
+        self.assertEqual(res.revisados, [])
+        self.assertIsNone(res.sin_revisar)
+        self.assertIn('personal_email_exposed', res.sin_cobertura)
+        self.assertEqual(res.sin_llave, ['personal_email_exposed'])   # R5
+        self.assertEqual(hallazgos(res, 'personal_email_exposed'), [])
+        self.assertTrue(hallazgos(res, 'email_pattern_exposed'))
+        self.assertEqual(contrato.validar(res, set(identidad.CODIGOS)), [])
+
+    def test_2_una_portada_que_redirige_a_su_consulta_se_lee(self):
+        """R2: / que manda a /?lang=es volvía a / hasta MAX_REDIRECCIONES y la raíz quedaba sin revisar."""
+        sitios = {'https://acme-demo.mx/': {'redirige': 'https://acme-demo.mx/?lang=es', 'codigo': 302},
+                  'https://acme-demo.mx/?lang=es': pagina('acme.html')}
+        res, _, _ = correr(sitios, red=Red(github_={}))
+        self.assertIsNone(res.revisados)
+        self.assertTrue(de_tipo(res, 'email'))
+        self.assertFalse(any('redirecciones' in x for x in res.avisos), res.avisos)
+
+    def test_3_el_destino_que_sale_del_dominio_trae_su_certificado(self):
+        """R3: en acme-demo.mx -> tienda -> otro dominio, tienda quedaba visto sin los correos de su certificado."""
+        tienda = 'tienda.acme-demo.mx'
+        sitios = {'https://acme-demo.mx/': {'redirige': 'https://%s/' % tienda, 'codigo': 301},
+                  'https://%s/' % tienda: {'redirige': 'https://otra-empresa.com/', 'codigo': 302, 'tls': {
+                      'version': 'TLSv1.3', 'cifrado': 'TLS_AES_256_GCM_SHA384',
+                      'correos': ['CIRDAN_FAKE_tienda@gmail.com', 'pki@acme-demo.mx']}}}
+        zona = {DOMINIO: a(IP), tienda: a(IP)}
+        res, _, _ = correr(sitios, red=Red(ct=paginas(tienda), github_={}), zona=zona)
+        self.assertEqual(de_tipo(res, 'email')['pki@acme-demo.mx'].atributos['identidad']['donde'],
+                         ['certificado de %s' % tienda])
+        personal = hallazgos(res, 'personal_email_exposed')
+        self.assertEqual([(h.partes, h.evidencia['donde']) for h in personal],
+                         [([tienda], ['certificado de %s' % tienda])])
+
+    def test_4_la_grabacion_de_un_destino_con_por_ciento_reproduce_lo_mismo(self):
+        """R4: '/a%2541' se grababa como '/a%41' y al reproducir salía '/aA'. Y '/u/juan%2540gmail.com' grababa el
+        correo codificado."""
+        cliente = identidad.ClienteIdentidad(dominio=DOMINIO)
+        for destino, esperado in (('https://acme-demo.mx/a%2541', 'https://acme-demo.mx/a%2541'),
+                                  ('https://acme-demo.mx/u/CIRDAN_FAKE_j%2540gmail.com', 'https://acme-demo.mx/u/_')):
+            limpia = cliente.limpiar({'redirige': destino, 'codigo': 301})
+            self.assertEqual(limpia['redirige'], esperado)
+            self.assertEqual(cliente.limpiar(json.loads(json.dumps(limpia)))['redirige'], esperado)
+
+    def test_5_un_correo_que_cierra_la_frase_sin_espacio_sale(self):
+        """R6: 'ti@acme-demo.mx.Gracias' daba el host acme-demo.mx.gracias y el correo se perdía. Solo se corta una
+        palabra con mayúscula inicial: '.RU' o '.x1' detrás siguen sin ser del dominio."""
+        texto = ('ti.lopez@acme-demo.mx.Gracias, CIRDAN_FAKE_juan@gmail.com.Saludos, luis@acme-demo.mx.RU '
+                 'ana@acme-demo.mx.x1 beto@acme-demo.mx.Mx.Gracias')
+        propios, personales, _ = identidad._correos_del_texto(texto, DOMINIO)
+        self.assertEqual(propios, ['ti.lopez@acme-demo.mx'])
+        self.assertEqual([p['correo'] for p in personales], ['c***@gmail.com'])
+
+    def test_6_la_documentacion_dice_lo_que_hace(self):
+        """R7: sin_revisar también lleva los perfiles, al reproducir sin llave sale lo grabado, la consulta de una
+        redirección se queda sin datos y cambiar la llave cierra los abiertos (no los reabre)."""
+        doc = (RAIZ / 'docs' / 'contrato_plugin.md').read_text(encoding='utf-8')
+        parrafo = next(p for p in doc.split('\n') if p.startswith('El recolector de identidad pasiva'))
+        for frase in ('`github:perfil:<login>`', 'Al reproducir no hace falta la llave', '`sin_llave`',
+                      '`revisados` vacío', 'con su consulta sin correos'):
+            self.assertIn(frase, parrafo)
+        self.assertNotIn('sin usuario, consulta,', parrafo)
+        env = (RAIZ / '.env.example').read_text(encoding='utf-8')
+        self.assertNotIn('se reabren', env)
+        self.assertIn('abiertos se\n# cierran', env)
 
 
 class Base(unittest.TestCase):
