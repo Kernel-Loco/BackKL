@@ -59,8 +59,10 @@ jobs:
       - name: SBOM con Syft (SPDX JSON)
         run: |
           mkdir -p sbom
-          docker run --rm -u "$(id -u):$(id -g)" -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/sbom:/out" \
-            --group-add "$(stat -c %g /var/run/docker.sock)" "$SYFT" docker:lowtide-api:ci -o spdx-json=/out/backkl.spdx.json
+          # Con -u la imagen de Syft no puede escribir en su /tmp: va uno propio en memoria, y la caché ahí mismo.
+          docker run --rm -u "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
+            --tmpfs /tmp:rw,exec,mode=1777 -e TMPDIR=/tmp -e XDG_CACHE_HOME=/tmp/cache \
+            -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/sbom:/out" "$SYFT" docker:lowtide-api:ci -o spdx-json=/out/backkl.spdx.json
           test -s sbom/backkl.spdx.json
 
       - uses: actions/upload-artifact@v4
