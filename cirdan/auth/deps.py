@@ -85,6 +85,7 @@ def current_session(request: Request) -> Session:
         # las 8 h.
         sessions.delete(token)
         raise HTTPException(401, SESION_TERMINADA)
+    request.state.cirdan_session = session
     return session
 
 

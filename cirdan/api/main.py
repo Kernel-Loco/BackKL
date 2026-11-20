@@ -16,8 +16,9 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Match
 
-from cirdan.auth.deps import Session, comprobar_cookie_segura, current_session, require_roles
+from cirdan.auth.deps import Session, client_ip, comprobar_cookie_segura, current_session, require_roles
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
@@ -26,7 +27,7 @@ from cirdan.api.v1 import router as v1_router
 from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import config, origenes_permitidos
-from cirdan.db import transaction
+from cirdan.db import audit, transaction
 
 
 @asynccontextmanager
@@ -202,6 +203,40 @@ async def cabeceras_de_seguridad(request: Request, call_next):
         if nombre == 'Content-Security-Policy' and "frame-ancestors 'none'" in response.headers.get(nombre, ''):
             continue
         response.headers[nombre] = valor
+    return response
+
+
+@app.middleware('http')
+async def auditar_lecturas_de_operador(request: Request, call_next):
+    """Registra las lecturas exitosas que un superadmin hace dentro de una empresa cliente."""
+    response = await call_next(request)
+    route_path, path_params = '', {}
+    for route in app.router.routes:
+        router = getattr(route, 'original_router', None)
+        candidates = router.routes if router else (route,)
+        for candidate in candidates:
+            if not getattr(candidate, 'path', None):
+                continue
+            match, child_scope = candidate.matches(request.scope)
+            if match is Match.FULL:
+                route_path = candidate.path
+                path_params = child_scope.get('path_params', {})
+                break
+        if route_path:
+            break
+    session = getattr(request.state, 'cirdan_session', None)
+    if (
+        request.method not in ('GET', 'HEAD') or response.status_code < 200 or response.status_code >= 300
+        or not route_path.startswith('/api/v1/') or route_path.startswith(('/api/v1/auth/', '/api/v1/platform/'))
+        or request.headers.get('authorization') or not session or not session.acting_elsewhere
+    ):
+        return response
+    with transaction(session.org_id) as conn:
+        audit(conn, session.org_id, 'platform.client_data_read', ip=client_ip(request), entity_type='api_route',
+              details={'method': request.method, 'route': route_path,
+                       'path_params': {key: str(value) for key, value in path_params.items()},
+                       'status_code': response.status_code},
+              platform=session.audit_platform)
     return response
 
 

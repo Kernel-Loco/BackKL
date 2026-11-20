@@ -9,12 +9,13 @@ biblioteca estándar de Python:
 Cada intento de escritura corre dentro de una transacción que se deshace, así
 que la base queda igual después de las pruebas.
 """
+import os
 import re
 import subprocess
 import unittest
 from pathlib import Path
 
-CONTAINER = 'cirdan-pg16'
+CONTAINER = os.environ.get('CIRDAN_TEST_DB_CONTAINER', 'cirdan-pg16')
 ACME = '20000000-0000-4000-8000-000000000001'
 BETA = '20000000-0000-4000-8000-000000000002'
 
