@@ -3,16 +3,22 @@
 Los errores de credenciales usan siempre el mismo mensaje y el mismo tiempo, exista o no el
 correo, para que nadie pueda saber qué cuentas existen.
 """
+import base64
+import io
 import logging
 
+import pyotp
+import qrcode
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
+from cirdan.auth import captcha
 from cirdan.auth import passwords, sessions, totp
 from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session
 from cirdan.db import audit, transaction
+from cirdan.config import config
 
 router = APIRouter(prefix='/api/v1/auth', tags=['sesión'])
 log = logging.getLogger(__name__)
@@ -22,15 +28,26 @@ LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
 ADMIN_MFA_REQUIRED = 'Activa MFA para iniciar sesión con una cuenta admin.'
+CAPTCHA_REQUIRED = config('CAPTCHA_REQUIRED', 'true').lower() == 'true'
 
 
 class LoginIn(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=passwords.MAX_LENGTH)
+    captcha: dict | str | None = None
 
 
 class MfaIn(BaseModel):
     mfa_token: str = Field(min_length=10, max_length=100)
+    code: str = Field(pattern=r'^\d{6}$')
+
+
+class MfaSetupIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=passwords.MAX_LENGTH)
+
+
+class MfaEnableIn(BaseModel):
+    setup_token: str = Field(min_length=10, max_length=100)
     code: str = Field(pattern=r'^\d{6}$')
 
 
@@ -79,10 +96,18 @@ def _audit_bad_password(org, user_id, ip):
         log.exception('No se pudo escribir auth.login_failed del usuario %s', user_id)
 
 
-@router.post('/login',summary='Correo y contraseña; si la cuenta tiene MFA, pide el código')
+@router.get('/captcha', summary='Obtiene un reto ALTCHA para el inicio de sesión')
+def captcha_challenge():
+    return captcha.nuevo_reto()
+
+
+@router.post('/login', summary='Correo y contraseña; si la cuenta tiene MFA, pide el código')
 def login(body: LoginIn, request: Request, response: Response):
     email = body.email.strip().lower()
     ip = client_ip(request)
+    if CAPTCHA_REQUIRED and not captcha.verificar(body.captcha):
+        raise HTTPException(400, 'Resuelve el captcha e inténtalo de nuevo.')
+
     if sessions.is_locked(email, ip):
         raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
 
@@ -208,3 +233,63 @@ def change_password(body: PasswordIn, request: Request, session: Session = Depen
                      (passwords.hash_password(body.new_password), session.user_id))
         audit(conn, session.org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
     sessions.clear_password_fails(session.user_id)
+
+
+@router.post('/mfa/setup', summary='Inicia el alta de TOTP y devuelve una llave y QR')
+def setup_mfa(body: MfaSetupIn, request: Request, session: Session = Depends(current_session)):
+    ip = client_ip(request)
+    with transaction(session.org_id) as conn:
+        row = conn.execute(
+            'SELECT password_hash, mfa_enabled_at IS NOT NULL AND totp_secret_enc IS NOT NULL AS mfa_enabled '
+            'FROM users WHERE id = %s AND is_active', (session.user_id,)).fetchone()
+        if not row:
+            raise HTTPException(401, 'Tu sesión terminó. Vuelve a iniciar sesión.')
+        if row['mfa_enabled']:
+            raise HTTPException(409, 'MFA ya está activo en esta cuenta.')
+        if not passwords.verify_password(row['password_hash'], body.current_password):
+            raise HTTPException(401, 'La contraseña actual no es correcta.')
+
+    secret = pyotp.random_base32()
+    setup_token = sessions.create_totp_setup({
+        'user_id': session.user_id,
+        'org_id': session.org_id,
+        'email': session.email,
+        'secret': secret,
+    })
+    uri = pyotp.TOTP(secret).provisioning_uri(name=session.email, issuer_name='LowTide')
+    image = qrcode.make(uri)
+    buffer = io.BytesIO()
+    image.save(buffer, format='PNG')
+    qr_data_uri = 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode()
+    return {'setup_token': setup_token, 'secret': secret, 'qr_uri': uri, 'qr_data_uri': qr_data_uri}
+
+
+@router.post('/mfa/enable', summary='Confirma el código TOTP y guarda el secreto nuevo')
+def enable_mfa(body: MfaEnableIn, request: Request, session: Session = Depends(current_session)):
+    pending = sessions.take_totp_setup(body.setup_token)
+    if not pending:
+        raise HTTPException(401, 'El alta TOTP expiró o ya fue usada.')
+    if pending['user_id'] != session.user_id or pending['org_id'] != session.org_id:
+        sessions.delete_totp_setup(body.setup_token)
+        raise HTTPException(403, 'El alta TOTP no pertenece a esta sesión.')
+
+    ip = client_ip(request)
+    step = totp.verify_code(pending['secret'], body.code)
+    if step is None:
+        raise HTTPException(401, MFA_INVALID)
+
+    with transaction(session.org_id) as conn:
+        row = conn.execute(
+            'SELECT id FROM users WHERE id = %s AND is_active AND mfa_enabled_at IS NULL',
+            (session.user_id,)).fetchone()
+        if not row:
+            sessions.delete_totp_setup(body.setup_token)
+            raise HTTPException(409, 'MFA ya está activo en esta cuenta.')
+        encrypted = totp.encrypt_secret(pending['secret'], session.user_id)
+        conn.execute(
+            'UPDATE users SET totp_secret_enc = %s, mfa_enabled_at = now(), last_totp_step = %s, updated_at = now() '
+            'WHERE id = %s',
+            (encrypted, step, session.user_id),)
+        audit(conn, session.org_id, 'auth.mfa_enabled', session.user_id, ip, 'user', session.user_id)
+    sessions.delete_totp_setup(body.setup_token)
+    return {'mfa_enabled': True}

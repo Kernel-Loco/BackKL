@@ -26,6 +26,8 @@ MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
 MAX_PASSWORD_FAILS_USER = 5
 MAX_PASSWORD_FAILS_IP = 20
+TOTP_SETUP_SECONDS = 10 * 60
+TOTP_SETUP_MAX_ATTEMPTS = 5
 
 
 @cache
@@ -176,3 +178,94 @@ def register_password_fail(user_id, ip):
 
 def clear_password_fails(user_id):
     _valkey().delete(_password_user_key(user_id))
+
+
+# ------------------------------------------------------------------ TOTP
+
+def create_totp_secret(user_id):
+    """Crea un secreto TOTP y lo guarda de forma segura."""
+    secret = secrets.token_urlsafe(10)
+    _valkey().set('totp:secret:' + _digest(str(user_id)), secret, ex=TOTP_SETUP_SECONDS)
+    return secret
+
+
+def get_totp_secret(user_id):
+    """Devuelve el secreto TOTP guardado."""
+    return _valkey().get('totp:secret:' + _digest(str(user_id)))
+
+
+def delete_totp_secret(user_id):
+    """Borra el secreto TOTP guardado."""
+    _valkey().delete('totp:secret:' + _digest(str(user_id)))
+
+
+def verify_totp(token, user_id, secret=None):
+    """Verifica un código TOTP contra el secreto guardado."""
+    import pyotp
+    if secret is None:
+        secret = get_totp_secret(user_id)
+    return pyotp.TOTP(secret).verify(token)
+
+
+def generate_totp_uri(user_id, secret, nombre=''):
+    """Genera una URI para configurar el TOTP en un cliente."""
+    return 'otpauth://totp/%s?secret=%s&issuer=TuApp' % (nombre or user_id, secret)
+
+
+# ------------------------------------------------------------------ configuración TOTP pendiente
+
+def create_totp_setup(data):
+    token = secrets.token_urlsafe(32)
+    _valkey().set('totp_setup:' + _digest(token), json.dumps(dict(data, attempts=0)), ex=TOTP_SETUP_SECONDS)
+    return token
+
+
+_TAKE_TOTP_SETUP = '''
+local raw = redis.call('GET', KEYS[1])
+if not raw then return false end
+local data = cjson.decode(raw)
+data.attempts = data.attempts + 1
+if data.attempts >= tonumber(ARGV[1]) then
+  redis.call('DEL', KEYS[1])
+else
+  redis.call('SET', KEYS[1], cjson.encode(data), 'KEEPTTL')
+end
+return raw
+'''
+
+
+def take_totp_setup(token):
+    if not token or len(token) > 100:
+        return None
+    raw = _valkey().eval(_TAKE_TOTP_SETUP, 1, 'totp_setup:' + _digest(token), TOTP_SETUP_MAX_ATTEMPTS)
+    return json.loads(raw) if raw else None
+
+
+def delete_totp_setup(token):
+    if token:
+        _valkey().delete('totp_setup:' + _digest(token))
+
+
+# ------------------------------------------------------------------ CAPTCHA ALTCHA
+
+def captcha_key():
+    """Llave HMAC persistida en Valkey, creada una sola vez."""
+    key = 'captcha:hmac:key'
+    valor = _valkey().get(key)
+    if not valor:
+        valor = secrets.token_hex(32)
+        actual = _valkey().get(key)
+        if not actual:
+            _valkey().set(key, valor)
+        else:
+            valor = actual
+    return valor
+
+
+def register_captcha_challenge(challenge):
+    _valkey().set('captcha:challenge:' + hashlib.sha256(challenge.encode()).hexdigest(), '1', ex=MFA_SECONDS * 2)
+
+
+def consume_captcha_challenge(challenge):
+    key = 'captcha:challenge:' + hashlib.sha256(challenge.encode()).hexdigest()
+    return bool(_valkey().getdel(key))

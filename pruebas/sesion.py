@@ -3,6 +3,7 @@
 Inicia sesión como una cuenta de demo (cirdan/auth/demo.py) con contraseña y código TOTP, y
 devuelve un cliente con su cookie. Necesita `docker compose up` con DEMO_ACCOUNTS=true.
 """
+import altcha
 import ast
 import base64
 import hashlib
@@ -63,6 +64,7 @@ def reset():
                     '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del; '
                     'done'], check=True, capture_output=True)
     _last_step.clear()
+    subprocess.run(['docker', 'compose', 'run', '--rm', 'demo-accounts'], check=True, capture_output=True)
 
 
 class Client:
@@ -88,6 +90,21 @@ class Client:
         return self.request('GET', url, headers=headers)
 
     def post(self, url, body=None, headers=None):
+        if url.endswith('/login') and isinstance(body, dict) and 'captcha' not in body:
+            code, challenge = self.get('/api/v1/auth/captcha')
+            assert code == 200, (code, challenge)
+            reto = altcha.ChallengeV1(
+                challenge['algorithm'], challenge['challenge'], challenge['maxNumber'],
+                challenge['salt'], challenge['signature'])
+            solucion = altcha.solve_challenge_v1(reto)
+            assert solucion is not None
+            body = dict(body, captcha={
+                'algorithm': reto.algorithm,
+                'challenge': reto.challenge,
+                'number': solucion.number,
+                'salt': reto.salt,
+                'signature': reto.signature,
+            })
         return self.request('POST', url, body, headers)
 
     def cookie(self):

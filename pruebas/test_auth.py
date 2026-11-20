@@ -4,12 +4,15 @@
 """
 import http.client
 import json
+import pyotp
 import secrets
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
+
+import altcha
 
 from pruebas import sesion
 from pruebas.sesion import AUTH, PASSWORD, Client
@@ -30,6 +33,25 @@ def codigos_malos(email, n):
     paso = int(time.time() // sesion.STEP)
     validos = {sesion.totp(sesion.SECRETS[email], s) for s in range(paso - 2, paso + 3)}
     return [c for c in ('%06d' % i for i in range(n + len(validos))) if c not in validos][:n]
+
+
+def captcha_payload():
+    code, challenge = Client().get(AUTH + '/captcha')
+    if code != 200:
+        raise AssertionError((code, challenge))
+    reto = altcha.ChallengeV1(
+        challenge['algorithm'], challenge['challenge'], challenge['maxNumber'],
+        challenge['salt'], challenge['signature'])
+    solucion = altcha.solve_challenge_v1(reto)
+    if solucion is None:
+        raise AssertionError('No se pudo resolver el reto ALTCHA')
+    return {
+        'algorithm': reto.algorithm,
+        'challenge': reto.challenge,
+        'number': solucion.number,
+        'salt': reto.salt,
+        'signature': reto.signature,
+    }
 
 
 class Login(unittest.TestCase):
@@ -162,7 +184,7 @@ class Login(unittest.TestCase):
         conn = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
         self.addCleanup(conn.close)
         for email in (JORDAN, 'nadie@acme-demo.mx'):
-            conn.request('POST', '/api/v1/auth/login', json.dumps({'email': email, 'password': 'no-es-la-contrasena'}),
+            conn.request('POST', '/api/v1/auth/login', json.dumps({'email': email, 'password': 'no-es-la-contrasena', 'captcha': captcha_payload()}),
                          {'Content-Type': 'application/json', 'X-Forwarded-For': 'no-es-ip'})
             r = conn.getresponse()
             self.assertEqual((r.status, json.loads(r.read())['detail']), (401, INVALID), email)
@@ -273,6 +295,37 @@ class Login(unittest.TestCase):
         code, body = client.post(AUTH + '/password', {'current_password': 'incorrecta', 'new_password': nuevo})
         self.assertEqual(code, 429)
         self.assertIn('Demasiados intentos', body['detail'])
+
+    def test_18_captcha_falta_o_se_reutiliza(self):
+        client = Client()
+        code, body = client.post(AUTH + '/login', {'email': JORDAN, 'password': 'x', 'captcha': None})
+        self.assertEqual((code, body['detail']), (400, 'Resuelve el captcha e inténtalo de nuevo.'))
+
+        payload = captcha_payload()
+        code, body = client.post(AUTH + '/login', {'email': JORDAN, 'password': 'x', 'captcha': payload})
+        self.assertEqual(code, 401)
+        code, body = client.post(AUTH + '/login', {'email': JORDAN, 'password': 'x', 'captcha': payload})
+        self.assertEqual((code, body['detail']), (400, 'Resuelve el captcha e inténtalo de nuevo.'))
+
+    def test_19_alta_totp_con_qr(self):
+        self.addCleanup(sesion.reset)
+        self._sin_mfa(JORDAN)
+        client = Client()
+        code, body = client.post(AUTH + '/login', {'email': JORDAN, 'password': PASSWORD})
+        self.assertEqual((code, body['mfa_required']), (200, False))
+
+        code, body = client.post(AUTH + '/mfa/setup', {'current_password': 'incorrecta'})
+        self.assertEqual((code, body['detail']), (401, 'La contraseña actual no es correcta.'))
+
+        code, body = client.post(AUTH + '/mfa/setup', {'current_password': PASSWORD})
+        self.assertEqual(code, 200)
+        self.assertIn('setup_token', body)
+        self.assertIn('qr_data_uri', body)
+        self.assertTrue(body['qr_data_uri'].startswith('data:image/png;base64,'))
+
+        totp_code = pyotp.TOTP(body['secret']).now()
+        code_status, body_enable = client.post(AUTH + '/mfa/enable', {'setup_token': body['setup_token'], 'code': totp_code})
+        self.assertEqual((code_status, body_enable['mfa_enabled']), (200, True))
 
 
 if __name__ == '__main__':

@@ -72,5 +72,5 @@ docker compose exec valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-war
 ## Lo que no funciona todavía
 
 - **Registro abierto y «¿Olvidaste tu contraseña?»** todavía no tienen backend; esas pantallas lo dicen al enviarlas. Las cuentas nuevas las creará un Administrador por invitación.
-- **Captcha** (RC-5): pendiente.
+- **Captcha** (RC-5): implementado con ALTCHA; el login obtiene un reto en `/api/v1/auth/captcha` y exige una solución válida.
 - **Los datos del portal** (dominios, hallazgos, score, reportes) siguen simulados hasta conectar la API v1 (RC-17). El inicio de sesión, la sesión, el rol y el perfil sí son reales.
