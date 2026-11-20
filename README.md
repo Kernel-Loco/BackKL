@@ -146,7 +146,7 @@ docker compose exec api python -m cirdan.auth.demo codigo jordan.tate@acme-demo.
 | `GET /api/v1/domains/{fqdn}/report?formato=json\|html` | Reporte ejecutivo de 1 a 2 páginas: el JSON para el PDF del portal y el mismo reporte en HTML, con la atribución de HIBP. Un activo de correo sale solo con su dominio. Va con `Cache-Control: no-store`. Pide autorización vigente (403 sin ella) |
 | `GET /api/v1/findings/{id}/explanation` | Por qué es crítico: factores, penalización y recomendación |
 | `GET /api/v1/scoring/weights` | Juego de reglas activo |
-| `GET /api/v1/domains/{fqdn}/assets` y `GET /api/v1/scans` | Activos y escaneos (provisionales). `/scans` acepta `domain`, `limit` (1 a 100, 50 por omisión) y `offset`, y su `total` es el de la empresa con ese filtro (RC-318, detalle en `docs/contrato_api_v1.md`) |
+| `GET /api/v1/domains/{fqdn}/assets`, `GET /api/v1/assets` y `GET /api/v1/scans` | Activos del dominio y de toda la empresa, con filtros, paginación y CSV (RC-231), y escaneos (provisionales). `/scans` acepta `domain`, `limit` (1 a 100, 50 por omisión) y `offset`, y su `total` es el de la empresa con ese filtro (RC-318, detalle en `docs/contrato_api_v1.md`) |
 | `GET /api/v1/domains/txt` | Registro TXT de cada dominio (solo Admin) |
 | `GET /api/v1/domains/{fqdn}/export/siem` | NDJSON para el HEC de Splunk con los hallazgos abiertos, el último escaneo y el último score (#98, ver Salida a Splunk). Solo con sesión, y 401 si la cuenta se desactivó después de iniciarla. Responde 403 si la empresa no está en `trial` o `active` (con su propio texto) o su plan no incluye SIEM, y 409 mientras el dominio tiene un escaneo en curso |
 
