@@ -89,7 +89,7 @@ def apagar_credenciales():
             print('cuenta de demo apagada:', email)
         elif fila is None:
             print('cuenta de demo que no puede iniciar sesión, nada que apagar:', email)
-        elif en_key_vault and str(fila['password_hash']).startswith(passwords.PREFIJO):
+        elif en_key_vault and passwords.es_cifrada(str(fila['password_hash'])):
             sin_revisar.append(email)
         # Con una huella cifrada esto usa la llave directa del .env (RC-330). Si no sirve, el script termina con error
         # y la API no arranca: no se da por apagada una cuenta que no se pudo revisar.

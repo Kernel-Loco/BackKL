@@ -150,6 +150,7 @@ HUELLAS_DB = {
     'db/migraciones/023_texto_ia_internetdb.sql': '21023fdae76fb51919a6e6edce31468b9e2d6e3fb637897441d76cf35f46e7ee',
     'db/migraciones/024_bandas_por_organizacion.sql': '435dfb3b46d6d4b7db6b73e20630671781626fdca35b2f8f1e228671a1143fdd',
     'db/migraciones/025_textos_higiene_certificados.sql': 'c2a50ddf2e0593e0c66666a597aeced543dca9f552947bc73593974ca2207cc5',
+    'db/migraciones/026_huellas_por_version.sql': '0ceaf2b7d16a9bd9f75130b4cb46f6ea092082c22bd859471fdb314607171529',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',

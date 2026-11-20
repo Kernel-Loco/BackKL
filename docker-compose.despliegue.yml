@@ -70,6 +70,9 @@ services:
       # uvicorn cierra una conexión ociosa a los 5 s por omisión, lo mismo que tarda el proxy de Next (agente de Node)
       # en soltarla: un POST que sale justo entonces termina en 500. Con 65 s siempre la suelta Next primero.
       UVICORN_TIMEOUT_KEEP_ALIVE: "65"
+      # Contraseñas filtradas (RC-334): prendida aquí, solo los 5 primeros caracteres del SHA-1 salen a
+      # api.pwnedpasswords.com. Se apaga con PWNED_PASSWORDS_ENABLED=false en el .env.
+      PWNED_PASSWORDS_ENABLED: ${PWNED_PASSWORDS_ENABLED:-true}
     networks:
       default:
         # La única IP que la regla de IMDS deja pasar (docs/despliegue.md). Por eso en la VM se usa

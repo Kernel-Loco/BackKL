@@ -35,6 +35,7 @@ empresas y con los respaldos.
    - `DOMINIOS_EN_VIVO` y `ORGS_GITHUB_DECLARADAS` según las cartas vigentes.
    - La llave del MFA. En la VM va `TOTP_KEY_VAULT_SECRET_URL` y no va `TOTP_ENCRYPTION_KEY` (sección 'Llave del MFA en Azure Key Vault'). En el plan B es al revés (paso 3 de 'Carpeta y volumen'). Con las dos puestas, o con ninguna, la API no arranca.
    - La llave de las huellas de contraseña, con la misma regla: en la VM `PASSWORD_HASH_KEY_VAULT_SECRET_URL` y no `PASSWORD_HASH_ENCRYPTION_KEY`, y en el plan B al revés (sección 'Llave de las huellas de contraseña').
+   - `PWNED_PASSWORDS_ENABLED` vacía, como viene en `.env.example`, o en `true`. Así `docker-compose.despliegue.yml` prende la revisión de contraseñas filtradas (RC-334). Con `false` queda apagada y solo se revisa la lista local.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
    - SSL/TLS > Edge Certificates: 'Always Use HTTPS' prendido. Sin él el portal también responde por `http://` y el formulario de login manda la contraseña sin cifrar hasta Cloudflare (la API la rechaza después por el Origin, pero ya viajó). Se comprueba con `curl -sI http://lowtidesec.com/login` y `curl -sI http://www.lowtidesec.com/login`: los dos responden 301 con `Location: https://...`. HSTS queda para RC-89.
@@ -158,7 +159,7 @@ La huella argon2id de cada contraseña se guarda cifrada con AES-256-GCM (`cirda
 - Las huellas de antes, sin cifrar, entran todavía y quedan cifradas en ese mismo inicio de sesión. No hace falta restablecer contraseñas. El hash de relleno de las semillas y de `cirdan/auth/demo.py` no cambia y sigue sin abrir nada.
 - Si la llave se pierde, ninguna contraseña guardada vuelve a abrir y cada cuenta se restablece con su script de alta. Por eso la copia del gestor de contraseñas se queda siempre, como la del MFA.
 - Si el cambio se revierte, el código viejo no abre las huellas cifradas: las cuentas que ya entraron se restablecen igual.
-- Rotar la llave no pide contraseñas nuevas, porque se descifra la huella y se vuelve a cifrar. Ese script todavía no existe: el `1` de `lt1$` es la versión de la llave para cuando exista.
+- Rotar la llave no pide contraseñas nuevas, porque se descifra la huella y se vuelve a cifrar (RC-333). El número de `lt1$` es la versión de la llave: los pasos están en 'Rotar la llave de las huellas'.
 
 ### Pasarla a la VM (una vez)
 
@@ -187,6 +188,27 @@ Cada paso va con el OK de quien administra la VM. La llave nunca va en un archiv
    ```
 
 En el plan B la misma llave va en `PASSWORD_HASH_ENCRYPTION_KEY`, tomada del gestor o con `az keyvault secret show --id <URL con versión> --query value -o tsv`, y se borra del `.env` al terminar. Con otra llave ninguna contraseña de la VM abre.
+
+### Rotar la llave de las huellas (RC-333)
+
+Se rota si la llave se filtra o cuando se decida, siempre con el OK de quien administra la VM. Nadie cambia su contraseña. La versión de la llave va en el prefijo de cada huella (`lt1$`, `lt2$`...) y en `PASSWORD_HASH_KEY_VERSION`, que sin poner vale 1. Mientras se rota, la llave de antes va en `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL` (en la VM) o en `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` (desarrollo y plan B), una de las dos. Con ella puesta, una huella de la versión anterior entra y el login la guarda cifrada con la actual. La API no arranca si la anterior es la misma llave que la actual o que la del MFA, ni con la anterior puesta y la versión en 1. Sin la anterior, una huella de la versión anterior no abre: 'Correo o contraseña incorrectos.' en el mismo tiempo que un correo que no existe.
+
+Nunca se crea otra versión del secreto `password-hash-key` sin seguir estos pasos: con una URL sin versión, la API tomaría la nueva al reiniciarse y ninguna huella abriría. Por eso las URL del `.env` siempre llevan su versión.
+
+1. (VM, una vez) La migración 026, que da al comando las empresas con huellas de una versión. La API no la lee: `docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/026_huellas_por_version.sql`.
+2. (Azure) Generar la llave nueva y guardarla en el gestor de contraseñas ('LowTide vm-lowtide PASSWORD_HASH_ENCRYPTION_KEY v2') como en el paso 1 de 'Pasarla a la VM', pero como un secreto nuevo, `password-hash-key-v2`, y darle a la identidad de la VM 'Key Vault Secrets User' sobre ese secreto como en el paso 2. El secreto de antes no se borra.
+3. (VM) En el `.env`: `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL=<la URL con versión que hoy está en PASSWORD_HASH_KEY_VAULT_SECRET_URL>`, `PASSWORD_HASH_KEY_VAULT_SECRET_URL=<el $r.id del secreto nuevo>` y `PASSWORD_HASH_KEY_VERSION=2` (o la que sigue).
+4. (VM) Reconstruir: `docker compose --dry-run up -d --build api` (sin recrear `cirdan-pg16`) y `docker compose up -d --build api`. `docker compose ps api` dice `healthy`. Un 403 en `docker compose logs api` es que falta el rol del paso 2.
+5. (VM) Contar sin cambiar nada y luego cifrar: `docker compose exec api python -m cirdan.auth.rotar_huellas --prueba` y `docker compose exec api python -m cirdan.auth.rotar_huellas`. Imprime por empresa cuántas cambió, cuántas no abrieron y cuántas quedan de la versión anterior, y, por empresa con al menos una cambiada, deja un evento `auth.password_hash_rotated` con esos conteos en `audit_log`. Si se corta a media empresa (Ctrl+C o un error), antes de salir deja el evento de lo que ya cambió con `interrupted`, y si la base es la que falló lo dice en la salida. Ni la salida ni la bitácora llevan huellas. Correrlo otra vez no cambia nada ni escribe eventos. Una que no abre ya no abría con la llave de antes (otra llave o una huella dañada): esa cuenta se restablece con su script de alta.
+6. (VM) Como postgres y solo lectura, con el número de la versión anterior. Tiene que dar `0`:
+
+   ```bash
+   docker exec cirdan-pg16 psql -U postgres -d cirdan -Atc "SELECT count(*) FROM users WHERE password_hash LIKE 'lt1\$%'"
+   ```
+
+7. (VM) Quitar `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL` del `.env` y reconstruir como en el paso 4. `PASSWORD_HASH_KEY_VERSION` se queda. Después se puede quitar el rol de la identidad sobre el secreto de antes. El secreto de antes y su copia del gestor se quedan al menos 33 días después del paso 6: cada respaldo dura de 30 a 32 días ('Respaldo diario') y los de antes de rotar traen huellas de la versión anterior, que solo abren con esa llave. Para restaurar uno de ellos se le vuelve a dar a la identidad 'Key Vault Secrets User' sobre el secreto de antes, como en el paso 2 (sin ese rol la API recibe 403 y no arranca), y se vuelve a poner la anterior como en el paso 3.
+
+En desarrollo y en el plan B es lo mismo con `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, sin Key Vault, y `docker compose exec api` como en la VM.
 
 ## Respaldo diario (RC-233)
 
