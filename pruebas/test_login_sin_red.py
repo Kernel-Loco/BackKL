@@ -496,6 +496,7 @@ class RastroDeBloqueos(unittest.TestCase):
         for email, secreto, dominio in (
                 ('nadie.secreto@ejemplo.test', 'nadie.secreto', 'ejemplo.test'),
                 ('nadie.secreto@Sub.EJEMPLO-2.test', 'nadie.secreto', 'sub.ejemplo-2.test'),
+                ('nadie.secreto@ejemplo.test\nERROR inventado', 'nadie.secreto', marcador),
                 ('nadie.secreto@ejemplo.test\nERROR inventado', 'ERROR inventado', marcador),
                 ('nadie.secreto', 'nadie.secreto', marcador),
                 ('Clave@Marzo2026', 'marzo2026', marcador),
@@ -505,12 +506,13 @@ class RastroDeBloqueos(unittest.TestCase):
                 ('juan@ empresa.com', 'juan', marcador),
                 ('juan@', 'juan', marcador),
                 ('juan@.com', 'juan', marcador),
-                ('juan@' + 'a' * 250 + '.com', 'a' * 250, marcador)):
+                ('juan@' + 'a' * 250 + '.com', 'a' * 250, marcador),
+                # Etiquetas válidas de 63 que suman 259: solo el tope de 253 lo rechaza.
+                ('juan@' + '.'.join(['a' * 63] * 4) + '.com', 'a' * 63, marcador)):
             with self.subTest(email=email), self.assertLogs(routes.log, 'WARNING') as logs:
                 routes._log_unknown_email(email, '198.51.100.1\nx')
             texto, = logs.output
-            if secreto != dominio:
-                self.assertNotIn(secreto.lower(), texto.lower())
+            self.assertNotIn(secreto.lower(), texto.lower())
             self.assertNotIn('\n', texto)
             self.assertIn("ip='198.51.100.1\\nx' dominio='%s'" % dominio, texto)
 
