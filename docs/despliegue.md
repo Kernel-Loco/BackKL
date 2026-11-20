@@ -7,6 +7,8 @@ navegador → Cloudflare (HTTPS) → cloudflared ─borde─ portal ─interna�
                                       └─salida─ Cloudflare
 ```
 
+Una VM equivalente también se crea y se borra desde código con Terraform, en su propio grupo de recursos y sin túnel por omisión: `docs/terraform.md` (#81, RC-132).
+
 ## Antes de levantar
 
 **Alta de dominios:** por ahora no se puede habilitar en el despliegue. El volumen `cirdan-cartas` guarda cartas cifradas,
