@@ -7,8 +7,10 @@ con filtros por dominio, tipo y texto y con paginación, y los lee cirdan_app co
 otra, los filtros y la paginación dan lo esperado y el CSV escapa las fórmulas.
 
 Lo esperado sale de la base (como postgres), no de números fijos, así una semilla nueva no rompe la prueba. Los activos
-con fórmula entran en acme-demo.mx con ids 70000000-0000-4000-8000-000000231xxx y se borran al final. Las llaves se
-llaman CIRDAN_FAKE_... y las limpia borrar_llaves() de test_llaves_api.py.
+con fórmula entran en acme-demo.mx con ids 70000000-0000-4000-8000-000000231xxx y se borran al final. Las cartas de la
+semilla vencen el 2026-12-31, así que acme-demo.mx, acme-tienda.mx y beta-corp.mx suman una carta propia que vence en 30
+días (ids 41000000-0000-4000-8000-000000231xxx), también borrada al final. Las llaves se llaman CIRDAN_FAKE_... y las
+limpia borrar_llaves() de test_llaves_api.py.
 """
 import csv
 import io
@@ -26,6 +28,9 @@ CAMPOS = {'id', 'domain', 'type', 'value', 'ip', 'parent', 'parent_type', 'attri
 ORDEN = ("array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email'], a.asset_type)")
 FORMULAS = ('=HYPERLINK("http://x.test")', '+1+1', '-2+3', '@SUM(A1)', 'ok;=1+1')
 PREFIJO_ID = '70000000-0000-4000-8000-000000231'
+PREFIJO_TOPE = '70000000-0000-4000-8231-'   # los activos de la prueba del tope de 50 000
+PREFIJO_CARTA = '41000000-0000-4000-8000-000000231'
+CON_CARTA_PROPIA = ('acme-demo.mx', 'acme-tienda.mx', 'beta-corp.mx')
 CARTA_VIGENTE = ('EXISTS (SELECT 1 FROM domain_authorizations x WHERE x.domain_id = d.id AND x.revoked_at IS NULL '
                  'AND current_date BETWEEN x.valid_from AND x.valid_until)')
 
@@ -70,6 +75,28 @@ def borrar_insertados(prefijo=PREFIJO_ID):
     assert ok, err
 
 
+def poner_cartas():
+    """Una carta vigente por 30 días en cada dominio de CON_CARTA_PROPIA, copiada de la primera carta del dominio."""
+    hoy = "(now() AT TIME ZONE 'America/Mexico_City')::date"
+    sql = 'BEGIN;'
+    for n, fqdn in enumerate(CON_CARTA_PROPIA):
+        sql += ("INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, "
+                "signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) "
+                "SELECT '%s%03d', x.organization_id, x.domain_id, 'Firma RC-231', 'Prueba', x.signer_email, "
+                "x.signed_document_key || '.rc231-%d', x.signed_document_sha256, %s - 1, %s + 30, x.accepted_by "
+                "FROM domain_authorizations x JOIN domains d ON d.id = x.domain_id WHERE d.fqdn = '%s' "
+                "ORDER BY x.created_at, x.id LIMIT 1;" % (PREFIJO_CARTA, n, n, hoy, hoy, fqdn))
+    ok, _, err = psql(sql + 'COMMIT;', user='postgres')
+    assert ok, err
+
+
+def borrar_cartas():
+    # domain_authorizations solo acepta UPDATE de revoked_at: el guardia se apaga en esta transacción.
+    ok, _, err = psql("BEGIN; SET LOCAL session_replication_role = replica; DELETE FROM domain_authorizations "
+                      "WHERE id::text LIKE '%s%%'; COMMIT;" % PREFIJO_CARTA, user='postgres')
+    assert ok, err
+
+
 def filas_csv(texto):
     return list(csv.DictReader(io.StringIO(texto.lstrip('﻿'), newline='')))
 
@@ -86,15 +113,19 @@ class InventarioActivos(unittest.TestCase):
         # La semilla solo trae activos en acme-demo.mx y beta-corp.mx: uno en un dominio sin carta vigente
         # (old-example.net) y tres en otro con carta (acme-tienda.mx), así filtros, páginas y CSV cruzan dominios.
         borrar_insertados()  # los de una corrida cortada
+        borrar_insertados(PREFIJO_TOPE)
+        borrar_cartas()
+        # Si un assert de aquí falla, unittest no llama a tearDownClass: la limpieza va registrada antes de insertar.
+        cls.addClassCleanup(borrar_insertados)
+        cls.addClassCleanup(borrar_cartas)
+        poner_cartas()
+        assert scalar("SELECT count(*) FROM domain_authorizations WHERE id::text LIKE '%s%%';" % PREFIJO_CARTA,
+                      user='postgres') == str(len(CON_CARTA_PROPIA))
         insertar([(900, 'old-example.net', 'subdomain', 'www.old-example.net'),
                   (901, 'acme-tienda.mx', 'subdomain', 'shop.acme-tienda.mx'),
                   (902, 'acme-tienda.mx', 'ip', '192.0.2.31'),
                   (903, 'acme-tienda.mx', 'subdomain', '_dmarc.acme-tienda.mx')])
         assert scalar("SELECT count(*) FROM assets WHERE id::text LIKE '%s9%%';" % PREFIJO_ID, user='postgres') == '4'
-
-    @classmethod
-    def tearDownClass(cls):
-        borrar_insertados()
 
     def tearDown(self):
         poner_plan(ACME, 'starter')
@@ -138,7 +169,7 @@ class InventarioActivos(unittest.TestCase):
         self.assertTrue(hijos)
         self.assertTrue(all(i['parent_type'] for i in hijos))
         for malo in ('type=otro', 'domain=', 'q=', 'q=' + 'x' * 201, 'limit=0', 'limit=201', 'offset=-1',
-                     'offset=1000001', 'formato=xml'):
+                     'offset=1000001', 'formato=xml', 'q=a%00b', 'domain=a%00', 'formato=csv&q=%00'):
             self.assertEqual(self.alex.get('/api/v1/assets?' + malo)[0], 422, malo)
 
     def test_3_paginacion(self):
@@ -220,7 +251,39 @@ class InventarioActivos(unittest.TestCase):
         self.assertEqual(code, 200, texto)
         self.assertEqual([f['activo_id'] for f in filas_csv(texto)], esperados("d.fqdn = 'acme-tienda.mx'"))
         self.assertEqual(len(filas_csv(texto)), 3)
+        # Sin ?domain, la bitácora deja el dominio de la llave, no la empresa.
+        tienda = scalar("SELECT id FROM domains WHERE fqdn = 'acme-tienda.mx';", user='postgres')
+        ok, salida, err = psql("SELECT entity_type, entity_id, details->>'domain', details->>'rows' FROM audit_log "
+                               "WHERE organization_id = '%s' AND action = 'report.downloaded' AND details->>'kind' = 'assets' "
+                               "ORDER BY chain_seq DESC LIMIT 1;" % ACME, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(salida.splitlines(), ['domain|%s|acme-tienda.mx|3' % tienda])
         self.assertEqual(descargar('/api/v1/assets?formato=csv&domain=acme-demo.mx', llave=llave['key'])[0], 404)
+
+    def test_7_csv_con_mas_de_50000_activos_responde_422(self):
+        # TOPE_CSV_ACTIVOS de cirdan/api/v1.py. acme-tienda.mx queda con 50 000 activos exactos (sale) y luego con 50 001
+        # (422, sin evento en la bitácora). Así se prueba el corte con LIMIT tope + 1 en los dos lados.
+        self.addCleanup(borrar_insertados, PREFIJO_TOPE)
+        self.addCleanup(borrar_insertados, PREFIJO_ID + '950')
+        tope = 50_000
+        ya = int(scalar("SELECT count(*) FROM assets a JOIN domains d ON d.id = a.domain_id "
+                        "WHERE d.fqdn = 'acme-tienda.mx';", user='postgres'))
+        ok, _, err = psql("INSERT INTO assets (id, organization_id, domain_id, asset_type, value, first_seen_at, "
+                          "last_seen_at) SELECT ('%s' || lpad(to_hex(n), 12, '0'))::uuid, d.organization_id, d.id, "
+                          "'subdomain', 'tope' || n || '.acme-tienda.mx', now(), now() FROM domains d, "
+                          "generate_series(1, %d) n WHERE d.fqdn = 'acme-tienda.mx';" % (PREFIJO_TOPE, tope - ya),
+                          user='postgres')
+        self.assertTrue(ok, err)
+        url = '/api/v1/assets?formato=csv&domain=acme-tienda.mx'
+        code, texto = descargar(url, self.alex)
+        self.assertEqual(code, 200, texto[:200])
+        self.assertEqual(len(filas_csv(texto)), tope)
+        insertar([(950, 'acme-tienda.mx', 'subdomain', 'uno-mas.acme-tienda.mx')])
+        antes = ultimo_seq(ACME)
+        code, texto = descargar(url, self.alex)
+        self.assertEqual(code, 422, texto[:200])
+        self.assertIn('50000', texto)
+        self.assertEqual(ultimo_seq(ACME), antes)
 
 
 if __name__ == '__main__':

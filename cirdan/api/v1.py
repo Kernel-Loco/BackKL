@@ -1302,6 +1302,9 @@ def organization_assets(request: Request,
                         session: Session = Depends(session_or_api_key)):
     if formato not in ('json', 'csv'):
         raise HTTPException(422, "El formato debe ser 'json' o 'csv'")
+    # PostgreSQL no acepta el carácter nulo en un text: sin esto psycopg falla al ejecutar y la respuesta sería 500.
+    if any(v is not None and '\x00' in v for v in (domain, q)):
+        raise HTTPException(422, 'Los filtros no pueden contener caracteres nulos.')
     params = {'llave': session.domain_id, 'fqdn': domain, 'tipo': tipo, 'q': q, 'carta': False,
               'limit': limit, 'offset': offset}
     if formato == 'json':
@@ -1331,9 +1334,10 @@ def organization_assets(request: Request,
                   r['first_seen_at'], r['last_seen_at'], r['attributes']) for r in rows]
         respuesta = _descarga(csv_con_bom(ENCABEZADOS_ACTIVOS, filas), 'text/csv; charset=utf-8',
                               '%s-activos.csv' % nombre)  # el nombre sale de la base, no de la ruta
-        # Con ?domain la bitácora queda como las demás descargas. Sin él, la entidad es la empresa y domain va en null.
-        if domain_id:
-            _registrar_descarga(conn, session, request, 'assets', 'csv', domain_id, len(filas))
+        # Con ?domain, o con una llave de un dominio (que solo trae filas de ese dominio), la bitácora queda como las
+        # demás descargas, con el dominio. Si no, la entidad es la empresa y domain va en null.
+        if domain_id or session.domain_id:
+            _registrar_descarga(conn, session, request, 'assets', 'csv', domain_id or session.domain_id, len(filas))
         else:
             audit(conn, session.org_id, REPORTE_DESCARGADO, user_id=session.audit_user_id, ip=client_ip(request),
                   entity_type='organization', entity_id=session.org_id, platform=session.audit_platform,
