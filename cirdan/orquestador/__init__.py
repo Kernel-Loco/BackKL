@@ -529,7 +529,7 @@ def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, pa
     hallazgos_score = []
     for hallazgo in filas:
         copia = dict(hallazgo)
-        if predicciones is not None:
+        if predicciones is not None and copia['id'] in predicciones:
             copia['severity'] = predicciones[copia['id']]['severity']
         hallazgos_score.append(copia)
     # Los cortes de bandas del juego con que se guarda el score: mueven el piso y la banda (RC-237).
