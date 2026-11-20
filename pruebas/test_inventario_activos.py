@@ -54,6 +54,22 @@ def todo(cliente, filtros=''):
             return items, body['total']
 
 
+def insertar(filas):
+    """Activos de prueba [(n, fqdn, tipo, valor)] con id PREFIJO_ID + n, como postgres, con un banner con fórmula."""
+    valores = ', '.join("('%s%03d', '%s', '%s', $v$%s$v$)" % (PREFIJO_ID, n, fqdn, tipo, valor)
+                        for n, fqdn, tipo, valor in filas)
+    ok, _, err = psql('INSERT INTO assets (id, organization_id, domain_id, asset_type, value, attributes, first_seen_at, '
+                      'last_seen_at) SELECT v.id::uuid, d.organization_id, d.id, v.tipo, v.valor, '
+                      '\'{"banner": "=cmd|calc"}\', now(), now() FROM (VALUES %s) AS v(id, fqdn, tipo, valor) '
+                      'JOIN domains d ON d.fqdn = v.fqdn;' % valores, user='postgres')
+    assert ok, err
+
+
+def borrar_insertados(prefijo=PREFIJO_ID):
+    ok, _, err = psql("DELETE FROM assets WHERE id::text LIKE '%s%%';" % prefijo, user='postgres')
+    assert ok, err
+
+
 def filas_csv(texto):
     return list(csv.DictReader(io.StringIO(texto.lstrip('﻿'), newline='')))
 
@@ -67,6 +83,18 @@ class InventarioActivos(unittest.TestCase):
         cls.alex = sesion.login(ALEX)
         cls.beta = sesion.login(DANA)
         cls.acme_demo = scalar("SELECT id FROM domains WHERE fqdn = 'acme-demo.mx';", user='postgres')
+        # La semilla solo trae activos en acme-demo.mx y beta-corp.mx: uno en un dominio sin carta vigente
+        # (old-example.net) y tres en otro con carta (acme-tienda.mx), así filtros, páginas y CSV cruzan dominios.
+        borrar_insertados()  # los de una corrida cortada
+        insertar([(900, 'old-example.net', 'subdomain', 'www.old-example.net'),
+                  (901, 'acme-tienda.mx', 'subdomain', 'shop.acme-tienda.mx'),
+                  (902, 'acme-tienda.mx', 'ip', '192.0.2.31'),
+                  (903, 'acme-tienda.mx', 'subdomain', '_dmarc.acme-tienda.mx')])
+        assert scalar("SELECT count(*) FROM assets WHERE id::text LIKE '%s9%%';" % PREFIJO_ID, user='postgres') == '4'
+
+    @classmethod
+    def tearDownClass(cls):
+        borrar_insertados()
 
     def tearDown(self):
         poner_plan(ACME, 'starter')
@@ -128,13 +156,8 @@ class InventarioActivos(unittest.TestCase):
         self.assertEqual((body['limit'], body['offset'], len(body['items'])), (50, 0, min(50, len(todos))))
 
     def test_4_csv_escapa_formulas_y_deja_bitacora(self):
-        valores = ',\n'.join(
-            "('%s%03d', '%s', '%s', NULL, 'subdomain', $v$%s$v$, NULL, '{\"banner\": \"=cmd|calc\"}', now(), now())"
-            % (PREFIJO_ID, n, ACME, self.acme_demo, v) for n, v in enumerate(FORMULAS))
-        self.addCleanup(psql, "DELETE FROM assets WHERE id::text LIKE '%s%%';" % PREFIJO_ID, user='postgres')
-        ok, _, err = psql('INSERT INTO assets (id, organization_id, domain_id, parent_asset_id, asset_type, value, '
-                          'ip_address, attributes, first_seen_at, last_seen_at) VALUES %s;' % valores, user='postgres')
-        self.assertTrue(ok, err)
+        self.addCleanup(borrar_insertados, PREFIJO_ID + '0')  # los 0xx de esta prueba, no los 9xx de la clase
+        insertar([(n, 'acme-demo.mx', 'subdomain', v) for n, v in enumerate(FORMULAS)])
         antes = ultimo_seq(ACME)
         code, texto = descargar('/api/v1/assets?formato=csv&domain=acme-demo.mx', self.alex)
         self.assertEqual(code, 200, texto)
@@ -164,7 +187,8 @@ class InventarioActivos(unittest.TestCase):
         filas = filas_csv(texto)
         self.assertEqual([f['activo_id'] for f in filas],
                          esperados("a.organization_id = '%s' AND %s" % (ACME, CARTA_VIGENTE)))
-        self.assertLess(len(filas), len(esperados("a.organization_id = '%s'" % ACME)), 'la semilla trae uno sin carta')
+        self.assertNotIn('old-example.net', {f['dominio'] for f in filas})   # su activo 900 no sale: no tiene carta
+        self.assertEqual({f['dominio'] for f in filas}, {'acme-demo.mx', 'acme-tienda.mx'})
         ok, salida, err = psql("SELECT entity_type, entity_id, details::text FROM audit_log WHERE organization_id = '%s' "
                                "AND chain_seq > %d AND action = 'report.downloaded';" % (ACME, antes), user='postgres')
         self.assertTrue(ok, err)
@@ -181,7 +205,7 @@ class InventarioActivos(unittest.TestCase):
         # Beta no recibe filas de Acme.
         code, texto = descargar('/api/v1/assets?formato=csv', self.beta)
         self.assertEqual(code, 200, texto)
-        self.assertFalse({f['dominio'] for f in filas_csv(texto)} & {f['dominio'] for f in filas})
+        self.assertEqual({f['dominio'] for f in filas_csv(texto)}, {'beta-corp.mx'})
 
     def test_6_llave_de_un_dominio_solo_ve_el_suyo(self):
         poner_plan(ACME, 'business')
@@ -194,7 +218,8 @@ class InventarioActivos(unittest.TestCase):
         self.assertEqual(get(llave['key'], '/api/v1/assets?domain=acme-demo.mx')[1]['total'], 0)
         code, texto = descargar('/api/v1/assets?formato=csv', llave=llave['key'])
         self.assertEqual(code, 200, texto)
-        self.assertEqual({f['dominio'] for f in filas_csv(texto)} - {'acme-tienda.mx'}, set())
+        self.assertEqual([f['activo_id'] for f in filas_csv(texto)], esperados("d.fqdn = 'acme-tienda.mx'"))
+        self.assertEqual(len(filas_csv(texto)), 3)
         self.assertEqual(descargar('/api/v1/assets?formato=csv&domain=acme-demo.mx', llave=llave['key'])[0], 404)
 
 
