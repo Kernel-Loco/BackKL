@@ -134,7 +134,7 @@ jobs:
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
           pruebas/test_contrasenas_comunes.py
           pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_siem.py pruebas/test_despliegue.py
-          pruebas/test_ci.py
+          pruebas/test_ci.py pruebas/test_terraform.py
 
       # RC-313, punto 3b: con la base a las 20:00 de México y la API en UTC, GET /api/v1/domains da 'missing' a una carta
       # que empieza mañana. La base se levanta otra vez con libfaketime (pruebas/hora_base) en las 02:00 UTC de hoy, que
@@ -159,3 +159,23 @@ jobs:
       - name: Apagar y borrar la base de prueba
         if: always()
         run: docker compose down -v
+
+  # Infraestructura como código (#81, RC-132): formato, validación sin nube (init -backend=false no crea nada ni pide
+  # cuenta de Azure) y Trivy sin hallazgos altos ni críticos en la configuración. Imágenes con versión fija.
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Terraform fmt y validate
+        run: |
+          tf() { docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD/infra/terraform:/tf" -w /tf hashicorp/terraform:1.17.2 "$@"; }
+          tf fmt -check -recursive -diff
+          tf init -backend=false -input=false -lockfile=readonly
+          tf validate
+
+      - name: Trivy revisa la configuración de Terraform
+        run: >-
+          docker run --rm -v "$PWD/infra/terraform:/src:ro" aquasec/trivy:0.76.2
+          config --severity HIGH,CRITICAL --exit-code 1 /src
