@@ -80,7 +80,7 @@ COMENTARIO_REVISOR = re.compile(r"COMMENT ON COLUMN scoring_rule_texts\.reviewed
 NOTA_REVISOR = re.compile(r"^Table scoring_rule_texts\b.*?^\s*reviewed_by\s+text\s+\[note:\s*'([^']*)'\]",
                           re.DOTALL | re.MULTILINE)
 FILA_DOC = re.compile(r"^\|\s*(\d{2})\s*\|\s*`([a-z0-9_]+)`\s*\|\s*([a-z_]+)\s*\|\s*([a-z]+)\s*\|\s*([0-9.]+)\s*\|"
-                      r"\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*$", re.MULTILINE)
+                      r"\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*$", re.MULTILINE)
 POR_CATEGORIA_DOC = re.compile(r'^Por categoría: (.*)$', re.MULTILINE)
 TITULO_TABLA_DOC = re.compile(r'^## Las (\d+) reglas$', re.MULTILINE)
 EMITE_HOY = 'Lo emite hoy'
@@ -150,6 +150,8 @@ HUELLAS_DB = {
     'db/migraciones/023_texto_ia_internetdb.sql': '21023fdae76fb51919a6e6edce31468b9e2d6e3fb637897441d76cf35f46e7ee',
     'db/migraciones/024_bandas_por_organizacion.sql': '435dfb3b46d6d4b7db6b73e20630671781626fdca35b2f8f1e228671a1143fdd',
     'db/migraciones/025_textos_higiene_certificados.sql': 'c2a50ddf2e0593e0c66666a597aeced543dca9f552947bc73593974ca2207cc5',
+    'db/migraciones/026_huellas_por_version.sql': '0ceaf2b7d16a9bd9f75130b4cb46f6ea092082c22bd859471fdb314607171529',
+    'db/migraciones/027_mfa_operador.sql': '8aa7f9edd44ddcdfa4e08450d908234763bc64214eb919f73c5aee721011bc2c',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',
@@ -457,13 +459,17 @@ class Reglas(unittest.TestCase):
         self.assertEqual(sorted(f[1] for f in FILAS_DOC), sorted(POR_CODIGO),
                          'docs/codigos_reglas.md no tiene los mismos códigos que las reglas del juego v1')
         emite_hoy = {c for fuente in REGISTRO if fuente != 'ejemplo' for c in cargar(fuente).CODIGOS}
-        for nn, code, cat, sev, tope, _, estado in FILAS_DOC:
+        for nn, code, cat, sev, tope, _, estado, falta, superficie in FILAS_DOC:
             _, i, _, _, cat_r, sev_r, _, tope_r = POR_CODIGO[code]
             self.assertEqual((i[-2:], cat, sev, Decimal(tope)), (nn, cat_r, sev_r, tope_r),
                              '%r: docs/codigos_reglas.md no coincide con su semilla' % code)
             self.assertEqual(estado == EMITE_HOY, code in emite_hoy,
                              '%r: docs/codigos_reglas.md dice %r y su recolector en REGISTRO %s lo declara'
                              % (code, estado, 'sí' if code in emite_hoy else 'no'))
+            self.assertIn(estado, (EMITE_HOY, 'Planeado', 'Previsto'))
+            self.assertTrue(falta and superficie, '%r: faltan columnas de cobertura' % code)
+            self.assertEqual(falta == '—', estado == EMITE_HOY, '%r: falta una dependencia o sobra una' % code)
+            self.assertIn(superficie, ('—', 'IoT y OT', 'APIs', 'Nube', 'Contenedores', 'Secretos'))
         titulo = TITULO_TABLA_DOC.search(doc)
         self.assertIsNotNone(titulo, 'docs/codigos_reglas.md sin el título Las N reglas')
         self.assertEqual(int(titulo.group(1)), len(REGLAS_V1), 'el título de docs/codigos_reglas.md no cuadra')

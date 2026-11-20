@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/026_tipo_activo_perfil.sql (#20, RC-56)
+-- Cirdan · db/migraciones/028_tipo_activo_perfil.sql (#20, RC-56)
 -- Agrega el tipo de activo 'profile' al CHECK de assets.asset_type: un
 -- perfil público ligado a la empresa (GitHub, GitLab, LinkedIn, X,
 -- Facebook, Instagram, YouTube o TikTok), enlazado desde un sitio del
@@ -30,7 +30,7 @@ ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_asset_type_check;
 ALTER TABLE assets ADD CONSTRAINT assets_asset_type_check
   CHECK (asset_type IN ('domain','subdomain','ip','service','certificate','email','api_doc','profile'));
 
-COMMENT ON COLUMN assets.asset_type IS 'Tipo de activo: domain, subdomain, ip, service, certificate, email, api_doc o profile (026: un perfil público ligado a la empresa, con su URL https en value).';
-COMMENT ON TABLE assets IS 'Inventario normalizado de la superficie expuesta: dominio, subdominios, IP, servicios, certificados, correos, documentos de API y perfiles públicos (026).';
+COMMENT ON COLUMN assets.asset_type IS 'Tipo de activo: domain, subdomain, ip, service, certificate, email, api_doc o profile (028: un perfil público ligado a la empresa, con su URL https en value).';
+COMMENT ON TABLE assets IS 'Inventario normalizado de la superficie expuesta: dominio, subdominios, IP, servicios, certificados, correos, documentos de API y perfiles públicos (028).';
 
 COMMIT;

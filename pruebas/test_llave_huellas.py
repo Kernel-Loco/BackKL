@@ -35,7 +35,8 @@ MAYA = '30000000-0000-4000-8000-000000000002'
 ORG = '20000000-0000-4000-8000-000000000001'
 CLAVE = 'Clave-De-Prueba-Larga-1'
 VARIABLES = ('PASSWORD_HASH_ENCRYPTION_KEY', 'PASSWORD_HASH_KEY_VAULT_SECRET_URL', 'TOTP_ENCRYPTION_KEY',
-             'TOTP_KEY_VAULT_SECRET_URL')
+             'TOTP_KEY_VAULT_SECRET_URL', 'PASSWORD_HASH_KEY_VERSION', 'PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY',
+             'PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL', 'PWNED_PASSWORDS_ENABLED')
 
 
 class Falso:
@@ -56,7 +57,7 @@ class Falso:
 
 class Base(unittest.TestCase):
     def setUp(self):
-        for nombre in ('_llave_vault', '_relleno'):
+        for nombre in ('_llave_vault', '_llave_vault_anterior', '_relleno'):
             setattr(passwords, nombre, None)
             self.addCleanup(setattr, passwords, nombre, None)
         totp._llave_vault = None

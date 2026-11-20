@@ -16,6 +16,7 @@ import re
 import secrets
 import uuid
 from datetime import date, datetime
+from typing import Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from starlette.concurrency import run_in_threadpool
@@ -1246,15 +1247,103 @@ def update_scoring_weights(payload: dict[str, object] = Body(...),
     }
 
 
-@router.get('/domains/{fqdn}/assets', summary='Activos del dominio (provisional, aún no está en el contrato #21)')
+# ---------------------------------------------------------------- inventario de activos (RC-17, #113 RC-231)
+
+ORDEN_TIPO = "array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email','profile'], a.asset_type)"
+TipoActivo = Literal['domain', 'subdomain', 'certificate', 'ip', 'service', 'api_doc', 'email', 'profile']
+
+
+@router.get('/domains/{fqdn}/assets', summary='Activos del dominio')
 def domain_assets(fqdn: str, session: Session = Depends(session_or_api_key)):
     _domain_id(session, fqdn)
     rows = _query(session, '''
         SELECT a.id::text, a.asset_type AS type, a.value, p.value AS parent, a.attributes, a.first_seen_at, a.last_seen_at
           FROM assets a JOIN domains d ON d.id = a.domain_id LEFT JOIN assets p ON p.id = a.parent_asset_id
-         WHERE d.fqdn = %s ORDER BY array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email','profile'], a.asset_type), a.value
+         WHERE d.fqdn = %s ORDER BY ''' + ORDEN_TIPO + ''', a.value
     ''', (fqdn,))
     return {'items': rows, 'total': len(rows)}
+
+
+# Filtros de GET /assets. RLS deja solo la empresa y una llave de un dominio solo ve el suyo. El texto se busca como
+# subcadena sin importar mayúsculas con strpos, no con LIKE, así % y _ cuentan como letras y no como comodines.
+# La exportación además pide carta vigente (%(carta)s), como las demás exportaciones (retro-11, RC-307).
+ACTIVOS_FILTRO = '''
+  FROM assets a
+  JOIN domains d      ON d.id = a.domain_id
+  LEFT JOIN assets p  ON p.id = a.parent_asset_id
+ WHERE (%(llave)s::uuid IS NULL OR a.domain_id = %(llave)s::uuid)
+   AND (%(fqdn)s::citext IS NULL OR d.fqdn = %(fqdn)s::citext)
+   AND (%(tipo)s::text IS NULL OR a.asset_type = %(tipo)s::text)
+   AND (%(q)s::text IS NULL OR strpos(lower(a.value), lower(%(q)s::text)) > 0)
+   AND (NOT %(carta)s OR EXISTS (SELECT 1 FROM domain_authorizations x
+                                  WHERE x.domain_id = d.id AND x.revoked_at IS NULL
+                                    AND current_date BETWEEN x.valid_from AND x.valid_until))
+'''
+ACTIVOS_COLUMNAS = '''
+SELECT a.id::text, d.fqdn::text AS domain, a.asset_type AS type, a.value, host(a.ip_address) AS ip,
+       p.value AS parent, p.asset_type AS parent_type, a.attributes, a.first_seen_at, a.last_seen_at
+'''
+ACTIVOS_ORDEN = ' ORDER BY d.fqdn, ' + ORDEN_TIPO + ', a.value, a.id'
+ENCABEZADOS_ACTIVOS = ('dominio', 'activo_id', 'tipo', 'valor', 'ip', 'activo_padre', 'tipo_padre', 'primera_vez',
+                       'ultima_vez', 'atributos')
+# Una exportación que pasa de aquí responde 422 y pide filtrar: el CSV se arma en memoria.
+TOPE_CSV_ACTIVOS = 50_000
+
+
+@router.get('/assets', summary='Inventario de activos de la organización, con filtros, paginación y exportación a CSV')
+def organization_assets(request: Request,
+                        domain: str | None = Query(default=None, min_length=1, max_length=253,
+                                                   description='Solo los de este dominio'),
+                        tipo: TipoActivo | None = Query(default=None, alias='type', description='Solo los de este tipo'),
+                        q: str | None = Query(default=None, min_length=1, max_length=200,
+                                              description='Texto que contiene el valor, sin importar mayúsculas'),
+                        limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0, le=1_000_000),
+                        formato: str = Query(default='json', description="'json' (la lista) o 'csv' (la descarga)"),
+                        session: Session = Depends(session_or_api_key)):
+    if formato not in ('json', 'csv'):
+        raise HTTPException(422, "El formato debe ser 'json' o 'csv'")
+    # PostgreSQL no acepta el carácter nulo en un text: sin esto psycopg falla al ejecutar y la respuesta sería 500.
+    if any(v is not None and '\x00' in v for v in (domain, q)):
+        raise HTTPException(422, 'Los filtros no pueden contener caracteres nulos.')
+    params = {'llave': session.domain_id, 'fqdn': domain, 'tipo': tipo, 'q': q, 'carta': False,
+              'limit': limit, 'offset': offset}
+    if formato == 'json':
+        # Como GET /scans: un dominio de otra empresa, uno que no existe o, con una llave de un dominio, otro dominio de
+        # la empresa da total 0, no 404. Conteo y página salen de la misma foto (REPEATABLE READ).
+        with transaction(session.org_id, isolation=IsolationLevel.REPEATABLE_READ) as conn:
+            total = conn.execute('SELECT count(*) AS n' + ACTIVOS_FILTRO, params).fetchone()['n']
+            rows = conn.execute(ACTIVOS_COLUMNAS + ACTIVOS_FILTRO + ACTIVOS_ORDEN + ' LIMIT %(limit)s OFFSET %(offset)s',
+                                params).fetchall()
+        return {'items': rows, 'total': total, 'limit': limit, 'offset': offset}
+
+    # CSV: todas las filas del filtro, sin paginar, solo de dominios con carta vigente. Con ?domain se comporta como las
+    # exportaciones de un dominio: 404 si no es de la empresa (o de la llave) y 403 sin carta vigente.
+    domain_id = _dominio_autorizado(session, domain) if domain is not None else None
+    params['carta'] = True
+    with transaction(session.org_id) as conn:  # READ COMMITTED: audit() no acepta otra (RC-312)
+        nombre = 'organizacion'
+        if domain_id:
+            _carta_vigente(conn, domain_id)
+            nombre = conn.execute('SELECT fqdn::text FROM domains WHERE id = %s', (domain_id,)).fetchone()['fqdn']
+        rows = conn.execute(ACTIVOS_COLUMNAS + ACTIVOS_FILTRO + ACTIVOS_ORDEN + ' LIMIT %d' % (TOPE_CSV_ACTIVOS + 1),
+                            params).fetchall()
+        if len(rows) > TOPE_CSV_ACTIVOS:
+            raise HTTPException(422, 'Hay más de %d activos con estos filtros: filtra por dominio o por tipo'
+                                % TOPE_CSV_ACTIVOS)
+        filas = [(r['domain'], r['id'], r['type'], r['value'], r['ip'], r['parent'], r['parent_type'],
+                  r['first_seen_at'], r['last_seen_at'], r['attributes']) for r in rows]
+        respuesta = _descarga(csv_con_bom(ENCABEZADOS_ACTIVOS, filas), 'text/csv; charset=utf-8',
+                              '%s-activos.csv' % nombre)  # el nombre sale de la base, no de la ruta
+        # Con ?domain, o con una llave de un dominio (que solo trae filas de ese dominio), la bitácora queda como las
+        # demás descargas, con el dominio. Si no, la entidad es la empresa y domain va en null.
+        if domain_id or session.domain_id:
+            _registrar_descarga(conn, session, request, 'assets', 'csv', domain_id or session.domain_id, len(filas))
+        else:
+            audit(conn, session.org_id, REPORTE_DESCARGADO, user_id=session.audit_user_id, ip=client_ip(request),
+                  entity_type='organization', entity_id=session.org_id, platform=session.audit_platform,
+                  api_key_id=session.api_key_id, details={'kind': 'assets', 'format': 'csv', 'domain': None,
+                                                          'rows': len(filas)})
+    return respuesta
 
 
 @router.get('/scans', summary='Escaneos de la organización, del más nuevo al más viejo (provisional)')

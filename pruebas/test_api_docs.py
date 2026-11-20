@@ -1016,7 +1016,7 @@ class Base(unittest.TestCase):
         sql = '\n'.join(linea.split('--', 1)[0] for linea in texto.splitlines())
         check, = re.findall(r"CHECK\s*\(asset_type IN \(([^)]*)\)\)", sql)
         tipos = tuple(t.strip().strip("'") for t in check.split(','))
-        # Los tipos que vinieron después (profile, 026) los agrega su propia migración
+        # Los tipos que vinieron después (profile, 028) los agrega su propia migración
         self.assertEqual(tipos, contrato.TIPOS_ACTIVO[:contrato.TIPOS_ACTIVO.index(api_docs.TIPO_ACTIVO) + 1])
         inicial = (RAIZ / 'db' / 'migraciones' / '001_esquema_inicial.sql').read_text(encoding='utf-8')
         antes, = re.findall(r"asset_type\s+text NOT NULL CHECK \(asset_type IN \(([^)]*)\)\)", inicial)

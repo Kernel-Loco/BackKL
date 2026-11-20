@@ -16,8 +16,10 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Match
 
-from cirdan.auth.deps import Session, current_session, require_roles
+from cirdan.auth.deps import Session, client_ip, comprobar_cookie_segura, current_session, require_roles
+from cirdan.api.asistente import router as assistant_router
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
@@ -25,8 +27,8 @@ from cirdan.api.plataforma import router as platform_router
 from cirdan.api.v1 import router as v1_router
 from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
-from cirdan.config import ORIGENES_LOCALES, config
-from cirdan.db import transaction
+from cirdan.config import config, origenes_permitidos
+from cirdan.db import audit, transaction
 
 
 @asynccontextmanager
@@ -35,6 +37,9 @@ async def _arranque(app):
     # `docker compose logs api`, y no en el primer inicio de sesión (#49, RC-91). Igual con la llave de las huellas de
     # contraseña (RC-330), que además tiene que ser otra que la del MFA aunque una venga del .env y la otra de Key
     # Vault.
+    # Antes que las llaves, que pueden tardar con Key Vault: publicada por HTTPS, la cookie de sesión va con Secure
+    # o la API no arranca (RC-286).
+    comprobar_cookie_segura()
     passwords.comprobar_llave(totp.comprobar_llave())
     yield
 
@@ -168,8 +173,8 @@ class TopeDeCuerpo:
 # Así el 413 también sale con CABECERAS_SEGURIDAD.
 app.add_middleware(TopeDeCuerpo)
 
-# Orígenes que pueden mandar POST con la cookie: el portal y la propia API.
-ALLOWED_ORIGINS = {o.strip() for o in config('ALLOWED_ORIGINS', ORIGENES_LOCALES).split(',')}
+# Orígenes que pueden mandar POST con la cookie: el portal y la propia API. Vacía vale como sin poner (RC-277).
+ALLOWED_ORIGINS = set(origenes_permitidos())
 
 
 @app.middleware('http')
@@ -202,6 +207,40 @@ async def cabeceras_de_seguridad(request: Request, call_next):
     return response
 
 
+@app.middleware('http')
+async def auditar_lecturas_de_operador(request: Request, call_next):
+    """Registra las lecturas exitosas que un superadmin hace dentro de una empresa cliente."""
+    response = await call_next(request)
+    route_path, path_params = '', {}
+    for route in app.router.routes:
+        router = getattr(route, 'original_router', None)
+        candidates = router.routes if router else (route,)
+        for candidate in candidates:
+            if not getattr(candidate, 'path', None):
+                continue
+            match, child_scope = candidate.matches(request.scope)
+            if match is Match.FULL:
+                route_path = candidate.path
+                path_params = child_scope.get('path_params', {})
+                break
+        if route_path:
+            break
+    session = getattr(request.state, 'cirdan_session', None)
+    if (
+        request.method not in ('GET', 'HEAD') or response.status_code < 200 or response.status_code >= 300
+        or not route_path.startswith('/api/v1/') or route_path.startswith(('/api/v1/auth/', '/api/v1/platform/'))
+        or request.headers.get('authorization') or not session or not session.acting_elsewhere
+    ):
+        return response
+    with transaction(session.org_id) as conn:
+        audit(conn, session.org_id, 'platform.client_data_read', ip=client_ip(request), entity_type='api_route',
+              details={'method': request.method, 'route': route_path,
+                       'path_params': {key: str(value) for key, value in path_params.items()},
+                       'status_code': response.status_code},
+              platform=session.audit_platform)
+    return response
+
+
 @app.exception_handler(Exception)
 async def error_no_manejado(request: Request, exc: Exception):
     """El 500 de un error sin manejar lo arma Starlette por fuera de los middlewares: aquí lleva las cabeceras."""
@@ -213,6 +252,7 @@ app.include_router(scans_router)
 app.include_router(api_keys_router)
 app.include_router(platform_router)
 app.include_router(v1_router)
+app.include_router(assistant_router)
 
 # Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas
 # rutas no existen (404). Nunca true en producción.

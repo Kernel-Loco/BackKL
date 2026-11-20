@@ -59,6 +59,14 @@ services:
       # de su secreto en Key Vault, una de las dos (cirdan/auth/passwords.py).
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
       PASSWORD_HASH_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_KEY_VAULT_SECRET_URL:-}
+      # Rotación de esa llave (RC-333, docs/despliegue.md): la versión de la actual y, mientras se rota, la anterior
+      # con la misma regla de una de las dos. Sin ellas, versión 1 y sin anterior.
+      PASSWORD_HASH_KEY_VERSION: ${PASSWORD_HASH_KEY_VERSION:-}
+      PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY: ${PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY:-}
+      PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL:-}
+      # Contraseñas filtradas (RC-334): consulta a api.pwnedpasswords.com en cada cambio de contraseña. Apagada en tu
+      # PC y en el CI. Prendida en la VM (docker-compose.despliegue.yml).
+      PWNED_PASSWORDS_ENABLED: ${PWNED_PASSWORDS_ENABLED:-false}
       CARTA_ALTA_ENABLED: ${CARTA_ALTA_ENABLED:-false}
       CARTA_STORAGE_DIR: /var/lib/cirdan/cartas
       CARTA_ENCRYPTION_KEY: ${CARTA_ENCRYPTION_KEY:-}
@@ -66,10 +74,13 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Dominio al que quedan amarradas las passkeys (RC-331). localhost en tu PC; los orígenes salen de ALLOWED_ORIGINS.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      # Orígenes que pueden escribir con la cookie (cirdan/api/main.py). Vacía o sin poner, la lista local
+      # (localhost y 127.0.0.1). El despliegue y el plan B la piden (docker-compose.despliegue.yml, RC-277).
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       # De quién se acepta X-Forwarded-For, que da la IP del bloqueo por intentos del login.
-      # Por omisión de nadie de fuera del contenedor. El portal (Next) no agrega ese encabezado:
-      # pasa tal cual el que mande el navegador, así que con "*" quien llama elige su IP y se
-      # salta el bloqueo. Sin proxy, la API ve con una sola IP a todo lo que entra por el puerto
+      # Por omisión de nadie de fuera del contenedor. El portal (Next) no limpia ese encabezado:
+      # reenvía tal cual el que mande el navegador y solo pone el suyo si no viene, así que con "*"
+      # quien llama elige su IP y se salta el bloqueo. Sin proxy, la API ve con una sola IP a todo lo que entra por el puerto
       # publicado (el portal y el host): la puerta de enlace de la red de Docker. Así el bloqueo
       # por IP es uno solo para todos. En el despliegue (#49) va la IP o el CIDR con que la API ve
       # llegar al portal (con el portal en el host, esa puerta de enlace, que da docker network
@@ -91,6 +102,14 @@ services:
       # Llave del HMAC de la huella de los correos personales del recolector de identidad (RC-56), de 32
       # caracteres o más. Vacía, personal_email_exposed queda sin cobertura. El valor va solo en el .env.
       IDENTITY_HMAC_KEY: ${IDENTITY_HMAC_KEY:-}
+      # Asistente (#38): endpoints compatibles con OpenAI. Los secretos solo viven en .env; sin configuración,
+      # el endpoint responde 503 y no sustituye la respuesta por texto inventado.
+      IA_BASE_URL: ${IA_BASE_URL:-}
+      IA_API_KEY: ${IA_API_KEY:-}
+      IA_MODELO: ${IA_MODELO:-openai/gpt-oss-120b}
+      IA_RESPALDO_BASE_URL: ${IA_RESPALDO_BASE_URL:-}
+      IA_RESPALDO_API_KEY: ${IA_RESPALDO_API_KEY:-}
+      IA_RESPALDO_MODELO: ${IA_RESPALDO_MODELO:-openai/gpt-oss-120b}
       # Explorador de la base para la demo (/demo y /db), siempre con sesión (RC-58). Con false
       # esas rutas no existen. Nunca true en producción.
       DEMO_EXPLORER: ${DEMO_EXPLORER:-false}
@@ -129,6 +148,9 @@ services:
       TOTP_KEY_VAULT_SECRET_URL: ${TOTP_KEY_VAULT_SECRET_URL:-}
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
       PASSWORD_HASH_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_KEY_VAULT_SECRET_URL:-}
+      PASSWORD_HASH_KEY_VERSION: ${PASSWORD_HASH_KEY_VERSION:-}
+      PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY: ${PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY:-}
+      PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL:-}
       DEMO_ACCOUNTS: ${DEMO_ACCOUNTS:-false}
       # Vacía cuenta como sin poner: vale la lista local por omisión.
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}

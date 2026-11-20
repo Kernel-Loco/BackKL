@@ -53,3 +53,13 @@ datos/geo/*
 respaldos/
 *.dump
 *.dump.age
+
+# Terraform (#81, RC-132): el estado, el plan y las variables de cada quien nunca van a git. El lock de proveedores sí.
+infra/terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log

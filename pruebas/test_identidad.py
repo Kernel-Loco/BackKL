@@ -7,7 +7,7 @@ ClienteIdentidad(descargar=...) y el A con el ResolvedorSimulado de test_shodan.
 Cada punto del Hecho cuando de RC-56 tiene su prueba:
 1. Del sitio, de los commits y de los certificados salen los correos del dominio, los perfiles enlazados y los usuarios
    de GitHub con correo del dominio: Identidad.test_1, test_2 y test_3.
-2. Cada uno es un activo: los mismos, más Base.test_4 (el tipo profile en el contrato y en la migración 026).
+2. Cada uno es un activo: los mismos, más Base.test_4 (el tipo profile en el contrato y en la migración 028).
 3. personal_email_exposed y email_pattern_exposed: Identidad.test_4 y test_5.
 4. El correo y el perfil sembrados por #10b en reservas.olmardo.com: Identidad.test_6.
 5. Nunca entra a cuentas ni navega con sesión: Identidad.test_7.
@@ -40,7 +40,7 @@ IP_RESERVAS = '20.150.10.20'
 AHORA = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
 FIXTURES = RAIZ / 'pruebas' / 'fixtures' / 'identidad'
 SEMILLA = RAIZ / 'db' / 'semillas' / '026_identidad.sql'
-MIGRACION = RAIZ / 'db' / 'migraciones' / '026_tipo_activo_perfil.sql'
+MIGRACION = RAIZ / 'db' / 'migraciones' / '028_tipo_activo_perfil.sql'
 DECLARADA = 'acme-demo.mx=acme-demo'
 LLAVE_FALSA = 'CIRDAN_FAKE_llave_del_hmac_de_identidad'   # IDENTITY_HMAC_KEY de las pruebas, no es de ningún despliegue
 _CON_LLAVE = mock.patch.dict(os.environ, {identidad.LLAVE: LLAVE_FALSA})
@@ -786,7 +786,7 @@ class Ronda4(unittest.TestCase):
         self.assertTrue(set(personal[0].partes) & set(segunda.sin_revisar))
 
 class Base(unittest.TestCase):
-    """Lectura estática de la semilla y la migración 026, del registro y del .gitignore, sin base."""
+    """Lectura estática de la semilla y la migración 028, del registro y del .gitignore, sin base."""
 
     def test_1_semilla_identity_encendida_con_10_corridas_por_dia(self):
         with mock.patch.object(test_subfinder, 'SEMILLA', SEMILLA):
@@ -798,14 +798,14 @@ class Base(unittest.TestCase):
         texto = SEMILLA.read_text(encoding='utf-8')
         self.assertIn("SET client_encoding = 'UTF8';", texto)
         self.assertIn('ON CONFLICT (code) DO NOTHING', texto)
-        self.assertIn('la migración 026, que va ANTES que esta', texto)
+        self.assertIn('la migración 028, que va ANTES que esta', texto)
         otras = [p.name for p in SEMILLA.parent.glob('*.sql') if p != SEMILLA
                  and fila['id'].strip("'") in p.read_text(encoding='utf-8')]
         self.assertEqual(otras, [])
         leeme = (RAIZ / 'db' / 'README.md').read_text(encoding='utf-8')
-        m026, s026 = '< db/migraciones/%s' % MIGRACION.name, '< db/semillas/%s' % SEMILLA.name
-        self.assertEqual((leeme.count(m026), leeme.count(s026)), (2, 2))
-        ordenes = [linea.split('< db/')[1].strip() for linea in leeme.splitlines() if m026 in linea or s026 in linea]
+        m028, s_identidad = '< db/migraciones/%s' % MIGRACION.name, '< db/semillas/%s' % SEMILLA.name
+        self.assertEqual((leeme.count(m028), leeme.count(s_identidad)), (2, 2))
+        ordenes = [linea.split('< db/')[1].strip() for linea in leeme.splitlines() if m028 in linea or s_identidad in linea]
         self.assertEqual(ordenes, ['migraciones/' + MIGRACION.name, 'semillas/' + SEMILLA.name] * 2)
 
     def test_2_migracion_agrega_profile_sin_quitar_tipos(self):

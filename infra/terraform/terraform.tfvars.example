@@ -1,0 +1,18 @@
+# Copia este archivo como terraform.tfvars (no va a git) y pon tus valores. Guía: docs/terraform.md.
+
+# Tu IP pública con /32 (`curl -s https://ifconfig.me`). Una por persona del equipo que entre por SSH.
+ips_equipo = ["203.0.113.10/32"]
+
+# llave_ssh_publica = "~/.ssh/id_ed25519.pub"
+# region            = "westus2"
+# tamano_vm         = "Standard_B2s"
+# rama              = "main"
+# apagado_diario    = "2300"
+
+# Si la suscripción no tiene registrado EncryptionAtHost (docs/terraform.md, paso 2) y no se puede registrar:
+# cifrado_en_host = false
+
+# Opcional: túnel de Cloudflare PROPIO de esta VM (nunca el de lowtidesec.com). Sin estas dos, la VM se levanta sin túnel.
+# nombre_publico    = "iac.lowtidesec.com"
+# tunel_boveda_id   = "/subscriptions/<suscripción>/resourceGroups/<grupo>/providers/Microsoft.KeyVault/vaults/<bóveda>"
+# tunel_secreto_url = "https://<bóveda>.vault.azure.net/secrets/tunel-iac/<versión>"

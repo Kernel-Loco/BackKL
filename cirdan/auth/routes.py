@@ -26,6 +26,7 @@ INVALID = 'Correo o contraseña incorrectos.'
 LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
+OPERATOR_MFA_REQUIRED = 'Las cuentas de operador deben tener MFA activo antes de iniciar sesión.'
 CAPTCHA_INVALID = 'No se pudo comprobar que no eres un robot. Espera a que termine la verificación e inténtalo de nuevo.'
 
 
@@ -213,7 +214,7 @@ def get_captcha(response: Response):
     return captcha.new_challenge()
 
 
-@router.post('/login',summary='Correo, contraseña y captcha; si la cuenta tiene MFA, pide el código')
+@router.post('/login', summary='Correo, contraseña y captcha; pide MFA cuando la cuenta lo requiere')
 def login(body: LoginIn, request: Request, response: Response):
     # El captcha va antes que todo: sin él no se busca el correo ni se mira el bloqueo, así que la respuesta no dice
     # nada de la cuenta. No cuenta como fallo de contraseña: si contara, cualquiera bloquearía un correo ajeno sin
@@ -256,6 +257,7 @@ def login(body: LoginIn, request: Request, response: Response):
     # La contraseña es correcta: el intento no fue un fallo y se devuelve, al correo y a la IP.
     sessions.refund_login_attempt(email, ip, ticket)
 
+    operator_mfa_required = False
     with transaction(org) as conn:
         if passwords.needs_rehash(found['password_hash'], user_id):
             # Una huella vieja sin cifrar queda cifrada en este mismo inicio de sesión (RC-330). Solo si nadie la
@@ -285,7 +287,15 @@ def login(body: LoginIn, request: Request, response: Response):
             raise HTTPException(401, INVALID)
         if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
-        user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': email}, ip, 'password')
+        operator_mfa_required = bool(conn.execute(
+            'SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required'])
+        if operator_mfa_required:
+            audit(conn, org, 'auth.operator_mfa_required', user_id, ip, 'user', user_id)
+        else:
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
+                                                    'email': email}, ip, 'password')
+    if operator_mfa_required:
+        raise HTTPException(403, OPERATOR_MFA_REQUIRED)
     _clear_fails(email)
     return {'mfa_required': False, 'user': user}
 
@@ -461,6 +471,8 @@ def me(session: Session = Depends(current_session)):
 
 
 COMMON_PASSWORD = 'Esa contraseña es muy común. Elige otra.'
+PWNED_PASSWORD = 'Esa contraseña salió en una filtración conocida. Elige otra.'
+NEW_PASSWORD_PROBLEMS = {'comun': COMMON_PASSWORD, 'filtrada': PWNED_PASSWORD}
 WRONG_PASSWORD_LAST = 'La contraseña actual no es correcta. Por seguridad cerramos tu sesión: vuelve a iniciarla.'
 
 
@@ -475,9 +487,19 @@ def _clear_password_attempts(user_id):
 
 @router.post('/password', summary='Cambia la contraseña del usuario de la sesión y borra sus passkeys')
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
-    # La lista de contraseñas comunes (RC-281) va primero: no revisa la contraseña actual, así que no gasta un intento.
-    if passwords.is_common(body.new_password):
-        raise HTTPException(400, COMMON_PASSWORD)
+    # La lista de contraseñas comunes (RC-281) y Pwned Passwords (RC-334) van primero: no revisan la contraseña actual,
+    # así que no gastan un intento, y la consulta a la API (hasta 2 s) no espera con la fila de la cuenta bloqueada.
+    # Por eso las consultas a la API llevan su propio tope por usuario: pasado, se revisa solo con la lista local.
+    topada = []
+
+    def permitir():
+        if sessions.take_pwned_check(session.user_id) > sessions.MAX_PWNED_CHECKS:
+            topada.append(True)
+            return False
+        return True
+    revision = passwords.revisar_nueva(body.new_password, permitir)
+    if revision.problema:
+        raise HTTPException(400, NEW_PASSWORD_PROBLEMS[revision.problema])
     # El intento se cuenta antes de revisar la contraseña actual (RC-290), como en /mfa/verify: en paralelo tampoco se
     # revisan más de 5. Es un contador del usuario, aparte del login: quien tiene una cookie robada no bloquea el
     # inicio de sesión del dueño, y el quinto fallo le cierra la sesión.
@@ -508,6 +530,13 @@ def change_password(body: PasswordIn, request: Request, session: Session = Depen
             # de la bitácora.
             removed = _delete_passkeys(conn, session, ip, 'password_changed')
             audit(conn, session.own_org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
+            if revision.sin_respuesta:
+                # Pwned Passwords no respondió en 2 s y la nueva solo pasó la lista local (decisión 2 de RC-334). Sin
+                # la contraseña ni su SHA-1.
+                # Con el tope por usuario pasado, el motivo lo dice.
+                audit(conn, session.own_org_id, 'auth.pwned_check_unavailable', session.user_id, ip, 'user',
+                      session.user_id, {'fallback': 'common_list', 'reason': 'rate_limited'} if topada
+                      else {'fallback': 'common_list'})
             # Las demás sesiones de la cuenta se cierran y queda la que cambió. Va antes del commit, como en
             # /mfa/enable: si Valkey falla, la contraseña no cambia y se puede repetir.
             sessions.delete_others(session.user_id, session.token)

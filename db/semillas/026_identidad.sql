@@ -7,7 +7,7 @@
 -- commits de la organización de GitHub declarada y el correo público de
 -- los perfiles de GitHub enlazados desde el sitio, por la API sin token.
 -- Nunca entra a cuentas ni navega con sesión.
--- Necesita la migración 026, que va ANTES que esta semilla: la fuente
+-- Necesita la migración 028, que va ANTES que esta semilla: la fuente
 -- queda encendida y sin el tipo 'profile' en el CHECK un escaneo que
 -- encuentra un perfil queda failed.
 --

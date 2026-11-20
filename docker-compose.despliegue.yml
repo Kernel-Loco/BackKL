@@ -70,6 +70,16 @@ services:
       # uvicorn cierra una conexión ociosa a los 5 s por omisión, lo mismo que tarda el proxy de Next (agente de Node)
       # en soltarla: un POST que sale justo entonces termina en 500. Con 65 s siempre la suelta Next primero.
       UVICORN_TIMEOUT_KEEP_ALIVE: "65"
+      # Contraseñas filtradas (RC-334): prendida aquí, solo los 5 primeros caracteres del SHA-1 salen a
+      # api.pwnedpasswords.com. Se apaga con PWNED_PASSWORDS_ENABLED=false en el .env.
+      PWNED_PASSWORDS_ENABLED: ${PWNED_PASSWORDS_ENABLED:-true}
+      # Asistente (#38): Workers AI principal y Groq respaldo. Llaves solo en el .env de despliegue.
+      IA_BASE_URL: ${IA_BASE_URL:-}
+      IA_API_KEY: ${IA_API_KEY:-}
+      IA_MODELO: ${IA_MODELO:-openai/gpt-oss-120b}
+      IA_RESPALDO_BASE_URL: ${IA_RESPALDO_BASE_URL:-}
+      IA_RESPALDO_API_KEY: ${IA_RESPALDO_API_KEY:-}
+      IA_RESPALDO_MODELO: ${IA_RESPALDO_MODELO:-openai/gpt-oss-120b}
     networks:
       default:
         # La única IP que la regla de IMDS deja pasar (docs/despliegue.md). Por eso en la VM se usa

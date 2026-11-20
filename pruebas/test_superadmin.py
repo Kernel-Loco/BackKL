@@ -5,8 +5,8 @@
 Hecho cuando de RC-332, punto por punto:
 1. El superadmin ve todas las organizaciones y cambia a cualquiera sin cerrar sesión. Un Admin, un Gerente o un
    Analista normal recibe 403 y /auth/me le dice platform_admin false (test_10 a test_12).
-2. En la empresa activa ve sus dominios y sus hallazgos y ningún dato de otra (test_13). BackKL no tiene GET de
-   bitácora, así que esa parte no se prueba aquí.
+2. En la empresa activa ve sus dominios y sus hallazgos y ningún dato de otra; cada lectura exitosa queda en la
+   bitácora de esa empresa (test_13).
 3. /auth/me, contraseña y MFA siguen funcionando con cualquier empresa activa (test_14).
 4. cirdan_app no lee ni escribe platform_admins y una sesión normal no cambia de empresa aunque mande el id
    (test_1, test_2 y test_11).
@@ -83,7 +83,7 @@ def ultima(org, accion):
 
 
 class Base(unittest.TestCase):
-    """Migración 017 y semilla 016, entrando como cirdan_app."""
+    """Migraciones 017 y 026 y semilla 016, entrando como cirdan_app."""
 
     def test_1_cirdan_app_no_lee_ni_escribe_platform_admins(self):
         for sql in ("SELECT count(*) FROM platform_admins;",
@@ -112,11 +112,15 @@ class Base(unittest.TestCase):
         self.assertEqual(admin, 'true')
         for nombre in ('Acme Demo', 'Beta Corp', 'Grupo Olmardo', 'LowTide'):
             self.assertIn(nombre, nombres.split(','))
-        # Las dos funciones son SECURITY DEFINER con search_path fijo, como login_lookup().
+        self.assertEqual(scalar("SELECT public.platform_operator_requires_mfa('%s')::text;" % EQUIPO), 'true')
+        self.assertEqual(scalar("SELECT public.platform_operator_requires_mfa('%s')::text;" % OLMARDO_DEMO), 'false')
+        # Las funciones son SECURITY DEFINER con search_path fijo, como login_lookup().
         self.assertEqual(scalar("SELECT string_agg(proname || ':' || prosecdef || ':' || array_to_string(proconfig, ';'),"
                                 " '|' ORDER BY proname) FROM pg_proc WHERE proname IN"
-                                " ('is_platform_admin', 'platform_organizations');", user='postgres'),
+                                " ('is_platform_admin', 'platform_organizations', 'platform_operator_requires_mfa');",
+                                user='postgres'),
                          'is_platform_admin:true:search_path=pg_catalog, public, pg_temp|'
+                         'platform_operator_requires_mfa:true:search_path=pg_catalog, public, pg_temp|'
                          'platform_organizations:true:search_path=pg_catalog, public, pg_temp')
 
     def test_3_actor_platform_sin_usuario_y_con_su_id(self):
@@ -179,6 +183,22 @@ class Superadmin(unittest.TestCase):
         self.assertEqual((me['platform_admin'], me['home_organization_id'], me['home_organization_name'],
                           me['organization_name'], me['role']), (True, BETA, 'Beta Corp', 'Beta Corp', 'admin'))
 
+    def test_09_operador_no_inicia_sesion_con_solo_contrasena_si_no_tiene_mfa(self):
+        secreto = scalar("SELECT encode(totp_secret_enc, 'hex') FROM users WHERE id = '%s';" % DANA_ID,
+                         user='postgres')
+        habilitado = scalar("SELECT mfa_enabled_at::text FROM users WHERE id = '%s';" % DANA_ID, user='postgres')
+        try:
+            postgres("UPDATE users SET totp_secret_enc = NULL, mfa_enabled_at = NULL WHERE id = '%s';" % DANA_ID)
+            cliente = Client()
+            code, body = sesion.post_login(cliente, DANA, sesion.PASSWORD)
+            self.assertEqual((code, body), (403, {
+                'detail': 'Las cuentas de operador deben tener MFA activo antes de iniciar sesión.'
+            }))
+            self.assertIsNone(cliente.cookie())
+        finally:
+            postgres("UPDATE users SET totp_secret_enc = decode('%s', 'hex'), mfa_enabled_at = '%s'::timestamptz"
+                     " WHERE id = '%s';" % (secreto, habilitado, DANA_ID))
+
     def test_11_cuentas_normales_reciben_403_aunque_manden_el_id(self):
         for nombre in ('alex', 'maya', 'jordan'):
             cliente = getattr(self, nombre)
@@ -214,8 +234,21 @@ class Superadmin(unittest.TestCase):
 
     def test_13_en_acme_ve_solo_lo_de_acme_y_no_crea_llaves(self):
         self.assertEqual(self.cambiar(ACME)[0], 200)
+        lecturas = scalar("SELECT count(*) FROM audit_log WHERE organization_id = '%s' AND action ="
+                          " 'platform.client_data_read';" % ACME, user='postgres')
+        self.assertEqual(self.dana.get('/api/v1/auth/me')[0], 200)
+        self.assertEqual(self.dana.get(LISTA)[0], 200)
+        self.assertEqual(scalar("SELECT count(*) FROM audit_log WHERE organization_id = '%s' AND action ="
+                                " 'platform.client_data_read';" % ACME, user='postgres'), lecturas)
         code, body = self.dana.get('/api/v1/domains')
         self.assertEqual(code, 200)
+        self.assertEqual(ultima(ACME, 'platform.client_data_read'), 'platform,-,%s' % DANA_ID)
+        self.assertEqual(int(scalar("SELECT count(*) FROM audit_log WHERE organization_id = '%s' AND action ="
+                                    " 'platform.client_data_read';" % ACME, user='postgres')), int(lecturas) + 1)
+        self.assertEqual(scalar("SELECT details->>'route' FROM audit_log WHERE organization_id = '%s' AND action ="
+                                " 'platform.client_data_read' ORDER BY chain_seq DESC LIMIT 1;" % ACME,
+                                user='postgres'),
+                         '/api/v1/domains')
         dominios = {d['fqdn'] for d in body['items']}
         self.assertIn('acme-demo.mx', dominios)
         self.assertNotIn('beta-corp.mx', dominios)
@@ -235,8 +268,15 @@ class Superadmin(unittest.TestCase):
         self.assertEqual(vistos, abiertos)
         self.assertEqual((body['domain'], body['total']), ('acme-demo.mx', len(abiertos)))
         self.assertFalse(vistos & de_beta)
+        self.assertEqual(scalar("SELECT details->'path_params'->>'fqdn' FROM audit_log WHERE organization_id = '%s'"
+                                " AND action = 'platform.client_data_read' ORDER BY chain_seq DESC LIMIT 1;" % ACME,
+                                user='postgres'), 'acme-demo.mx')
+        lecturas = scalar("SELECT count(*) FROM audit_log WHERE organization_id = '%s' AND action ="
+                          " 'platform.client_data_read';" % ACME, user='postgres')
         self.assertEqual(self.dana.get('/api/v1/domains/beta-corp.mx/findings'),
                          (404, {'detail': 'Dominio no encontrado para esta organización'}))
+        self.assertEqual(scalar("SELECT count(*) FROM audit_log WHERE organization_id = '%s' AND action ="
+                                " 'platform.client_data_read';" % ACME, user='postgres'), lecturas)
         self.assertEqual(self.dana.get('/api/v1/findings/80000000-0000-4000-8000-000000000011/explanation'),
                          (404, {'detail': 'Hallazgo no encontrado'}))
         self.assertEqual(self.dana.get('/api/v1/api-keys')[0], 200)

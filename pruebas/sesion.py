@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = 'http://127.0.0.1:8000'
+BASE = os.environ.get('CIRDAN_TEST_BASE', 'http://127.0.0.1:8000')
 AUTH = BASE + '/api/v1/auth'
 PASSWORD = 'Lowtide-Demo-2026'
 STEP = 30
@@ -56,7 +56,8 @@ def next_code(email):
 
 def psql(sql):
     """Corre una sentencia en la base como postgres, fuera de la API."""
-    subprocess.run(['docker', 'exec', 'cirdan-pg16', 'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c', sql],
+    subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_DB_CONTAINER', 'cirdan-pg16'),
+                    'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c', sql],
                    check=True, capture_output=True)
 
 
@@ -83,7 +84,7 @@ def valkey(*argumentos):
 def esquema():
     """El esquema OpenAPI de la API que corre, con app.openapi() dentro de su contenedor y con su mismo entorno.
     /openapi.json no existe por omisión (API_DOCS, RC-303), así que no se pide por HTTP."""
-    r = subprocess.run(['docker', 'exec', 'cirdan-api', 'python', '-c',
+    r = subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api'), 'python', '-c',
                         'import json; from cirdan.api.main import app; print(json.dumps(app.openapi()))'],
                        check=True, capture_output=True, text=True, encoding='utf-8')
     return json.loads(r.stdout.strip().splitlines()[-1])

@@ -40,6 +40,9 @@ MAX_PASSKEY_OPTIONS_IP = 300  # el autollenado pide uno en cada carga del login:
 MAX_FAILS_EMAIL = 5
 MAX_FAILS_IP = 20
 MAX_PASSWORD_ATTEMPTS = 5  # cambio de contraseña: intentos por usuario en LOCK_SECONDS (RC-290)
+MAX_PWNED_CHECKS = 10  # consultas a Pwned Passwords por usuario en LOCK_SECONDS (RC-334)
+MAX_ASSISTANT_QUESTIONS = 20
+ASSISTANT_WINDOW_SECONDS = 24 * 60 * 60
 
 
 @cache
@@ -53,6 +56,24 @@ def _valkey():
 
 def _digest(token):
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------- límite del asistente
+
+_TAKE_ASSISTANT_QUESTION = '''
+local count = tonumber(redis.call('GET', KEYS[1]) or '0')
+if count >= tonumber(ARGV[1]) then return 0 end
+count = redis.call('INCR', KEYS[1])
+if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+return 1
+'''
+
+
+def take_assistant_question(user_id):
+    """Reserva una pregunta por usuario en una ventana de 24 h; la llave de Valkey no contiene el ID real."""
+    digest = _digest(str(user_id))
+    return bool(_valkey().eval(_TAKE_ASSISTANT_QUESTION, 1, 'assistant:questions:' + digest,
+                               MAX_ASSISTANT_QUESTIONS, ASSISTANT_WINDOW_SECONDS))
 
 
 # ------------------------------------------------------------------ sesiones
@@ -479,3 +500,12 @@ def take_password_attempt(user_id):
 
 def clear_password_attempts(user_id):
     _valkey().delete(_password_key(user_id))
+
+
+def take_pwned_check(user_id):
+    """Cuenta una consulta a Pwned Passwords del usuario y devuelve su número: 1 a MAX_PWNED_CHECKS salen a la API, uno
+    mayor se revisa solo con la lista local (RC-334). Va antes de take_password_attempt, que no gasta, así que sin este
+    tope una sesión podría mandar consultas a la API sin límite desde la IP de la VM. No se borra al cambiar la
+    contraseña: es un tope de consultas, no de fallos."""
+    check, = _count('pw:pwned:user:' + _digest(str(user_id)))
+    return check
