@@ -21,6 +21,8 @@ def comprobar_cookie_segura():
     if https and not COOKIE_SECURE:
         raise RuntimeError('ALLOWED_ORIGINS trae un origen https (%s) y COOKIE_SECURE no es true: la cookie de sesión '
                            'saldría sin Secure. Pon COOKIE_SECURE=true en .env (RC-286).' % ', '.join(https))
+
+
 ROL_LLAVE = 'api_key'  # no es un rol de la base: ningún require_roles() lo deja pasar
 LLAVE_INVALIDA = 'La llave de API no es válida, venció o fue revocada.'
 SESION_TERMINADA = 'Tu sesión terminó. Vuelve a iniciar sesión.'
