@@ -39,6 +39,14 @@ _slots = threading.BoundedSemaphore(ASSISTANT_MAX_CONCURRENT)
 PROVIDER_BUSY = 'El asistente está atendiendo muchas preguntas. Inténtalo en un minuto.'
 PROVIDER_UNAVAILABLE = ('El asistente no está disponible. Inténtalo en un minuto o consulta el reporte del dominio, '
                         'que incluye qué significa cada hallazgo y qué hacer.')
+# Primera línea de la respuesta automática: la persona sabe que no es de IA aunque el portal no lea `source`.
+TEMPLATE_NOTICE = ('Respuesta automática, no es de IA: ningún modelo de IA respondió, así que no contesta tu pregunta. '
+                   'Estos son los pasos del plan de acción para los hallazgos enviados, del más grave al menos grave.')
+SOURCE_AI = 'ai'
+SOURCE_TEMPLATE = 'template'
+# Campos de cada hallazgo que van al modelo (Hecho cuando de RC-77). La recomendación solo va en la plantilla.
+MODEL_FIELDS = ('title', 'category', 'severity')
+_SEVERITY_ORDER = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
 
 # SISTEMA v2 de la evaluación de proveedores (RC-185), tal cual. Con él pasaron Workers AI y Groq gpt-oss-120b,
 # con los mismos max_tokens, reasoning_effort y temperatura que manda _call_provider.
@@ -113,6 +121,11 @@ class AssistantQuestion(BaseModel):
 
 class ProviderError(Exception):
     """Error de configuración, transporte o respuesta de un proveedor, sin datos de la pregunta."""
+
+
+class Unavailable(HTTPException):
+    """El 503 de cuando ningún proveedor respondió o no hay ninguno configurado. El handler lo cambia por la
+    respuesta automática con el plan de acción."""
 
 
 class ClientGone(HTTPException):
@@ -266,11 +279,36 @@ def complete(question, findings, attempts=None, client_gone=None):
         return answer
     if not configured:
         logger.error('Asistente no disponible: no hay proveedores de IA configurados')
-    raise HTTPException(503, PROVIDER_UNAVAILABLE, headers={'Cache-Control': 'no-store'})
+    raise Unavailable(503, PROVIDER_UNAVAILABLE, headers={'Cache-Control': 'no-store'})
+
+
+def _one_line(text):
+    return ' '.join(str(text).split())
+
+
+def template_answer(findings):
+    """La respuesta sin IA: los pasos del plan de acción (#42, RC-72) de los hallazgos enviados.
+
+    Agrupa por regla, como el plan, con la recomendación de scoring_rule_texts que el plan muestra. Cada paso cita
+    sus hallazgos con el [HN] del orden de `finding_ids`, para que el portal los liste como en una respuesta de IA.
+    Ordena por la severidad más grave del grupo y luego por el primer hallazgo enviado.
+    """
+    groups = {}
+    for number, finding in enumerate(findings, start=1):
+        group = groups.setdefault(finding['rule_code'], {
+            'title': _one_line(finding['title']), 'recommendation': _one_line(finding['recommendation']),
+            'rank': _SEVERITY_ORDER.get(finding['severity'], len(_SEVERITY_ORDER)), 'first': number, 'cites': [],
+        })
+        group['rank'] = min(group['rank'], _SEVERITY_ORDER.get(finding['severity'], len(_SEVERITY_ORDER)))
+        group['cites'].append('H%d' % number)
+    ordered = sorted(groups.values(), key=lambda group: (group['rank'], group['first']))
+    steps = ['%d. **%s** [%s]: %s' % (index, group['title'], ', '.join(group['cites']), group['recommendation'])
+             for index, group in enumerate(ordered, start=1)]
+    return '\n\n'.join([TEMPLATE_NOTICE, '\n'.join(steps)])
 
 
 FINDINGS_FOR_ASSISTANT_SQL = '''
-SELECT f.id::text AS id, t.title, r.category,
+SELECT f.id::text AS id, t.title, r.category, r.code AS rule_code, t.recommendation,
        coalesce(sc_score.severity, f.severity) AS severity
   FROM findings f
   JOIN domains d ON d.id = f.domain_id
@@ -299,7 +337,8 @@ def _get_context(session, fqdn, finding_ids):
         raise HTTPException(404, 'Uno o más hallazgos no están disponibles para este dominio')
     # En el orden de finding_ids: el hallazgo N es el [HN] que cita la respuesta.
     by_id = {row['id']: row for row in rows}
-    findings = [{'title': row['title'], 'category': row['category'], 'severity': row['severity']}
+    findings = [{'title': row['title'], 'category': row['category'], 'severity': row['severity'],
+                 'rule_code': row['rule_code'], 'recommendation': row['recommendation']}
                 for row in (by_id[str(finding_id)] for finding_id in finding_ids)]
     return domain['id'], findings
 
@@ -397,12 +436,17 @@ def ask_assistant(fqdn: str, body: AssistantQuestion, request: Request, response
         response.headers['Cache-Control'] = 'no-store'
         attempts = []
         # A qué proveedores salió la pregunta y cómo terminó, también si falló. Sin el texto de la pregunta ni de error.
+        model_findings = [{field: finding[field] for field in MODEL_FIELDS} for finding in findings]
         try:
-            answer = complete(question, findings, attempts, _client_gone(request))
+            answer = complete(question, model_findings, attempts, _client_gone(request))
         except ClientGone:
             _audit(session, request, 'assistant.completed', domain_id,
                    {'result': 'client_gone', 'providers': attempts})
             raise
+        except Unavailable:
+            # Ningún modelo respondió: la respuesta automática con el plan de acción, que avisa que no es de IA.
+            _audit(session, request, 'assistant.completed', domain_id, {'result': 'template', 'providers': attempts})
+            return {'answer': template_answer(findings), 'finding_ids': finding_ids, 'source': SOURCE_TEMPLATE}
         except HTTPException:
             _audit(session, request, 'assistant.completed', domain_id,
                    {'result': 'unavailable', 'providers': attempts})
@@ -411,6 +455,6 @@ def ask_assistant(fqdn: str, body: AssistantQuestion, request: Request, response
             _audit(session, request, 'assistant.completed', domain_id, {'result': 'error', 'providers': attempts})
             raise
         _audit(session, request, 'assistant.completed', domain_id, {'result': 'answered', 'providers': attempts})
-        return {'answer': answer, 'finding_ids': finding_ids}
+        return {'answer': answer, 'finding_ids': finding_ids, 'source': SOURCE_AI}
     finally:
         _slots.release()

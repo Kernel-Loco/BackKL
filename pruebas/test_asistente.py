@@ -38,6 +38,7 @@ class AssistantEndpoint(unittest.TestCase):
         findings_result = Mock()
         findings_result.fetchall.return_value = [{
             'id': str(FINDING_ID), 'title': 'Servicio expuesto', 'category': 'infrastructure', 'severity': 'high',
+            'rule_code': 'exposed_service', 'recommendation': 'Cierra el puerto si no lo usas.',
         }]
         self.conn.execute.side_effect = (domain_result, findings_result)
 
@@ -52,7 +53,7 @@ class AssistantEndpoint(unittest.TestCase):
 
         result = asistente.ask_assistant('acme-demo.mx', body, _request(), response, _session())
 
-        self.assertEqual(result, {'answer': 'Explicación breve.', 'finding_ids': [str(FINDING_ID)]})
+        self.assertEqual(result, {'answer': 'Explicación breve.', 'finding_ids': [str(FINDING_ID)], 'source': 'ai'})
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
         complete.assert_called_once()
         self.assertEqual(complete.call_args.args[:3], ('¿Qué significa?', [{
@@ -74,25 +75,46 @@ class AssistantEndpoint(unittest.TestCase):
     @patch.object(asistente, 'audit')
     @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
     @patch.object(asistente, 'transaction')
-    def test_si_nadie_responde_audita_a_que_proveedores_salio_sin_el_texto(self, transaction, take, audit, complete):
+    def test_si_nadie_responde_da_la_plantilla_y_audita_a_que_proveedores_salio_sin_el_texto(
+            self, transaction, take, audit, complete):
         transaction.side_effect = lambda org_id: nullcontext(self.conn)
 
         def sin_respuesta(question, findings, attempts, client_gone):
             attempts.append({'provider': 'Workers AI', 'result': 'timeout'})
             attempts.append({'provider': 'Groq', 'result': 'error'})
-            raise HTTPException(503, asistente.PROVIDER_UNAVAILABLE)
+            raise asistente.Unavailable(503, asistente.PROVIDER_UNAVAILABLE)
 
         complete.side_effect = sin_respuesta
         body = asistente.AssistantQuestion(question='pregunta privada', finding_ids=[FINDING_ID])
+        response = Response()
 
-        with self.assertRaises(HTTPException) as error:
-            asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+        result = asistente.ask_assistant('acme-demo.mx', body, _request(), response, _session())
 
-        self.assertEqual(error.exception.status_code, 503)
+        self.assertEqual(result['source'], 'template')
+        self.assertEqual(result['finding_ids'], [str(FINDING_ID)])
+        self.assertTrue(result['answer'].startswith(asistente.TEMPLATE_NOTICE))
+        self.assertIn('1. **Servicio expuesto** [H1]: Cierra el puerto si no lo usas.', result['answer'])
+        self.assertNotIn('pregunta privada', result['answer'])
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
         self.assertEqual([item.args[2] for item in audit.call_args_list], ['assistant.asked', 'assistant.completed'])
-        self.assertEqual(audit.call_args_list[1].kwargs['details'], {'result': 'unavailable', 'providers': [
+        self.assertEqual(audit.call_args_list[1].kwargs['details'], {'result': 'template', 'providers': [
             {'provider': 'Workers AI', 'result': 'timeout'}, {'provider': 'Groq', 'result': 'error'}]})
         self.assertNotIn('pregunta privada', repr(audit.call_args_list))
+
+    @patch.object(asistente, 'audit')
+    @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
+    @patch.object(asistente, 'transaction')
+    def test_sin_proveedores_configurados_da_la_plantilla_sin_salir_a_la_red(self, transaction, take, audit):
+        transaction.side_effect = lambda org_id: nullcontext(self.conn)
+        body = asistente.AssistantQuestion(question='¿Qué hago?', finding_ids=[FINDING_ID])
+
+        with patch.object(asistente, 'config', return_value=''), \
+                patch.object(asistente, '_call_provider') as call_provider:
+            result = asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+
+        call_provider.assert_not_called()
+        self.assertEqual(result['source'], 'template')
+        self.assertEqual(audit.call_args_list[1].kwargs['details'], {'result': 'template', 'providers': []})
 
     @patch.object(asistente, 'complete')
     @patch.object(asistente, 'audit')
@@ -193,8 +215,10 @@ class AssistantEndpoint(unittest.TestCase):
         domain_result.fetchone.return_value = {'id': DOMAIN_ID}
         findings_result = Mock()
         findings_result.fetchall.return_value = [
-            {'id': str(FINDING_ID), 'title': 'Servicio expuesto', 'category': 'infrastructure', 'severity': 'high'},
-            {'id': str(otro), 'title': 'Brecha', 'category': 'data_leaks', 'severity': 'critical'},
+            {'id': str(FINDING_ID), 'title': 'Servicio expuesto', 'category': 'infrastructure', 'severity': 'high',
+             'rule_code': 'exposed_service', 'recommendation': 'Cierra el puerto.'},
+            {'id': str(otro), 'title': 'Brecha', 'category': 'data_leaks', 'severity': 'critical',
+             'rule_code': 'breach', 'recommendation': 'Cambia las contraseñas.'},
         ]
         self.conn.execute.side_effect = (domain_result, findings_result)
         transaction.side_effect = lambda org_id: nullcontext(self.conn)
@@ -263,6 +287,77 @@ class AssistantEndpoint(unittest.TestCase):
         take.assert_not_called()
         audit.assert_not_called()
         complete.assert_not_called()
+
+
+class AssistantTemplate(unittest.TestCase):
+
+    def _finding(self, code, severity, title=None, recommendation=None):
+        return {'title': title or 'Título %s' % code, 'category': 'configuration', 'severity': severity,
+                'rule_code': code, 'recommendation': recommendation or 'Haz %s.' % code}
+
+    def test_un_paso_por_regla_del_mas_grave_al_menos_grave_con_sus_citas(self):
+        findings = [
+            self._finding('spf', 'low'),
+            self._finding('tls', 'medium'),
+            self._finding('spf', 'high'),
+            self._finding('breach', 'critical'),
+            self._finding('dmarc', 'medium'),
+        ]
+
+        answer = asistente.template_answer(findings)
+
+        notice, steps = answer.split('\n\n')
+        self.assertEqual(notice, asistente.TEMPLATE_NOTICE)
+        self.assertEqual(steps.split('\n'), [
+            '1. **Título breach** [H4]: Haz breach.',
+            '2. **Título spf** [H1, H3]: Haz spf.',
+            '3. **Título tls** [H2]: Haz tls.',
+            '4. **Título dmarc** [H5]: Haz dmarc.',
+        ])
+
+    def test_el_aviso_dice_que_no_es_de_ia_y_cada_paso_queda_en_una_linea(self):
+        answer = asistente.template_answer([self._finding(
+            'tls', 'high', title='Certificado\nvencido',
+            recommendation='Renueva el certificado.\r\n  Activa la renovación.')])
+
+        self.assertIn('no es de IA', answer.split('\n')[0])
+        self.assertTrue(answer.endswith(
+            '\n1. **Certificado vencido** [H1]: Renueva el certificado. Activa la renovación.'))
+
+    def test_con_20_hallazgos_cita_hasta_h20(self):
+        answer = asistente.template_answer([self._finding('regla%d' % n, 'medium') for n in range(20)])
+
+        self.assertIn('\n20. **Título regla19** [H20]: Haz regla19.', answer)
+
+    def test_la_api_nunca_manda_la_recomendacion_ni_la_regla_al_proveedor(self):
+        conn = Mock()
+        domain_result = Mock()
+        domain_result.fetchone.return_value = {'id': DOMAIN_ID}
+        findings_result = Mock()
+        findings_result.fetchall.return_value = [{
+            'id': str(FINDING_ID), 'title': 'Servicio expuesto', 'category': 'infrastructure', 'severity': 'high',
+            'rule_code': 'codigo_solo_plantilla', 'recommendation': 'RECOMENDACION_SOLO_PLANTILLA',
+        }]
+        conn.execute.side_effect = (domain_result, findings_result)
+        body = asistente.AssistantQuestion(question='¿Qué hago?', finding_ids=[FINDING_ID])
+        sent = []
+
+        def provider(base_url, api_key, model, messages, timeout):
+            sent.append(json.dumps(messages, ensure_ascii=False))
+            return 'Respuesta.'
+
+        values = {'IA_BASE_URL': 'https://ia.example.test/v1', 'IA_API_KEY': 'k', 'IA_MODELO': 'm'}
+        with patch.object(asistente, 'transaction', side_effect=lambda org_id: nullcontext(conn)), \
+                patch.object(asistente, 'audit'), \
+                patch.object(asistente.sessions, 'take_assistant_question', return_value=True), \
+                patch.object(asistente, 'config', side_effect=lambda name: values.get(name, '')), \
+                patch.object(asistente, '_call_provider', side_effect=provider):
+            result = asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+
+        self.assertEqual(result['source'], 'ai')
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn('RECOMENDACION_SOLO_PLANTILLA', sent[0])
+        self.assertNotIn('codigo_solo_plantilla', sent[0])
 
 
 class AssistantPromptAndProvider(unittest.TestCase):
@@ -474,7 +569,7 @@ class AssistantPromptAndProvider(unittest.TestCase):
         }
         config.side_effect = valores.get
 
-        with self.assertRaises(HTTPException) as error:
+        with self.assertRaises(asistente.Unavailable) as error:
             asistente.complete('pregunta privada', [])
 
         self.assertEqual(error.exception.status_code, 503)
