@@ -54,6 +54,8 @@ Para trabajar en la API sin reconstruir la imagen: `docker compose stop api`, cr
 
 25 tablas (18 con Row-Level Security por cliente y 7 catálogos compartidos), datos de Acme Demo y Beta Corp, el dominio de prueba olmardo.com de Grupo Olmardo, y el rol `cirdan_app` sin privilegios de más. Qué se creó, cómo cargarla y las decisiones respecto al DBML están en [`db/README.md`](db/README.md).
 
+**Imágenes firmadas.** `.github/workflows/imagenes.yml` (aquí y en FrontKL) escanea cada imagen con Trivy y frena con críticas, saca su SBOM con Syft y, al mergear a dev o main, la sube a ghcr.io firmada con cosign. `infra/verificar_imagenes.sh --levantar` verifica la firma antes de levantarla. `python -m unittest pruebas/test_cadena_suministro.py` lo prueba sin red. Guía en [`docs/cadena_de_suministro.md`](docs/cadena_de_suministro.md).
+
 **Terraform.** `infra/terraform/` crea en Azure una VM equivalente a la del despliegue (red, grupo de seguridad con solo 443 y SSH al equipo, disco cifrado y cloud-init que levanta el compose) y `terraform destroy` la borra. `python -m unittest pruebas/test_terraform.py` lo revisa sin nube y el CI corre `terraform validate` y Trivy. Guía en [`docs/terraform.md`](docs/terraform.md).
 
 **Respaldo.** `db/respaldo/` saca un respaldo diario cifrado de la base y lo restaura siempre en una base nueva (RC-233). En la VM corre con un timer y sube a Azure Blob (`docs/despliegue.md`, 'Respaldo diario'). `python -m unittest pruebas/test_respaldo.py` lo prueba y necesita `age`. En el CI usa la base del compose de prueba. En una PC hay que nombrar el contenedor de una pila aislada con `RESPALDO_CONTENEDOR` y, sin esa variable, las pruebas se saltan. Detalle en [`db/README.md`](db/README.md#respaldar-y-restaurar).
