@@ -12,7 +12,6 @@ Corren dentro del contenedor, porque importan argon2, cryptography y la API:
 import asyncio
 import base64
 import os
-import statistics
 import time
 import unittest
 from contextlib import contextmanager
@@ -472,38 +471,45 @@ class Login(Base):
                 self.assertEqual(respuesta.status_code, 401)
                 self.assertEqual(base.updates, [])
 
+    @staticmethod
+    def _pares(f, g, vueltas):
+        """Mínimo de f y de g en pares alternados. Los dos ven el mismo ruido del runner, y el ruido solo suma tiempo,
+        así que el mínimo se acerca al costo real. No se comparan medianas de dos ventanas seguidas: argon2id con
+        p=4 tiene dos modos (unos 47 o 78 ms) según lo ocupadas que estén las CPU, y fallaba sin fuga."""
+        tf, tg = [], []
+        for v in range(vueltas):
+            for h, t in ((f, tf), (g, tg)) if v % 2 == 0 else ((g, tg), (f, tf)):
+                inicio = time.perf_counter()
+                h()
+                t.append(time.perf_counter() - inicio)
+        return min(tf), min(tg)
+
+    def _tardan_lo_mismo(self, inexistente, otro):
+        # argon2id lo cuentan test_5 y test_5c. Aquí, todo lo demás, que se mide en microsegundos.
+        with mock.patch.object(passwords, '_verificar_phc', lambda phc, clave: False):
+            a, b = self._pares(inexistente, otro, 200)
+        self.assertLess(abs(b - a), 0.001, (a, b))
+        # Con argon2id real, los dos tardan más de 10 ms: los dos gastan argon2id (unos 47 ms en su modo rápido) y un
+        # camino sin él responde en microsegundos. No se compara uno contra otro: en un runner de GitHub el modo lento
+        # puede pasar de 2 veces el rápido.
+        a, b = self._pares(inexistente, otro, 4)
+        self.assertGreater(a, 0.01, ('el correo inexistente también debe gastar el tiempo de argon2id', a, b))
+        self.assertGreater(b, 0.01, ('la huella también debe gastar el tiempo de argon2id', a, b))
+
     def test_5d_y_tardan_lo_mismo_que_un_correo_inexistente(self):
         passwords.comprobar_llave()
         no_abren = self._no_abren()
-
-        def medir(f):
-            tiempos = []
-            for _ in range(7):
-                inicio = time.perf_counter()
-                f()
-                tiempos.append(time.perf_counter() - inicio)
-            return statistics.median(tiempos)
-        inexistente = medir(lambda: passwords.burn_time('Otra-Clave-Larga-99'))
+        inexistente = lambda: passwords.burn_time('Otra-Clave-Larga-99')
         for caso in ('otra llave', 'base64 mala'):
             with self.subTest(caso=caso):
-                no_abre = medir(lambda: passwords.verify_password(no_abren[caso], 'Otra-Clave-Larga-99', ALEX))
-                self.assertLess(abs(inexistente - no_abre) / inexistente, 0.35, (inexistente, no_abre))
+                self._tardan_lo_mismo(
+                    inexistente, lambda: passwords.verify_password(no_abren[caso], 'Otra-Clave-Larga-99', ALEX))
 
     def test_5b_y_tardan_lo_mismo(self):
         huella = passwords.hash_password(CLAVE, ALEX)
         passwords.comprobar_llave()
-
-        def medir(f):
-            tiempos = []
-            for _ in range(7):
-                inicio = time.perf_counter()
-                f()
-                tiempos.append(time.perf_counter() - inicio)
-            return statistics.median(tiempos)
-        inexistente = medir(lambda: passwords.burn_time('Otra-Clave-Larga-99'))
-        equivocada = medir(lambda: passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX))
-        self.assertGreater(inexistente, 0.01, 'el correo inexistente también debe gastar el tiempo de argon2id')
-        self.assertLess(abs(inexistente - equivocada) / equivocada, 0.35, (inexistente, equivocada))
+        self._tardan_lo_mismo(lambda: passwords.burn_time('Otra-Clave-Larga-99'),
+                              lambda: passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX))
 
 
 class Parametros(unittest.TestCase):
