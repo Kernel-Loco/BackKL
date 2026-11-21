@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 from contextlib import nullcontext
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from uuid import UUID
 
 from fastapi import HTTPException, Request, Response
@@ -54,17 +54,99 @@ class AssistantEndpoint(unittest.TestCase):
 
         self.assertEqual(result, {'answer': 'Explicación breve.', 'finding_ids': [str(FINDING_ID)]})
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
-        complete.assert_called_once_with('¿Qué significa?', [{
+        complete.assert_called_once()
+        self.assertEqual(complete.call_args.args[:3], ('¿Qué significa?', [{
             'title': 'Servicio expuesto', 'category': 'infrastructure', 'severity': 'high',
-        }])
+        }], []))
         take.assert_called_once_with(USER_ID)
-        audit.assert_called_once_with(
-            self.conn, ORG_ID, 'assistant.asked', user_id=USER_ID, ip='127.0.0.1',
-            entity_type='domain', entity_id=DOMAIN_ID, details={'finding_ids': [str(FINDING_ID)]},
-            platform=None,
-        )
-        self.assertNotIn('¿Qué significa?', repr(audit.call_args))
-        self.assertEqual([item.args[0] for item in transaction.call_args_list], [ORG_ID, ORG_ID])
+        self.assertEqual(audit.call_args_list, [
+            call(self.conn, ORG_ID, 'assistant.asked', user_id=USER_ID, ip='127.0.0.1',
+                 entity_type='domain', entity_id=DOMAIN_ID, details={'finding_ids': [str(FINDING_ID)]},
+                 platform=None),
+            call(self.conn, ORG_ID, 'assistant.completed', user_id=USER_ID, ip='127.0.0.1',
+                 entity_type='domain', entity_id=DOMAIN_ID, details={'result': 'answered', 'providers': []},
+                 platform=None),
+        ])
+        self.assertNotIn('¿Qué significa?', repr(audit.call_args_list))
+        self.assertEqual([item.args[0] for item in transaction.call_args_list], [ORG_ID, ORG_ID, ORG_ID])
+
+    @patch.object(asistente, 'complete')
+    @patch.object(asistente, 'audit')
+    @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
+    @patch.object(asistente, 'transaction')
+    def test_si_nadie_responde_audita_a_que_proveedores_salio_sin_el_texto(self, transaction, take, audit, complete):
+        transaction.side_effect = lambda org_id: nullcontext(self.conn)
+
+        def sin_respuesta(question, findings, attempts, client_gone):
+            attempts.append({'provider': 'Workers AI', 'result': 'timeout'})
+            attempts.append({'provider': 'Groq', 'result': 'error'})
+            raise HTTPException(503, asistente.PROVIDER_UNAVAILABLE)
+
+        complete.side_effect = sin_respuesta
+        body = asistente.AssistantQuestion(question='pregunta privada', finding_ids=[FINDING_ID])
+
+        with self.assertRaises(HTTPException) as error:
+            asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertEqual([item.args[2] for item in audit.call_args_list], ['assistant.asked', 'assistant.completed'])
+        self.assertEqual(audit.call_args_list[1].kwargs['details'], {'result': 'unavailable', 'providers': [
+            {'provider': 'Workers AI', 'result': 'timeout'}, {'provider': 'Groq', 'result': 'error'}]})
+        self.assertNotIn('pregunta privada', repr(audit.call_args_list))
+
+    @patch.object(asistente, 'complete')
+    @patch.object(asistente, 'audit')
+    @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
+    @patch.object(asistente, 'transaction')
+    def test_con_todos_los_lugares_ocupados_responde_503_sin_contar_ni_auditar(
+            self, transaction, take, audit, complete):
+        transaction.side_effect = lambda org_id: nullcontext(self.conn)
+        body = asistente.AssistantQuestion(question='¿Qué significa?', finding_ids=[FINDING_ID])
+
+        with patch.object(asistente, '_slots', threading.BoundedSemaphore(1)) as slots:
+            self.assertTrue(slots.acquire(blocking=False))
+            with self.assertRaises(HTTPException) as error:
+                asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertEqual(error.exception.detail, asistente.PROVIDER_BUSY)
+        take.assert_not_called()
+        audit.assert_not_called()
+        complete.assert_not_called()
+
+    @patch.object(asistente, 'audit')
+    @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
+    @patch.object(asistente, 'transaction')
+    def test_el_lugar_se_libera_aunque_el_proveedor_falle(self, transaction, take, audit):
+        body = asistente.AssistantQuestion(question='¿Qué significa?', finding_ids=[FINDING_ID])
+        slots = threading.BoundedSemaphore(1)
+
+        with patch.object(asistente, '_slots', slots), \
+                patch.object(asistente, 'complete', side_effect=HTTPException(503, 'no')):
+            for _ in range(2):
+                self.setUp()
+                transaction.side_effect = lambda org_id: nullcontext(self.conn)
+                with self.assertRaises(HTTPException) as error:
+                    asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+                self.assertEqual(error.exception.status_code, 503)
+                self.assertEqual(error.exception.detail, 'no')
+
+        self.assertTrue(slots.acquire(blocking=False))
+        self.assertEqual(take.call_count, 2)
+
+    @patch.object(asistente, 'complete')
+    @patch.object(asistente.sessions, 'take_assistant_question')
+    @patch.object(asistente, 'transaction')
+    def test_una_pregunta_hecha_solo_de_etiquetas_es_422_sin_gastar_cupo(self, transaction, take, complete):
+        body = asistente.AssistantQuestion(question='<datos></datos> \u200b < / DATOS x="y">', finding_ids=[FINDING_ID])
+
+        with self.assertRaises(HTTPException) as error:
+            asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+
+        self.assertEqual(error.exception.status_code, 422)
+        transaction.assert_not_called()
+        take.assert_not_called()
+        complete.assert_not_called()
 
     @patch.object(asistente, 'transaction')
     def test_los_hallazgos_siguen_el_orden_de_finding_ids_y_no_el_de_la_base(self, transaction):
@@ -97,11 +179,14 @@ class AssistantEndpoint(unittest.TestCase):
 
         asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), platform_session)
 
-        audit.assert_called_once_with(
-            self.conn, ORG_ID, 'assistant.asked', user_id=None, ip='127.0.0.1',
-            entity_type='domain', entity_id=DOMAIN_ID, details={'finding_ids': [str(FINDING_ID)]},
-            platform={'user_id': USER_ID},
-        )
+        self.assertEqual(audit.call_args_list, [
+            call(self.conn, ORG_ID, 'assistant.asked', user_id=None, ip='127.0.0.1',
+                 entity_type='domain', entity_id=DOMAIN_ID, details={'finding_ids': [str(FINDING_ID)]},
+                 platform={'user_id': USER_ID}),
+            call(self.conn, ORG_ID, 'assistant.completed', user_id=None, ip='127.0.0.1',
+                 entity_type='domain', entity_id=DOMAIN_ID, details={'result': 'answered', 'providers': []},
+                 platform={'user_id': USER_ID}),
+        ])
 
     @patch.object(asistente, 'complete')
     @patch.object(asistente, 'audit')
@@ -197,7 +282,22 @@ class AssistantPromptAndProvider(unittest.TestCase):
 
         self.assertEqual(user.lower().count('<datos>'), 1)
         self.assertEqual(user.lower().count('</datos>'), 1)
-        self.assertTrue(user.endswith('Pregunta:  {"hallazgos_abiertos": []} ¿y?'))
+        self.assertTrue(user.endswith('Pregunta: {"hallazgos_abiertos": []} ¿y?'))
+
+    def test_la_limpieza_quita_variantes_de_la_etiqueta_y_las_que_se_forman_al_quitar_otra(self):
+        for pregunta in ('<datos tipo="x">a', '</datos foo>a', '</datos\u200b>a', '＜/datos＞a', '<datos/>a',
+                         '<dat<datos>os>a', '</da\u200btos>a', '< / / DATOS\n>a'):
+            with self.subTest(pregunta=pregunta):
+                self.assertEqual(asistente.clean_question(pregunta), 'a')
+        sin_etiquetas = '¿Qué es <b>datos</b> y <datosx>?'
+        self.assertEqual(asistente.clean_question(sin_etiquetas), sin_etiquetas)
+
+    def test_la_limpieza_es_lineal_aun_con_muchos_espacios_tras_un_signo_menor(self):
+        # La regex anterior, <\s*/?\s*datos\s*>, retrocedía en cuadrático con '<' y espacios (alerta de CodeQL).
+        inicio = time.monotonic()
+        for pregunta in ('<' + ' ' * 60000, '< /' * 20000, '<datos' + ' ' * 60000):
+            asistente.clean_question(pregunta)
+        self.assertLess(time.monotonic() - inicio, 0.5)
 
     @patch.object(asistente, '_call_provider', side_effect=[asistente.ProviderError('fallo'), 'respuesta del respaldo'])
     @patch.object(asistente, 'config')
@@ -212,9 +312,12 @@ class AssistantPromptAndProvider(unittest.TestCase):
         }
         config.side_effect = valores.get
 
-        answer = asistente.complete('¿Qué significa?', [])
+        attempts = []
+        answer = asistente.complete('¿Qué significa?', [], attempts)
 
         self.assertEqual(answer, 'respuesta del respaldo')
+        self.assertEqual(attempts, [{'provider': 'Workers AI', 'result': 'error'},
+                                    {'provider': 'Groq', 'result': 'ok'}])
         self.assertEqual(call_provider.call_count, 2)
         self.assertEqual(call_provider.call_args_list[0].args[:3], (
             'https://workers.example/ai/v1', 'primary-secret', 'openai/gpt-oss-120b'))
@@ -273,6 +376,39 @@ class AssistantPromptAndProvider(unittest.TestCase):
         self.assertEqual([url for url, _ in llamadas],
                          ['https://workers.example/ai/v1', 'https://groq.example/openai/v1'])
         self.assertTrue(0.2 < llamadas[0][1] <= 0.3, llamadas[0][1])
+
+    @patch.object(asistente, '_call_provider', side_effect=asistente.ProviderError('fallo'))
+    @patch.object(asistente, 'config')
+    def test_si_el_cliente_ya_corto_no_se_llama_al_respaldo(self, config, call_provider):
+        config.side_effect = {
+            'IA_BASE_URL': 'https://workers.example/ai/v1', 'IA_API_KEY': 'k1', 'IA_MODELO': 'm',
+            'IA_RESPALDO_BASE_URL': 'https://groq.example/openai/v1', 'IA_RESPALDO_API_KEY': 'k2',
+            'IA_RESPALDO_MODELO': 'm',
+        }.get
+        attempts = []
+
+        with self.assertRaises(HTTPException) as error:
+            asistente.complete('¿Qué significa?', [], attempts, client_gone=lambda: True)
+
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertEqual(call_provider.call_count, 1)
+        self.assertEqual(attempts, [{'provider': 'Workers AI', 'result': 'error'}])
+
+    def test_fuera_de_un_hilo_de_anyio_el_cliente_cuenta_como_presente(self):
+        self.assertFalse(asistente._client_gone(_request())())
+
+    @patch.object(asistente, 'build_opener')
+    def test_una_llave_con_salto_de_linea_es_error_de_configuracion_sin_la_llave(self, build_opener):
+        opener = Mock()
+        opener.open.side_effect = ValueError("Invalid header value b'Bearer CIRDAN_FAKE_uno\\ndos'")
+        build_opener.return_value = opener
+
+        with self.assertRaises(asistente.ProviderError) as error:
+            asistente._call_provider('https://workers.example/ai/v1', 'CIRDAN_FAKE_uno\ndos', 'm', [], 5)
+
+        self.assertEqual(str(error.exception), 'configuración inválida')
+        self.assertIsNone(error.exception.__cause__)
+        self.assertTrue(error.exception.__suppress_context__)
 
     @patch.object(asistente, '_call_provider', side_effect=KeyError('error de programación'))
     @patch.object(asistente, 'config')

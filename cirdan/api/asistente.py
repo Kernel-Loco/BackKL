@@ -4,12 +4,14 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from http.client import HTTPException as HttpProtocolError
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request as UrlRequest, build_opener
 from uuid import UUID
 
+import anyio.from_thread
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
@@ -30,6 +32,11 @@ MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024
 ASSISTANT_DEADLINE_SECONDS = 30
 # Si hay respaldo, el principal deja este tiempo para que el respaldo alcance a responder.
 BACKUP_RESERVE_SECONDS = 10
+# Preguntas que esperan a un proveedor al mismo tiempo. El handler es síncrono y ocupa un hilo del pool que comparten
+# login, MFA y el resto de la API (40 en anyio, un solo uvicorn): sin este tope, un proveedor colgado los acaparaba.
+ASSISTANT_MAX_CONCURRENT = 8
+_slots = threading.BoundedSemaphore(ASSISTANT_MAX_CONCURRENT)
+PROVIDER_BUSY = 'El asistente está atendiendo muchas preguntas. Inténtalo en un minuto.'
 PROVIDER_UNAVAILABLE = ('El asistente no está disponible. Inténtalo en un minuto o consulta el reporte del dominio, '
                         'que incluye qué significa cada hallazgo y qué hacer.')
 
@@ -59,7 +66,21 @@ CATEGORY_NAMES = {
     'data_leaks': 'Fugas de datos',
 }
 SEVERITY_NAMES = {'critical': 'Crítica', 'high': 'Alta', 'medium': 'Media', 'low': 'Baja'}
-_DATA_TAG = re.compile(r'<\s*/?\s*datos\s*>', re.IGNORECASE)
+# Lineal: ningún tramo cruza un '<'. Cubre </datos>, < / datos >, <datos x="y"> y <datos/>.
+_DATA_TAG = re.compile(r'<[\s/]*datos\b[^<>]*>', re.IGNORECASE)
+
+
+def clean_question(question):
+    """La pregunta sin caracteres invisibles (categoría Cf) ni etiquetas <datos>, hasta que no quede ninguna.
+
+    NFKC vuelve las etiquetas de ancho completo a <datos>, y el bucle quita las que se forman al quitar otra.
+    """
+    text = ''.join(ch for ch in unicodedata.normalize('NFKC', question) if unicodedata.category(ch) != 'Cf')
+    while True:
+        cleaned = _DATA_TAG.sub('', text)
+        if cleaned == text:
+            return cleaned.strip()
+        text = cleaned
 
 
 class AssistantQuestion(BaseModel):
@@ -98,7 +119,7 @@ def _messages(question, findings):
     context = json.dumps(data, ensure_ascii=False, indent=1)
     return [
         {'role': 'system', 'content': SYSTEM_PROMPT},
-        {'role': 'user', 'content': '<datos>\n%s\n</datos>\n\nPregunta: %s' % (context, _DATA_TAG.sub('', question))},
+        {'role': 'user', 'content': '<datos>\n%s\n</datos>\n\nPregunta: %s' % (context, clean_question(question))},
     ]
 
 
@@ -136,6 +157,10 @@ def _call_provider(base_url, api_key, model, messages, timeout):
         raise ProviderError('respuesta HTTP %d' % status) from None
     except (URLError, TimeoutError, OSError, HttpProtocolError) as error:
         raise ProviderError(type(error).__name__) from None
+    except ValueError:
+        # http.client rechaza una llave o un modelo con saltos de línea o fuera de latin-1 (UnicodeError también es
+        # ValueError). El mensaje original lleva el valor del encabezado, así que no se encadena ni se registra.
+        raise ProviderError('configuración inválida') from None
 
     if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
         raise ProviderError('respuesta demasiado grande')
@@ -177,7 +202,13 @@ def _call_within(seconds, base_url, api_key, model, messages):
     return result['answer']
 
 
-def complete(question, findings):
+def complete(question, findings, attempts=None, client_gone=None):
+    """La respuesta del primer proveedor que conteste dentro del tope total, o 503.
+
+    `attempts` recibe {'provider', 'result'} de cada proveedor al que se le mandó la pregunta, para la bitácora.
+    `client_gone` dice si el cliente ya cortó: entonces no se llama al respaldo.
+    """
+    attempts = [] if attempts is None else attempts
     messages = _messages(question, findings)
     providers = (
         ('Workers AI', config('IA_BASE_URL'), config('IA_API_KEY'), config('IA_MODELO')),
@@ -201,10 +232,17 @@ def complete(question, findings):
         if budget <= 0:
             logger.warning('Proveedor %s no disponible: sin tiempo', name)
             continue
+        if index and client_gone and client_gone():
+            logger.info('Proveedor %s no se llama: el cliente ya cortó', name)
+            break
         try:
-            return _call_within(budget, base_url, api_key, model, messages)
+            answer = _call_within(budget, base_url, api_key, model, messages)
         except ProviderError as error:
             logger.warning('Proveedor %s no disponible: %s', name, error)
+            attempts.append({'provider': name, 'result': 'timeout' if str(error) == 'TimeoutError' else 'error'})
+            continue
+        attempts.append({'provider': name, 'result': 'ok'})
+        return answer
     if not configured:
         logger.error('Asistente no disponible: no hay proveedores de IA configurados')
     raise HTTPException(503, PROVIDER_UNAVAILABLE, headers={'Cache-Control': 'no-store'})
@@ -245,24 +283,51 @@ def _get_context(session, fqdn, finding_ids):
     return domain['id'], findings
 
 
+def _client_gone(request):
+    """Una función que dice si el cliente ya cortó la conexión, sin fallar fuera de un hilo de anyio."""
+    def check():
+        try:
+            return anyio.from_thread.run(request.is_disconnected)
+        except Exception:  # noqa: BLE001 - sin forma de saberlo, se sigue como si el cliente esperara
+            return False
+    return check
+
+
+def _audit(session, request, action, domain_id, details):
+    with transaction(session.org_id) as conn:
+        audit(conn, session.org_id, action, user_id=session.audit_user_id, ip=client_ip(request),
+              entity_type='domain', entity_id=domain_id, details=details, platform=session.audit_platform)
+
+
 @router.post('/domains/{fqdn}/assistant', summary='Responde preguntas sobre hallazgos abiertos')
 def ask_assistant(fqdn: str, body: AssistantQuestion, request: Request, response: Response,
                   session: Session = Depends(require_roles('analyst', 'admin'))):
-    question = body.question.strip()
+    question = clean_question(body.question)
     if not question:
         raise HTTPException(422, 'Escribe una pregunta')
 
     domain_id, findings = _get_context(session, fqdn, body.finding_ids)
-    if not sessions.take_assistant_question(session.user_id):
-        raise HTTPException(429, 'Alcanzaste el límite de 20 preguntas por cada 24 horas.',
-                            headers={'Cache-Control': 'no-store'})
+    # Antes del cupo: si está lleno, la pregunta no se cuenta ni se audita.
+    if not _slots.acquire(blocking=False):
+        raise HTTPException(503, PROVIDER_BUSY, headers={'Cache-Control': 'no-store', 'Retry-After': '60'})
+    try:
+        if not sessions.take_assistant_question(session.user_id):
+            raise HTTPException(429, 'Alcanzaste el límite de 20 preguntas por cada 24 horas.',
+                                headers={'Cache-Control': 'no-store'})
 
-    finding_ids = [str(finding_id) for finding_id in body.finding_ids]
-    with transaction(session.org_id) as conn:
-        audit(conn, session.org_id, 'assistant.asked', user_id=session.audit_user_id, ip=client_ip(request),
-              entity_type='domain', entity_id=domain_id, details={'finding_ids': finding_ids},
-              platform=session.audit_platform)
+        finding_ids = [str(finding_id) for finding_id in body.finding_ids]
+        _audit(session, request, 'assistant.asked', domain_id, {'finding_ids': finding_ids})
 
-    response.headers['Cache-Control'] = 'no-store'
-    answer = complete(question, findings)
-    return {'answer': answer, 'finding_ids': finding_ids}
+        response.headers['Cache-Control'] = 'no-store'
+        attempts = []
+        try:
+            answer = complete(question, findings, attempts, _client_gone(request))
+        except HTTPException:
+            # A qué proveedores salió la pregunta y que no hubo respuesta. Sin el texto de la pregunta ni del error.
+            _audit(session, request, 'assistant.completed', domain_id,
+                   {'result': 'unavailable', 'providers': attempts})
+            raise
+        _audit(session, request, 'assistant.completed', domain_id, {'result': 'answered', 'providers': attempts})
+        return {'answer': answer, 'finding_ids': finding_ids}
+    finally:
+        _slots.release()
