@@ -85,11 +85,16 @@ jobs:
             docker tag lowtide-api:ci "$IMAGEN:$etiqueta"
             docker push -q "$IMAGEN:$etiqueta"
           done
-          # Se firma el digest, nunca la etiqueta: una etiqueta se puede mover a otra imagen.
-          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGEN:$GITHUB_SHA")
+          # Se firma el digest, nunca la etiqueta: una etiqueta se puede mover a otra imagen. Se le pide a ghcr.io:
+          # docker inspect puede dar primero el de la imagen local (lowtide-api@sha256:…), que cosign no encuentra.
+          sha=$(docker buildx imagetools inspect "$IMAGEN:$GITHUB_SHA" --format '{{.Manifest.Digest}}')
+          [[ "$sha" =~ ^sha256:[0-9a-f]{64}$ ]]
+          digest="$IMAGEN@$sha"
           echo "Imagen: $digest" | tee -a "$GITHUB_STEP_SUMMARY"
           cosign() {
-            docker run --rm -e ACTIONS_ID_TOKEN_REQUEST_URL -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            # Con el usuario del runner: el config.json de docker login es 0600 y la imagen corre como nonroot.
+            docker run --rm -u "$(id -u):$(id -g)" --tmpfs /tmp:rw,mode=1777 -e HOME=/tmp \
+              -e ACTIONS_ID_TOKEN_REQUEST_URL -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
               -e DOCKER_CONFIG=/docker -v "$DOCKER_CONFIG:/docker:ro" -v "$PWD/sbom:/sbom:ro" "$COSIGN" "$@"
           }
           cosign sign --yes "$digest"
