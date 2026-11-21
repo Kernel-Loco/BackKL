@@ -134,6 +134,7 @@ jobs:
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
           pruebas/test_contrasenas_comunes.py
           pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_siem.py pruebas/test_despliegue.py
+          pruebas/test_reporte_tecnico.py
           pruebas/test_ci.py pruebas/test_terraform.py
 
       # RC-313, punto 3b: con la base a las 20:00 de México y la API en UTC, GET /api/v1/domains da 'missing' a una carta

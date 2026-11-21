@@ -26,7 +26,7 @@ from psycopg import IsolationLevel
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
-from cirdan import cartas, orquestador, reporte, siem
+from cirdan import cartas, orquestador, reporte, reporte_tecnico, siem
 from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
 from cirdan.auth.deps import (Session, api_key_or_roles, client_ip, current_session, in_scope, require_roles,
@@ -684,7 +684,19 @@ SELECT d.last_scan_at, o.name AS organization, a.valid_from, a.valid_until
 '''
 
 
-def _reporte(session, fqdn):
+# Las corridas del último escaneo del dominio para la cobertura del reporte técnico (#46, RC-81). Sin el error: puede
+# traer detalles internos de la fuente y el reporte sale de la plataforma.
+REPORTE_FUENTES_SQL = '''
+SELECT s.code AS source, r.status, r.attempt, r.finished_at
+  FROM scan_source_runs r
+  JOIN data_sources s ON s.id = r.source_id
+ WHERE r.scan_id = (SELECT sc.id FROM scans sc WHERE sc.domain_id = %s ORDER BY sc.queued_at DESC, sc.id LIMIT 1)
+ ORDER BY s.code
+'''
+
+
+def _reporte(session, fqdn, tecnico=False):
+    """El reporte ejecutivo (#45) o, con tecnico, el técnico (#46): los dos leen la misma foto de la base."""
     domain_id = _dominio_autorizado(session, fqdn)
     # REPEATABLE READ, como la salida a SIEM: score, hallazgos y carta salen de una sola foto de la base, así un
     # escaneo que cierra a la mitad no mezcla el score de uno con los hallazgos del otro.
@@ -695,8 +707,10 @@ def _reporte(session, fqdn):
         scores = conn.execute(SCORES_SQL, (fqdn,)).fetchall()
         hallazgos = [_finding(f) for f in conn.execute(FINDINGS_SQL, (fqdn,)).fetchall()]
         codigos = sorted({h['rule_code'] for h in hallazgos})
-        recomendaciones = {r['code']: r['recommendation'] for r in conn.execute(
-            'SELECT code, recommendation FROM scoring_rule_texts WHERE code = ANY(%s)', (codigos,)).fetchall()}
+        textos = {r['code']: r for r in conn.execute(
+            'SELECT code, title, meaning, recommendation FROM scoring_rule_texts WHERE code = ANY(%s)',
+            (codigos,)).fetchall()}
+        fuentes = conn.execute(REPORTE_FUENTES_SQL, (domain_id,)).fetchall() if tecnico else []
     score = None
     if scores:
         s = scores[-1]
@@ -704,9 +718,12 @@ def _reporte(session, fqdn):
         score = {'score': s['score'], 'band': criterio.banda(s['score'], cortes),
                  'grade': criterio.letra(s['score'], cortes),
                  'partial_coverage': s['partial_coverage'], 'computed_at': s['computed_at']}
-    return reporte.armar(fqdn, dominio['organization'],
-                         {'valid_from': dominio['valid_from'], 'valid_until': dominio['valid_until']},
-                         score, dominio['last_scan_at'], hallazgos, recomendaciones)
+    carta = {'valid_from': dominio['valid_from'], 'valid_until': dominio['valid_until']}
+    if tecnico:
+        return reporte_tecnico.armar(fqdn, dominio['organization'], carta, score, dominio['last_scan_at'], hallazgos,
+                                     textos, fuentes)
+    return reporte.armar(fqdn, dominio['organization'], carta, score, dominio['last_scan_at'], hallazgos,
+                         {c: t['recommendation'] for c, t in textos.items()})
 
 
 @router.get('/domains/{fqdn}/report', summary='Reporte ejecutivo del dominio en JSON (para el PDF del portal) o en HTML')
@@ -721,6 +738,23 @@ def executive_report(response: Response, fqdn: str, formato: str = Query(default
         return datos
     # Sin scripts ni recursos externos. La CSP lleva frame-ancestors para que el middleware de RC-283 la conserve.
     respuesta = _descarga(reporte.html(datos), 'text/html; charset=utf-8', '%s-resumen-ejecutivo.html' % fqdn)
+    respuesta.headers['Content-Security-Policy'] = reporte.CSP_HTML
+    respuesta.headers['Cache-Control'] = 'no-store'
+    return respuesta
+
+
+@router.get('/domains/{fqdn}/report/technical',
+            summary='Reporte técnico del dominio en JSON (para el PDF del portal) o en HTML: detalle y remediaciones')
+def technical_report(response: Response, fqdn: str, formato: str = Query(default='json'),
+                     session: Session = Depends(LEE_HALLAZGOS)):
+    # LEE_HALLAZGOS, como la lista y la exportación de hallazgos: trae la evidencia de cada uno.
+    if formato not in ('json', 'html'):
+        raise HTTPException(422, "El formato debe ser 'json' o 'html'")
+    datos = _reporte(session, fqdn, tecnico=True)
+    if formato == 'json':
+        response.headers['Cache-Control'] = 'no-store'
+        return datos
+    respuesta = _descarga(reporte_tecnico.html(datos), 'text/html; charset=utf-8', '%s-reporte-tecnico.html' % fqdn)
     respuesta.headers['Content-Security-Policy'] = reporte.CSP_HTML
     respuesta.headers['Cache-Control'] = 'no-store'
     return respuesta
