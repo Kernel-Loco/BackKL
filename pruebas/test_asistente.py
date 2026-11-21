@@ -148,6 +148,44 @@ class AssistantEndpoint(unittest.TestCase):
         take.assert_not_called()
         complete.assert_not_called()
 
+    @patch.object(asistente, 'complete')
+    @patch.object(asistente.sessions, 'take_assistant_question')
+    @patch.object(asistente, 'transaction')
+    def test_una_pregunta_que_nfkc_alarga_de_mas_es_422_sin_gastar_cupo(self, transaction, take, complete):
+        # U+FDFA cabe en el tope de 1,000, pero NFKC lo vuelve 18 caracteres: llegaban unos 18,000 al proveedor.
+        body = asistente.AssistantQuestion(question='ﷺ' * asistente.MAX_QUESTION_LENGTH,
+                                           finding_ids=[FINDING_ID])
+
+        with self.assertRaises(HTTPException) as error:
+            asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+
+        self.assertEqual(error.exception.status_code, 422)
+        transaction.assert_not_called()
+        take.assert_not_called()
+        complete.assert_not_called()
+        cabe = asistente.AssistantQuestion(question='ﷺ' * 55, finding_ids=[FINDING_ID])
+        self.assertLessEqual(len(asistente.clean_question(cabe.question)), asistente.MAX_QUESTION_LENGTH)
+
+    @patch.object(asistente, 'audit')
+    @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
+    @patch.object(asistente, 'transaction')
+    def test_audita_el_corte_del_cliente_y_el_error_inesperado_como_resultado(self, transaction, take, audit):
+        body = asistente.AssistantQuestion(question='¿Qué significa?', finding_ids=[FINDING_ID])
+        casos = (
+            (asistente.ClientGone(503, asistente.PROVIDER_UNAVAILABLE), HTTPException, 'client_gone'),
+            (KeyError('error de programación'), KeyError, 'error'),
+        )
+        for falla, esperado, resultado in casos:
+            with self.subTest(resultado=resultado):
+                self.setUp()
+                audit.reset_mock()
+                transaction.side_effect = lambda org_id: nullcontext(self.conn)
+                with patch.object(asistente, 'complete', side_effect=falla), self.assertRaises(esperado):
+                    asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+                self.assertEqual([item.args[2] for item in audit.call_args_list],
+                                 ['assistant.asked', 'assistant.completed'])
+                self.assertEqual(audit.call_args_list[1].kwargs['details'], {'result': resultado, 'providers': []})
+
     @patch.object(asistente, 'transaction')
     def test_los_hallazgos_siguen_el_orden_de_finding_ids_y_no_el_de_la_base(self, transaction):
         otro = UUID('40000000-0000-4000-8000-000000000002')
@@ -286,7 +324,9 @@ class AssistantPromptAndProvider(unittest.TestCase):
 
     def test_la_limpieza_quita_variantes_de_la_etiqueta_y_las_que_se_forman_al_quitar_otra(self):
         for pregunta in ('<datos tipo="x">a', '</datos foo>a', '</datos\u200b>a', '＜/datos＞a', '<datos/>a',
-                         '<dat<datos>os>a', '</da\u200btos>a', '< / / DATOS\n>a'):
+                         '<dat<datos>os>a', '</da\u200btos>a', '< / / DATOS\n>a', '</da\ufe0ftos>a',
+                         '</da\u034ftos>a', '</da\U000e0100tos>a', '</da\u3164tos>a', '</da\uffa0tos>a',
+                         '</da\u115ftos>a', '</da\u180btos>a', '</da\u2065tos>a'):
             with self.subTest(pregunta=pregunta):
                 self.assertEqual(asistente.clean_question(pregunta), 'a')
         sin_etiquetas = '¿Qué es <b>datos</b> y <datosx>?'
@@ -387,15 +427,17 @@ class AssistantPromptAndProvider(unittest.TestCase):
         }.get
         attempts = []
 
-        with self.assertRaises(HTTPException) as error:
+        with self.assertRaises(asistente.ClientGone) as error:
             asistente.complete('¿Qué significa?', [], attempts, client_gone=lambda: True)
 
         self.assertEqual(error.exception.status_code, 503)
+        self.assertEqual(error.exception.detail, asistente.PROVIDER_UNAVAILABLE)
         self.assertEqual(call_provider.call_count, 1)
         self.assertEqual(attempts, [{'provider': 'Workers AI', 'result': 'error'}])
 
-    def test_fuera_de_un_hilo_de_anyio_el_cliente_cuenta_como_presente(self):
+    def test_sin_el_middleware_el_cliente_cuenta_como_presente(self):
         self.assertFalse(asistente._client_gone(_request())())
+
 
     @patch.object(asistente, 'build_opener')
     def test_una_llave_con_salto_de_linea_es_error_de_configuracion_sin_la_llave(self, build_opener):
@@ -484,6 +526,89 @@ class AssistantPromptAndProvider(unittest.TestCase):
         self.assertNotIn(USER_ID, key)
         self.assertIn("redis.call('INCR'", script)
         self.assertEqual((limit, seconds), (20, 86400))
+
+
+def _preguntar_por_asgi(app, cliente_corta):
+    """Manda una pregunta a la app por ASGI, como uvicorn: si el cliente ya cortó, receive() da http.disconnect
+    en cuanto se pide, y si no, espera. Devuelve el status y lo que vio client_gone() dentro del handler."""
+    import anyio
+
+    cuerpo = json.dumps({'question': '¿Qué significa?', 'finding_ids': [str(FINDING_ID)]}).encode()
+    scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': 'POST', 'scheme': 'http',
+             'path': '/api/v1/domains/acme-demo.mx/assistant', 'raw_path': b'', 'query_string': b'', 'root_path': '',
+             'headers': [(b'content-type', b'application/json'), (b'content-length', str(len(cuerpo)).encode()),
+                         (b'host', b'testserver')],
+             'client': ('127.0.0.1', 12345), 'server': ('testserver', 80)}
+    visto = {}
+    estado = {}
+    entregado = False
+
+    async def receive():
+        nonlocal entregado
+        if not entregado:
+            entregado = True
+            return {'type': 'http.request', 'body': cuerpo, 'more_body': False}
+        if cliente_corta:
+            return {'type': 'http.disconnect'}
+        await anyio.sleep_forever()
+
+    async def send(message):
+        if message['type'] == 'http.response.start':
+            estado['status'] = message['status']
+
+    def completar(question, findings, attempts, client_gone):
+        visto['client_gone'] = client_gone()
+        return 'Explicación breve.'
+
+    from cirdan.auth import deps
+    with patch.object(deps, 'current_session', return_value=_session()), \
+            patch.object(asistente, '_get_context', return_value=(DOMAIN_ID, [])), \
+            patch.object(asistente.sessions, 'take_assistant_question', return_value=True), \
+            patch.object(asistente, '_audit'), patch.object(asistente, 'complete', side_effect=completar):
+        anyio.run(app, scope, receive, send)
+    return estado.get('status'), visto.get('client_gone')
+
+
+class ClientDisconnectThroughTheApp(unittest.TestCase):
+    """Con la app completa: los @app.middleware('http') de main.py no dejan ver el corte (RC-77, ronda 2)."""
+
+    def test_el_handler_ve_el_corte_del_cliente_detras_de_los_middlewares(self):
+        from cirdan.api.main import app
+        self.assertEqual(_preguntar_por_asgi(app, cliente_corta=True), (200, True))
+
+    def test_si_el_cliente_espera_no_cuenta_como_corte(self):
+        from cirdan.api.main import app
+        self.assertEqual(_preguntar_por_asgi(app, cliente_corta=False), (200, False))
+
+    def test_otras_rutas_no_pasan_por_el_vigilante(self):
+        from cirdan.api.main import app
+        vistos = []
+
+        async def interior(scope, receive, send):
+            vistos.append(asistente.CLIENT_GONE_SCOPE_KEY in scope)
+
+        import anyio
+        vigilante = asistente.ClientDisconnectWatch(interior)
+        for metodo, ruta in (('GET', '/api/v1/domains/acme-demo.mx/assistant'), ('POST', '/api/v1/auth/login'),
+                             ('POST', '/api/v1/domains/acme-demo.mx/assistant/x')):
+            anyio.run(vigilante, {'type': 'http', 'method': metodo, 'path': ruta}, None, None)
+        self.assertEqual(vistos, [False, False, False])
+        # El último que se agrega queda afuera de todos, también de los @app.middleware('http').
+        self.assertIs(app.user_middleware[0].cls, asistente.ClientDisconnectWatch)
+
+    def test_un_error_de_la_app_sale_tal_cual_y_no_en_un_grupo(self):
+        import anyio
+
+        async def interior(scope, receive, send):
+            raise KeyError('error de programación')
+
+        async def receive():
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+        vigilante = asistente.ClientDisconnectWatch(interior)
+        with self.assertRaises(KeyError):
+            anyio.run(vigilante, {'type': 'http', 'method': 'POST',
+                                  'path': '/api/v1/domains/acme-demo.mx/assistant'}, receive, None)
 
 
 if __name__ == '__main__':

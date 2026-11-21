@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Match
 
 from cirdan.auth.deps import Session, client_ip, comprobar_cookie_segura, current_session, require_roles
-from cirdan.api.asistente import router as assistant_router
+from cirdan.api.asistente import ClientDisconnectWatch, router as assistant_router
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
@@ -239,6 +239,10 @@ async def auditar_lecturas_de_operador(request: Request, call_next):
                        'status_code': response.status_code},
               platform=session.audit_platform)
     return response
+
+
+# Afuera de los @app.middleware('http') de arriba, que no dejan ver el corte del cliente (asistente.py lo explica).
+app.add_middleware(ClientDisconnectWatch)
 
 
 @app.exception_handler(Exception)

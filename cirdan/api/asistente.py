@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request as UrlRequest, build_opener
 from uuid import UUID
 
-import anyio.from_thread
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
@@ -68,14 +68,30 @@ CATEGORY_NAMES = {
 SEVERITY_NAMES = {'critical': 'Crítica', 'high': 'Alta', 'medium': 'Media', 'low': 'Baja'}
 # Lineal: ningún tramo cruza un '<'. Cubre </datos>, < / datos >, <datos x="y"> y <datos/>.
 _DATA_TAG = re.compile(r'<[\s/]*datos\b[^<>]*>', re.IGNORECASE)
+# Default_Ignorable_Code_Point de Unicode (DerivedCoreProperties.txt) que no son de la categoría Cf: el grafema
+# combinante U+034F, los rellenos Hangul, los selectores de variación y los reservados. No se ven, pero partían
+# '</datos>' sin que la regex lo reconociera.
+_IGNORABLE_RANGES = (
+    (0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F), (0x2060, 0x206F), (0x3164, 0x3164),
+    (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
+
+
+def _invisible(ch):
+    if unicodedata.category(ch) == 'Cf':
+        return True
+    code = ord(ch)
+    return any(low <= code <= high for low, high in _IGNORABLE_RANGES)
 
 
 def clean_question(question):
-    """La pregunta sin caracteres invisibles (categoría Cf) ni etiquetas <datos>, hasta que no quede ninguna.
+    """La pregunta sin caracteres invisibles (Cf y los demás ignorables por omisión) ni etiquetas <datos>.
 
-    NFKC vuelve las etiquetas de ancho completo a <datos>, y el bucle quita las que se forman al quitar otra.
+    NFKC vuelve las etiquetas de ancho completo a <datos>, y el bucle quita las que se forman al quitar otra. NFKC
+    puede alargar el texto (U+FDFA da 18 caracteres): el handler revisa el largo de lo que regresa esta función.
     """
-    text = ''.join(ch for ch in unicodedata.normalize('NFKC', question) if unicodedata.category(ch) != 'Cf')
+    text = ''.join(ch for ch in unicodedata.normalize('NFKC', question) if not _invisible(ch))
     while True:
         cleaned = _DATA_TAG.sub('', text)
         if cleaned == text:
@@ -97,6 +113,10 @@ class AssistantQuestion(BaseModel):
 
 class ProviderError(Exception):
     """Error de configuración, transporte o respuesta de un proveedor, sin datos de la pregunta."""
+
+
+class ClientGone(HTTPException):
+    """El 503 de cuando el principal falló y el cliente ya había cortado, así que no se llamó al respaldo."""
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -158,8 +178,9 @@ def _call_provider(base_url, api_key, model, messages, timeout):
     except (URLError, TimeoutError, OSError, HttpProtocolError) as error:
         raise ProviderError(type(error).__name__) from None
     except ValueError:
-        # http.client rechaza una llave o un modelo con saltos de línea o fuera de latin-1 (UnicodeError también es
-        # ValueError). El mensaje original lleva el valor del encabezado, así que no se encadena ni se registra.
+        # http.client rechaza una llave con saltos de línea o fuera de latin-1 y una URL con caracteres de control
+        # (UnicodeError e InvalidURL también son ValueError). El modelo va en el JSON, no en un encabezado. El mensaje
+        # original lleva el valor del encabezado, así que no se encadena ni se registra.
         raise ProviderError('configuración inválida') from None
 
     if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
@@ -234,7 +255,7 @@ def complete(question, findings, attempts=None, client_gone=None):
             continue
         if index and client_gone and client_gone():
             logger.info('Proveedor %s no se llama: el cliente ya cortó', name)
-            break
+            raise ClientGone(503, PROVIDER_UNAVAILABLE, headers={'Cache-Control': 'no-store'})
         try:
             answer = _call_within(budget, base_url, api_key, model, messages)
         except ProviderError as error:
@@ -283,14 +304,67 @@ def _get_context(session, fqdn, finding_ids):
     return domain['id'], findings
 
 
+CLIENT_GONE_SCOPE_KEY = 'cirdan.client_gone'
+_ASSISTANT_PATH = re.compile(r'/api/v1/domains/[^/]+/assistant')
+
+
+class ClientDisconnectWatch:
+    """Middleware ASGI puro: avisa al handler del asistente si el cliente cortó mientras espera al proveedor.
+
+    request.is_disconnected() no sirve detrás de los @app.middleware('http') de main.py: BaseHTTPMiddleware envuelve
+    receive() en un grupo de tareas que la revisión cancelada de is_disconnected corta antes de leer, y siempre da
+    False. Este middleware va afuera de ellos y, solo en POST del asistente y ya leído todo el cuerpo, escucha el
+    receive() del servidor: después del cuerpo el único mensaje que queda es http.disconnect, así que no le quita
+    nada a la app. Lo anota en un threading.Event del scope, que el handler lee desde su hilo.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (scope['type'] != 'http' or scope.get('method') != 'POST'
+                or not _ASSISTANT_PATH.fullmatch(scope.get('path', ''))):
+            await self.app(scope, receive, send)
+            return
+        gone = threading.Event()
+        scope[CLIENT_GONE_SCOPE_KEY] = gone
+        body_read = anyio.Event()
+
+        async def tracked_receive():
+            message = await receive()
+            if message['type'] == 'http.disconnect':
+                gone.set()
+                body_read.set()
+            elif not message.get('more_body', False):
+                body_read.set()
+            return message
+
+        async def watch():
+            await body_read.wait()
+            try:
+                if not gone.is_set() and (await receive())['type'] == 'http.disconnect':
+                    gone.set()
+            except Exception:  # noqa: BLE001 - sin forma de saberlo, se sigue como si el cliente esperara
+                return
+
+        # El error de la app sale tal cual y no dentro del ExceptionGroup que arma el grupo de tareas de anyio.
+        error = None
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(watch)
+            try:
+                await self.app(scope, tracked_receive, send)
+            except Exception as exc:  # noqa: BLE001 - se vuelve a lanzar abajo
+                error = exc
+            finally:
+                task_group.cancel_scope.cancel()
+        if error is not None:
+            raise error
+
+
 def _client_gone(request):
-    """Una función que dice si el cliente ya cortó la conexión, sin fallar fuera de un hilo de anyio."""
-    def check():
-        try:
-            return anyio.from_thread.run(request.is_disconnected)
-        except Exception:  # noqa: BLE001 - sin forma de saberlo, se sigue como si el cliente esperara
-            return False
-    return check
+    """Una función que dice si el cliente ya cortó. Sin ClientDisconnectWatch, como si el cliente esperara."""
+    gone = request.scope.get(CLIENT_GONE_SCOPE_KEY)
+    return gone.is_set if gone is not None else (lambda: False)
 
 
 def _audit(session, request, action, domain_id, details):
@@ -305,6 +379,8 @@ def ask_assistant(fqdn: str, body: AssistantQuestion, request: Request, response
     question = clean_question(body.question)
     if not question:
         raise HTTPException(422, 'Escribe una pregunta')
+    if len(question) > MAX_QUESTION_LENGTH:
+        raise HTTPException(422, 'La pregunta puede tener hasta %d caracteres' % MAX_QUESTION_LENGTH)
 
     domain_id, findings = _get_context(session, fqdn, body.finding_ids)
     # Antes del cupo: si está lleno, la pregunta no se cuenta ni se audita.
@@ -320,12 +396,19 @@ def ask_assistant(fqdn: str, body: AssistantQuestion, request: Request, response
 
         response.headers['Cache-Control'] = 'no-store'
         attempts = []
+        # A qué proveedores salió la pregunta y cómo terminó, también si falló. Sin el texto de la pregunta ni de error.
         try:
             answer = complete(question, findings, attempts, _client_gone(request))
+        except ClientGone:
+            _audit(session, request, 'assistant.completed', domain_id,
+                   {'result': 'client_gone', 'providers': attempts})
+            raise
         except HTTPException:
-            # A qué proveedores salió la pregunta y que no hubo respuesta. Sin el texto de la pregunta ni del error.
             _audit(session, request, 'assistant.completed', domain_id,
                    {'result': 'unavailable', 'providers': attempts})
+            raise
+        except Exception:
+            _audit(session, request, 'assistant.completed', domain_id, {'result': 'error', 'providers': attempts})
             raise
         _audit(session, request, 'assistant.completed', domain_id, {'result': 'answered', 'providers': attempts})
         return {'answer': answer, 'finding_ids': finding_ids}
