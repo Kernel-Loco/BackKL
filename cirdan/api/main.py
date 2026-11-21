@@ -20,6 +20,7 @@ from starlette.routing import Match
 
 from cirdan.auth.deps import Session, client_ip, comprobar_cookie_segura, current_session, require_roles
 from cirdan.api.asistente import ClientDisconnectWatch, router as assistant_router
+from cirdan.api.bitacora import router as audit_log_router
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
@@ -257,6 +258,7 @@ app.include_router(api_keys_router)
 app.include_router(platform_router)
 app.include_router(v1_router)
 app.include_router(assistant_router)
+app.include_router(audit_log_router)
 
 # Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas
 # rutas no existen (404). Nunca true en producción.

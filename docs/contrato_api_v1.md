@@ -62,6 +62,24 @@ Para que un sistema de la propia empresa lea la API sin la sesión del portal. E
 - **Último uso:** `last_used_at` se actualiza a lo más una vez por minuto.
 - **Bitácora:** crear y revocar quedan en `audit_log` como `api_key.created` y `api_key.revoked`, con el prefijo y nunca con la llave.
 
+## Bitácora (#86, RC-130)
+
+La bitácora de la empresa (`audit_log`) y la verificación de su cadena de hashes. Las lee la pantalla de bitácora del portal (#86b, RC-174). Solo el Administrador, con su sesión: el Gerente y el Analista reciben 403, sin sesión responde 401 y una llave de API no entra (401). Un superadmin que trabaja en otra empresa entra como Admin de esa empresa y ve la de esa empresa. Las dos respuestas van con `Cache-Control: no-store`.
+
+| Método y ruta | Qué devuelve |
+|---|---|
+| `GET /api/v1/audit-log?limit=500&offset=0` | `{items, total, limit, offset}`, de la más nueva a la más vieja (por `chain_seq`). `limit` va de 1 a 1000 (500 por omisión) y `offset` de 0 a 1 000 000. Fuera de rango responde 422. `total` cuenta todas las filas de la empresa, no solo las de la página |
+| `GET /api/v1/audit-log/verify` | Recalcula toda la cadena de la empresa y responde `status` (`intact` o `broken`), `checked` (filas revisadas), `last_chain_seq`, `first_broken` (`null` o `{id, chain_seq, reason}`) y `verified_at`. Una bitácora vacía sale `intact` con `checked` 0. Verificar no escribe en la bitácora |
+
+**Cada fila** tiene la forma de `AuditEntry` del portal: `id`, `occurred_at`, `actor_type` (`user`, `system`, `api_key` o `platform`), `actor`, `action`, `entity_type` y `details`, y además `chain_seq`, `entity_id` e `ip_address`. `actor` es el correo del usuario con `user` y el nombre de la llave con `api_key`. Con `system` va en `null`, y con `platform` también: es el superadmin de LowTide en una empresa ajena (RC-332), su correo no sale y su id está en `details.platform_user_id`. Los hashes no se mandan.
+
+**La verificación** usa la fórmula del trigger `audit_log_chain()` (migración 001) y revisa cada fila en orden de `chain_seq`. `reason` dice qué falló primero en la primera fila rota:
+- `chain_seq`: la fila no está en la posición que le toca, porque falta una antes (se borró) o se repite su número.
+- `prev_hash`: no apunta al `row_hash` de la anterior, porque la anterior se cambió y se recalculó su hash.
+- `row_hash`: no cuadra con su propio contenido, porque se cambió la fila.
+
+`first_broken.id` es el `id` de esa fila en la lista. **Límites:** la cadena sola no detecta que se borren las últimas filas, porque las que quedan siguen cuadrando. La cadena de la plataforma (`organization_id` NULL) no la ve ninguna empresa. El código está en `cirdan/bitacora.py` y `cirdan/api/bitacora.py`, y la prueba, que altera una copia de la base con los triggers apagados, en `pruebas/test_bitacora.py`.
+
 ## Dominio (`dominios.json`)
 
 | Campo | Qué es |
