@@ -123,6 +123,14 @@ class DocumentacionApagada(unittest.TestCase):
         code, _ = self.api.get('/health')
         self.assertEqual(code, 200)
 
+    def test_4_sin_api_docs_no_hay_csp_de_documentacion(self):
+        """RC-89: la CSP de /docs y /redoc solo existe con API_DOCS=true. Sin ella, su 404 lleva la de la API."""
+        for ruta in ('/docs', '/redoc'):
+            _, headers = self.api.get(ruta)
+            csp = headers.get('Content-Security-Policy', '')
+            self.assertNotIn('cdn.jsdelivr.net', csp, ruta)
+            self.assertIn("default-src 'none'", csp, ruta)
+
 
 class DocumentacionPuesta(unittest.TestCase):
     """Con API_DOCS=true, como se pone en una PC: las tres rutas existen, también sin encabezado Server."""
@@ -137,6 +145,23 @@ class DocumentacionPuesta(unittest.TestCase):
             code, headers = self.api.get(ruta)
             self.assertEqual(code, 200, ruta)
             self.assertIsNone(headers.get('Server'), ruta)
+
+    def test_2_docs_y_redoc_con_su_csp(self):
+        """RC-89: la CSP de la API (default-src 'none') dejaría /docs y /redoc en blanco. Llevan la suya, que deja
+        cargar swagger-ui y redoc de cdn.jsdelivr.net y sigue sin dejar meterlas en un marco."""
+        for ruta in ('/docs', '/docs/oauth2-redirect', '/redoc'):
+            _, headers = self.api.get(ruta)
+            csp = headers.get('Content-Security-Policy', '')
+            self.assertIn("script-src 'unsafe-inline' https://cdn.jsdelivr.net", csp, ruta)
+            self.assertIn("frame-ancestors 'none'", csp, ruta)
+            self.assertIn("base-uri 'none'", csp, ruta)
+            self.assertEqual(headers.get('X-Frame-Options'), 'DENY', ruta)
+        # El resto de la API sigue con la CSP que no deja cargar nada.
+        for ruta in ('/openapi.json', '/health'):
+            _, headers = self.api.get(ruta)
+            csp = headers.get('Content-Security-Policy', '')
+            self.assertTrue(csp.startswith("default-src 'none'; frame-ancestors"), ruta)
+            self.assertNotIn('cdn.jsdelivr.net', csp, ruta)
 
 
 if __name__ == '__main__':
