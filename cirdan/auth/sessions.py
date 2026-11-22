@@ -16,6 +16,8 @@ guarda bajo su SHA-256, así que ni quien lea Valkey puede reusar la cookie.
   cuenta por su red /64, que es lo que suele tener un solo cliente (#49, RC-91).
 - Cambio de contraseña (RC-290): 5 intentos por usuario en 15 min, contados antes de revisar la contraseña actual.
   El quinto fallo cierra la sesión que lo hizo.
+- Enlace al correo (#28, RC-63): el token del enlace vive 15 min bajo su SHA-256 y se canjea una sola vez; pedir otro
+  anula el anterior. Se piden 3 por correo y 10 por IP en 15 min, y se envían hasta ENLACE_TOPE_DIARIO al día (UTC).
 """
 import base64
 import hashlib
@@ -43,6 +45,10 @@ MAX_PASSWORD_ATTEMPTS = 5  # cambio de contraseña: intentos por usuario en LOCK
 MAX_PWNED_CHECKS = 10  # consultas a Pwned Passwords por usuario en LOCK_SECONDS (RC-334)
 MAX_ASSISTANT_QUESTIONS = 20
 ASSISTANT_WINDOW_SECONDS = 24 * 60 * 60
+LINK_SECONDS = 15 * 60
+MAX_LINKS_EMAIL = 3   # enlaces pedidos por correo en LOCK_SECONDS (#28, RC-63)
+MAX_LINKS_IP = 10     # y por IP
+LINK_DAY_SECONDS = 48 * 60 * 60  # el contador del día vive dos días: alcanza para cualquier zona y se borra solo
 
 
 @cache
@@ -246,6 +252,87 @@ def captcha_hmac_key(candidate):
 def spend_captcha(nonce, seconds):
     """Gasta el reto una sola vez: True la primera vez que llega su nonce, False las demás."""
     return bool(_valkey().set('captcha:used:' + _digest(nonce), '1', nx=True, ex=seconds))
+
+
+# ------------------------------------------------------------------ enlace al correo (#28, RC-63)
+
+def _link_user_key(user_id):
+    return 'link-user:' + _digest(str(user_id))
+
+
+# KEYS: el índice de la cuenta (link-user:) y el token nuevo (link:<hash>). ARGV: el hash nuevo, sus datos y los
+# segundos. Borra el token anterior de la cuenta y deja el nuevo en un solo paso: dos pedidos a la vez dejan uno solo.
+_CREATE_LINK = '''
+local anterior = redis.call('GET', KEYS[1])
+if anterior then redis.call('DEL', 'link:' .. anterior) end
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+'''
+# KEYS: el token (link:<hash>). ARGV: su hash. Lo lee y lo borra en el mismo paso (como GETDEL), y limpia el índice de
+# su cuenta solo si sigue apuntando a este token. Dos canjes a la vez: uno lo recibe y el otro ve nil.
+_TAKE_LINK = '''
+local raw = redis.call('GET', KEYS[1])
+if not raw then return false end
+redis.call('DEL', KEYS[1])
+local data = cjson.decode(raw)
+local indice = 'link-user:' .. data.user_key
+if redis.call('GET', indice) == ARGV[1] then redis.call('DEL', indice) end
+return raw
+'''
+
+
+def create_link(data):
+    """Crea el token de un enlace para `data` (user_id, org_id, email) y lo devuelve: 32 bytes al azar. En Valkey solo
+    queda su SHA-256, vence en LINK_SECONDS y anula el enlace anterior de la misma cuenta."""
+    token = secrets.token_urlsafe(32)
+    digest = _digest(token)
+    payload = json.dumps(dict(data, user_key=_digest(str(data['user_id']))))
+    _valkey().eval(_CREATE_LINK, 2, _link_user_key(data['user_id']), 'link:' + digest, digest, payload, LINK_SECONDS)
+    return token
+
+
+def take_link(token):
+    """Los datos del enlace, una sola vez; None si no existe, venció, ya se usó o lo anuló otro más nuevo."""
+    if not token or len(token) > 100:
+        return None
+    digest = _digest(token)
+    raw = _valkey().eval(_TAKE_LINK, 1, 'link:' + digest, digest)
+    if not raw:
+        return None
+    data = json.loads(raw)
+    data.pop('user_key', None)
+    return data
+
+
+def delete_link(token):
+    """Borra el token si el envío falló: un enlace que nunca llegó no debe quedar vivo."""
+    _valkey().delete('link:' + _digest(token))
+
+
+def take_link_request(email, ip):
+    """Cuenta un pedido de enlace para el correo y la IP; False si el correo ya pidió MAX_LINKS_EMAIL o la IP
+    MAX_LINKS_IP en LOCK_SECONDS, y entonces no cuenta nada. Revisar y contar van en un solo paso, como /login."""
+    vence = _valkey().eval(_TAKE, 2, 'link:req:email:' + _digest(email.lower()), 'link:req:ip:' + _ip_bloque(ip),
+                           MAX_LINKS_EMAIL, MAX_LINKS_IP, LOCK_SECONDS)
+    return bool(vence)
+
+
+_RESERVE_DAY = '''
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+if n > tonumber(ARGV[1]) then
+  redis.call('DECR', KEYS[1])
+  return 0
+end
+return n
+'''
+
+
+def reserve_link_send(tope, dia=None):
+    """Reserva un envío del día (UTC) si quedan menos de `tope`; 0 si ya se llegó. Solo cuenta lo que se va a enviar.
+    `dia` solo lo pasan las pruebas, para no gastar el contador de hoy."""
+    dia = dia or time.strftime('%Y-%m-%d', time.gmtime())
+    return int(_valkey().eval(_RESERVE_DAY, 1, 'link:day:' + dia, tope, LINK_DAY_SECONDS))
 
 
 # ------------------------------------------------------------------ passkeys (RC-331)

@@ -1,5 +1,5 @@
 """Endpoints de inicio de sesión: /api/v1/auth/captcha, /login, /mfa/verify, /mfa/setup, /mfa/enable, /logout, /me,
-/password y las passkeys (/passkeys, RC-331).
+/password, las passkeys (/passkeys, RC-331) y el enlace al correo (/link/request y /link/verify, #28, RC-63).
 
 Los errores de credenciales usan siempre el mismo mensaje y el mismo tiempo, exista o no el
 correo, para que nadie pueda saber qué cuentas existen.
@@ -15,8 +15,10 @@ import psycopg
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
+from cirdan import correo
 from cirdan.auth import captcha, passwords, sessions, totp, webauthn
 from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session, is_platform_admin
+from cirdan.config import config
 from cirdan.db import audit, transaction
 
 router = APIRouter(prefix='/api/v1/auth', tags=['sesión'])
@@ -333,7 +335,9 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
         else:
             fail = False
             sessions.delete_mfa(body.mfa_token)
-            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, 'totp')
+            # Después de un enlace al correo (#28, RC-63) la bitácora dice link_totp; si no, totp.
+            via = 'link_totp' if pending.get('via') == 'link_totp' else 'totp'
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, via)
     if fail:
         sessions.register_mfa_fail(ip)
         raise HTTPException(401, MFA_INVALID)
@@ -341,7 +345,118 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
     return {'user': user}
 
 
-MFA_ALREADY = 'La verificación en dos pasos ya está activa en tu cuenta.'
+# ------------------------------------------------------------------ enlace al correo (#28, RC-63)
+
+# El mismo texto para todos, exista o no la cuenta, y aunque el enlace no salga (decisión 7 de RC-327).
+LINK_SENT = ('Si el correo tiene cuenta, te enviamos un enlace que vence en 15 minutos. '
+             'Si no llega, puedes entrar con tu contraseña o con una passkey.')
+LINK_INVALID = 'El enlace no es válido o ya venció. Pide otro o entra con tu contraseña.'
+LINK_MINUTES = sessions.LINK_SECONDS // 60
+LINK_DAILY_DEFAULT = 80  # debajo de los 100 al día de Resend Free: deja cupo para otros correos (RC-317)
+
+
+class LinkRequestIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    captcha: str | None = Field(default=None, max_length=captcha.MAX_PAYLOAD)
+
+
+class LinkVerifyIn(BaseModel):
+    token: str = Field(min_length=20, max_length=100)
+
+
+def _portal_url():
+    """La dirección del portal para el enlace: de PORTAL_URL, nunca de la cabecera Host de la petición."""
+    return (config('PORTAL_URL') or 'http://localhost:3000').rstrip('/')
+
+
+def _link_daily_cap():
+    try:
+        return max(0, int(config('ENLACE_TOPE_DIARIO') or LINK_DAILY_DEFAULT))
+    except ValueError:
+        return LINK_DAILY_DEFAULT
+
+
+def _send_link(email, ip):
+    """Corre después del 202, así que la respuesta tarda lo mismo exista o no la cuenta. Ni el token ni el enlace van
+    al log ni a la bitácora; el correo solo va a Resend."""
+    try:
+        if not sessions.take_link_request(email, ip):
+            log.warning('enlace: límite de pedidos alcanzado: ip=%r dominio=%r', ip, _email_domain(email))
+            return
+        with transaction() as conn:
+            found = conn.execute('SELECT * FROM login_lookup(%s)', (email,)).fetchone()
+        if not found:
+            log.warning('enlace pedido para un correo que no existe: ip=%r dominio=%r', ip, _email_domain(email))
+            return
+        org, user_id = str(found['organization_id']), str(found['user_id'])
+        tope = _link_daily_cap()
+        if not sessions.reserve_link_send(tope):
+            # Texto fijo para contar cuántas veces sale en la semana (decisión 7 de RC-327, README).
+            log.warning('enlace: tope diario alcanzado (%d)', tope)
+            return
+        token = sessions.create_link({'user_id': user_id, 'org_id': org, 'email': email})
+        motivo = correo.enviar_enlace(email, '%s/login/enlace#t=%s' % (_portal_url(), token), LINK_MINUTES)
+        if motivo:
+            sessions.delete_link(token)  # un enlace que no llegó no queda vivo
+        with transaction(org) as conn:
+            if motivo:
+                audit(conn, org, 'auth.link_send_failed', user_id, ip, 'user', user_id, {'reason': motivo})
+            else:
+                audit(conn, org, 'auth.link_sent', user_id, ip, 'user', user_id, {'expires_minutes': LINK_MINUTES})
+    except Exception:
+        log.exception('enlace: falló el envío en segundo plano')
+
+
+@router.post('/link/request', status_code=202,
+             summary='Pide un enlace para entrar por correo; responde igual exista o no la cuenta')
+def request_link(body: LinkRequestIn, request: Request):
+    # El captcha va primero, como en /login: sin él no se cuenta nada ni se busca el correo. Con el tope diario debajo
+    # de 100, sin captcha unas cuantas IP dejarían a todos sin enlace ese día.
+    if not captcha.verify(body.captcha):
+        raise HTTPException(400, CAPTCHA_INVALID)
+    email = body.email.strip().lower()
+    return JSONResponse({'detail': LINK_SENT}, status_code=202, headers=NO_STORE,
+                        background=BackgroundTask(_send_link, email, client_ip(request)))
+
+
+@router.post('/link/verify', summary='Canjea el enlace del correo por la sesión; con MFA pide el código')
+def verify_link(body: LinkVerifyIn, request: Request, response: Response):
+    pending = sessions.take_link(body.token)  # una sola vez, también con dos canjes a la vez
+    if not pending:
+        raise HTTPException(401, LINK_INVALID)
+    ip = client_ip(request)
+    org, user_id, email = pending['org_id'], pending['user_id'], pending['email']
+    rejected = None
+    with transaction(org) as conn:
+        # Como /login: la cuenta sigue activa y su empresa en trial o active, con la fila bloqueada contra un alta de
+        # TOTP a la vez (FOR NO KEY UPDATE, RC-154).
+        row = conn.execute(
+            'SELECT u.role, u.email::text, u.mfa_enabled_at IS NOT NULL AND u.totp_secret_enc IS NOT NULL AS mfa_enabled '
+            '  FROM users u JOIN organizations o ON o.id = u.organization_id '
+            " WHERE u.id = %s AND u.is_active AND o.status IN ('trial', 'active') FOR NO KEY UPDATE OF u",
+            (user_id,)).fetchone()
+        if not row:
+            rejected = 'inactive'
+        elif row['mfa_enabled']:
+            return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
+                {'user_id': user_id, 'org_id': org, 'email': row['email'], 'via': 'link_totp'})}
+        elif conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required']:
+            rejected = 'operator_mfa_required'
+        else:
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
+                                                    'email': row['email']}, ip, 'link')
+        if rejected:
+            audit(conn, org, 'auth.link_rejected', user_id, ip, 'user', user_id, {'reason': rejected})
+    # Fuera del with: con raise adentro, la transacción se desharía y la bitácora no quedaría.
+    if rejected == 'operator_mfa_required':
+        raise HTTPException(403, OPERATOR_MFA_REQUIRED)
+    if rejected:
+        raise HTTPException(401, LINK_INVALID)
+    _clear_fails(email)
+    return {'mfa_required': False, 'user': user}
+
+
+MFA_ALREADY ='La verificación en dos pasos ya está activa en tu cuenta.'
 MFA_SETUP_EXPIRED = 'El código QR venció o ya se usaron sus 5 intentos. Empieza de nuevo.'
 WRONG_PASSWORD = 'La contraseña actual no es correcta.'
 SESSION_ENDED = 'Tu sesión terminó. Vuelve a iniciar sesión.'
