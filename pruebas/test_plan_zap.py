@@ -12,7 +12,9 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[1]
 PLAN = RAIZ / 'docs' / 'zap' / 'plan.yaml'
 GUIA = RAIZ / 'docs' / 'pruebas_zap.md'
-URL_LOWTIDE = 'url: "https://lowtidesec\\\\.com/.*"'
+# Anclada con ^ y $: así vale igual si ZAP compara con matches() o con find() (una URL de otro host que traiga
+# https://lowtidesec.com/ en la query no lleva la cookie).
+URL_LOWTIDE = 'url: "^https://lowtidesec\\\\.com/.*$"'
 # https://www.zaproxy.org/docs/alerts/ : Billion Laughs, Apache Range Header DoS, Buffer Overflow, Format String Error
 # e Integer Overflow Error.
 REGLAS_DOS = (40044, 10053, 30001, 30002, 30003)

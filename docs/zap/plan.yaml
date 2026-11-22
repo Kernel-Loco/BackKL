@@ -33,12 +33,12 @@ jobs:
       # Las dos reglas solo valen para lowtidesec.com: sin `url` ZAP mandaría la cookie a cualquier host al que llegue
       # (beacon de Cloudflare, servidores de OAST, actualizaciones de ZAP).
       - description: Sesión de la cuenta de prueba
-        url: "https://lowtidesec\\.com/.*"
+        url: "^https://lowtidesec\\.com/.*$"
         matchType: req_header
         matchString: Cookie
         replacementString: "lt_session=${ZAP_LT_SESSION}"
       - description: Origin que la API acepta en los POST
-        url: "https://lowtidesec\\.com/.*"
+        url: "^https://lowtidesec\\.com/.*$"
         matchType: req_header
         matchString: Origin
         replacementString: https://lowtidesec.com
