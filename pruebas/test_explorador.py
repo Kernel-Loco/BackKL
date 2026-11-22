@@ -208,8 +208,8 @@ class ExploradorEncendido(Explorador):
             html, csp = r.read().decode(), r.headers.get_all('Content-Security-Policy')
         self.assertEqual(len(csp), 1)
         directivas = dict((d.split(' ', 1) + [''])[:2] for d in (x.strip() for x in csp[0].split(';')))
-        scripts = re.findall(r'<script>(.*?)</script>', html, re.S)
-        self.assertEqual(len(scripts), html.count('<script'))
+        scripts = re.findall(r'<script\b[^>]*>(.*?)</script\b[^>]*>', html, re.S | re.I)
+        self.assertEqual(len(scripts), html.lower().count('<script'))
         huellas = ["'sha256-%s'" % base64.b64encode(hashlib.sha256(s.encode()).digest()).decode() for s in scripts]
         self.assertEqual(directivas['script-src'].split(), huellas)
         self.assertEqual(directivas['default-src'], "'none'")

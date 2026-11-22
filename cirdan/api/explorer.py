@@ -67,7 +67,7 @@ def _csp_demo(html):
     score), que un hash no cubre. frame-ancestors 'none' hace que el middleware de main.py la conserve.
     """
     huellas = ' '.join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s.encode('utf-8')).digest()).decode()
-                       for s in re.findall(r'<script>(.*?)</script>', html, re.S))
+                       for s in re.findall(r'<script\b[^>]*>(.*?)</script\b[^>]*>', html, re.S | re.I))
     return ("default-src 'none'; script-src %s; style-src 'unsafe-inline'; connect-src 'self'; "
             "frame-ancestors 'none'; base-uri 'none'; form-action 'none'" % huellas)
 
