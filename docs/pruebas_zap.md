@@ -10,10 +10,27 @@ ZAP en modo de escaneo activo completo contra el producto final en la VM, por `h
 | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` (FrontKL `next.config.ts`) | Igual (`cirdan/api/main.py`) |
 | `X-Frame-Options` | `DENY` | `DENY` |
 | `X-Content-Type-Options` | `nosniff` | `nosniff` |
-| `Referrer-Policy` | `no-referrer` | `no-referrer` |
+| `Referrer-Policy` | `same-origin` | `no-referrer` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), usb=()` | Igual |
+| `Cache-Control` | `private, no-cache, no-store, max-age=0, must-revalidate, no-transform` (`src/proxy.ts`) | La de cada ruta |
 
 HSTS va sin `preload` (decisión del 22 nov): hstspreload.org acepta el dominio de quien lo inscriba y salir de la lista tarda meses. Cloudflare no pone HSTS: lo ponen el portal y la API, que quedan en git con sus pruebas.
+
+El portal usa `same-origin` y no `no-referrer` (decisión del 22 nov): con `no-referrer` el navegador manda `Origin: null` en un POST de formulario normal y la API lo rechaza. Con `same-origin` el Referer completo solo va dentro de `lowtidesec.com` y nada sale hacia otros sitios. La API se queda con `no-referrer` porque solo responde JSON.
+
+### Lo que Cloudflare inyecta en las páginas
+
+La CSP del portal solo deja correr scripts con el nonce de la página. Un script que Cloudflare meta en el HTML no lo lleva y el navegador lo bloquea (en el peor caso, con un error de hidratación de React). Por eso las páginas salen con `Cache-Control: no-transform`, que según la documentación de Cloudflare apaga Email Address Obfuscation y el script de JavaScript detections de Bot Fight Mode. El costo, aceptado el 22 nov: ni Next ni Cloudflare comprimen una respuesta con `no-transform`, así que el HTML de las páginas va sin gzip (los archivos de `_next/static` sí van comprimidos). Las páginas de no encontrado se quedan sin `no-transform`, porque Next pone ahí su propio `Cache-Control`.
+
+La documentación de Cloudflare no dice que `no-transform` apague todo lo demás. Antes de la ventana Ernesto revisa en el panel de `lowtidesec.com` que estas opciones sigan apagadas, y al leer el reporte, que ninguna alerta de CSP venga de un script de `/cdn-cgi/`:
+
+| Opción del panel | Dónde | Qué inyecta |
+|---|---|---|
+| Email Address Obfuscation | Scrape Shield | `email-decode.min.js` en cada página cuyo HTML trae un correo, como `arco@lowtidesec.com` en los términos, la privacidad y las pantallas de acceso |
+| Rocket Loader | Speed, Optimization | Reescribe todos los `<script>` de la página |
+| Web Analytics con instalación automática | Analytics & Logs, Web Analytics | El beacon de `static.cloudflareinsights.com` |
+| Zaraz | Zaraz | Su script de terceros |
+| Bot Fight Mode | Security, Bots | JavaScript detections. Según Cloudflare le pone el nonce de la CSP, y con `no-transform` no lo inyecta |
 
 ## Lo que pone Ernesto antes de la ventana
 
