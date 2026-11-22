@@ -123,7 +123,7 @@ jobs:
           pruebas.test_rdap.Transporte pruebas.test_crtsh.TopeDeBytes pruebas.test_visita.SaludoReal pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
           pruebas.test_subfinder.Integracion pruebas/test_estado_carta.py
           pruebas/test_alta_dominio.py pruebas/test_verificacion_txt_api.py pruebas/test_alta_dominio_integracion.py
-          pruebas/test_enlace_sin_red.py
+          pruebas/test_enlace_sin_red.py pruebas/test_programador.py
 
       - name: Pruebas sin base ni red
         run: >-

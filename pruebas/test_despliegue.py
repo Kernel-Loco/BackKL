@@ -40,7 +40,7 @@ ENV_FALSO = {
 }
 
 
-def _config(env, proyecto='prueba-despliegue', archivos=ARCHIVOS):
+def _config(env, proyecto='prueba-despliegue', archivos=ARCHIVOS, perfiles=()):
     """Corre `docker compose config` con solo las variables de env. Devuelve (código de salida, salida). Con
     `proyecto=None` no pasa `-p` y el nombre del proyecto sale de env (COMPOSE_PROJECT_NAME) o de la carpeta."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -54,6 +54,8 @@ def _config(env, proyecto='prueba-despliegue', archivos=ARCHIVOS):
             '--env-file', str(archivo)]
         for a in archivos:
             cmd += ['-f', str(RAIZ / a)]
+        for perfil in perfiles:
+            cmd += ['--profile', perfil]
         r = subprocess.run(cmd + ['config', '--format', 'json'], capture_output=True, text=True, env=base,
                            timeout=60, encoding='utf-8')
         return r.returncode, r.stdout if r.returncode == 0 else r.stderr
@@ -240,6 +242,24 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(doc.count('iptables -C DOCKER-USER ' + regla), 1)
         self.assertEqual(doc.count('iptables -I DOCKER-USER ' + regla), 1)
         self.assertEqual(set(re.findall(r'! -s ([0-9.]+)/32', doc)), {str(api)})
+
+    def test_16_programador_solo_con_su_profile_y_sin_imds(self):
+        # RC-52: el programador no se enciende con `up -d` (test_1). Con su profile sale por default, sin puertos, sin
+        # la IP fija de la API ni NET_RAW, con el registro rotado y sin las llaves de Key Vault.
+        rc, salida = _config(ENV_FALSO, perfiles=('programador',))
+        self.assertEqual(rc, 0, salida[-500:])
+        cfg = json.loads(salida)
+        s = cfg['services']['programador']
+        self.assertEqual(s['command'], ['python', '-m', 'cirdan.programador'])
+        self.assertEqual(s['profiles'], ['programador'])
+        self.assertFalse(s.get('ports'))
+        self.assertEqual(set(s.get('networks') or {'default': None}), {'default'})
+        self.assertNotIn('ipv4_address', (s.get('networks') or {}).get('default') or {})
+        self.assertIn('NET_RAW', s.get('cap_drop') or [])
+        self.assertEqual(s['logging'], cfg['services']['db']['logging'])
+        self.assertTrue(s['init'])
+        for llave in ('TOTP', 'PASSWORD_HASH', 'CARTA', 'IA_', 'CORREO'):
+            self.assertEqual([k for k in s['environment'] if k.startswith(llave)], [], llave)
 
     def test_15_el_healthcheck_espera_a_la_llave_de_key_vault(self):
         # Hallazgos 8, 11 y 12: la API puede tardar hasta keyvault.PLAZO en leer cada llave antes de rendirse, y desde
