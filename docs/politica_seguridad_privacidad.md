@@ -168,7 +168,7 @@ Los controles 7.1 a 7.6, 7.11 y 7.12 (perímetro, entradas, oficinas, vigilancia
 | 8.26 Requisitos de seguridad | OWASP ASVS para sesiones y autenticación | Existe |
 | 8.27 Arquitectura segura | RLS con FORCE en las tablas por cliente, rol de la API sin privilegios y base y Valkey sin puertos públicos | Existe |
 | 8.28 Codificación segura | CodeQL y revisión de PR | Existe |
-| 8.29 Pruebas de seguridad | ZAP activo, pentest y reto de hackeo solo contra el propio despliegue | Falta. Llegan con #51, #58b y #85 |
+| 8.29 Pruebas de seguridad | ZAP activo, pentest y reto de hackeo solo contra el propio despliegue. Las reglas, el alcance y el registro del reto están en [`reto_hackeo.md`](reto_hackeo.md) (#85) | Falta. Llegan con #51, #58b y #85. El reto espera el permiso escrito del profesor |
 | 8.31 Separación de entornos | El CI corre las pruebas de base y API en una base desechable. En local corren contra la base del contenedor `cirdan-pg16`. `dev` y `main` separados | En parte |
 | 8.32 Gestión de cambios | Migraciones numeradas que no se editan, PR con la clave de Jira y congelamiento desde el 25 nov | Existe |
 | 8.33 Información de prueba | Empresas ficticias (Acme Demo, Beta Corp y Grupo Olmardo) y tokens `CIRDAN_FAKE_` | Existe |
