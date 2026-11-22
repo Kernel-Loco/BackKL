@@ -68,7 +68,9 @@ class Flujo(unittest.TestCase):
     def test_3_firma_solo_en_push_y_por_digest(self):
         firma = paso(self.texto, 'Subir a ghcr.io, firmar y atestar el SBOM')
         self.assertIn("if: github.event_name == 'push'", firma)
-        self.assertIn('RepoDigests', firma)
+        self.assertIn('imagetools inspect "$IMAGEN:$GITHUB_SHA"', firma)
+        self.assertIn('digest="$IMAGEN@$sha"', firma)
+        self.assertNotIn('RepoDigests', firma)
         self.assertIn('cosign sign --yes "$digest"', firma)
         self.assertIn('cosign attest --yes --type spdxjson', firma)
         self.assertIn('cosign verify', firma)
