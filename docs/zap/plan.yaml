@@ -30,11 +30,15 @@ jobs:
     parameters:
       deleteAllRules: true
     rules:
+      # Las dos reglas solo valen para lowtidesec.com: sin `url` ZAP mandaría la cookie a cualquier host al que llegue
+      # (beacon de Cloudflare, servidores de OAST, actualizaciones de ZAP).
       - description: Sesión de la cuenta de prueba
+        url: "https://lowtidesec\\.com/.*"
         matchType: req_header
         matchString: Cookie
         replacementString: "lt_session=${ZAP_LT_SESSION}"
       - description: Origin que la API acepta en los POST
+        url: "https://lowtidesec\\.com/.*"
         matchType: req_header
         matchString: Origin
         replacementString: https://lowtidesec.com
@@ -59,6 +63,24 @@ jobs:
     policyDefinition:
       defaultStrength: medium
       defaultThreshold: medium
+      # Sin denegación de servicio: se apagan aquí y no dependen de qué reglas traiga la imagen
+      # (https://www.zaproxy.org/docs/alerts/ con su id).
+      rules:
+        - id: 40044
+          name: Exponential Entity Expansion (Billion Laughs Attack)
+          threshold: "off"
+        - id: 10053
+          name: Apache Range Header DoS (CVE-2011-3192)
+          threshold: "off"
+        - id: 30001
+          name: Buffer Overflow
+          threshold: "off"
+        - id: 30002
+          name: Format String Error
+          threshold: "off"
+        - id: 30003
+          name: Integer Overflow Error
+          threshold: "off"
   - type: report
     parameters:
       template: traditional-html

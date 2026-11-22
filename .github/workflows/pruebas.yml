@@ -133,7 +133,7 @@ jobs:
           pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py pruebas/test_borde.py
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
           pruebas/test_contrasenas_comunes.py pruebas/test_identidad.py
-          pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_siem.py pruebas/test_despliegue.py
+          pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_plan_zap.py pruebas/test_siem.py pruebas/test_despliegue.py
           pruebas/test_ci.py pruebas/test_cadena_suministro.py pruebas/test_terraform.py
       # RC-313, punto 3b: con la base a las 20:00 de México y la API en UTC, GET /api/v1/domains da 'missing' a una carta
       # que empieza mañana. La base se levanta otra vez con libfaketime (pruebas/hora_base) en las 02:00 UTC de hoy, que
