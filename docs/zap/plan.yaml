@@ -1,0 +1,72 @@
+# Plan de ZAP (Automation Framework) para RC-89. Cómo y cuándo se corre: docs/pruebas_zap.md.
+# Solo contra https://lowtidesec.com, con la cookie de una cuenta de prueba en ZAP_LT_SESSION (variable de entorno,
+# nunca en un archivo).
+env:
+  contexts:
+    - name: lowtide
+      urls:
+        - https://lowtidesec.com/
+      includePaths:
+        - "https://lowtidesec\\.com/.*"
+      excludePaths:
+        # Cierran la sesión, cambian el acceso de la cuenta de prueba o bloquean su inicio de sesión.
+        - "https://lowtidesec\\.com/api/v1/auth/(?!me$).*"
+        - "https://lowtidesec\\.com/login.*"
+        - "https://lowtidesec\\.com/signup.*"
+        - "https://lowtidesec\\.com/forgot-password.*"
+        # Consultas en vivo a fuentes externas y a DNS.
+        - "https://lowtidesec\\.com/api/v1/domains/[^/]+/scans$"
+        - "https://lowtidesec\\.com/api/v1/domains/[^/]+/txt/verify$"
+        # Gasta la cuota de los proveedores de IA.
+        - "https://lowtidesec\\.com/api/v1/domains/[^/]+/assistant$"
+        # Fuera de LowTide.
+        - "https://lowtidesec\\.com/cdn-cgi/.*"
+  parameters:
+    failOnError: true
+    progressToStdout: true
+
+jobs:
+  - type: replacer
+    parameters:
+      deleteAllRules: true
+    rules:
+      - description: Sesión de la cuenta de prueba
+        matchType: req_header
+        matchString: Cookie
+        replacementString: "lt_session=${ZAP_LT_SESSION}"
+      - description: Origin que la API acepta en los POST
+        matchType: req_header
+        matchString: Origin
+        replacementString: https://lowtidesec.com
+  - type: spider
+    parameters:
+      context: lowtide
+      maxDuration: 10
+  - type: spiderAjax
+    parameters:
+      context: lowtide
+      maxDuration: 10
+      browserId: firefox-headless
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 10
+  - type: activeScan
+    parameters:
+      context: lowtide
+      threadPerHost: 2
+      delayInMs: 100
+      maxScanDurationInMins: 120
+    policyDefinition:
+      defaultStrength: medium
+      defaultThreshold: medium
+  - type: report
+    parameters:
+      template: traditional-html
+      reportDir: /zap/wrk
+      reportFile: reporte_zap
+      reportTitle: LowTide, ZAP activo (RC-89)
+  - type: report
+    parameters:
+      template: traditional-json
+      reportDir: /zap/wrk
+      reportFile: reporte_zap
