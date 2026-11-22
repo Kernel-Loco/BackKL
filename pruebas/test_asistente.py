@@ -188,6 +188,30 @@ class AssistantEndpoint(unittest.TestCase):
         cabe = asistente.AssistantQuestion(question='ﷺ' * 55, finding_ids=[FINDING_ID])
         self.assertLessEqual(len(asistente.clean_question(cabe.question)), asistente.MAX_QUESTION_LENGTH)
 
+    @patch.object(asistente, '_get_context', return_value=(DOMAIN_ID, []))
+    @patch.object(asistente, 'complete', return_value='Respuesta.')
+    @patch.object(asistente, '_audit')
+    @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
+    def test_el_tope_de_la_pregunta_normalizada_es_2000_justos(self, take, audit, complete, get_context):
+        # '…' da '...' con NFKC: 666 dan 1998 y con 'ab' son 2000 justos; 667 dan 2001.
+        self.assertEqual(asistente.MAX_CLEAN_QUESTION_LENGTH, 2000)
+        justa = '…' * 666 + 'ab'
+        self.assertEqual(len(asistente.clean_question(justa)), asistente.MAX_CLEAN_QUESTION_LENGTH)
+        body = asistente.AssistantQuestion(question=justa, finding_ids=[FINDING_ID])
+        self.assertEqual(asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())['answer'],
+                         'Respuesta.')
+
+        de_mas = '…' * 667
+        self.assertEqual(len(asistente.clean_question(de_mas)), asistente.MAX_CLEAN_QUESTION_LENGTH + 1)
+        take.reset_mock()
+        complete.reset_mock()
+        body = asistente.AssistantQuestion(question=de_mas, finding_ids=[FINDING_ID])
+        with self.assertRaises(HTTPException) as error:
+            asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+        self.assertEqual(error.exception.status_code, 422)
+        take.assert_not_called()
+        complete.assert_not_called()
+
     @patch.object(asistente, 'complete', return_value='Respuesta.')
     @patch.object(asistente, 'audit')
     @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
@@ -265,8 +289,9 @@ class AssistantEndpoint(unittest.TestCase):
                     self.assertIs(type(error.exception), asistente.ClientGone)
                 elif resultado == 'unavailable':
                     self.assertEqual(error.exception.detail, 'otro 503')
+                # Con el dominio, para cruzarlo con el assistant.asked que sí quedó en la bitácora.
                 self.assertEqual(logs.output, ['ERROR:cirdan.api.asistente:No se pudo registrar assistant.completed '
-                                               '(%s): ConnectionError' % resultado])
+                                               '(%s) del dominio %s: ConnectionError' % (resultado, DOMAIN_ID)])
                 self.assertNotIn('la base no responde', ' '.join(logs.output))
 
     @patch.object(asistente, 'audit')
@@ -477,7 +502,8 @@ class AssistantPromptAndProvider(unittest.TestCase):
         self.assertIn('No describas menús, botones ni rutas de pantallas de otros servicios, como Cloudflare',
                       reglas['8'])
         self.assertIn('documentación oficial de ese servicio y en el plan de acción del reporte', reglas['8'])
-        self.assertIn('empezar con p=none y una dirección rua', reglas['9'])
+        self.assertIn('empezar con p=none y una dirección rua de un buzón de la empresa', reglas['9'])
+        self.assertIn('sin escribir ninguna dirección de correo', reglas['9'])
         self.assertIn('después a reject solo cuando los reportes muestren que el correo legítimo pasa', reglas['9'])
         self.assertIn('en una línea en negritas y sin número, como **Nombre [H1]**', reglas['10'])
         self.assertIn('No pongas listas dentro de listas.', reglas['10'])
@@ -516,11 +542,15 @@ class AssistantPromptAndProvider(unittest.TestCase):
         for pregunta in ('<datos tipo="x">a', '</datos foo>a', '</datos\u200b>a', '＜/datos＞a', '<datos/>a',
                          '<dat<datos>os>a', '</da\u200btos>a', '< / / DATOS\n>a', '</da\ufe0ftos>a',
                          '</da\u034ftos>a', '</da\U000e0100tos>a', '</da\u3164tos>a', '</da\uffa0tos>a',
-                         '</da\u115ftos>a', '</da\u180btos>a', '</da\u2065tos>a'):
+                         '</da\u115ftos>a', '</da\u180btos>a', '</da\u2065tos>a', '</da\u00adtos>a'):
             with self.subTest(pregunta=pregunta):
                 self.assertEqual(asistente.clean_question(pregunta), 'a')
         sin_etiquetas = '¿Qué es <b>datos</b> y <datosx>?'
         self.assertEqual(asistente.clean_question(sin_etiquetas), sin_etiquetas)
+        # Las orillas del atajo de _invisible: U+00AD es el único invisible antes de U+034F, y U+034F sí cuenta.
+        self.assertEqual([asistente._invisible(ch) for ch in '\u00ac\u00ad\u00ae\u034e\u034f'],
+                         [False, True, False, False, True])
+        self.assertFalse(any(asistente._invisible(ch) for ch in '¿¡áéíóúñüÁÑ'))
 
     def test_la_limpieza_es_lineal_aun_con_muchos_espacios_tras_un_signo_menor(self):
         # La regex anterior, <\s*/?\s*datos\s*>, retrocedía en cuadrático con '<' y espacios (alerta de CodeQL).
@@ -528,7 +558,8 @@ class AssistantPromptAndProvider(unittest.TestCase):
         # cuadrático tarda 16 veces más con 4 veces el texto.
         def tarda(n):
             inicio = time.perf_counter()
-            for pregunta in ('<' + ' ' * n, '< /' * (n // 3), '<datos' + ' ' * n, '\u00e1' * n):
+            # 'ж' (U+0436) queda después del atajo de _invisible y paga category y el recorrido de los rangos.
+            for pregunta in ('<' + ' ' * n, '< /' * (n // 3), '<datos' + ' ' * n, '\u0436' * n):
                 asistente.clean_question(pregunta)
             return time.perf_counter() - inicio
 
@@ -683,6 +714,38 @@ class AssistantPromptAndProvider(unittest.TestCase):
                 self.assertEqual(str(error.exception), 'respuesta JSON inválida')
 
     @patch.object(asistente, 'build_opener')
+    def test_un_surrogate_suelto_en_la_respuesta_es_error_de_proveedor_y_no_500(self, build_opener):
+        # json.loads acepta el escape partido, pero la respuesta de la API ya no se podía pasar a UTF-8.
+        response = Mock()
+        response.read.return_value = b'{"choices":[{"message":{"content":"hola \\ud83d"}}]}'
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        build_opener.return_value.open.return_value = response
+        self.assertEqual(json.loads(response.read.return_value)['choices'][0]['message']['content'], 'hola \ud83d')
+
+        with self.assertRaises(asistente.ProviderError) as error:
+            asistente._call_provider('https://workers.example/ai/v1', 'k', 'm', [], 5)
+
+        self.assertEqual(str(error.exception), 'respuesta de texto inválida')
+
+    @patch.object(asistente.threading.Thread, 'start', side_effect=RuntimeError("can't start new thread"))
+    @patch.object(asistente, '_call_provider')
+    @patch.object(asistente, 'config')
+    def test_si_no_arranca_el_hilo_la_bitacora_no_anota_al_proveedor(self, config, call_provider, start):
+        config.side_effect = {'IA_BASE_URL': 'https://workers.example/ai/v1', 'IA_API_KEY': 'k',
+                              'IA_MODELO': 'm', 'IA_RESPALDO_BASE_URL': 'https://groq.example/openai/v1',
+                              'IA_RESPALDO_API_KEY': 'k2', 'IA_RESPALDO_MODELO': 'm'}.get
+        attempts = []
+
+        with self.assertRaises(asistente.WorkerNotStarted):
+            asistente.complete('¿Qué significa?', [], attempts)
+
+        # La pregunta no salió a ningún proveedor: ni se anota ni se intenta el respaldo.
+        self.assertEqual(attempts, [])
+        call_provider.assert_not_called()
+        self.assertEqual(start.call_count, 1)
+
+    @patch.object(asistente, 'build_opener')
     def test_la_url_del_proveedor_se_valida_antes_de_abrir_la_conexion(self, build_opener):
         # La llave va en Authorization: con http, usuario en la URL, query o un puerto roto no debe salir nada.
         for url in ('http://workers.example/ai/v1', 'https://u:p@workers.example/ai/v1',
@@ -768,10 +831,12 @@ class AssistantPromptAndProvider(unittest.TestCase):
         self.assertEqual((limit, seconds), (20, 86400))
 
 
-def _preguntar_por_asgi(app, cliente_corta):
+def _preguntar_por_asgi(app, cliente_corta, detalle=None):
     """Manda una pregunta a la app por ASGI, como uvicorn: si el cliente ya cortó, receive() da http.disconnect
-    en cuanto se pide, y si no, espera. Devuelve el status, lo que vio client_gone() dentro de complete() (None si no
-    se llamó) y si se cobró el cupo."""
+    en cuanto se pide, y si no, espera. Con cliente_corta='durante', el corte llega después de cobrar el cupo,
+    mientras complete() espera al proveedor, y complete() hace lo del real: si lo ve, lanza ClientGone. Devuelve el
+    status, lo que vio client_gone() dentro de complete() (None si no se llamó) y si se cobró el cupo. En `detalle`
+    deja el cuerpo de la respuesta y las acciones auditadas."""
     import anyio
 
     cuerpo = json.dumps({'question': '¿Qué significa?', 'finding_ids': [str(FINDING_ID)]}).encode()
@@ -782,13 +847,20 @@ def _preguntar_por_asgi(app, cliente_corta):
              'client': ('127.0.0.1', 12345), 'server': ('testserver', 80)}
     visto = {}
     estado = {}
+    cuerpo_respuesta = []
     entregado = False
+    cobrado = threading.Event()
 
     async def receive():
         nonlocal entregado
         if not entregado:
             entregado = True
             return {'type': 'http.request', 'body': cuerpo, 'more_body': False}
+        if cliente_corta == 'durante':
+            # Corta hasta que el handler cobró el cupo: así pasa la revisión temprana y el corte lo ve complete().
+            while not cobrado.is_set():
+                await anyio.sleep(0.01)
+            return {'type': 'http.disconnect'}
         if cliente_corta:
             return {'type': 'http.disconnect'}
         await anyio.sleep_forever()
@@ -796,17 +868,32 @@ def _preguntar_por_asgi(app, cliente_corta):
     async def send(message):
         if message['type'] == 'http.response.start':
             estado['status'] = message['status']
+        elif message['type'] == 'http.response.body':
+            cuerpo_respuesta.append(message.get('body', b''))
 
     def completar(question, findings, attempts, client_gone):
+        if cliente_corta == 'durante':
+            limite = time.monotonic() + 5
+            while not client_gone() and time.monotonic() < limite:
+                time.sleep(0.01)
         visto['client_gone'] = client_gone()
+        if visto['client_gone']:
+            raise asistente.ClientGone(503, asistente.PROVIDER_UNAVAILABLE)
         return 'Explicación breve.'
+
+    def cobrar(user_id):
+        cobrado.set()
+        return True
 
     from cirdan.auth import deps
     with patch.object(deps, 'current_session', return_value=_session()), \
             patch.object(asistente, '_get_context', return_value=(DOMAIN_ID, [])), \
-            patch.object(asistente.sessions, 'take_assistant_question', return_value=True) as take, \
-            patch.object(asistente, '_audit'), patch.object(asistente, 'complete', side_effect=completar):
+            patch.object(asistente.sessions, 'take_assistant_question', side_effect=cobrar) as take, \
+            patch.object(asistente, '_audit') as auditar, patch.object(asistente, 'complete', side_effect=completar):
         anyio.run(app, scope, receive, send)
+    if detalle is not None:
+        detalle['cuerpo'] = json.loads(b''.join(cuerpo_respuesta) or b'null')
+        detalle['acciones'] = [(c.args[2], c.args[4]) for c in auditar.call_args_list]
     return estado.get('status'), visto.get('client_gone'), take.called
 
 
@@ -816,7 +903,21 @@ class ClientDisconnectThroughTheApp(unittest.TestCase):
     def test_el_handler_ve_el_corte_del_cliente_detras_de_los_middlewares(self):
         from cirdan.api.main import app
         # El corte llega antes de cobrar el cupo: el handler lo ve, no cobra la pregunta ni la manda al proveedor.
-        self.assertEqual(_preguntar_por_asgi(app, cliente_corta=True), (503, None, False))
+        # El detail es el de no disponible, no el de ocupado (PROVIDER_BUSY también es 503 sin cobrar).
+        detalle = {}
+        self.assertEqual(_preguntar_por_asgi(app, cliente_corta=True, detalle=detalle), (503, None, False))
+        self.assertEqual(detalle['cuerpo'], {'detail': asistente.PROVIDER_UNAVAILABLE})
+        self.assertEqual(detalle['acciones'], [])
+
+    def test_complete_recibe_el_corte_que_llega_mientras_espera_al_proveedor(self):
+        from cirdan.api.main import app
+        # El caso real: el cliente corta mientras Workers AI tarda. complete() recibe el client_gone del vigilante,
+        # lo ve en True (así no llama a Groq) y la bitácora cierra con client_gone.
+        detalle = {}
+        self.assertEqual(_preguntar_por_asgi(app, cliente_corta='durante', detalle=detalle), (503, True, True))
+        self.assertEqual(detalle['cuerpo'], {'detail': asistente.PROVIDER_UNAVAILABLE})
+        self.assertEqual([accion for accion, _ in detalle['acciones']], ['assistant.asked', 'assistant.completed'])
+        self.assertEqual(detalle['acciones'][1][1]['result'], 'client_gone')
 
     def test_si_el_cliente_espera_no_cuenta_como_corte(self):
         from cirdan.api.main import app

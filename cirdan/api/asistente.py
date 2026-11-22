@@ -72,8 +72,9 @@ SYSTEM_PROMPT = (
     '8. No describas menús, botones ni rutas de pantallas de otros servicios, como Cloudflare, GitHub o el proveedor '
     'de correo: no vienen en los datos y cambian seguido. Di qué hay que lograr y que los pasos exactos están en la '
     'documentación oficial de ese servicio y en el plan de acción del reporte.\n'
-    '9. Si hablas de DMARC, recomienda empezar con p=none y una dirección rua para recibir reportes, y subir a '
-    'quarantine y después a reject solo cuando los reportes muestren que el correo legítimo pasa.\n'
+    '9. Si hablas de DMARC, recomienda empezar con p=none y una dirección rua de un buzón de la empresa para recibir '
+    'reportes, sin escribir ninguna dirección de correo, y subir a quarantine y después a reject solo cuando los '
+    'reportes muestren que el correo legítimo pasa.\n'
     '10. Si das pasos para varios hallazgos, escribe el nombre de cada uno con su cita en una línea en negritas y sin '
     'número, como **Nombre [H1]**, y debajo sus pasos en una lista numerada que empiece en 1. No pongas listas dentro '
     'de listas.'
@@ -100,10 +101,10 @@ _IGNORABLE_RANGES = (
 
 
 def _invisible(ch):
-    # Atajo: el primer Cf es U+00AD y el primer rango de _IGNORABLE_RANGES empieza en U+034F, así que el texto ASCII
-    # y latino común no paga unicodedata.category ni el recorrido de los rangos.
-    if ch < '­':
-        return False
+    # Atajo: antes de U+034F (el primer rango de _IGNORABLE_RANGES) el único Cf es U+00AD, así que el ASCII, las
+    # letras con acento, la ñ y los signos ¿ y ¡ no pagan unicodedata.category ni el recorrido de los rangos.
+    if ch < '\u034f':
+        return ch == '\u00ad'
     if unicodedata.category(ch) == 'Cf':
         return True
     code = ord(ch)
@@ -138,6 +139,10 @@ class AssistantQuestion(BaseModel):
 
 class ProviderError(Exception):
     """Error de configuración, transporte o respuesta de un proveedor, sin datos de la pregunta."""
+
+
+class WorkerNotStarted(RuntimeError):
+    """No arrancó el hilo de la llamada, así que la pregunta no salió al proveedor."""
 
 
 class Unavailable(HTTPException):
@@ -225,6 +230,12 @@ def _call_provider(base_url, api_key, model, messages, timeout):
         raise ProviderError('respuesta JSON inválida') from error
     if not isinstance(answer, str) or not answer.strip() or len(answer) > MAX_ANSWER_LENGTH:
         raise ProviderError('respuesta de texto inválida')
+    try:
+        # json.loads acepta un escape partido como "\ud83d" (un surrogate suelto), pero la respuesta de la API ya no
+        # se puede pasar a UTF-8 y daba 500 con el cupo cobrado. Aquí pasa al respaldo.
+        answer.encode('utf-8')
+    except UnicodeEncodeError:
+        raise ProviderError('respuesta de texto inválida') from None
     return answer.strip()
 
 
@@ -245,7 +256,10 @@ def _call_within(seconds, base_url, api_key, model, messages):
             result['crash'] = error
 
     worker = threading.Thread(target=run, name='asistente-proveedor', daemon=True)
-    worker.start()
+    try:
+        worker.start()
+    except RuntimeError as error:
+        raise WorkerNotStarted(str(error)) from error
     worker.join(seconds)
     if worker.is_alive():
         raise ProviderError('TimeoutError')
@@ -259,7 +273,7 @@ def _call_within(seconds, base_url, api_key, model, messages):
 def complete(question, findings, attempts=None, client_gone=None):
     """La respuesta del primer proveedor que conteste dentro del tope total, o 503.
 
-    `attempts` recibe {'provider', 'result'} de cada proveedor al que se le mandó la pregunta, para la bitácora.
+    `attempts` recibe {'provider', 'result'} de cada proveedor que se intentó, para la bitácora.
     `client_gone` dice si el cliente ya cortó: entonces no se llama al respaldo.
     """
     attempts = [] if attempts is None else attempts
@@ -295,6 +309,11 @@ def complete(question, findings, attempts=None, client_gone=None):
             logger.warning('Proveedor %s no disponible: %s', name, error)
             attempts.append({'provider': name, 'result': 'timeout' if str(error) == 'TimeoutError' else 'error'})
             continue
+        except WorkerNotStarted:
+            # El hilo no arrancó (por ejemplo, sin hilos libres): la pregunta no salió y la bitácora no anota al
+            # proveedor.
+            logger.error('Proveedor %s no se llamó: no arrancó el hilo', name)
+            raise
         except Exception:
             # Un error inesperado no pasa al respaldo, pero la bitácora sí dice que la pregunta salió a este proveedor.
             attempts.append({'provider': name, 'result': 'error'})
@@ -443,7 +462,8 @@ def _audit_completed(session, request, domain_id, result, attempts):
     try:
         _audit(session, request, 'assistant.completed', domain_id, {'result': result, 'providers': attempts})
     except Exception as error:  # noqa: BLE001 - solo el tipo: el mensaje de la base puede traer valores
-        logger.error('No se pudo registrar assistant.completed (%s): %s', result, type(error).__name__)
+        logger.error('No se pudo registrar assistant.completed (%s) del dominio %s: %s', result, domain_id,
+                     type(error).__name__)
 
 
 @router.post('/domains/{fqdn}/assistant', summary='Responde preguntas sobre hallazgos abiertos')
@@ -474,7 +494,7 @@ def ask_assistant(fqdn: str, body: AssistantQuestion, request: Request, response
 
         response.headers['Cache-Control'] = 'no-store'
         attempts = []
-        # A qué proveedores salió la pregunta y cómo terminó, también si falló. Sin el texto de la pregunta ni de error.
+        # Qué proveedores se intentaron y cómo terminó, también si falló. Sin el texto de la pregunta ni de error.
         model_findings = [{field: finding[field] for field in MODEL_FIELDS} for finding in findings]
         try:
             answer = complete(question, model_findings, attempts, client_gone)
