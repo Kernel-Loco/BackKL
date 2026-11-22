@@ -7,16 +7,38 @@ navegador → Cloudflare (HTTPS) → cloudflared ─borde─ portal ─interna�
                                       └─salida─ Cloudflare
 ```
 
+Una VM equivalente también se crea y se borra desde código con Terraform, en su propio grupo de recursos y sin túnel por omisión: `docs/terraform.md` (#81, RC-132).
+
 ## Antes de levantar
+
+**Alta de dominios:** por ahora no se puede habilitar en el despliegue. El volumen `cirdan-cartas` guarda cartas cifradas,
+pero el respaldo descrito más abajo solo incluye la base y no ese volumen. El despliegue fija `CARTA_ALTA_ENABLED=false`
+y la API también rechaza el alta con `COOKIE_SECURE=true`. Antes de activarla se necesita implementar y probar respaldo
+y restauración coordinados de la base, las cartas y la llave, además de revisar la política de retención. La verificación
+TXT de dominios ya registrados sí funciona para los que estén en `DOMINIOS_EN_VIVO`.
+
+Para pruebas locales sin datos reales: monta el volumen mediante `docker compose`, pon `CARTA_ALTA_ENABLED=true` y
+una llave aleatoria `CARTA_ENCRYPTION_KEY` de 32 bytes en base64 url-safe, diferente de las del MFA y contraseñas.
+El directorio del contenedor es `/var/lib/cirdan/cartas`, privado del usuario de la API. Fuera de Docker se debe
+configurar `CARTA_STORAGE_DIR` con un directorio absoluto, privado y persistente. Como alternativa a la llave directa,
+`CARTA_KEY_VAULT_SECRET_URL` acepta una URL versionada de Azure Key Vault; nunca se configuran ambas. No se debe cambiar
+ni perder la llave: todavía no hay herramienta de rotación. El PDF se cifra con AES-256-GCM y la base guarda su SHA-256
+y nombre opaco, no la carta en claro. La API comprueba la estructura básica del PDF, no su firma: el administrador
+confirma que la carta firmada autoriza el dominio. Si una transacción falla después de escribir el archivo puede quedar
+un archivo cifrado huérfano; no se borra automáticamente porque el resultado de una confirmación fallida puede ser
+incierto. No se debe borrar ninguno sin conciliarlo primero con `domain_authorizations.signed_document_key` de todas las
+empresas y con los respaldos.
 
 1. FrontKL clonado junto a BackKL (`../FrontKL`), o su ruta en `PORTAL_DIR`.
 2. `.env` copiado de `.env.example`, con contraseñas propias y además:
    - `ALLOWED_ORIGINS=https://lowtidesec.com,https://www.lowtidesec.com`. Van los dos porque el túnel publica los dos nombres y el navegador manda el Origin del nombre que abrió: sin el de www, la API responde 403 al login que llega por www. Sin la variable la pila no arranca. También apaga las cuentas de demo (RC-287).
+   - `COOKIE_SECURE=true`. El archivo del despliegue ya la fija, pero con un origen https en `ALLOWED_ORIGINS` y sin `COOKIE_SECURE=true` la API no arranca (RC-286): así un `docker compose up` que se olvide de `docker-compose.despliegue.yml` tampoco publica la cookie de sesión sin Secure. Vale igual en el plan B y en el plan B de pruebas.
    - `TUNNEL_TOKEN`, el token del túnel de Cloudflare. Sin él la pila no arranca. Nunca va en git.
    - `COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml` y `COMPOSE_PATH_SEPARATOR=:`. Con eso cualquier `docker compose` de esa carpeta usa los dos archivos, aunque se escriba sin los `-f`. Sin ellos, un `docker compose up -d --build` recrea la API con la config de desarrollo, sin la red interna, y lowtidesec.com responde 500 en `/api/v1`. `COMPOSE_PATH_SEPARATOR=:` hace falta en Windows (plan B), donde el separador por omisión es `;`. En Linux no estorba.
    - `DOMINIOS_EN_VIVO` y `ORGS_GITHUB_DECLARADAS` según las cartas vigentes.
    - La llave del MFA. En la VM va `TOTP_KEY_VAULT_SECRET_URL` y no va `TOTP_ENCRYPTION_KEY` (sección 'Llave del MFA en Azure Key Vault'). En el plan B es al revés (paso 3 de 'Carpeta y volumen'). Con las dos puestas, o con ninguna, la API no arranca.
    - La llave de las huellas de contraseña, con la misma regla: en la VM `PASSWORD_HASH_KEY_VAULT_SECRET_URL` y no `PASSWORD_HASH_ENCRYPTION_KEY`, y en el plan B al revés (sección 'Llave de las huellas de contraseña').
+   - `PWNED_PASSWORDS_ENABLED` vacía, como viene en `.env.example`, o en `true`. Así `docker-compose.despliegue.yml` prende la revisión de contraseñas filtradas (RC-334). Con `false` queda apagada y solo se revisa la lista local.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
    - SSL/TLS > Edge Certificates: 'Always Use HTTPS' prendido. Sin él el portal también responde por `http://` y el formulario de login manda la contraseña sin cifrar hasta Cloudflare (la API la rechaza después por el Origin, pero ya viajó). Se comprueba con `curl -sI http://lowtidesec.com/login` y `curl -sI http://www.lowtidesec.com/login`: los dos responden 301 con `Location: https://...`. HSTS queda para RC-89.
@@ -39,7 +61,7 @@ La segunda línea tiene que decir 'DEMO_ACCOUNTS no es true: se apagan las cuent
 Ningún .env le gana a estos valores:
 
 - `DEMO_ACCOUNTS=false` y `DEMO_EXPLORER=false`. El compose del despliegue también fija `API_DOCS=false`, así que `/openapi.json`, `/docs` y `/redoc` no existen, y la imagen corre uvicorn con `--no-server-header` (comentario 10063 de RC-91).
-- `COOKIE_SECURE=true`, porque el despliegue siempre va con HTTPS.
+- `COOKIE_SECURE=true`, porque el despliegue siempre va con HTTPS. La respuesta del login trae `Set-Cookie: lt_session` con `Secure` (RC-286).
 - `FORWARDED_ALLOW_IPS` con las IP fijas del portal (10.249.91.10) y de cloudflared (10.249.92.11). Cloudflare agrega la IP real al final de X-Forwarded-For y Next no le agrega nada si ya viene. uvicorn toma la primera IP de la derecha que no es de confianza. Una IP falsa que mande el navegador queda a la izquierda y no cuenta. El bloqueo por intentos del login cuenta por IPv4 y, como Cloudflare también entrega visitantes por IPv6, por red /64 en IPv6 (`cirdan/auth/sessions.py`): quien tiene un /64 puede estrenar dirección en cada intento, pero todas caen en el mismo contador. Quien tiene más de un /64 (un /56 trae 256 y un /48, 65 536) sí puede repartir los intentos entre sus redes /64 y saltarse el límite por IP, pero no el de 5 fallos por correo. Varios visitantes detrás de la misma IPv4 (una red corporativa) comparten contador.
 - `UVICORN_TIMEOUT_KEEP_ALIVE=65`. El proxy de Next suelta una conexión ociosa con la API a los 5 s, lo mismo que uvicorn por omisión, y un POST que sale justo entonces termina en 500. Con 65 s la suelta siempre Next primero. Del lado del portal, la imagen de FrontKL pone `KEEP_ALIVE_TIMEOUT=95000`, por encima de los 90 s con que cloudflared reutiliza las conexiones.
 - Sin `ports` en ningún servicio. Para entrar a la base de la VM se usa `docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d cirdan'`: `POSTGRES_USER` es la del contenedor, que sale del `.env` (`postgres` si no se puso).
@@ -140,7 +162,7 @@ La huella argon2id de cada contraseña se guarda cifrada con AES-256-GCM (`cirda
 - Las huellas de antes, sin cifrar, entran todavía y quedan cifradas en ese mismo inicio de sesión. No hace falta restablecer contraseñas. El hash de relleno de las semillas y de `cirdan/auth/demo.py` no cambia y sigue sin abrir nada.
 - Si la llave se pierde, ninguna contraseña guardada vuelve a abrir y cada cuenta se restablece con su script de alta. Por eso la copia del gestor de contraseñas se queda siempre, como la del MFA.
 - Si el cambio se revierte, el código viejo no abre las huellas cifradas: las cuentas que ya entraron se restablecen igual.
-- Rotar la llave no pide contraseñas nuevas, porque se descifra la huella y se vuelve a cifrar. Ese script todavía no existe: el `1` de `lt1$` es la versión de la llave para cuando exista.
+- Rotar la llave no pide contraseñas nuevas, porque se descifra la huella y se vuelve a cifrar (RC-333). El número de `lt1$` es la versión de la llave: los pasos están en 'Rotar la llave de las huellas'.
 
 ### Pasarla a la VM (una vez)
 
@@ -169,6 +191,27 @@ Cada paso va con el OK de quien administra la VM. La llave nunca va en un archiv
    ```
 
 En el plan B la misma llave va en `PASSWORD_HASH_ENCRYPTION_KEY`, tomada del gestor o con `az keyvault secret show --id <URL con versión> --query value -o tsv`, y se borra del `.env` al terminar. Con otra llave ninguna contraseña de la VM abre.
+
+### Rotar la llave de las huellas (RC-333)
+
+Se rota si la llave se filtra o cuando se decida, siempre con el OK de quien administra la VM. Nadie cambia su contraseña. La versión de la llave va en el prefijo de cada huella (`lt1$`, `lt2$`...) y en `PASSWORD_HASH_KEY_VERSION`, que sin poner vale 1. Mientras se rota, la llave de antes va en `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL` (en la VM) o en `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` (desarrollo y plan B), una de las dos. Con ella puesta, una huella de la versión anterior entra y el login la guarda cifrada con la actual. La API no arranca si la anterior es la misma llave que la actual o que la del MFA, ni con la anterior puesta y la versión en 1. Sin la anterior, una huella de la versión anterior no abre: 'Correo o contraseña incorrectos.' en el mismo tiempo que un correo que no existe.
+
+Nunca se crea otra versión del secreto `password-hash-key` sin seguir estos pasos: con una URL sin versión, la API tomaría la nueva al reiniciarse y ninguna huella abriría. Por eso las URL del `.env` siempre llevan su versión.
+
+1. (VM, una vez) La migración 026, que da al comando las empresas con huellas de una versión. La API no la lee: `docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/026_huellas_por_version.sql`.
+2. (Azure) Generar la llave nueva y guardarla en el gestor de contraseñas ('LowTide vm-lowtide PASSWORD_HASH_ENCRYPTION_KEY v2') como en el paso 1 de 'Pasarla a la VM', pero como un secreto nuevo, `password-hash-key-v2`, y darle a la identidad de la VM 'Key Vault Secrets User' sobre ese secreto como en el paso 2. El secreto de antes no se borra.
+3. (VM) En el `.env`: `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL=<la URL con versión que hoy está en PASSWORD_HASH_KEY_VAULT_SECRET_URL>`, `PASSWORD_HASH_KEY_VAULT_SECRET_URL=<el $r.id del secreto nuevo>` y `PASSWORD_HASH_KEY_VERSION=2` (o la que sigue).
+4. (VM) Reconstruir: `docker compose --dry-run up -d --build api` (sin recrear `cirdan-pg16`) y `docker compose up -d --build api`. `docker compose ps api` dice `healthy`. Un 403 en `docker compose logs api` es que falta el rol del paso 2.
+5. (VM) Contar sin cambiar nada y luego cifrar: `docker compose exec api python -m cirdan.auth.rotar_huellas --prueba` y `docker compose exec api python -m cirdan.auth.rotar_huellas`. Imprime por empresa cuántas cambió, cuántas no abrieron y cuántas quedan de la versión anterior, y, por empresa con al menos una cambiada, deja un evento `auth.password_hash_rotated` con esos conteos en `audit_log`. Si se corta a media empresa (Ctrl+C o un error), antes de salir deja el evento de lo que ya cambió con `interrupted`, y si la base es la que falló lo dice en la salida. Ni la salida ni la bitácora llevan huellas. Correrlo otra vez no cambia nada ni escribe eventos. Una que no abre ya no abría con la llave de antes (otra llave o una huella dañada): esa cuenta se restablece con su script de alta.
+6. (VM) Como postgres y solo lectura, con el número de la versión anterior. Tiene que dar `0`:
+
+   ```bash
+   docker exec cirdan-pg16 psql -U postgres -d cirdan -Atc "SELECT count(*) FROM users WHERE password_hash LIKE 'lt1\$%'"
+   ```
+
+7. (VM) Quitar `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL` del `.env` y reconstruir como en el paso 4. `PASSWORD_HASH_KEY_VERSION` se queda. Después se puede quitar el rol de la identidad sobre el secreto de antes. El secreto de antes y su copia del gestor se quedan al menos 33 días después del paso 6: cada respaldo dura de 30 a 32 días ('Respaldo diario') y los de antes de rotar traen huellas de la versión anterior, que solo abren con esa llave. Para restaurar uno de ellos se le vuelve a dar a la identidad 'Key Vault Secrets User' sobre el secreto de antes, como en el paso 2 (sin ese rol la API recibe 403 y no arranca), y se vuelve a poner la anterior como en el paso 3.
+
+En desarrollo y en el plan B es lo mismo con `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, sin Key Vault, y `docker compose exec api` como en la VM.
 
 ## Respaldo diario (RC-233)
 
@@ -291,6 +334,40 @@ Lo que se escriba durante el plan B (escaneos, usuarios, cambios de contraseña)
 Si el plan B dura poco y no se copia de vuelta, se avisa a los usuarios que lo que hagan ahí se pierde.
 
 Al terminar, en la carpeta del plan B, la primera línea de `docker compose config` tiene que ser otra vez `name: lowtide-planb`, porque una `COMPOSE_PROJECT_NAME` puesta en la terminal le gana al `.env` y `docker volume ls` lista todos los volúmenes, no dice cuál borra esa carpeta. Con ese nombre, `docker compose down -v` borra `lowtide-planb_cirdan-pg16-data`, que trae los datos reales. Con otro nombre no se corre. En la carpeta de desarrollo, `docker compose up -d` levanta otra vez la pila local con su base de siempre.
+
+### Plan B de pruebas (RC-277)
+
+La misma pila en la PC de Ernesto, de respaldo por si la VM cae: otro túnel que publica solo `pruebas.lowtidesec.com`. ZAP activo (RC-89), ASVS (RC-136) y el pentest (RC-153) van contra el producto final en la VM, nunca contra esta pila (`docs/politica_uso_etico.md`). Queda abierto, como la VM, pero el túnel solo está arriba en las ventanas de prueba. No trae datos de la VM.
+
+1. Ernesto crea en Zero Trust el túnel de pruebas con un solo nombre público, `pruebas.lowtidesec.com`, con destino `http://portal:3000`. Ni `lowtidesec.com` ni su www apuntan a ese túnel.
+2. El paso 2 de 'Carpeta y volumen', con los clones en otra carpeta (por ejemplo `C:\lowtide-pruebas\`) y en el commit que se quiere probar. El paso 1 no hace falta: la pila de desarrollo puede seguir arriba con el archivo del paso 3.
+3. `docker-compose.yml` fija `container_name` en `cirdan-pg16`, `cirdan-valkey` y `cirdan-api`, los mismos de la pila de desarrollo, y con ella arriba el `up` choca. En el clon de pruebas va un tercer archivo, `docker-compose.pruebas-pc.yml`, que les cambia el nombre. Es solo de esa PC: no se versiona ni se agrega con `git add`. El prefijo `lote14-` es el de las pilas aisladas de prueba. En redes que cortan UDP, cloudflared no sale por QUIC (UDP 7844) y el túnel cae con el error 1033 de Cloudflare. Con `TUNNEL_TRANSPORT_PROTOCOL: http2` va por TCP 443 y vuelve con sus 4 conexiones (prueba del 20 nov). `docker compose logs cloudflared` dice con qué protocolo registró cada conexión.
+
+   ```yaml
+   services:
+     db:
+       container_name: lote14-planb-pg16
+     valkey:
+       container_name: lote14-planb-valkey
+     api:
+       container_name: lote14-planb-api
+     cloudflared:
+       environment:
+         TUNNEL_TRANSPORT_PROTOCOL: http2
+   ```
+
+4. Su `.env` sale de `.env.example`: `COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml:docker-compose.pruebas-pc.yml`, `COMPOSE_PATH_SEPARATOR=:`, `COMPOSE_PROJECT_NAME=lowtide-pruebas`, `ALLOWED_ORIGINS=https://pruebas.lowtidesec.com`, el `TUNNEL_TOKEN` del túnel de pruebas y llaves nuevas en `TOTP_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, distintas entre sí y de las de la VM. `COOKIE_SECURE`, `DEMO_ACCOUNTS`, `DEMO_EXPLORER`, `API_DOCS` y `FORWARDED_ALLOW_IPS` los fija `docker-compose.despliegue.yml`, diga lo que diga el `.env`. `WEBAUTHN_RP_ID` se queda en `lowtidesec.com`, que también sirve en el subdominio.
+5. La primera línea de `docker compose config` es `name: lowtide-pruebas` y `docker compose config --format json` trae los tres `container_name` con `lote14-planb-`. Después, `docker compose up -d --build`: la base nueva se carga con las semillas y `docker compose logs demo-accounts` dice que las cuentas de demo quedaron apagadas.
+6. Las cuentas de prueba las da de alta Ernesto. Nunca se usan las de demo, que tienen contraseña y secreto TOTP en el repo público (comentario 10312 de RC-91).
+
+En cada ventana de prueba:
+
+- Al abrir, `docker compose up -d`. Se anotan la hora y los minutos hasta que `https://pruebas.lowtidesec.com/login` respondió 200.
+- La prueba de punta a punta: login con MFA, ver un dominio y cerrar sesión, sin 403. La respuesta del login trae `Set-Cookie: lt_session` con `Secure` (RC-286). Un login con una X-Forwarded-For inventada cuenta el fallo con la IP real, y 20 fallos desde una IP no bloquean el login desde otra.
+- Esas dos pruebas de fallos van desde un navegador, con correos inventados, no con curl. El captcha se revisa antes de contar el fallo (`cirdan/auth/routes.py:221`): sin resolverlo, curl recibe 400 y el contador no sube. La X-Forwarded-For inventada se agrega a cada `POST /auth/login` que manda la página. El contador de cada IP es `login:fail:ip:<ip>` en Valkey (una IPv6 cuenta por su /64) y vence 15 min después del primer fallo (`LOCK_SECONDS`, `cirdan/auth/sessions.py:37`), así que los fallos van seguidos y se lee en seguida: `docker compose exec valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "login:fail:ip:*"'` lista las IP que contaron. El mismo comando con `get login:fail:ip:<ip>` en lugar de `--scan --pattern ...` da cuántos fallos lleva esa IP.
+- Por este túnel no va ninguna prueba activa. ZAP activo, ASVS y el pentest van contra la VM por `lowtidesec.com`, con una cuenta de prueba que da de alta Ernesto. Cómo se le abre paso al escáner en Cloudflare durante la ventana y cómo se cierra después va en RC-89.
+- Al cerrar, `docker compose stop` (la base se queda) y se anota la hora. `docker inspect -f '{{.State.StartedAt}} {{.State.FinishedAt}}' lowtide-pruebas-cloudflared-1` da las dos horas del túnel en UTC. Con `restart: unless-stopped`, un contenedor detenido a mano no vuelve a arrancar al reiniciar la PC. Uno que no se detuvo sí: si la PC se apaga o se reinicia a mitad de una ventana, Docker Desktop vuelve a levantar el túnel. Por eso el `stop` va antes de apagar, y al prender la PC fuera de una ventana se revisa `docker compose ps`. Si cloudflared quedó arriba, se detiene y se anota el rato que estuvo publicado.
+- Las horas de cada ventana van en un comentario de RC-277.
 
 ## Pruebas
 

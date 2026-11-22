@@ -82,7 +82,7 @@ APORTES = [aporte('cert_expired', 'infrastructure', 'high', 20), aporte('cert_ex
            aporte('exposed_rdp', 'infrastructure', 'high', 25), aporte('exposed_api_docs', 'infrastructure', 'medium', 10),
            aporte('dmarc_missing', 'configuration', 'medium', 10), aporte('lookalike_domain', 'digital_identity', 'medium', 15),
            aporte('breach_exposure', 'data_leaks', 'critical', 40)]
-TODAS = {f: 'succeeded' for f in ('ct_logs', 'dns', 'shodan', 'api_docs', 'whois')}
+TODAS = {f: 'succeeded' for f in ('ct_logs', 'dns', 'shodan', 'api_docs', 'whois', 'web')}
 
 
 class SubcategoriasYKri(unittest.TestCase):
@@ -101,7 +101,12 @@ class SubcategoriasYKri(unittest.TestCase):
         # Huella de SUBCATEGORIAS, KRIS y EMITEN por versión. Si cambias el mapa, sube VERSION y agrega aquí su
         # huella nueva (la que imprime el mensaje de esta prueba), sin borrar las anteriores.
         huellas = {1: '21dcfebaeb77bdcadd33c3342b5f34cffa11c2be9ac7b50252d52d368994a8cb',
-                   2: '9975c93f5a65ec3d73bd7a47c44da9bb067cd817e13fb91ad419762fa19278f8'}
+                   2: '9975c93f5a65ec3d73bd7a47c44da9bb067cd817e13fb91ad419762fa19278f8',
+                   3: 'c939b876df9892c32d9227df4313dca74c435538f573f7a3dfb06ac589afcf64',   # 3: RC-228
+                   4: '977cc23dc8c4496c1d6e93f5265a8c66d4e5c60879e70a7efd57a177ae55d7d1',   # 4: RC-239
+                   5: 'f88721b474d494569497549077c1a9fa11c4f4c0e0ea25407a1c2b6d2db95b19',   # 5: RC-247
+                   6: '2b418995f327b691e8966f92f35ee6217677adf8954f4e0ae9ed27cd1c83703b',   # 6: RC-262
+                   7: 'e73d091dc7769634ef5b82f758d5170b32a7b16084511df787cb95c118b675c4'}   # 7: RC-218
         mapa = json.dumps([sub.SUBCATEGORIAS, sub.KRIS, sub.EMITEN], ensure_ascii=False, sort_keys=True)
         huella = hashlib.sha256(mapa.encode('utf-8')).hexdigest()
         self.assertIn(sub.VERSION, huellas, 'VERSION %d no tiene huella en esta prueba: %s' % (sub.VERSION, huella))
@@ -190,7 +195,11 @@ class SubcategoriasYKri(unittest.TestCase):
             ((TODAS, ['lookalike_domain'], ()), ('ok', 'ok', 'ok', nc, sf)),
             ((TODAS, ['cert_expired'], ()), ('partial', 'ok', 'ok', 'ok', sf)),
             ((TODAS, (), ['ct_logs']), ('partial', 'ok', 'ok', 'partial', sf)),
-            (({'shodan': 'succeeded', 'ct_logs': 'succeeded'}, (), ()), ('ok', 'partial', nc, 'ok', sf)),
+            # web no corrió: el saludo TLS de los sitios no se revisó (RC-239)
+            (({'shodan': 'succeeded', 'ct_logs': 'succeeded'}, (), ()), ('partial', 'partial', nc, 'ok', sf)),
+            (({'shodan': 'succeeded', 'ct_logs': 'succeeded', 'web': 'succeeded'}, (), ()),
+             ('ok', 'partial', nc, 'ok', sf)),
+            ((TODAS, (), ['web']), ('partial', 'ok', 'ok', 'ok', sf)),
             ((TODAS, (), ()), ('ok', 'ok', 'ok', 'ok', sf)),
         ]
         for (corridas, sin_cobertura, a_medias), esperado in casos:
@@ -202,13 +211,13 @@ class SubcategoriasYKri(unittest.TestCase):
     def test_8f_reglas_de_una_fuente_que_no_corrio_cuentan_como_sin_revisar(self):
         # shodan respondió sin poder revisar nada (reproducir sin grabación) y api_docs no corrió: ningún dato real
         de_shodan = ['exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database',
-                     'exposed_container_api', 'exposed_service', 'known_vulnerability', 'exposed_iot_device', 'exposed_ot_device',
-                     'outdated_software']
+                     'exposed_container_api', 'exposed_ai_service', 'exposed_service', 'known_vulnerability',
+                     'exposed_iot_device', 'exposed_ot_device', 'outdated_software']
         _, kris = sub.resumen([], {'shodan': 'succeeded'}, sin_cobertura=de_shodan)
         k = self.kri(kris, 'service_exposure')
         self.assertEqual((k['status'], k['findings'], k['max_severity'], k['penalty'], k['sources_not_run']),
                          ('no_coverage', None, None, None, ['api_docs']))
-        self.assertEqual(len(k['rules_without_coverage']), 8)   # solo las que dio el escaneo, no las de api_docs
+        self.assertEqual(len(k['rules_without_coverage']), 9)   # solo las que dio el escaneo, no las de api_docs
         # con una sola regla de shodan revisada ya hay un dato: a medias
         _, kris = sub.resumen([], {'shodan': 'succeeded'}, sin_cobertura=de_shodan[1:])
         k = self.kri(kris, 'service_exposure')
@@ -311,6 +320,93 @@ class Alerta(unittest.TestCase):
     def test_2_umbral_de_la_empresa(self):
         self.assertFalse(c.dispara_alerta(68, umbral=70))
         self.assertTrue(c.dispara_alerta(70, umbral=70))
+
+
+
+# Las reglas de antes de RC-237, escritas a mano, para comparar la plantilla contra lo de siempre.
+def _banda_de_siempre(score):
+    return 'low' if score < 40 else 'medium' if score < 60 else 'high' if score < 80 else 'critical'
+
+
+def _letra_de_siempre(score):
+    return 'A' if score < 20 else 'B' if score < 40 else 'C' if score < 60 else 'D' if score < 80 else 'F'
+
+
+class CortesPorCliente(unittest.TestCase):
+    """RC-237: bandas, letras y pisos salen de los cortes del juego de reglas de cada score."""
+
+    def test_1_la_plantilla_da_lo_mismo_que_antes(self):
+        self.assertEqual(c.CORTES_PLANTILLA, {'medium': 40, 'high': 60, 'critical': 80})
+        for cortes in (None, dict(c.CORTES_PLANTILLA)):
+            for score in range(101):
+                with self.subTest(score=score, cortes=cortes):
+                    self.assertEqual(c.banda(score, cortes), _banda_de_siempre(score))
+                    self.assertEqual(c.letra(score, cortes), _letra_de_siempre(score))
+            self.assertEqual([c.piso(n, cortes) for n in range(4)], [0, 60, 80, 80])
+        self.assertEqual((c.PISO_UN_CRITICO, c.PISO_VARIOS_CRITICOS), (60, 80))
+        self.assertEqual(c.BANDAS, ((0, 39, 'low', 'bajo'), (40, 59, 'medium', 'medio'), (60, 79, 'high', 'alto'),
+                                    (80, 100, 'critical', 'crítico')))
+        self.assertEqual(c.LETRAS, ((0, 19, 'A'), (20, 39, 'B'), (40, 59, 'C'), (60, 79, 'D'), (80, 100, 'F')))
+
+    def test_2_con_50_70_85_un_critico_queda_en_70_alto_y_d(self):
+        cortes = {'medium': 50, 'high': 70, 'critical': 85}
+        r = c.score_dominio(notas(10, 10, 10, 10), PESOS_V1, criticos=1, cortes=cortes)
+        self.assertEqual((r['score'], r['banda'], r['piso_aplicado']), (70, 'high', True))
+        self.assertEqual(c.letra(r['score'], cortes), 'D')
+        self.assertEqual(c.score_dominio(notas(10, 10, 10, 10), PESOS_V1, criticos=2, cortes=cortes)['score'], 85)
+        self.assertEqual([c.banda(s, cortes) for s in (49, 50, 69, 70, 84, 85)],
+                         ['low', 'medium', 'medium', 'high', 'high', 'critical'])
+        self.assertEqual([c.letra(s, cortes) for s in (24, 25, 49, 50, 70, 85)], ['A', 'B', 'B', 'C', 'D', 'F'])
+        self.assertEqual(c.nombre_banda(70, cortes), 'alto')
+
+    def test_3_las_bandas_cubren_0_a_100_sin_huecos(self):
+        for cortes in ({'medium': 10, 'high': 20, 'critical': 30}, {'medium': 71, 'high': 81, 'critical': 91},
+                       {'medium': 33, 'high': 57, 'critical': 77}):
+            with self.subTest(cortes=cortes):
+                b = c.bandas(cortes)
+                self.assertEqual((b[0][0], b[-1][1]), (0, 100))
+                for anterior, siguiente in zip(b, b[1:]):
+                    self.assertEqual(anterior[1] + 1, siguiente[0])
+                    self.assertGreaterEqual(anterior[1] - anterior[0] + 1, c.ANCHO_MINIMO_BANDA)
+                self.assertGreaterEqual(b[-1][1] - b[-1][0] + 1, c.ANCHO_MINIMO_BANDA)
+                letras = c.letras(cortes)
+                self.assertEqual((letras[0][0], letras[-1][1]), (0, 100))
+                for anterior, siguiente in zip(letras, letras[1:]):
+                    self.assertEqual(anterior[1] + 1, siguiente[0])
+
+    def test_4_validar_cortes_acepta_los_bordes(self):
+        for cortes in ({'medium': 10, 'high': 20, 'critical': 30}, {'medium': 71, 'high': 81, 'critical': 91}):
+            self.assertEqual(c.validar_cortes(cortes), cortes)
+
+    def test_5_validar_cortes_rechaza(self):
+        malos = (
+            {'medium': 9, 'high': 20, 'critical': 30},      # bajo con menos de 10
+            {'medium': 40, 'high': 49, 'critical': 80},     # medio con 9
+            {'medium': 40, 'high': 60, 'critical': 69},     # alto con 9
+            {'medium': 40, 'high': 60, 'critical': 92},     # crítico con 9
+            {'medium': 60, 'high': 40, 'critical': 80},     # fuera de orden
+            {'medium': 40.0, 'high': 60, 'critical': 80},   # no entero
+            {'medium': True, 'high': 60, 'critical': 80},   # booleano
+            {'medium': '40', 'high': 60, 'critical': 80},   # texto
+            {'medium': 40, 'high': 60},                     # falta uno
+            {'medium': 40, 'high': 60, 'critical': 80, 'low': 0},  # sobra uno
+            [40, 60, 80],
+            None,
+        )
+        for cortes in malos:
+            with self.subTest(cortes=cortes), self.assertRaises(ValueError):
+                c.validar_cortes(cortes)
+        # Un booleano es 0 o 1 y la regla del orden también lo rechazaría, pero el 422 del PUT debe decir por qué
+        for cortes in ({'medium': True, 'high': 60, 'critical': 80}, {'medium': 40, 'high': 60, 'critical': False},
+                       {'medium': 40.0, 'high': 60, 'critical': 80}, {'medium': '40', 'high': 60, 'critical': 80}):
+            with self.subTest(cortes=cortes), self.assertRaisesRegex(ValueError, 'número entero'):
+                c.validar_cortes(cortes)
+        with self.assertRaises(ValueError):
+            c.banda(50, {'medium': 40, 'high': 45, 'critical': 80})
+
+    def test_6_la_alerta_no_se_mueve_con_los_cortes(self):
+        self.assertEqual(c.UMBRAL_ALERTA, 60)
+        self.assertTrue(c.dispara_alerta(60))
 
 
 if __name__ == '__main__':

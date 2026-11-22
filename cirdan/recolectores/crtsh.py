@@ -5,7 +5,12 @@ dominio, y devuelve:
 - los subdominios del dominio autorizado (activos),
 - certificados vencidos de nombres que todavía resuelven en DNS, o que vencen en menos de 30 días
   cuando les queda menos de un tercio de su vida (hallazgos),
-- dominios parecidos que ya tienen un certificado emitido (hallazgos).
+- dominios parecidos que ya tienen un certificado emitido (hallazgos),
+- higiene de certificados (RC-218, _higiene): nombres internos a la vista (cert_internal_name, con la lista de
+  nombres_internos.py), un comodín *.dominio vigente (cert_broad_wildcard) y un certificado reciente de una autoridad
+  que el dominio no usaba (cert_new_issuer). Salen de las mismas respuestas, sin ninguna consulta nueva, así una
+  grabación de antes los da al reproducirla. Las características del reto de todos los códigos salen de
+  cirdan.ml.caracteristicas.calcular(), como en los demás recolectores (comentario 10256).
 
 La búsqueda de dominios parecidos (#109, RC-226) consulta en crt.sh %marca% y hasta 10 variantes del dominio, las
 de candidatos_parecidos(), que pueden ser de terceros. ErnestoDL aprobó esa lista el 10 nov 2026 y está en
@@ -27,7 +32,8 @@ cirdan/recolectores/respuestas_grabadas/crtsh/<dominio>/; 'reproducir' solo lee 
 certspotter.py). Si crt.sh responde, Cert Spotter suma los certificados vigentes que crt.sh no trae, sin
 contar dos veces el mismo, y si Cert Spotter no responde queda lo de crt.sh con un aviso. Si crt.sh no
 responde después de los reintentos, los subdominios y certificados vigentes salen solo de Cert Spotter,
-sin vencidos ni dominios parecidos: esos dos códigos quedan en sin_cobertura. Si Cert Spotter tampoco
+sin vencidos ni dominios parecidos: los códigos que dependen de ellos (certspotter.SIN_COBERTURA) quedan en
+sin_cobertura. Si Cert Spotter tampoco
 responde, el resultado queda en 'failed' y no trae activos ni hallazgos.
 
 Cobertura (#23, RC-55). Cada hallazgo de vigencia lleva como parte el nombre con el vencimiento de su
@@ -35,7 +41,9 @@ certificado (_parte) y uno de dominio parecido, el dominio parecido. Si pueden f
 la búsqueda por nombre, o Cert Spotter no respondió, no estaba grabado o no dio todas sus páginas),
 revisados lleva las partes de todos los certificados que llegaron y sin_revisar queda en None: así el
 orquestador no cierra lo de un certificado que esta corrida no vio. En el respaldo no van los ya
-vencidos, porque cert_expired queda en sin_cobertura. Si a los parecidos les faltó la respuesta de alguna
+vencidos, porque cert_expired queda en sin_cobertura. La parte de cert_new_issuer, emisor:<organización>, solo va en
+revisados si llegaron todos los certificados, y la de cert_internal_name, interno:<nombre>@<vence>, solo si los
+certificados salieron de crt.sh, no del respaldo. Si a los parecidos les faltó la respuesta de alguna
 variante la corrida también es parcial y da revisados. Con revisados y cobertura de parecidos van además los
 dominios parecidos que sí se revisaron, para que el orquestador cierre el que ya no salió (ronda 4 de RC-226).
 
@@ -46,6 +54,15 @@ nombra los archivos dañados (DANADA). La única excepción al cierre es la de s
 ya pasó se cierra en toda corrida de la fuente (RC-55, orquestador). Nunca queda 'failed' ni completo: si no se
 pudo leer nada, sale sin activos, con los tres códigos en sin_cobertura. Si el dañado es el dns_ de un nombre,
 no se sabe si resolvía y su certificado vencido no se reporta en esa corrida (DNS_DANADO).
+
+DNS de los nombres vencidos (RC-288, comentario 10394). Se pregunta A y AAAA a los resolvedores públicos del
+recolector dns (registros_dns.RESOLVEDORES, 1.1.1.1 y 8.8.8.8, con su TIMEOUT_S por consulta), nunca al DNS del
+sistema: la carta solo nombra a los de Cloudflare y Google. Toda la corrida de DNS cabe en PLAZO_DNS: un nombre no se
+pregunta si no le quedan COSTO_DNS segundos, sus dos consultas. Si los resolvedores no responden o no quedó tiempo, no
+se sabe si el nombre resuelve: su certificado vencido no se reporta, queda un aviso y su huella va en omitidos, así el
+orquestador no cierra el que un escaneo anterior dejó abierto (DNS_SIN_RESPUESTA), y la corrida queda parcial
+(revisados). Un «no existe» se cree si el dominio autorizado existe en DNS, aunque no tenga A ni AAAA. Al reproducir,
+un nombre sin su dns_ grabado se reporta con aviso, como antes.
 
     python -m cirdan.recolectores.crtsh olmardo.com
     python -m cirdan.recolectores.crtsh olmardo.com --sin-parecidos     (sin la búsqueda de dominios parecidos)
@@ -72,7 +89,6 @@ import argparse
 import hashlib
 import http.client
 import json
-import socket
 import sys
 import time
 import urllib.error
@@ -81,7 +97,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from cirdan.recolectores import certspotter, contrato
+from cirdan.ml import caracteristicas as rubrica
+from cirdan.recolectores import certspotter, contrato, nombres_internos, registros_dns, transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (MARCA, NOMBRE_VALIDO, SIN_GRABACION, Activo, FuenteNoResponde,  # noqa: F401
                                           Grabadora, Hallazgo, Resultado, SinGrabacion, nombre_archivo)
@@ -105,9 +122,10 @@ PAUSA_PARECIDOS = 2          # segundos entre consultas de variantes, para no sa
 # en unos 35 s. El primer intento espera 20 s, como antes, y el segundo hasta 45 (TIMEOUTS_VARIANTE): una variante que
 # se cuelga y responde al reintento cuesta lo mismo que antes, y una lenta responde en el segundo. Todas las variantes
 # juntas (pausas, peticiones y esperas entre intentos) caben en PRESUPUESTO_VARIANTES, los mismos 470 s de antes (10
-# variantes x (2 de pausa + 2 intentos de 20 + 5 de espera)): el peor caso de la corrida sigue en 1055 s, debajo de
-# TOPE_CORRIDA del orquestador. Con menos de MINIMO_VARIANTE por delante no se hace otra petición, y las variantes que
-# ya no caben quedan sin consultar (SIN_TIEMPO), salvo las que salen del disco.
+# variantes x (2 de pausa + 2 intentos de 20 + 5 de espera)). Con las dos búsquedas de subdominios en PLAZO_PRINCIPAL
+# (RC-218) el peor caso de la corrida baja de 1055 a 865 s, debajo de TOPE_CORRIDA del orquestador. Con menos de
+# MINIMO_VARIANTE por delante no se hace otra petición, y las variantes que ya no caben quedan sin consultar
+# (SIN_TIEMPO), salvo las que salen del disco.
 # Si casi todas tardan, el primer intento de 20 s se perdería en cada una. Por eso, cuando la respuesta de una variante
 # tarda más de 20 s, las siguientes esperan 45 s desde el primer intento (10 variantes de 35 s: 62 + 9 x 37 = 395 s, y
 # antes solo respondían 7). Si con 45 s una variante falla su primer intento, crt.sh se cuelga en vez de tardar y
@@ -129,9 +147,35 @@ SAN = 'san:'                 # consulta del respaldo de una variante: san:X es d
 INTENTOS_RESPALDO = 1        # intentos de cada búsqueda del respaldo
 FALLA = 'falla:'             # consulta que graba que crt.sh no respondió y se usó Cert Spotter
 ORIGEN = 'crtsh'             # de dónde salió el certificado, en atributos y evidencia (el otro es Cert Spotter)
+# Tope de las respuestas (RC-218, comentario 10276). Cada petición, también las de Cert Spotter, pasa por
+# transporte.descargar(): https al 443, solo direcciones públicas, sin proxies ni redirecciones, a lo más TOPE_BYTES y
+# con su timeout como plazo de toda la petición, no de cada lectura del socket. Una respuesta más grande no se
+# reintenta: esa búsqueda falla y entra la búsqueda por nombre o Cert Spotter, nunca 0 hallazgos. La grabación más
+# grande del repo y de la PC del equipo es de unos 3 KB (olmardo.com, 18 nov 2026). Las dos búsquedas de subdominios
+# (%.dominio y la de nombre) tienen juntas PLAZO_PRINCIPAL, con sus pausas y reintentos, y cada intento espera lo que
+# quede de ese plazo. %.dominio termina RESERVA_NOMBRE segundos antes: si se cuelga o falla lento, la búsqueda por
+# nombre todavía tiene esos segundos para responder.
+TOPE_BYTES = 50 * 1024 * 1024
+# DNS de los nombres vencidos (RC-288): segundos de toda la corrida de DNS y lo que puede tardar un nombre (A y AAAA).
+# Con los 865 s del peor caso de HTTP (orquestador) queda dentro de TOPE_CORRIDA, que es de 1200 s.
+PLAZO_DNS = 300
+COSTO_DNS = 2 * registros_dns.TIMEOUT_S
+PLAZO_PRINCIPAL = 120        # segundos de las dos búsquedas de subdominios de crt.sh, juntas
+RESERVA_NOMBRE = 45          # segundos de PLAZO_PRINCIPAL que %.dominio deja a la búsqueda por nombre
+# Higiene de certificados (RC-218)
+VENTANA_EMISOR_DIAS = 90     # un certificado emitido hace menos de esto puede ser de una autoridad nueva...
+EMISORES_PREVIOS = 3         # ...si antes hubo al menos tantos certificados, todos de otras autoridades
+EMISOR = 'emisor:'           # parte de cert_new_issuer: emisor:<organización>
+INTERNO = 'interno:'         # parte de cert_internal_name: interno:<nombre>@<vence>
+# Un certificado de una autoridad nueva con los mismos nombres del dominio que otro de una autoridad ya usada, emitido
+# a lo más tantas horas antes o después, es el respaldo del otro y no un cambio de autoridad: Universal SSL de
+# Cloudflare emite, por cada certificado, uno de respaldo de otra autoridad (olmardo.com, 14 oct: Let's Encrypt a las
+# 00:04 y SSL.com a las 10:24, con olmardo.com y *.olmardo.com).
+VENTANA_RESPALDO_HORAS = 72
 
-# Código de regla -> severidad base. Los tres deben existir en el catálogo de reglas (#30).
-CODIGOS = {'cert_expired': 'high', 'cert_expiring_soon': 'medium', 'lookalike_domain': 'medium'}
+# Código de regla -> severidad base. Todos deben existir en el catálogo de reglas (#30).
+CODIGOS = {'cert_expired': 'high', 'cert_expiring_soon': 'medium', 'lookalike_domain': 'medium',
+           'cert_internal_name': 'low', 'cert_broad_wildcard': 'low', 'cert_new_issuer': 'medium'}
 
 # Lo que ejecutar() le pasa a recolectar() en cada escaneo, además de dominio, cliente, ahora y propios (#109, RC-226).
 EN_ESCANEO = {'parecidos': True}
@@ -172,7 +216,8 @@ HOMOGLIFOS = {'o': '0', 'l': '1', 'i': 'l', 'm': 'rn', 'w': 'vv', 'e': '3', 'a':
 # Solo para lo que se imprime: los datos conservan los códigos de la base (high, medium...).
 SEVERIDAD_ES = {'critical': 'crítica', 'high': 'alta', 'medium': 'media', 'low': 'baja'}
 CODIGO_ES = {'cert_expired': 'certificados vencidos', 'cert_expiring_soon': 'certificados por vencer',
-             'lookalike_domain': 'dominios parecidos'}
+             'lookalike_domain': 'dominios parecidos', 'cert_internal_name': 'nombres internos en certificados',
+             'cert_broad_wildcard': 'comodines del dominio', 'cert_new_issuer': 'autoridades nuevas'}
 EXPOSICION_ES = {'publica': 'pública', 'privada': 'privada'}
 MESES = ('ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic')
 
@@ -193,6 +238,15 @@ class SinTiempo(FuenteNoResponde):
 DANADA = ('La grabación tiene %s (%s). Se muestra lo que sí se pudo leer, pueden faltar subdominios y certificados, y '
           'en este escaneo no se marca nada como resuelto, salvo un certificado por vencer cuya fecha ya pasó')
 DNS_DANADO = object()        # lo que da el DNS de un nombre cuyo dns_ grabado está dañado: su vencido no se reporta
+POR_NOMBRE_GRANDE = ('La respuesta de crt.sh a %%.%s pasó de su tope de %d bytes y no se leyó. Se usó la '
+                     'búsqueda por nombre y pueden faltar subdominios')   # RC-288
+DNS_SIN_RESPUESTA = object()  # los resolvedores no respondieron o no quedó tiempo: su vencido va en omitidos (RC-288)
+SIN_DNS = 'No se pudo comprobar en DNS si resuelven %s. No se reporta su certificado vencido en este escaneo'
+SIN_DNSPYTHON = ('Falta dnspython en este equipo (pip install -r requirements.txt) y no se comprobó en DNS si resuelven '
+                 '%s. No se reporta su certificado vencido en este escaneo')
+MAX_NOMBRES_AVISO = 10       # nombres que dicen SIN_DNS y DNS_SIN_TIEMPO. De los demás dicen cuántos son (RC-288)
+DNS_SIN_TIEMPO = ('El DNS de los nombres vencidos llegó a su tope de %d s. No se comprobó si resuelven %s y no se '
+                  'reporta su certificado vencido en este escaneo')
 MAX_DANADOS = 5              # archivos dañados que nombra el aviso. De los demás dice cuántos son
 SIN_LEER = 'No se pudo leer ningún certificado de la grabación de este dominio'
 SIN_MARCA = ('No se buscaron dominios parecidos de %s: solo se buscan cuando el dominio autorizado es su propio '
@@ -218,10 +272,20 @@ class GrabacionDanada(FuenteNoResponde):
 
 # ---------------------------------------------------------------- consulta a crt.sh
 
+class RespuestaGrande(ValueError):
+    """La respuesta pasó de TOPE_BYTES. No se reintenta: otro intento bajaría lo mismo."""
+
+
 def _descargar(url, timeout):
+    """El cuerpo de `url` con transporte.descargar(): `timeout` es el plazo de toda la petición y el cuerpo no pasa de
+    TOPE_BYTES (RespuestaGrande). Las URL de crt.sh y Cert Spotter son https y no se pide tipo, así que el único
+    ValueError de descargar() es el del tope. Va por certspotter.descargar: una página de Cert Spotter que otra fuente
+    ya pidió en este escaneo no sale a la red (RC-326)."""
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/json'})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    try:
+        return certspotter.descargar(req, time.monotonic() + timeout, TOPE_BYTES, time.monotonic)
+    except ValueError as e:
+        raise RespuestaGrande(str(e)) from None
 
 
 def _nombre_grabado(consulta):
@@ -255,8 +319,10 @@ class ClienteCrtsh:
         `nueva` (solo al grabar) vacía la carpeta y escribe la marca de inicio con la primera respuesta válida de
         crt.sh o Cert Spotter: si ninguno responde, la grabación anterior queda intacta.
         `resolver(nombre)` dice si un nombre resuelve en DNS (True, False o None si no se pudo saber). Si no se pasa,
-        se usa el del transporte cuando lo trae (el simulado de las pruebas) o la consulta DNS del sistema.
-        `cronometro()` da segundos que solo avanzan (time.monotonic): mide el presupuesto de las variantes."""
+        se usa el del transporte cuando lo trae (el simulado de las pruebas) o _resolver_dns, que pregunta a
+        registros_dns.RESOLVEDORES. Todas sus llamadas de una corrida caben en PLAZO_DNS (RC-288).
+        `cronometro()` da segundos que solo avanzan (time.monotonic): mide el presupuesto de las variantes y el del
+        DNS."""
         self.modo, self.carpeta, self.timeout = modo, Path(carpeta), timeout
         self.grabadora = Grabadora(carpeta, modo, completar=completar, desde=desde, nueva=nueva, reloj=reloj,
                                    nombre=_nombre_grabado)
@@ -268,6 +334,23 @@ class ClienteCrtsh:
         self.ultima = None         # (intentos, segundos de la respuesta) de la última consulta, si respondió por la red
         self.danados = []          # archivos de la grabación que no se pudieron leer, sin repetir (RC-46)
         self._dns_funciona = {}    # nombre de control -> si el DNS responde, una vez por corrida
+        self._fin_dns = None       # valor de cronometro() en que se acaba PLAZO_DNS, desde la primera pregunta
+        self.dns_sin_respuesta = []  # nombres que se preguntaron y no se supo si resuelven (RC-288)
+        self.dns_sin_tiempo = []     # nombres que no se preguntaron porque ya no quedaba PLAZO_DNS
+
+    def _preguntar(self, nombre, de=None, control=False):
+        """self.resolver(nombre) si a la corrida de DNS le quedan COSTO_DNS segundos de PLAZO_DNS. Si no, None sin
+        preguntar, y `de` (el nombre por el que se pregunta) queda en dns_sin_tiempo. El plazo empieza con la primera
+        pregunta de la corrida. Con `control` y el resolvedor de omisión, basta con que el nombre exista (_resolver_dns)."""
+        if self._fin_dns is None:
+            self._fin_dns = self.cronometro() + PLAZO_DNS
+        if self._fin_dns - self.cronometro() < COSTO_DNS:
+            if (de or nombre) not in self.dns_sin_tiempo:
+                self.dns_sin_tiempo.append(de or nombre)
+            return None
+        if control and self.resolver is _resolver_dns:
+            return self.resolver(nombre, control=True)
+        return self.resolver(nombre)
 
     @property
     def leidas(self):
@@ -289,9 +372,12 @@ class ClienteCrtsh:
         """True si el nombre resuelve en DNS, False si no existe y None si no se pudo saber. La respuesta se graba y se
         reproduce como las de crt.sh (dns_<nombre>.json), así --reproducir no consulta el DNS.
 
-        Un «no existe» solo se cree si el nombre de `control` (el dominio autorizado) sí resuelve: sin servidor DNS
-        alcanzable, Windows y macOS dan el mismo código que un nombre que no existe. Si el control falla, es None y no
-        se graba. Con el archivo de la grabación dañado también es None, y queda anotado en `danados`."""
+        Un «no existe» solo se cree si el nombre de `control` (el dominio autorizado) sí resuelve: un resolvedor que
+        miente o un DNS del sistema sin servidor alcanzable (los resolvedores simulados de las pruebas) dan lo mismo que
+        un nombre que no existe. Si el control falla, es None y no se graba. Con el archivo de la grabación dañado
+        también es None, y queda anotado en `danados`.
+        Lo que se pregunta cabe en PLAZO_DNS (_preguntar). Un None preguntado (o que no se preguntó por el plazo) queda
+        en dns_sin_respuesta (o en dns_sin_tiempo): recolectar() no reporta su vencido (RC-288)."""
         consulta = 'dns:' + nombre
         try:
             del_disco, datos = self._de_disco(consulta)
@@ -299,14 +385,19 @@ class ClienteCrtsh:
             return None
         if del_disco:
             return datos
-        valor = self.resolver(nombre)
+        valor = self._preguntar(nombre)
         if valor is False and control:
-            if control not in self._dns_funciona:
-                self._dns_funciona[control] = self.resolver(control) is True
-            if not self._dns_funciona[control]:
+            funciona = self._dns_funciona.get(control)
+            if funciona is None:
+                funciona = self._preguntar(control, de=nombre, control=True)
+                if funciona is not None:  # un None (sin respuesta o sin tiempo) no dice nada: se vuelve a preguntar
+                    self._dns_funciona[control] = funciona
+            if funciona is not True:
                 valor = None
         if valor is not None:
             self.grabadora.guardar(consulta, valor)
+        elif nombre not in self.dns_sin_tiempo and nombre not in self.dns_sin_respuesta:
+            self.dns_sin_respuesta.append(nombre)
         return valor
 
     def consultar(self, consulta, intentos=INTENTOS, timeout=None, pausa=0, plazo=None, **extra):
@@ -391,11 +482,16 @@ class ClienteCrtsh:
         que falta se vuelve a medir después de la pausa y antes de cada intento. Si ni la primera cabe, lanza SinTiempo
         sin consultar. Si el tiempo se acaba después de un intento sin respuesta, lanza SinTiempo con esos `intentos`.
         Lo que sale del disco no gasta tiempo y siempre se lee.
+        Una página de Cert Spotter que otra fuente ya pidió en este escaneo (certspotter.repetida, RC-326) se lee de lo
+        que ella recibió, en un solo intento, sin pausa y sin contarla en `consultas`.
         `ultima` queda con (intentos, segundos que tardó la respuesta) si respondió por la red, y con None si no."""
         self.ultima = None
         del_disco, datos = self._de_disco(consulta)
         if del_disco:
             return datos
+        repetida = certspotter.repetida(url)
+        if repetida:
+            intentos, pausa = 1, 0
         if plazo is not None and plazo - self.cronometro() < pausa + MINIMO_VARIANTE:
             raise SinTiempo('no quedó tiempo para consultar %s' % (texto or consulta))
         if pausa:
@@ -409,7 +505,7 @@ class ClienteCrtsh:
                     sin_tiempo = True
                     break
                 espera = min(espera, queda)
-            self.consultas += 1
+            self.consultas += 0 if repetida else 1
             hechos += 1
             inicio = self.cronometro()
             try:
@@ -420,8 +516,11 @@ class ClienteCrtsh:
                 if valida and not valida(datos):
                     ultimo = 'ValueError: respuesta que no se puede leer'
                     break  # la fuente sí respondió y otro intento daría lo mismo
-            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
+            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, transporte.PlazoVencido,
+                    transporte.Redirigida) as e:
                 ultimo = '%s: %s' % (type(e).__name__, e)
+                if isinstance(e, (RespuestaGrande, transporte.Redirigida)):
+                    break  # otro intento bajaría lo mismo o volvería a redirigir
                 if isinstance(e, urllib.error.HTTPError) and e.code in sin_reintento:
                     if e.code == 429:
                         ultimo = 'llegó a su límite de consultas, Retry-After %s s' % (
@@ -451,19 +550,40 @@ class ClienteCrtsh:
 
 # ---------------------------------------------------------------- utilidades
 
-NO_EXISTE = {socket.EAI_NONAME, getattr(socket, 'EAI_NODATA', socket.EAI_NONAME), 11001, 11004}  # NXDOMAIN o sin datos
-
-
-def _resolver_dns(nombre):
-    """True si el nombre resuelve (A, AAAA o un CNAME que llega a una), False si no existe y None si no se pudo saber.
-    Es la misma consulta de DNS que hace cualquier navegador, sin tocar los servidores del dominio."""
+def _resolver_dns(nombre, control=False):
+    """True si el nombre resuelve (A, AAAA o un CNAME que llega a una), False si no existe o no tiene ninguna y None si
+    no se pudo saber. Es la misma consulta de DNS que hace cualquier navegador, sin tocar los servidores del dominio:
+    A y, si no la tiene, AAAA, a registros_dns.RESOLVEDORES con TIMEOUT_S cada una (registros_dns._consultar), nunca
+    al DNS del sistema (RC-288). Un NXDOMAIN de la A basta: el nombre no existe.
+    Con `control` (el dominio autorizado) dice si existe: una A vacía también es True, porque un dominio con solo MX o
+    TXT en la raíz sí responde, y así su «no existe» se cree (RC-288)."""
     try:
-        socket.getaddrinfo(nombre, None, proto=socket.IPPROTO_TCP)
-        return True
-    except socket.gaierror as e:
-        return False if e.errno in NO_EXISTE else None
-    except (OSError, UnicodeError):
+        estado, valores = registros_dns._consultar(nombre, 'A')
+        if estado == 'ok' and valores:
+            return True
+        if estado == 'nxdomain':
+            return False
+        if control:
+            return True
+        estado, valores = registros_dns._consultar(nombre, 'AAAA')
+    except (registros_dns.ConsultaFallida, ImportError, OSError, ValueError, UnicodeError):
         return None
+    return estado == 'ok' and bool(valores)
+
+
+def _hay_dnspython():
+    """Si dnspython carga. Sin él _resolver_dns da None en cada nombre y el aviso lo dice (RC-288)."""
+    try:
+        import dns.resolver  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _lista(nombres):
+    """Los primeros MAX_NOMBRES_AVISO nombres separados por coma y, si hay más, cuántos faltan."""
+    texto = ', '.join(nombres[:MAX_NOMBRES_AVISO])
+    return texto + (' y %d más' % (len(nombres) - MAX_NOMBRES_AVISO) if len(nombres) > MAX_NOMBRES_AVISO else '')
 
 
 def _con_fechas(certs):
@@ -602,8 +722,13 @@ def _revisados(dominio, certs, ahora, respaldo=False, sin_revocaciones=False):
     dudosos = {n for n, cs in por_nombre.items()
                if len({_serie(c) for c in cs}) > 1 or (n != dominio and n.split('.', 1)[1] in comodines
                                                         and max(_fecha(c['not_after']) for c in cs) < ahora)}
-    return sorted({_parte(n, c) for n, cs in por_nombre.items() if not (sin_revocaciones and n in dudosos)
-                   for c in cs if not respaldo or _fecha(c['not_after']) >= ahora})
+    partes = {_parte(n, c) for n, cs in por_nombre.items() if not (sin_revocaciones and n in dudosos)
+              for c in cs if not respaldo or _fecha(c['not_after']) >= ahora}
+    # cert_internal_name no depende de revocaciones, pero el respaldo no lo cubre (certspotter.SIN_COBERTURA)
+    if not respaldo:
+        partes |= {INTERNO + _parte(n, c) for n, cs in por_nombre.items()
+                   if nombres_internos.etiqueta_interna(n, dominio) for c in cs}
+    return sorted(partes)
 
 
 def _unir(certs, otros, dominio):
@@ -655,7 +780,7 @@ def candidatos_parecidos(dominio, maximo=MAX_CANDIDATOS):
 
 # ---------------------------------------------------------------- análisis
 
-def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
+def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False, omitidos=None):
     """Agrupa los certificados por nombre dentro del dominio y genera activos y hallazgos de vigencia.
 
     Un certificado vencido solo es hallazgo si el nombre todavía resuelve en DNS (`resuelve(nombre)` no es False) y no
@@ -664,6 +789,8 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
     cuenta: no lo cubre el comodín del padre y su DNS no es el del nombre base.
     Si `resuelve(nombre)` da DNS_DANADO (el dns_ grabado de ese nombre está dañado, RC-46), no se sabe si resolvía y
     su vencido tampoco se reporta: el nombre queda solo como activo, sin el atributo resuelve.
+    Si da DNS_SIN_RESPUESTA (no respondió o no quedó tiempo, RC-288), tampoco, y la huella del vencido va en
+    `omitidos` (una lista de pares nombre y huella) para que el orquestador no cierre el que ya estaba abierto.
     Con `anticipar` (al grabar) también consulta el DNS de los nombres que todavía no vencen o que un comodín cubre, así
     una reproducción de días después tiene las respuestas que necesite.
     """
@@ -691,11 +818,18 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
         primero = min(_fecha(c['not_before']) for c in g['certs'])
         dias = (vence - ahora).total_seconds() / 86400
         origen = _origen(reciente)
+        # 'emitido' es el not_before del certificado emitido más tarde, sin contar revocados salvo que todos lo
+        # estén. No sale de 'reciente' (el que vence más tarde): uno de 90 días emitido hoy puede vencer antes que
+        # uno de un año. El portal lo compara con el inicio del escaneo anterior para marcar 'certificado nuevo'
+        # (#102, RC-219).
+        emitido = max(_fecha(c['not_before']) for c in ([c for c in g['certs'] if not c.get('revocado')] or g['certs']))
         activos.append(Activo('domain' if nombre == dominio else 'subdomain', nombre, {
             'comodin': g['comodin'], 'certificados': len(g['certs']), 'primer_certificado': primero.isoformat(),
-            'vence': vence.isoformat(), 'emisor': reciente.get('issuer_name', ''), 'fuente': FUENTE, **origen}))
-        evidencia = {'host': nombre, 'vence': vence.isoformat(), 'emisor': reciente.get('issuer_name', ''), **origen,
-                     'comodin': g['comodin']}
+            'emitido': emitido.isoformat(), 'vence': vence.isoformat(),
+            'emisor': reciente.get('issuer_name', ''), 'fuente': FUENTE, **origen}))
+        evidencia = {'host': nombre, 'emitido': _fecha(reciente['not_before']).isoformat(), 'vence': vence.isoformat(),
+                     'emisor': reciente.get('issuer_name', ''), **origen, 'comodin': g['comodin']}
+        tipo = 'domain' if nombre == dominio else 'subdomain'
         exacto = nombre in {n.strip().lower().rstrip('.') for n in
                             (reciente.get('name_value') or '').split('\n') + [reciente.get('common_name') or '']}
         padre = nombre.split('.', 1)[1] if nombre != dominio else ''
@@ -712,23 +846,172 @@ def _subdominios(dominio, certs, ahora, resuelve=None, anticipar=False):
                 continue
             if dns is DNS_DANADO:  # no se sabe si resolvía: abrir su vencido podría ser falso (RC-46)
                 continue
+            if dns is DNS_SIN_RESPUESTA:  # tampoco se sabe, y cerrar el de antes también podría ser falso (RC-288)
+                if omitidos is not None:
+                    omitidos.append((nombre, _huella('cert_expired', nombre, _serie(reciente))))
+                continue
             titulo = 'Certificado vencido en %s' % nombre
+            e = dict(evidencia, title=titulo, dias_vencido=int(-dias))
             hallazgos.append(Hallazgo(
-                'cert_expired', CODIGOS['cert_expired'], nombre, titulo,
-                dict(evidencia, title=titulo, dias_vencido=int(-dias)),
-                {'tipo': 'certificado_vencido', 'antiguedad_dias': int(-dias), 'exposicion': 'publica',
-                 'sensibilidad': 'media'},
+                'cert_expired', CODIGOS['cert_expired'], nombre, titulo, e,
+                rubrica.calcular('cert_expired', tipo, e, ahora),
                 _huella('cert_expired', nombre, _serie(reciente)), partes=[_parte(nombre, reciente)]))
         elif 0 <= dias < DIAS_POR_VENCER and dias * 86400 < (vence - _fecha(reciente['not_before'])).total_seconds() / FRACCION_POR_VENCER:
             titulo = ('El certificado de %s vence en menos de un día' % nombre if dias < 1 else
                       'El certificado de %s vence en %s' % (nombre, _cuantos(int(dias), 'día', 'días')))
+            e = dict(evidencia, title=titulo, dias_para_vencer=int(dias))
             hallazgos.append(Hallazgo(
-                'cert_expiring_soon', CODIGOS['cert_expiring_soon'], nombre, titulo,
-                dict(evidencia, title=titulo, dias_para_vencer=int(dias)),
-                {'tipo': 'certificado_por_vencer', 'antiguedad_dias': max(0, (ahora - _fecha(reciente['not_before'])).days),
-                 'exposicion': 'publica', 'sensibilidad': 'baja'},
+                'cert_expiring_soon', CODIGOS['cert_expiring_soon'], nombre, titulo, e,
+                rubrica.calcular('cert_expiring_soon', tipo, e, ahora),
                 _huella('cert_expiring_soon', nombre, _serie(reciente)), partes=[_parte(nombre, reciente)]))
     return activos, hallazgos
+
+
+def organizacion(emisor):
+    """La organización (O=) del nombre del emisor, como lo dan crt.sh (issuer_name) y Cert Spotter (issuer.name):
+    'C=US, O=Let's Encrypt, CN=R11' da "Let's Encrypt". Acepta el valor entre comillas y los caracteres escapados con
+    barra invertida. None si no trae O=, por ejemplo cuando Cert Spotter solo da el friendly_name."""
+    if not isinstance(emisor, str):
+        return None
+    campos, actual, comillas, escape = [], [], False, False
+    for ch in emisor:
+        if escape:
+            actual.append(ch)
+            escape = False
+        elif ch == '\\':
+            escape = True
+        elif ch == '"':
+            comillas = not comillas
+        elif ch in ',+' and not comillas:
+            campos.append(''.join(actual))
+            actual = []
+        else:
+            actual.append(ch)
+    campos.append(''.join(actual))
+    for campo in campos:
+        llave, igual, valor = campo.partition('=')
+        if igual and llave.strip().lower() in ('o', 'organizationname', '2.5.4.10') and valor.strip():
+            return ' '.join(valor.split())
+    return None
+
+
+def _llave_emisor(org):
+    """La organización para comparar: sin mayúsculas ni espacios de más. Let's Encrypt y LET'S ENCRYPT son la misma."""
+    return ' '.join(org.casefold().split())
+
+
+def _higiene(dominio, certs, ahora):
+    """Los hallazgos de higiene de certificados (RC-218): cert_internal_name, cert_broad_wildcard y cert_new_issuer.
+
+    - cert_internal_name: un nombre del dominio con una etiqueta de nombres_internos en un certificado vigente o que
+      venció hace menos de VENTANA_VENCIDOS_DIAS, revocado o no (el nombre ya quedó en el registro público). Uno por
+      nombre, en el nombre, con una parte interno:<_parte> por cada certificado que cuenta. Esas partes solo van en
+      revisados si los certificados salieron de crt.sh, no del respaldo de Cert Spotter, que no lo cubre (_revisados).
+    - cert_broad_wildcard: *.dominio del dominio autorizado en un certificado vigente y no revocado. Uno por dominio,
+      con cuántos certificados vigentes lo traen y una parte por cada uno.
+    - cert_new_issuer: un certificado vigente y no revocado emitido hace menos de VENTANA_EMISOR_DIAS por una
+      organización (O= del emisor, organizacion()) que no está en ningún certificado emitido antes, cuando antes hubo
+      al menos EMISORES_PREVIOS certificados con su organización. Uno por organización, en el dominio, con la parte
+      emisor:<organización>, que la corrida da como revisada solo si llegaron todos los certificados (_revisados).
+      No cuenta el respaldo de otro: un certificado con los mismos nombres del dominio que otro de una organización ya
+      usada antes, emitido a lo más VENTANA_RESPALDO_HORAS antes o después (Universal SSL de Cloudflare).
+    El mismo certificado de crt.sh y de Cert Spotter cuenta una vez (la clave de _unir)."""
+    unicos = {}
+    for c in certs:
+        clave = (_serie(c), tuple(n for n in _nombres(c) if _del_dominio(n[0], dominio)))
+        if clave not in unicos or (unicos[clave].get('revocado') and not c.get('revocado')):
+            unicos[clave] = c
+    certs = list(unicos.values())
+    limite_nombre = ahora - timedelta(days=VENTANA_VENCIDOS_DIAS)
+
+    def vigente(c):
+        return _fecha(c['not_before']) <= ahora < _fecha(c['not_after']) and not c.get('revocado')
+
+    internos, comodines = {}, []
+    for c in certs:
+        nombres = _nombres(c)
+        if _fecha(c['not_before']) <= ahora and _fecha(c['not_after']) >= limite_nombre:
+            for n, _ in nombres:
+                etiqueta = nombres_internos.etiqueta_interna(n, dominio)
+                if etiqueta:
+                    internos.setdefault(n, (etiqueta, []))[1].append(c)
+        if vigente(c) and (dominio, True) in nombres:
+            comodines.append(c)
+
+    hallazgos = []
+    for nombre in sorted(internos):
+        etiqueta, cs = internos[nombre]
+        reciente = max(cs, key=lambda c: (not c.get('revocado'), _fecha(c['not_after'])))
+        titulo = 'Nombre interno a la vista en un certificado público: %s' % nombre
+        e = {'title': titulo, 'host': nombre, 'etiqueta': etiqueta, 'lista_version': nombres_internos.VERSION,
+             'emisor': reciente.get('issuer_name', ''), 'emitido': _fecha(reciente['not_before']).isoformat(),
+             'vence': _fecha(reciente['not_after']).isoformat(), **_origen(reciente), 'certificados': len(cs),
+             'primera_vez': min(_fecha(c['not_before']) for c in cs).isoformat()}
+        hallazgos.append(Hallazgo(
+            'cert_internal_name', CODIGOS['cert_internal_name'], nombre, titulo, e,
+            rubrica.calcular('cert_internal_name', 'domain' if nombre == dominio else 'subdomain', e, ahora),
+            _huella('cert_internal_name', nombre), partes=sorted({INTERNO + _parte(nombre, c) for c in cs})))
+
+    if comodines:
+        reciente = max(comodines, key=lambda c: _fecha(c['not_after']))
+        titulo = 'Certificado comodín vigente para todo *.%s' % dominio
+        e = {'title': titulo, 'host': '*.' + dominio, 'certificados': len(comodines),
+             'ids': sorted((str(c.get('id')) for c in comodines), key=lambda i: (len(i), i))[:10],
+             'emisor': reciente.get('issuer_name', ''), 'emitido': _fecha(reciente['not_before']).isoformat(),
+             'vence': _fecha(reciente['not_after']).isoformat(), **_origen(reciente),
+             'primera_vez': min(_fecha(c['not_before']) for c in comodines).isoformat()}
+        hallazgos.append(Hallazgo(
+            'cert_broad_wildcard', CODIGOS['cert_broad_wildcard'], dominio, titulo, e,
+            rubrica.calcular('cert_broad_wildcard', 'domain', e, ahora),
+            _huella('cert_broad_wildcard', dominio), partes=sorted({_parte(dominio, c) for c in comodines})))
+
+    # cert_new_issuer: los certificados en orden de emisión, con las organizaciones de los emitidos antes de cada uno.
+    con_org = sorted(((_fecha(c['not_before']), c, organizacion(c.get('issuer_name'))) for c in certs
+                      if organizacion(c.get('issuer_name'))), key=lambda x: (x[0], str(x[1].get('id'))))
+    limite_emisor = ahora - timedelta(days=VENTANA_EMISOR_DIAS)
+    ventana_respaldo = timedelta(hours=VENTANA_RESPALDO_HORAS)
+    por_nombres = {}  # nombres del dominio -> (emitido, organización) de cada certificado que los trae
+    for emitido, c, org in con_org:
+        por_nombres.setdefault(frozenset(n for n, _ in _nombres(c) if _del_dominio(n, dominio)), []).append(
+            (emitido, _llave_emisor(org)))
+    previas, nuevas, i = {}, {}, 0   # previas: organización -> certificados emitidos antes del que se revisa
+    for emitido, c, org in con_org:
+        while i < len(con_org) and con_org[i][0] < emitido:
+            previas[_llave_emisor(con_org[i][2])] = previas.get(_llave_emisor(con_org[i][2]), 0) + 1
+            i += 1
+        llave = _llave_emisor(org)
+        if (emitido >= limite_emisor and vigente(c) and llave not in previas and llave not in nuevas
+                and sum(previas.values()) >= EMISORES_PREVIOS
+                and not _es_respaldo(c, emitido, dominio, previas, por_nombres, ventana_respaldo)):
+            nuevas[llave] = (org, c, dict(previas))
+    for llave in sorted(nuevas):
+        org, c, antes = nuevas[llave]
+        nombres = [n for n, _ in _nombres(c) if _del_dominio(n, dominio)]
+        titulo = 'Certificado reciente de una autoridad que el dominio no usaba: %s' % org
+        e = {'title': titulo, 'host': nombres[0] if nombres else dominio, 'nombres': nombres[:10], 'organizacion': org,
+             'emisor': c.get('issuer_name', ''), 'emitido': _fecha(c['not_before']).isoformat(),
+             'vence': _fecha(c['not_after']).isoformat(), **_origen(c), 'certificados_anteriores': sum(antes.values()),
+             'organizaciones_anteriores': sorted(antes)[:10], 'primera_vez': _fecha(c['not_before']).isoformat()}
+        hallazgos.append(Hallazgo(
+            'cert_new_issuer', CODIGOS['cert_new_issuer'], dominio, titulo, e,
+            rubrica.calcular('cert_new_issuer', 'domain', e, ahora),
+            _huella('cert_new_issuer', dominio, llave), clave=llave, partes=[EMISOR + llave]))
+    return hallazgos
+
+
+def _es_respaldo(cert, emitido, dominio, previas, por_nombres, ventana):
+    """True si `cert` trae los mismos nombres del dominio que otro certificado de una organización de `previas` emitido
+    a lo más `ventana` antes o después: es el respaldo de ese otro, no un cambio de autoridad (VENTANA_RESPALDO_HORAS).
+    Un certificado sin nombres del dominio no es respaldo de nada."""
+    nombres = frozenset(n for n, _ in _nombres(cert) if _del_dominio(n, dominio))
+    return bool(nombres) and any(org in previas and abs(emitido - cuando) <= ventana
+                                 for cuando, org in por_nombres.get(nombres, ()))
+
+
+def _emisores(certs):
+    """Las partes emisor:<organización> de todas las organizaciones de los certificados: una corrida que recibió todos
+    los certificados del dominio revisó cert_new_issuer de cada una."""
+    return {EMISOR + _llave_emisor(org) for org in (organizacion(c.get('issuer_name')) for c in certs) if org}
 
 
 def _parecidos(dominio, certs_por_tipo, propios, ahora, vistos=None):
@@ -761,14 +1044,13 @@ def _parecidos(dominio, certs_por_tipo, propios, ahora, vistos=None):
             continue
         primero = min(_fecha(c['not_before']) for c in certs)
         titulo = 'Dominio parecido con certificado: %s' % reg
-        hallazgos.append(Hallazgo(
-            'lookalike_domain', CODIGOS['lookalike_domain'], dominio, titulo,
-            {'title': titulo, 'dominio_parecido': reg, 'tipo_parecido': g['tipo'],
+        e = {'title': titulo, 'dominio_parecido': reg, 'tipo_parecido': g['tipo'],
              'nombres': sorted(g['nombres'])[:10], 'certificados': len(certs),
              'primer_certificado': primero.isoformat(), 'vence': _fecha(reciente['not_after']).isoformat(),
-             'emisor': reciente.get('issuer_name', ''), 'origen': ORIGEN, 'crtsh_id': reciente.get('id')},
-            {'tipo': 'dominio_parecido', 'antiguedad_dias': max(0, (ahora - primero).days), 'exposicion': 'publica',
-             'sensibilidad': 'alta'},
+             'emisor': reciente.get('issuer_name', ''), 'origen': ORIGEN, 'crtsh_id': reciente.get('id')}
+        hallazgos.append(Hallazgo(
+            'lookalike_domain', CODIGOS['lookalike_domain'], dominio, titulo, e,
+            rubrica.calcular('lookalike_domain', 'domain', e, ahora),
             _huella('lookalike_domain', dominio, reg), clave=reg, partes=[reg]))
     return hallazgos
 
@@ -799,10 +1081,14 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
         return res
 
     # Subdominios: primero la consulta por comodín; si crt.sh no la resuelve, la búsqueda por nombre.
+    # Las dos tienen juntas PLAZO_PRINCIPAL: si una respuesta tarda más o pasa de TOPE_BYTES, entra la otra o Cert
+    # Spotter. %.dominio deja RESERVA_NOMBRE segundos a la búsqueda por nombre.
     certs, fallas, consultas = None, [], (('%.' + dominio, {'deduplicate': 'Y'}), (dominio, {}))
+    plazo = cliente.cronometro() + PLAZO_PRINCIPAL
     for consulta, extra in consultas:
+        hasta = plazo - RESERVA_NOMBRE if consulta.startswith('%.') else plazo
         try:
-            certs = _con_fechas(cliente.consultar(consulta, **extra))
+            certs = _con_fechas(cliente.consultar(consulta, timeout=PLAZO_PRINCIPAL, plazo=hasta, **extra))
             break
         except CrtshNoResponde as e:
             fallas.append((consulta, e))
@@ -843,8 +1129,9 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             falla_comodin = fallas[0][1]
             res.avisos.append(str(falla_comodin) if isinstance(falla_comodin, SinGrabacion) else
                               POR_NOMBRE_DANADA % dominio if isinstance(falla_comodin, GrabacionDanada) else
-                              'crt.sh no respondió a %%.%s. Se usó la búsqueda por nombre y pueden faltar subdominios'
-                              % dominio)
+                              POR_NOMBRE_GRANDE % (dominio, TOPE_BYTES) if 'RespuestaGrande: ' in str(falla_comodin)
+                              else 'crt.sh no respondió a %%.%s. Se usó la búsqueda por nombre y pueden faltar '
+                              'subdominios' % dominio)
         try:  # crt.sh no siempre lee todos los logs: Cert Spotter suma los certificados vigentes que le falten (#14b)
             de_cert_spotter, completos = certspotter.certificados(cliente, dominio, **certspotter.COMPLEMENTO)
         except SinGrabacion as e:  # grabación de antes de que #14 consultara siempre Cert Spotter
@@ -869,11 +1156,17 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
             valor = None
         if valor is None and _nombre_grabado('dns:' + nombre) in danados():
             return DNS_DANADO  # su dns_ está dañado: ya lo nombra el aviso DANADA y su vencido no se reporta
+        if valor is None and (nombre in getattr(cliente, 'dns_sin_respuesta', ()) or
+                              nombre in getattr(cliente, 'dns_sin_tiempo', ())):
+            return DNS_SIN_RESPUESTA  # se preguntó en vivo y no se supo: ni se reporta ni se cierra (RC-288)
         if valor is None:
             desconocidos.append(nombre)
         return valor
+    omitidos = []
     res.activos, res.hallazgos = _subdominios(dominio, certs, ahora, resuelve,
-                                              anticipar=getattr(cliente, 'modo', 'vivo') == 'grabar')
+                                              anticipar=getattr(cliente, 'modo', 'vivo') == 'grabar',
+                                              omitidos=omitidos)
+    res.hallazgos += _higiene(dominio, certs, ahora)
     # Un código sin cobertura no trae hallazgos: al reproducir el respaldo meses después, ya vencieron.
     res.hallazgos = [h for h in res.hallazgos if h.codigo not in res.sin_cobertura]
     if not completo:  # pueden faltar certificados: el orquestador solo cierra lo de los que llegaron (#23, RC-55)
@@ -881,6 +1174,20 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
     vencidos = {h.activo for h in res.hallazgos if h.codigo == 'cert_expired'}
     res.avisos += ['No se pudo comprobar en DNS si %s resuelve. Se reporta su certificado vencido.' % n
                    for n in desconocidos if n in vencidos]
+    if omitidos and 'cert_expired' not in res.sin_cobertura:
+        # No se supo si resuelven (RC-288): su vencido no sale y el orquestador no cierra el que ya estaba abierto.
+        res.omitidos += [h for _, h in omitidos if h not in res.omitidos]
+        cortados = [n for n, _ in omitidos if n in getattr(cliente, 'dns_sin_tiempo', ())]
+        sin_respuesta_dns = [n for n, _ in omitidos if n not in cortados]
+        if sin_respuesta_dns:
+            falta = getattr(cliente, 'resolver', None) is _resolver_dns and not _hay_dnspython()
+            res.avisos.append((SIN_DNSPYTHON if falta else SIN_DNS) % _lista(sin_respuesta_dns))
+        if cortados:
+            res.avisos.append(DNS_SIN_TIEMPO % (PLAZO_DNS, _lista(cortados)))
+        # Y la corrida queda parcial, como con una variante sin respuesta: el escaneo no termina completo con 0
+        # vencidos cuando el DNS no se pudo comprobar.
+        if res.revisados is None:
+            res.revisados = sorted(set(_revisados(dominio, certs, ahora)) | _emisores(certs))
 
     # Dominios parecidos (#109, RC-226): solo se buscan en crt.sh. Nunca se resuelve su DNS ni se les pide nada.
     respondidas = 0        # búsquedas de parecidos que sí respondieron
@@ -1005,8 +1312,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=(), parecidos=False, m
                              if h not in dadas and h not in res.omitidos]
             # Una búsqueda de parecidos sin respuesta deja la corrida parcial (B3 y H10): con revisados el escaneo
             # termina 'partial' en vez de completo con 1 de 11 búsquedas.
-            if sin_respuesta and res.revisados is None:
-                res.revisados = _revisados(dominio, certs, ahora)
+            if sin_respuesta and res.revisados is None:  # llegaron todos los certificados: también sus emisores
+                res.revisados = sorted(set(_revisados(dominio, certs, ahora)) | _emisores(certs))
             # Con cobertura parcial deciden las partes (B2 y H9): van los dominios parecidos que esta corrida sí
             # revisó, así el orquestador cierra el que ya no tiene certificado reciente o ya es de la empresa. Son los
             # que dejó el filtro de cada búsqueda, las variantes que respondieron y los otros dominios de la empresa.

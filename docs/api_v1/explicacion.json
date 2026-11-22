@@ -12,6 +12,7 @@
   "computed_at": "2026-10-29T20:16:09-06:00",
   "method": "rules",
   "model_version": null,
+  "model_fallback_reason": null,
   "penalty": 40.0,
   "max_penalty": 40.0,
   "factors": [

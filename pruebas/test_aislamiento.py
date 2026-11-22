@@ -9,12 +9,13 @@ biblioteca estándar de Python:
 Cada intento de escritura corre dentro de una transacción que se deshace, así
 que la base queda igual después de las pruebas.
 """
+import os
 import re
 import subprocess
 import unittest
 from pathlib import Path
 
-CONTAINER = 'cirdan-pg16'
+CONTAINER = os.environ.get('CIRDAN_TEST_DB_CONTAINER', 'cirdan-pg16')
 ACME = '20000000-0000-4000-8000-000000000001'
 BETA = '20000000-0000-4000-8000-000000000002'
 
@@ -213,6 +214,45 @@ class LimiteDiario(unittest.TestCase):
                 self.assertEqual(config, 'true,search_path=pg_catalog, public, pg_temp,false')
 
 
+# Rotación de la llave de las huellas (migración 026, RC-333): el comando lista las empresas con huellas de una
+# versión, que cirdan_app no ve por RLS. Mismo patrón que login_lookup().
+HUELLAS_POR_VERSION = "'public.password_hash_version_orgs(integer)'::regprocedure"
+# Una cuenta de Acme con la versión 77 y una de Beta con la 7, dentro de una transacción que se deshace.
+VERSIONES = """BEGIN;
+UPDATE users SET password_hash = 'lt77$x' WHERE id = '30000000-0000-4000-8000-000000000003';
+UPDATE users SET password_hash = 'lt7$x' WHERE id = (SELECT min(id::text)::uuid FROM users WHERE organization_id = '%s');
+SET LOCAL ROLE cirdan_app;
+SELECT count(*) FROM users;
+SELECT coalesce(string_agg(organization_id::text, ',' ORDER BY organization_id), '-') FROM password_hash_version_orgs(7);
+SELECT coalesce(string_agg(organization_id::text, ',' ORDER BY organization_id), '-') FROM password_hash_version_orgs(77);
+SELECT count(*) FROM password_hash_version_orgs(0);
+SELECT count(*) FROM password_hash_version_orgs(10000);
+SELECT count(*) FROM password_hash_version_orgs(NULL);
+ROLLBACK;
+""" % BETA
+
+
+class HuellasPorVersion(unittest.TestCase):
+
+    def test_12b_security_definer_con_search_path_fijo_y_sin_public(self):
+        config = scalar("SELECT prosecdef || ',' || array_to_string(proconfig, ';') || ','"
+                        " || has_function_privilege('public', oid, 'EXECUTE') || ','"
+                        " || has_function_privilege('cirdan_app', oid, 'EXECUTE') FROM pg_proc WHERE oid = %s;"
+                        % HUELLAS_POR_VERSION)
+        self.assertEqual(config, 'true,search_path=pg_catalog, public, pg_temp,false,true')
+
+    def test_12c_devuelve_solo_ids_de_empresa(self):
+        self.assertEqual(scalar("SELECT pg_get_function_result(%s);" % HUELLAS_POR_VERSION),
+                         'TABLE(organization_id uuid)')
+
+    def test_12d_solo_las_empresas_con_huellas_de_esa_version(self):
+        ok, out, err = psql(VERSIONES, user='postgres')
+        self.assertTrue(ok, err)
+        # 0: sin empresa, cirdan_app no ve ninguna cuenta. La versión 7 no es la 77 ('lt7$' no es prefijo de
+        # 'lt77$'). Fuera de 1 a 9999 o NULL no devuelve nada.
+        self.assertEqual(out.splitlines(), ['0', BETA, ACME, '0', '0', '0'])
+
+
 # Corrección del score de Acme (migración 010 y semillas 009 y 010, RC-72): la semilla 010 apaga el
 # trigger de solo inserción dentro de su transacción. Aquí se revisa que quedó encendido.
 class CorreccionScore(unittest.TestCase):
@@ -297,11 +337,11 @@ class MapeoMarcos(unittest.TestCase):
                 raise AssertionError(err)
             return out.splitlines()
 
-        # Los 31 textos y los 31 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 31 son
+        # Los 40 textos y los 40 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 40 son
         # las reglas de docs/codigos_reglas.md: una regla nueva lo sube.
         self.assertEqual(scalar("SELECT (SELECT count(*) FROM scoring_rule_texts) || ',' ||"
                                 " (SELECT count(*) FROM scoring_rule_framework_mappings) || ',' ||"
-                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '31,31,31')
+                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '40,40,40')
         self.assertEqual(filas("SELECT coalesce(t.code, m.rule_code) FROM scoring_rule_texts t"
                                " FULL JOIN scoring_rule_framework_mappings m ON m.rule_code = t.code"
                                " WHERE t.code IS NULL OR m.rule_code IS NULL"
@@ -309,13 +349,13 @@ class MapeoMarcos(unittest.TestCase):
                                " LEFT JOIN scoring_rule_framework_mappings m ON m.rule_code = r.code"
                                " WHERE m.rule_code IS NULL ORDER BY 1;"), [],
                          'códigos con texto y sin mapeo, con mapeo y sin texto, o reglas sin mapeo')
-        # Las 26 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
+        # Las 31 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
         # como quedan después de todos los UPDATE. test_10 de pruebas/test_catalogo_reglas.py lo lee del SQL sin saber
         # qué corre.
         doc = (Path(__file__).resolve().parent.parent / 'docs' / 'codigos_reglas.md').read_text(encoding='utf-8')
         filas_doc = re.findall(r'^\|\s*\d{2}\s*\|\s*`([a-z0-9_]+)`\s*\|(?:[^|\n]*\|){3}\s*#(\d+)', doc, re.MULTILINE)
         osint = [code for code, recolector in filas_doc if 14 <= int(recolector) <= 20]
-        self.assertEqual(len(osint), 26, 'docs/codigos_reglas.md ya no tiene 26 reglas de #14 a #20')
+        self.assertEqual(len(osint), 31, 'docs/codigos_reglas.md ya no tiene 31 reglas de #14 a #20')
         self.assertEqual(filas("SELECT unnest(ARRAY[%s]) EXCEPT SELECT code FROM scoring_rule_texts"
                                " WHERE reviewed_by = 'ErnestoDL' ORDER BY 1;" % ', '.join("'%s'" % c for c in osint)),
                          [], 'reglas OSINT sin texto o con un texto que no firmó ErnestoDL')
@@ -354,6 +394,277 @@ class MapeoMarcos(unittest.TestCase):
                                " FROM pg_constraint WHERE conname = 'scoring_rule_texts_mapping_fk';"),
                          ['scoring_rule_texts FOREIGN KEY (code) REFERENCES scoring_rule_framework_mappings(rule_code)'
                           ' DEFERRABLE INITIALLY DEFERRED true'], 'la FK de la 012 no está o no es diferida')
+
+    def test_16_la_semilla_022_llega_a_cada_juego(self):
+        # RC-239, desviación 15 de db/README.md: el orquestador rechaza un hallazgo cuyo código no está en el juego
+        # activo, así que la 022 agrega las 2 reglas del saludo TLS a cada juego que no es v1, activo o no, también
+        # al de una organización que cambió sus pesos, con la severidad, el peso y el tope de v1, como la 020 de los
+        # contenedores. Los juegos de ACME (activo) y BETA (inactivo) se arman con las reglas de v1 sin esas 2, la
+        # 022 corre otra vez y el ROLLBACK lo deshace todo.
+        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '022_reglas_tls_sitio.sql').read_text(
+            encoding='utf-8')
+        cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
+        tls = "('tls_certificate_invalid', 'tls_legacy_only')"
+        juego = """
+UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
+WITH j AS (
+  INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active)
+  SELECT '%(org)s', COALESCE((SELECT max(version) FROM scoring_rule_sets WHERE organization_id = '%(org)s'), 0) + 1,
+         category_weights, %(activo)s FROM scoring_rule_sets WHERE id = '90000000-0000-4000-8000-000000000001'
+  RETURNING id)
+INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty)
+SELECT j.id, r.code, r.category, r.base_severity, r.weight, r.max_penalty FROM j CROSS JOIN scoring_rules r
+ WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001' AND r.code NOT IN %(tls)s;"""
+        sql = ('BEGIN;' + juego % {'org': ACME, 'activo': 'true', 'tls': tls}
+               + juego % {'org': BETA, 'activo': 'false', 'tls': tls} + '\n' + cuerpo + """
+SELECT s.organization_id || ' ' || s.is_active || ' ' || r.code || ' ' || r.category || ' ' || r.base_severity
+       || ' ' || r.weight || ' ' || r.max_penalty
+  FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id
+ WHERE s.organization_id IN ('%s', '%s') AND r.code IN %s ORDER BY 1;
+SELECT 'sin las 2: ' || count(*) FROM scoring_rule_sets s
+   WHERE (SELECT count(*) FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code IN %s) <> 2;
+ROLLBACK;""" % (ACME, BETA, tls, tls))
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-5:],
+                         ['%s true tls_certificate_invalid infrastructure medium 1.000 10.00' % ACME,
+                          '%s true tls_legacy_only infrastructure medium 1.000 10.00' % ACME,
+                          '%s false tls_certificate_invalid infrastructure medium 1.000 10.00' % BETA,
+                          '%s false tls_legacy_only infrastructure medium 1.000 10.00' % BETA,
+                          'sin las 2: 0'])
+
+    def test_17_la_semilla_023_llega_a_cada_juego(self):
+        # RC-247, como la test_16: la 023 agrega file_share_link_in_repo a cada juego que no es v1, activo o no,
+        # también al de una organización que cambió sus pesos, con la severidad, el peso y el tope de v1. Los juegos
+        # de ACME (activo) y BETA (inactivo) se arman con las reglas de v1 sin esa, la 023 corre otra vez y el
+        # ROLLBACK lo deshace todo.
+        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '023_regla_enlaces_nube_repos.sql'
+                   ).read_text(encoding='utf-8')
+        cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
+        enlace ="('file_share_link_in_repo')"
+        juego = """
+UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
+WITH j AS (
+  INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active)
+  SELECT '%(org)s', COALESCE((SELECT max(version) FROM scoring_rule_sets WHERE organization_id = '%(org)s'), 0) + 1,
+         category_weights, %(activo)s FROM scoring_rule_sets WHERE id = '90000000-0000-4000-8000-000000000001'
+  RETURNING id)
+INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty)
+SELECT j.id, r.code, r.category, r.base_severity, r.weight, r.max_penalty FROM j CROSS JOIN scoring_rules r
+ WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001' AND r.code NOT IN %(enlace)s;"""
+        sql = ('BEGIN;' + juego % {'org': ACME, 'activo': 'true', 'enlace': enlace}
+               + juego % {'org': BETA, 'activo': 'false', 'enlace': enlace} + '\n' + cuerpo + """
+SELECT s.organization_id || ' ' || s.is_active || ' ' || r.code || ' ' || r.category || ' ' || r.base_severity
+       || ' ' || r.weight || ' ' || r.max_penalty
+  FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id
+ WHERE s.organization_id IN ('%s', '%s') AND r.code IN %s ORDER BY 1;
+SELECT 'sin la regla: ' || count(*) FROM scoring_rule_sets s
+   WHERE (SELECT count(*) FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code IN %s) <> 1;
+ROLLBACK;""" % (ACME, BETA, enlace, enlace))
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-3:],
+                         ['%s true file_share_link_in_repo data_leaks medium 1.000 10.00' % ACME,
+                          '%s false file_share_link_in_repo data_leaks medium 1.000 10.00' % BETA,
+                          'sin la regla: 0'])
+
+    def test_18_la_semilla_024_llega_a_cada_juego(self):
+        # RC-262, desviación 15 de db/README.md: como la 023, la 024 agrega exposed_ai_service a cada juego que no es
+        # v1, activo o no, también al de una organización que cambió sus pesos, con la severidad, el peso y el tope de
+        # v1. Los juegos de ACME (activo) y BETA (inactivo) se arman con las reglas de v1 sin ella, la 024 corre otra
+        # vez y el ROLLBACK lo deshace todo.
+        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '024_regla_ia.sql').read_text(
+            encoding='utf-8')
+        cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
+        juego = """
+UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
+WITH j AS (
+  INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active)
+  SELECT '%(org)s', COALESCE((SELECT max(version) FROM scoring_rule_sets WHERE organization_id = '%(org)s'), 0) + 1,
+         category_weights, %(activo)s FROM scoring_rule_sets WHERE id = '90000000-0000-4000-8000-000000000001'
+  RETURNING id)
+INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty)
+SELECT j.id, r.code, r.category, r.base_severity, r.weight, r.max_penalty FROM j CROSS JOIN scoring_rules r
+ WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001' AND r.code <> 'exposed_ai_service';"""
+        sql = ('BEGIN;' + juego % {'org': ACME, 'activo': 'true'} + juego % {'org': BETA, 'activo': 'false'}
+               + "\nSELECT 'antes: ' || count(*) FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id"
+               " WHERE s.organization_id IN ('%s', '%s') AND r.code = 'exposed_ai_service';\n" % (ACME, BETA)
+               + cuerpo + """
+SELECT s.organization_id || ' ' || s.is_active || ' ' || r.code || ' ' || r.category || ' ' || r.base_severity
+       || ' ' || r.weight || ' ' || r.max_penalty
+  FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id
+ WHERE s.organization_id IN ('%s', '%s') AND r.code = 'exposed_ai_service' ORDER BY 1;
+SELECT 'v1: ' || id FROM scoring_rules WHERE rule_set_id = '90000000-0000-4000-8000-000000000001'
+   AND code = 'exposed_ai_service';
+SELECT 'sin ella: ' || count(*) FROM scoring_rule_sets s
+   WHERE NOT EXISTS (SELECT 1 FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code = 'exposed_ai_service');
+ROLLBACK;""" % (ACME, BETA))
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        lineas = out.splitlines()
+        self.assertIn('antes: 0', lineas)
+        self.assertEqual(lineas[-4:],
+                         ['%s true exposed_ai_service infrastructure high 1.000 25.00' % ACME,
+                          '%s false exposed_ai_service infrastructure high 1.000 25.00' % BETA,
+                          'v1: 91000000-0000-4000-8000-000000000037',
+                          'sin ella: 0'])
+
+    def test_20_la_semilla_025_llega_a_cada_juego(self):
+        # RC-218, como la 022 en test_16, la 023 en test_17 y la 024 en test_18: la 025 agrega las 3 reglas de
+        # higiene de certificados de ct_logs a cada juego que no es v1, activo o no, con la severidad, el peso y el
+        # tope de v1. Los juegos de ACME (activo) y BETA (inactivo) se arman con las reglas de v1 sin esas 3, la 025
+        # corre otra vez y el ROLLBACK lo deshace.
+        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas'
+                   / '025_reglas_higiene_certificados.sql').read_text(encoding='utf-8')
+        cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
+        codigos = "('cert_internal_name', 'cert_broad_wildcard', 'cert_new_issuer')"
+        juego = """
+UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
+WITH j AS (
+  INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active)
+  SELECT '%(org)s', COALESCE((SELECT max(version) FROM scoring_rule_sets WHERE organization_id = '%(org)s'), 0) + 1,
+         category_weights, %(activo)s FROM scoring_rule_sets WHERE id = '90000000-0000-4000-8000-000000000001'
+  RETURNING id)
+INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty)
+SELECT j.id, r.code, r.category, r.base_severity, r.weight, r.max_penalty FROM j CROSS JOIN scoring_rules r
+ WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001' AND r.code NOT IN %(codigos)s;"""
+        sql = ('BEGIN;' + juego % {'org': ACME, 'activo': 'true', 'codigos': codigos}
+               + juego % {'org': BETA, 'activo': 'false', 'codigos': codigos}
+               + '\n' + cuerpo + """
+SELECT s.organization_id || ' ' || s.is_active || ' ' || r.code || ' ' || r.category || ' ' || r.base_severity
+       || ' ' || r.weight || ' ' || r.max_penalty
+  FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id
+ WHERE s.organization_id IN ('%s', '%s') AND r.code IN %s ORDER BY 1;
+SELECT 'sin las 3: ' || count(*) FROM scoring_rule_sets s
+   WHERE (SELECT count(*) FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code IN %s) <> 3;
+ROLLBACK;""" % (ACME, BETA, codigos, codigos))
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-7:],
+                         ['%s true cert_broad_wildcard infrastructure low 1.000 8.00' % ACME,
+                          '%s true cert_internal_name infrastructure low 1.000 8.00' % ACME,
+                          '%s true cert_new_issuer infrastructure medium 1.000 10.00' % ACME,
+                          '%s false cert_broad_wildcard infrastructure low 1.000 8.00' % BETA,
+                          '%s false cert_internal_name infrastructure low 1.000 8.00' % BETA,
+                          '%s false cert_new_issuer infrastructure medium 1.000 10.00' % BETA,
+                          'sin las 3: 0'])
+
+
+
+# RC-237, migración 024: cada juego de reglas guarda dónde empiezan sus bandas medio, alto y crítico. Todo corre en
+# una transacción con ROLLBACK. COMO_APP cambia a cirdan_app dentro de la sesión de postgres, así cada caso arma lo
+# que necesita sin dejar nada en la base.
+PESOS_IGUALES = '{"infrastructure":0.25,"digital_identity":0.25,"configuration":0.25,"data_leaks":0.25}'
+COMO_APP = "SET LOCAL ROLE cirdan_app;\nSET LOCAL app.current_org = '%s';\n"
+NUEVO_JUEGO = """INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active%(columnas)s)
+SELECT '%(org)s', coalesce(max(version), 0) + 1, '""" + PESOS_IGUALES + """', false%(valores)s
+  FROM scoring_rule_sets WHERE organization_id = '%(org)s';
+"""
+ULTIMOS_CORTES = ("SELECT band_medium_from || ',' || band_high_from || ',' || band_critical_from FROM scoring_rule_sets"
+                  " WHERE organization_id = '%s' ORDER BY version DESC LIMIT 1;\n")
+
+
+def nuevo_juego(org, cortes=None, columnas=('band_medium_from', 'band_high_from', 'band_critical_from')):
+    if cortes is None:
+        return NUEVO_JUEGO % {'org': org, 'columnas': '', 'valores': ''}
+    return NUEVO_JUEGO % {'org': org, 'columnas': ', ' + ', '.join(columnas),
+                          'valores': ', ' + ', '.join(str(c) for c in cortes)}
+
+
+class CortesDeBandas(unittest.TestCase):
+
+    def test_19_el_global_queda_en_40_60_80_y_las_columnas_son_obligatorias(self):
+        self.assertEqual(scalar("SELECT string_agg(DISTINCT band_medium_from || ',' || band_high_from || ','"
+                                " || band_critical_from, ' ') FROM scoring_rule_sets WHERE organization_id IS NULL;",
+                                user='postgres'), '40,60,80')
+        self.assertEqual(scalar("SELECT string_agg(attname || ':' || attnotnull, ',' ORDER BY attname) FROM pg_attribute"
+                                " WHERE attrelid = 'scoring_rule_sets'::regclass AND attname LIKE 'band_%';"),
+                         'band_critical_from:true,band_high_from:true,band_medium_from:true')
+
+    def test_19b_el_check_pide_enteros_en_orden_y_10_por_banda(self):
+        for cortes in ((10, 20, 30), (71, 81, 91), (50, 70, 85)):
+            with self.subTest(cortes=cortes):
+                ok, out, err = psql('BEGIN;\n' + nuevo_juego(ACME, cortes) + ULTIMOS_CORTES % ACME + 'ROLLBACK;',
+                                    user='postgres')
+                self.assertTrue(ok, err)
+                self.assertEqual(out.splitlines()[-1], ','.join(str(c) for c in cortes))
+        for cortes in ((9, 20, 30), (40, 49, 80), (40, 60, 69), (40, 60, 92), (60, 40, 80), (40, 60, 101)):
+            with self.subTest(cortes=cortes):
+                ok, _, err = psql('BEGIN;\n' + nuevo_juego(ACME, cortes) + 'ROLLBACK;', user='postgres')
+                self.assertFalse(ok)
+                self.assertIn('scoring_rule_sets_band_cutoffs_ck', err)
+        self.assertEqual(scalar("SELECT string_agg(DISTINCT format_type(atttypid, atttypmod), ',') FROM pg_attribute"
+                                " WHERE attrelid = 'scoring_rule_sets'::regclass AND attname LIKE 'band_%';"), 'smallint')
+
+    def test_19c_una_version_nueva_copia_los_cortes_de_la_anterior(self):
+        sql = ('BEGIN;\n' + COMO_APP % ACME
+               + nuevo_juego(ACME, (50, 70, 85)) + nuevo_juego(ACME) + ULTIMOS_CORTES % ACME
+               # BETA no tiene juego propio: el primero copia los del global activo.
+               + "SET LOCAL app.current_org = '%s';\n" % BETA + nuevo_juego(BETA) + ULTIMOS_CORTES % BETA
+               + 'ROLLBACK;')
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-2:], ['50,70,85', '40,60,80'])
+
+    def test_19d_cortes_a_medias_no_se_completan(self):
+        ok, _, err = psql('BEGIN;\n' + COMO_APP % ACME + nuevo_juego(ACME, (50,), ('band_medium_from',)) + 'ROLLBACK;',
+                          user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('null value in column', err)
+
+    def test_19e_cirdan_app_no_cambia_los_cortes_de_una_version_creada(self):
+        for columna in ('band_medium_from', 'band_high_from', 'band_critical_from'):
+            with self.subTest(columna=columna):
+                ok, _, err = psql('BEGIN;\n' + COMO_APP % ACME + nuevo_juego(ACME, (50, 70, 85))
+                                  + "UPDATE scoring_rule_sets SET %s = %s + 1 WHERE organization_id = '%s';\n"
+                                  % (columna, columna, ACME) + 'ROLLBACK;', user='postgres')
+                self.assertFalse(ok)
+                self.assertIn('permission denied', err)
+        ok, _, err = psql("BEGIN;\n" + COMO_APP % ACME + "UPDATE scoring_rule_sets SET band_high_from = 61"
+                          " WHERE organization_id IS NULL;\nROLLBACK;", user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('permission denied', err)
+
+    def test_19f_una_organizacion_no_ve_ni_cambia_los_cortes_de_otra(self):
+        # BETA crea su juego con 50, 70 y 85. ACME no lo ve, no lo activa y no le copia los cortes.
+        sql = ('BEGIN;\n' + COMO_APP % BETA + nuevo_juego(BETA, (50, 70, 85))
+               + "SET LOCAL app.current_org = '%s';\n" % ACME
+               + "SELECT 've ' || count(*) FROM scoring_rule_sets WHERE organization_id = '%s';\n" % BETA
+               + "WITH u AS (UPDATE scoring_rule_sets SET is_active = true WHERE organization_id = '%s' RETURNING 1)"
+                 " SELECT 'cambia ' || count(*) FROM u;\n" % BETA
+               + nuevo_juego(ACME) + ULTIMOS_CORTES % ACME
+               + "RESET ROLE;\nSELECT 'beta ' || is_active || ' ' || band_medium_from FROM scoring_rule_sets"
+                 " WHERE organization_id = '%s';\n" % BETA
+               + 'ROLLBACK;')
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-4:], ['ve 0', 'cambia 0', '40,60,80', 'beta false 50'])
+        ok, _, err = psql('BEGIN;\n' + COMO_APP % ACME + nuevo_juego(BETA, (50, 70, 85)) + 'ROLLBACK;', user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('row-level security', err)
+
+    def test_19g_el_global_no_se_modifica_desde_la_app(self):
+        antes = scalar("SELECT string_agg(concat_ws(' ', id, is_active, band_medium_from, band_high_from, band_critical_from),"
+                       " ',' ORDER BY id) FROM scoring_rule_sets WHERE organization_id IS NULL;", user='postgres')
+        ok, _, err = psql("BEGIN;\n" + COMO_APP % ACME + "UPDATE scoring_rule_sets SET is_active = false"
+                          " WHERE organization_id IS NULL;\nROLLBACK;", user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('row-level security', err)
+        ok, _, err = psql("BEGIN;\n" + COMO_APP % ACME + "INSERT INTO scoring_rule_sets (organization_id, version,"
+                          " category_weights, is_active) VALUES (NULL, 999, '" + PESOS_IGUALES + "', false);\nROLLBACK;",
+                          user='postgres')
+        self.assertFalse(ok)
+        self.assertIn('row-level security', err)
+        self.assertEqual(scalar("SELECT string_agg(concat_ws(' ', id, is_active, band_medium_from, band_high_from,"
+                                " band_critical_from), ',' ORDER BY id) FROM scoring_rule_sets"
+                                " WHERE organization_id IS NULL;", user='postgres'), antes)
+
+    def test_19h_la_funcion_del_trigger_tiene_search_path_fijo(self):
+        self.assertEqual(scalar("SELECT array_to_string(proconfig, ' ') FROM pg_proc"
+                                " WHERE oid = 'public.scoring_rule_sets_copiar_cortes()'::regprocedure;"),
+                         'search_path=pg_catalog, public, pg_temp')
+        self.assertEqual(scalar("SELECT has_function_privilege('cirdan_app', 'public.scoring_rule_sets_copiar_cortes()',"
+                                " 'EXECUTE')::text;"), 'false')
 
 
 if __name__ == '__main__':

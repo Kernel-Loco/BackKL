@@ -9,6 +9,8 @@
   "floor_applied": true,
   "floor_message": "Subido a 60 por 1 hallazgo crítico vigente; la suma ponderada da 28.",
   "critical_open": 1,
+  "critical_at_time": 1,
+  "needs_rescan": false,
   "method": "rules",
   "model_version": null,
   "model_fallback_reason": null,
@@ -37,12 +39,28 @@
     {"category": "data_leaks", "subcategory": "public_storage", "name": "Almacenamiento público", "findings": 0, "penalty": 0.0}
   ],
   "kris": [
-    {"kri": "certificates", "name": "Certificados", "status": "ok", "subcategories": ["certificates"], "sources": ["ct_logs"], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": 1, "max_severity": "high", "penalty": 20.0},
+    {"kri": "certificates", "name": "Certificados", "status": "partial", "subcategories": ["certificates"], "sources": ["ct_logs", "web"], "sources_failed": [], "sources_not_run": ["web"], "sources_partial": [], "rules_without_coverage": [], "findings": 1, "max_severity": "high", "penalty": 20.0},
     {"kri": "service_exposure", "name": "Exposición de servicios", "status": "partial", "subcategories": ["exposed_services", "exposed_apis"], "sources": ["shodan", "api_docs"], "sources_failed": [], "sources_not_run": ["api_docs"], "sources_partial": [], "rules_without_coverage": [], "findings": 0, "max_severity": null, "penalty": 0.0},
     {"kri": "email", "name": "Correo", "status": "ok", "subcategories": ["email"], "sources": ["dns"], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": 1, "max_severity": "medium", "penalty": 10.0},
     {"kri": "impersonation", "name": "Suplantación", "status": "ok", "subcategories": ["impersonation"], "sources": ["ct_logs"], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": 0, "max_severity": null, "penalty": 0.0},
     {"kri": "reputation", "name": "Reputación", "status": "no_source_yet", "subcategories": [], "sources": [], "sources_failed": [], "sources_not_run": [], "sources_partial": [], "rules_without_coverage": [], "findings": null, "max_severity": null, "penalty": null}
   ],
-  "kri_map_version": 2,
+  "coverage_gaps": [
+    {"code": "api_auth_not_declared", "source": "api_docs", "reason": "source_not_run"},
+    {"code": "debug_page_exposed", "source": "web", "reason": "source_not_run"},
+    {"code": "directory_listing", "source": "web", "reason": "source_not_run"},
+    {"code": "email_in_public_commits", "source": "github", "reason": "source_not_run"},
+    {"code": "email_pattern_exposed", "source": "identity", "reason": "source_not_run"},
+    {"code": "exposed_api_docs", "source": "api_docs", "reason": "source_not_run"},
+    {"code": "file_share_link_in_repo", "source": "github", "reason": "source_not_run"},
+    {"code": "known_vulnerability", "source": "web", "reason": "source_not_run"},
+    {"code": "outdated_software", "source": "web", "reason": "source_not_run"},
+    {"code": "personal_email_exposed", "source": "identity", "reason": "source_not_run"},
+    {"code": "secret_in_public_repo", "source": "github", "reason": "source_not_run"},
+    {"code": "server_version_disclosed", "source": "web", "reason": "source_not_run"},
+    {"code": "tls_certificate_invalid", "source": "web", "reason": "source_not_run"},
+    {"code": "tls_legacy_only", "source": "web", "reason": "source_not_run"}
+  ],
+  "kri_map_version": 7,
   "alert": {"threshold": 60, "triggered": true}
 }

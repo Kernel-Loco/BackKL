@@ -4,7 +4,8 @@ reales sobre un repo local, también sin red, y solo dentro del contenedor.
 
     python -m unittest -v pruebas/test_github.py
 
-El token falso se genera en cada corrida ('CIRDAN_FAKE_' más 32 hexadecimales): nunca vive en un archivo del repo.
+El token falso se genera en cada corrida ('CIRDAN_FAKE_' más 32 hexadecimales): nunca vive en un archivo del repo. Los
+enlaces para compartir falsos de RC-247 (enlaces_falsos) llevan un identificador armado igual.
 """
 import hashlib
 import io
@@ -70,6 +71,38 @@ def hallazgo_gitleaks(regla='cirdan-fake-token', archivo='config/.env', fecha='2
             'Fingerprint': 'c0ffee:%s:%s:3' % (archivo, regla)}
     base.update(cambios)
     return base
+
+
+def enlaces_falsos(marca=None):
+    """Un enlace para compartir falso de cada servicio (RC-247), por su regla de gitleaks, con el identificador `marca`
+    ('CIRDAN_FAKE_' más 32 hexadecimales si no se da), que se arma en cada corrida y nunca vive en un archivo."""
+    i = marca or 'CIRDAN_FAKE_' + secrets.token_hex(16)
+    return {'cirdan-enlace-google-drive': 'https://drive.google.com/file/d/%s/view?usp=sharing' % i,
+            'cirdan-enlace-onedrive': 'https://acmedemo-my.sharepoint.com/:x:/g/personal/ana_acme-demo_mx/%s?e=Ab12Cd' % i,
+            'cirdan-enlace-dropbox': 'https://www.dropbox.com/scl/fi/%s/reporte.xlsx?dl=0' % i}
+
+
+# Lo que tiene forma de ejemplo y no de enlace real: ninguna regla de enlaces lo halla. Los de plantilla (TU_ID_AQUI,
+# YOUR_SHARE_ID) tienen el largo y las letras de un identificador y los salta la allowlist de cada regla
+EJEMPLOS = ('https://drive.google.com/file/d/<ID>/view\n'
+            'https://drive.google.com/file/d/TU_ID_AQUI/view\n'
+            'https://drive.google.com/drive/folders/YOUR_GOOGLE_DRIVE_FOLDER_ID\n'
+            'https://drive.google.com/open?id=TU_ID_DE_CARPETA_EN_DRIVE_AQUI\n'
+            'https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID_GOES_HERE/edit\n'
+            'https://drive.google.com/drive/my-drive\n'
+            'https://docs.google.com/forms/d/e/1FAIpQLSdEjemploDeFormularioPublico00/viewform\n'
+            'https://1drv.ms/u/s!<ID>\n'
+            'https://1drv.ms/u/s!YOUR_SHARE_ID\n'
+            'https://1drv.ms/f/s!TU_ID_AQUI\n'
+            'https://acmedemo.sharepoint.com/:x:/r/sites/Ventas/Documentos/reporte.xlsx\n'
+            'https://www.dropbox.com/s/<ID>/archivo.pdf\n'
+            'https://www.dropbox.com/s/TU_ID_AQUI/archivo.pdf\n'
+            'https://www.dropbox.com/scl/fi/YOUR_FILE_ID/reporte.xlsx?dl=0\n'
+            'https://www.dropbox.com/scl/fo/EXAMPLE-FOLDER-0123/h?dl=0\n'
+            'https://www.dropbox.com/home/Documentos\n'
+            '[la carpeta](https://www.dropbox.com/s/YOUR_SHARE_ID)\n'
+            '`https://drive.google.com/drive/folders/YOUR_GOOGLE_DRIVE_FOLDER_ID`\n'
+            'Usa https://www.dropbox.com/s/SHARED_FOLDER_ID_HERE.\n')
 
 
 def commit(autor, quien, cuando):
@@ -437,6 +470,175 @@ class Secretos(unittest.TestCase):
             recolectar(procesos=ProcesosSimulados(reportes={'sitio': '{"no": "lista"}', 'api': '[1, 2]'}))
 
 
+class Enlaces(unittest.TestCase):
+    """RC-247: un enlace para compartir de Google Drive, de OneDrive o SharePoint o de Dropbox se reconoce solo por su
+    forma y da file_share_link_in_repo, sin el enlace en la evidencia y con una huella que no depende de él."""
+
+    def reglas(self):
+        return {regla['id']: regla for regla in tomllib.loads(gitleaks_reglas.REGLAS_ENLACES)['rules']}
+
+    def test_1_las_tres_reglas_son_las_de_servicios_enlace_sin_capturas_ni_paths_en_la_allowlist(self):
+        """Sin capturas, el secreto de gitleaks es el enlace entero y --redact lo tapa todo. Su allowlist solo lleva la
+        regex de PLANTILLA, sin paths, porque en gitleaks sus paths y sus regexes se unen con OR y una ruta de
+        documentación saltaría el enlace."""
+        reglas = self.reglas()
+        self.assertEqual(list(reglas), list(github.SERVICIOS_ENLACE))
+        for id_, regla in reglas.items():
+            with self.subTest(regla=id_):
+                self.assertEqual(sorted(regla), ['allowlist', 'description', 'id', 'keywords', 'regex'])
+                self.assertEqual(regla['allowlist'], {'regexes': [gitleaks_reglas.PLANTILLA]})
+                self.assertEqual(re.compile(regla['regex']).groups, 0)
+                self.assertEqual(regla['keywords'], [k.lower() for k in regla['keywords']])
+                self.assertTrue(github.REGLA_VALIDA.fullmatch(id_))
+        self.assertTrue(set(github.SERVICIOS_ENLACE).isdisjoint({'cirdan-fake-token'}))
+
+    def buscadores(self):
+        """{id de la regla: buscar(texto)} con el re de Python en modo ASCII, como el \\b de Go, y la allowlist sobre el
+        secreto, que es lo que casa. buscar da el Match o None."""
+        plantilla = re.compile(gitleaks_reglas.PLANTILLA, re.ASCII)
+
+        def buscador(regex):
+            def buscar(texto):
+                m = re.compile(regex, re.ASCII).search(texto)
+                return m if m and not plantilla.search(m.group(0)) else None
+            return buscar
+        return {id_: buscador(regla['regex']) for id_, regla in self.reglas().items()}
+
+    def test_2_reconocen_la_forma_de_cada_servicio_y_no_la_de_un_ejemplo(self):
+        """Las de Google Drive y Dropbox se llevan el enlace completo. La plantilla solo cuenta en el identificador: un
+        your, tu, example o ejemplo en el nombre del archivo o en la ruta de SharePoint no salta el enlace. Lo que
+        gitleaks halla de verdad lo prueba Integracion."""
+        reglas = self.buscadores()
+        i = 'CIRDAN_FAKE_' + secrets.token_hex(16)
+        positivos = {
+            'cirdan-enlace-google-drive': [
+                'https://drive.google.com/file/d/%s/view?usp=sharing' % i,
+                'https://drive.google.com/file/u/1/d/%s/view' % i,
+                'https://drive.google.com/drive/folders/%s?usp=drive_link' % i,
+                'https://drive.google.com/drive/u/0/folders/%s' % i,
+                'https://drive.google.com/open?id=%s' % i,
+                'https://drive.google.com/uc?export=download&id=%s' % i,
+                'https://drive.google.com/file/d/%s/view?usp=sharing&resourcekey=0-Ab12Cd' % i,
+                'https://docs.google.com/spreadsheets/d/%s/edit#gid=0' % i,
+                'https://DOCS.google.com/document/d/e/%s/pub' % i],
+            'cirdan-enlace-onedrive': [
+                'https://1drv.ms/u/s!%s' % i,
+                'https://1drv.ms/f/c/0123456789abcdef/%s' % i,
+                'https://onedrive.live.com/?redeem=%s' % i,
+                'https://onedrive.live.com/redir?resid=ABC123!105&authkey=!%s' % i,
+                'https://acmedemo.sharepoint.com/:w:/s/Ventas/%s?e=Xy12' % i,
+                'https://acmedemo-my.sharepoint.com/:x:/g/personal/ana_acme_mx/%s' % i,
+                'https://acmedemo-my.sharepoint.com/:w:/g/personal/tu_nguyen_acme_com/%s' % i,
+                'https://tuberlin-my.sharepoint.com/:x:/g/personal/ana_tu-berlin_de/%s?e=Ab12' % i,
+                'https://acmedemo.sharepoint.com/:w:/s/Example-Team/Your_Docs/%s' % i,
+                'https://onedrive.live.com/redir?resid=ABC123!105&tu_ref=1&authkey=!%s' % i],
+            'cirdan-enlace-dropbox': [
+                'https://www.dropbox.com/s/%s/reporte.pdf?dl=0' % i,
+                'https://www.dropbox.com/sh/%s/AAB?dl=0' % i,
+                'https://www.dropbox.com/scl/fi/%s/reporte.xlsx?rlkey=abc&dl=0' % i,
+                'https://dropbox.com/scl/fo/%s/h?dl=0' % i,
+                'https://dl.dropboxusercontent.com/s/%s/a.zip' % i,
+                'https://db.tt/%s' % i,
+                'https://www.dropbox.com/s/%s/Tu_reporte.pdf?dl=0' % i,
+                'https://www.dropbox.com/scl/fi/%s/Example-report.xlsx?rlkey=abc&dl=0' % i,
+                'https://www.dropbox.com/sh/%s/ejemplo_final?dl=0' % i,
+                'https://www.dropbox.com/s/%s/datos-here.csv' % i],
+        }
+        for esperada, enlaces in positivos.items():
+            for enlace in enlaces:
+                with self.subTest(enlace=enlace.replace(i, '<id>')):
+                    halladas = {id_: buscar('ver ' + enlace + ' aquí') for id_, buscar in reglas.items()}
+                    self.assertEqual([id_ for id_, m in halladas.items() if m], [esperada])
+                    self.assertIn(i, halladas[esperada].group(0))   # --redact tapa también el identificador
+                    if esperada != 'cirdan-enlace-onedrive':      # y el resto, con un resourcekey= o un rlkey=
+                        self.assertEqual(halladas[esperada].group(0), enlace.split('://', 1)[1])
+        negativos = EJEMPLOS.splitlines() + [
+            'https://notdrive.google.com/file/d/%s/view' % i, 'https://evildropbox.com/s/%s' % i,
+            'https://1drv.ms/u/s!corto', 'https://drive.google.com/file/d/corto123/view',
+            'https://www.dropbox.com/s/corto/a.pdf', 'https://acmedemo.sharepoint.com/:x:/g/corto',
+            # plantilla en el identificador, con el largo de uno real
+            'https://drive.google.com/file/d/EXAMPLE-FILE-ID-0123456789ABC/view',
+            'https://docs.google.com/document/d/ID_DEL_DOCUMENTO_DE_TU_EQUIPO/edit',
+            'https://www.dropbox.com/s/ID_DE_TU_ARCHIVO/a.pdf',
+            'https://www.dropbox.com/scl/fi/SHARED-FILE-ID-HERE/a.pdf?dl=0',
+            'https://acmedemo.sharepoint.com/:w:/g/personal/ana_acme_mx/TU_TOKEN_DE_SHAREPOINT_AQUI',
+            'https://onedrive.live.com/redir?resid=ABC123!105&authkey=!YOUR_AUTH_KEY',
+            'https://1drv.ms/f/c/0123456789abcdef/TU_TOKEN_AQUI']
+        for texto in negativos:
+            with self.subTest(texto=texto.replace(i, '<id>')):
+                self.assertEqual([id_ for id_, buscar in reglas.items() if buscar(texto)], [])
+
+    def test_2b_la_cola_de_google_drive_y_dropbox_corta_en_punto_y_coma_y_barra(self):
+        """Una clave pegada después del enlace con ; o | queda fuera del secreto del enlace, así que generic-api-key
+        la halla aparte. Con gitleaks real lo prueba test_12 de Integracion."""
+        reglas = self.buscadores()
+        i = 'CIRDAN_FAKE_' + secrets.token_hex(16)
+        enlaces = {'cirdan-enlace-google-drive': 'drive.google.com/file/d/%s/view?usp=sharing' % i,
+                   'cirdan-enlace-dropbox': 'www.dropbox.com/scl/fi/%s/a.xlsx?dl=0' % i}
+        for id_, enlace in enlaces.items():
+            for separador in (';', '|', ' ;', '|;'):
+                with self.subTest(regla=id_, separador=separador):
+                    m = reglas[id_]('URL=https://%s%sAPI_KEY=0123456789abcdef' % (enlace, separador))
+                    self.assertEqual(m.group(0), enlace)
+            with self.subTest(regla=id_, separador='&amp;'):   # el ; de un &amp; de HTML no corta
+                m = reglas[id_]('<a href="https://%s&amp;resourcekey=0-Ab12Cd">' % enlace)
+                self.assertEqual(m.group(0), enlace + '&amp;resourcekey=0-Ab12Cd')
+
+    def test_3_cada_enlace_da_file_share_link_in_repo_sin_el_enlace(self):
+        reporte = [hallazgo_gitleaks(regla, 'README.md', Match='REDACTED') for regla in github.SERVICIOS_ENLACE]
+        reporte.append(hallazgo_gitleaks())
+        res, _ = recolectar(procesos=ProcesosSimulados(reportes={'sitio': reporte, 'api': []}, log=''))
+        enlaces = [h for h in res.hallazgos if h.codigo == 'file_share_link_in_repo']
+        self.assertEqual(sorted(h.evidencia['tipo'] for h in enlaces), ['dropbox', 'google_drive', 'onedrive'])
+        h = next(h for h in enlaces if h.evidencia['tipo'] == 'dropbox')
+        self.assertEqual((h.severidad, h.activo), ('medium', DOMINIO))
+        self.assertEqual(h.titulo,
+                         'Enlace para compartir archivos de la nube publicado en GitHub: acme-demo/sitio, archivo README.md')
+        self.assertEqual(h.evidencia, {'title': h.titulo, 'repo': 'acme-demo/sitio', 'ruta': 'README.md',
+                                       'tipo': 'dropbox', 'huella': h.huella,
+                                       'primera_vez': '2026-09-01T12:00:00+00:00'})
+        self.assertEqual(h.caracteristicas, {'tipo': 'enlace_compartido_en_repositorio', 'antiguedad_dias': 44,
+                                             'exposicion': 'publica', 'sensibilidad': 'media'})
+        self.assertEqual(h.huella, huella('file_share_link_in_repo', 'acme-demo/sitio', 'README.md',
+                                          'cirdan-enlace-dropbox'))
+        self.assertEqual((h.clave, h.partes), ('acme-demo/sitio:README.md:cirdan-enlace-dropbox', ['acme-demo/sitio']))
+        (secreto,) = [h for h in res.hallazgos if h.codigo == 'secret_in_public_repo']
+        self.assertEqual(secreto.evidencia['tipo'], 'cirdan-fake-token')   # las demás reglas siguen dando secretos
+        self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+
+    def test_4_la_huella_no_depende_del_enlace_ni_del_commit(self):
+        def huellas(**cambios):
+            reporte = [hallazgo_gitleaks(regla, 'docs/guia.md', Match='REDACTED', **cambios)
+                       for regla in github.SERVICIOS_ENLACE]
+            res, _ = recolectar(procesos=ProcesosSimulados(reportes={'sitio': reporte, 'api': []}, log=''))
+            return sorted(h.huella for h in res.hallazgos)
+        uno = huellas(Commit='a' * 40, StartLine=1, EndColumn=90, Entropy=3.1)
+        self.assertEqual(uno, huellas(Commit='b' * 40, StartLine=7, EndColumn=140, Entropy=4.8, Fingerprint='otro'))
+        self.assertEqual(uno, sorted(huella('file_share_link_in_repo', 'acme-demo/sitio', 'docs/guia.md', regla)
+                                     for regla in github.SERVICIOS_ENLACE))
+
+    def test_5_un_enlace_sin_redactar_descarta_la_corrida_y_no_sale(self):
+        enlace = enlaces_falsos()['cirdan-enlace-dropbox']
+        for cambios in ({'Secret': enlace, 'Match': enlace}, {'Match': enlace}):
+            with self.subTest(campos=sorted(cambios)):
+                reporte = [hallazgo_gitleaks('cirdan-enlace-dropbox', 'README.md', **cambios)]
+                res, _ = recolectar(procesos=ProcesosSimulados(reporte=reporte))
+                self.assertEqual((res.estado, res.hallazgos, res.avisos), ('succeeded', [], [github.SIN_REDACTAR]))
+                self.assertNotIn(enlace.split('/')[5], json.dumps(res.a_dict(), ensure_ascii=False))
+
+    def test_6_graba_y_reproduce_el_enlace_igual(self):
+        reporte = [hallazgo_gitleaks('cirdan-enlace-google-drive', 'README.md', Match='REDACTED')]
+        with tempfile.TemporaryDirectory() as d:
+            carpeta = Path(d) / DOMINIO
+            grabado, _ = recolectar(procesos=ProcesosSimulados(reporte=reporte), modo='grabar', carpeta=carpeta,
+                                    nueva=True)
+            reproducido, _ = recolectar(sin_api, sin_procesos, modo='reproducir', carpeta=carpeta)
+        enlaces = [(h.clave, h.huella, h.evidencia) for h in grabado.hallazgos if h.codigo == 'file_share_link_in_repo']
+        self.assertEqual(len(enlaces), 2)   # uno por repo: api y sitio
+        self.assertEqual(enlaces, [(h.clave, h.huella, h.evidencia) for h in reproducido.hallazgos
+                                   if h.codigo == 'file_share_link_in_repo'])
+
+
 class Correos(unittest.TestCase):
     """D4: solo correos del dominio o subdominios, validados. Los demás solo se cuentan."""
 
@@ -560,7 +762,8 @@ class Procesos(unittest.TestCase):
             'github: se saltaron 2 repos de más de 100 MB o sin tamaño'])
         self.assertIn('github: cobertura parcial, se revisaron 2 de 4 repos', res.avisos)
         self.assertEqual(res.sin_revisar, ['acme-demo/grande', 'acme-demo/sin-tamano'])   # sin el fork ni el apagado
-        self.assertEqual(res.sin_cobertura, [])   # los dos códigos trajeron hallazgos: solo queda el aviso
+        # el secreto y el correo trajeron hallazgos: solo queda el aviso. El de los enlaces no trajo y va a sin_cobertura
+        self.assertEqual(res.sin_cobertura, ['file_share_link_in_repo'])
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
 
     def test_4_hasta_diez_repos_por_ultimo_push(self):
@@ -570,15 +773,15 @@ class Procesos(unittest.TestCase):
         self.assertEqual([ll.repo for ll in procesos.de('clone')], ['r%02d' % i for i in range(12, 2, -1)])
         self.assertIn('github: se saltaron 3 repos más allá de los 10 más recientes', res.avisos)
         self.assertIn('github: cobertura parcial, se revisaron 10 de 13 repos', res.avisos)
-        self.assertEqual(res.sin_cobertura, [])
+        self.assertEqual(res.sin_cobertura, ['file_share_link_in_repo'])
         self.assertFalse({h.codigo for h in res.hallazgos} & set(res.sin_cobertura))
 
-    def test_5_sin_hallazgos_y_con_cobertura_parcial_los_dos_codigos_van_a_sin_cobertura(self):
+    def test_5_sin_hallazgos_y_con_cobertura_parcial_los_codigos_sin_hallazgos_van_a_sin_cobertura(self):
         repos = [repo('r%02d' % i, '2026-10-%02dT00:00:00Z' % (i + 1)) for i in range(13)]
         res, _ = recolectar(ApiSimulada(repos=repos), ProcesosSimulados(reporte=[], log=''))
         self.assertEqual((res.hallazgos, res.sin_cobertura), ([], CODIGOS))
         res, _ = recolectar(ApiSimulada(repos=repos), ProcesosSimulados(log=''))
-        self.assertEqual(res.sin_cobertura, ['email_in_public_commits'])
+        self.assertEqual(res.sin_cobertura, ['file_share_link_in_repo', 'email_in_public_commits'])
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
 
     def test_6_una_pagina_llena_con_mas_repos_es_cobertura_parcial(self):
@@ -619,7 +822,8 @@ class Procesos(unittest.TestCase):
                                  [['acme-demo/sitio']])
                 self.assertEqual({tuple(h.partes) for h in res.hallazgos if h.codigo == 'email_in_public_commits'},
                                  {('acme-demo/sitio',)})
-                self.assertEqual(res.sin_cobertura, [])   # el código trae hallazgos: solo las partes protegen al de api
+                # los códigos traen hallazgos: solo las partes protegen al de api. El de los enlaces no trae
+                self.assertEqual(res.sin_cobertura, ['file_share_link_in_repo'])
                 self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
         repos = [repo('r%02d' % i, '2026-10-%02dT00:00:00Z' % (i + 1)) for i in range(13)]
         res, _ = recolectar(ApiSimulada(perfil=dict(PERFIL, public_repos=13), repos=repos), ProcesosSimulados())
@@ -783,12 +987,13 @@ class Cuota(unittest.TestCase):
                 time.sleep(self.espera)
                 return self.trozo
 
-        with mock.patch.object(github.urllib.request, 'urlopen', lambda req, timeout: Gotero(0.2, b'x')):
+        # RC-304: _descargar va por transporte.descargar. Sin red: transporte.abrir, la conexión, da el Gotero.
+        with mock.patch.object(github.transporte, 'abrir', lambda req, plazo, cronometro: Gotero(0.2, b'x')):
             inicio = time.monotonic()
-            with self.assertRaises(TimeoutError):
+            with self.assertRaises(github.transporte.PlazoVencido):
                 github._descargar('https://api.github.com/orgs/acme-demo', 1)
             self.assertLess(time.monotonic() - inicio, 5)
-        with mock.patch.object(github.urllib.request, 'urlopen', lambda req, timeout: Gotero(0, b'x' * 1024)), \
+        with mock.patch.object(github.transporte, 'abrir', lambda req, plazo, cronometro: Gotero(0, b'x' * 1024)), \
                 mock.patch.object(github, 'MAX_BYTES', 4000), self.assertRaises(ValueError):
             github._descargar('https://api.github.com/orgs/acme-demo', 30)
 
@@ -800,6 +1005,103 @@ class Cuota(unittest.TestCase):
         res = por_ejecutar(api=api)
         self.assertEqual((res.estado, res.consultas), ('succeeded', github.MAX_CONSULTAS))
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
+
+
+class TransporteApi(unittest.TestCase):
+    """RC-304: la API de GitHub sale por transporte.descargar(), como RDAP y Shodan: sin seguir redirecciones, sin los
+    proxies del entorno y solo a direcciones públicas en el 443 (RC-299). Sin red: se simula la conexión https
+    (transporte._Https.https_open, detrás del opener de verdad) o transporte.abrir, y transporte.resolver truena si
+    alguien intenta salir (getaddrinfo también, con un OSError que el hilo de resolver sí deja pasar)."""
+    URL = 'https://api.github.com/orgs/acme-demo'
+
+    def setUp(self):
+        for sin_red in (mock.patch.object(github.transporte, 'resolver',
+                                          side_effect=AssertionError('la prueba intentó salir a la red')),
+                        mock.patch('socket.getaddrinfo', side_effect=OSError('la prueba intentó salir a la red'))):
+            sin_red.start()
+            self.addCleanup(sin_red.stop)
+
+    @staticmethod
+    def respuesta(req, codigo, cuerpo=b'', cabeceras=()):
+        import http.client
+        import urllib.response
+        h = http.client.HTTPMessage()
+        for nombre, valor in cabeceras:
+            h[nombre] = valor
+        r = urllib.response.addinfourl(io.BytesIO(cuerpo), h, req.full_url, codigo)
+        r.msg = http.client.responses.get(codigo, '')
+        return r
+
+    def cliente(self):
+        return github.ClienteGitHub(dormir=lambda s: None)
+
+    def test_1_un_301_a_otro_host_falla_sin_segunda_peticion(self):
+        https, http_ = [], []
+
+        def https_open(handler, req):
+            https.append(req.full_url)
+            return self.respuesta(req, 301, cabeceras=[('Location', 'http://otro-host.example/orgs/acme-demo')])
+        with mock.patch.object(github.transporte._Https, 'https_open', https_open), \
+                mock.patch.object(github.transporte._Http, 'http_open', lambda h, req: http_.append(req) or 1 / 0):
+            c = self.cliente()
+            with self.assertRaises(FuenteNoResponde) as e:
+                c._api('/orgs/acme-demo', 'perfil')
+        self.assertEqual(str(e.exception), 'github: la API de GitHub no respondió (perfil)')
+        self.assertEqual((https, http_, c.consultas), ([self.URL], [], 1))   # ni otro intento ni el salto a http
+        with mock.patch.object(github.transporte, 'abrir', side_effect=github.transporte.Redirigida(
+                301, 'api.github.com', 'http://otro-host.example/')) as abrir:
+            c = self.cliente()
+            with self.assertRaises(FuenteNoResponde):
+                c._api('/orgs/acme-demo', 'perfil')
+        self.assertEqual((abrir.call_count, c.consultas), (1, 1))
+
+    def test_2_https_proxy_del_entorno_no_se_usa(self):
+        vistas = []
+
+        def https_open(handler, req):
+            vistas.append((req.host, req._tunnel_host, req.get_header('Accept'), req.get_header('User-agent'),
+                           req.get_header('X-github-api-version')))
+            return self.respuesta(req, 200, b'{"login": "acme-demo"}', [('Content-Type', 'application/json')])
+        proxies = {n: 'http://proxy.invalid:3128' for n in ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy',
+                                                            'ALL_PROXY', 'all_proxy')}
+        with mock.patch.dict(os.environ, proxies), mock.patch.object(github.transporte._Https, 'https_open', https_open):
+            self.assertEqual(github._descargar(self.URL, 30), b'{"login": "acme-demo"}')
+        self.assertEqual(vistas, [('api.github.com', None, 'application/vnd.github+json', github.AGENTE,
+                                   github.VERSION_API)])
+
+    def test_3_404_403_y_429_siguen_dando_noexiste_y_cuota(self):
+        for codigo, error in ((404, github.NoExiste), (403, github.CuotaAgotada), (429, github.CuotaAgotada)):
+            with self.subTest(codigo=codigo):
+                falla = urllib.error.HTTPError(self.URL, codigo, 'x', None, None)
+                with mock.patch.object(github.transporte, 'abrir', side_effect=falla):
+                    c = self.cliente()
+                    with self.assertRaises(error):
+                        c._api('/orgs/acme-demo', 'perfil')
+                self.assertEqual(c.consultas, 1)
+
+    def test_4_mas_de_max_bytes_y_plazo_vencido_fallan_como_hoy(self):
+        def grande(req, plazo, cronometro):
+            return self.respuesta(req, 200, b'x' * 5000)
+        casos = ((grande, 'grande'),
+                 (mock.Mock(side_effect=github.transporte.PlazoVencido('api.github.com no terminó')), 'plazo'))
+        for abrir, nombre in casos:
+            with self.subTest(nombre), mock.patch.object(github.transporte, 'abrir', abrir), \
+                    mock.patch.object(github, 'MAX_BYTES', 4000):
+                c = self.cliente()
+                with self.assertRaises(FuenteNoResponde) as e:
+                    c._api('/orgs/acme-demo', 'perfil')
+                self.assertEqual(str(e.exception), 'github: la API de GitHub no respondió (perfil)')
+                self.assertEqual(c.consultas, github.INTENTOS)   # se reintenta como cualquier falla de la red
+
+    def test_5_descargar_pasa_max_bytes_y_el_plazo(self):
+        pedidas = []
+
+        def descargar(req, plazo, tope, cronometro):
+            pedidas.append((req.full_url, round(plazo - cronometro()), tope))
+            return b'{}'
+        with mock.patch.object(github.transporte, 'descargar', descargar):
+            self.assertEqual(github._descargar(self.URL, 30), b'{}')
+        self.assertEqual(pedidas, [(self.URL, 30, github.MAX_BYTES)])
 
 
 class GrabarYReproducir(unittest.TestCase):
@@ -999,7 +1301,8 @@ class Contrato(unittest.TestCase):
             self.assertEqual(severidad, POR_CODIGO[codigo][5], codigo)
 
     def test_2_por_ejecutar_cumple_el_contrato(self):
-        res = por_ejecutar()
+        res = por_ejecutar(procesos=ProcesosSimulados(reporte=[
+            hallazgo_gitleaks(), hallazgo_gitleaks('cirdan-enlace-onedrive', 'README.md', Match='REDACTED')]))
         self.assertEqual(res.estado, 'succeeded', res.error)
         self.assertEqual(contrato.validar(res, codigos=set(POR_CODIGO)), [])
         self.assertLessEqual(res.consultas, github.MAX_CONSULTAS)
@@ -1020,10 +1323,11 @@ class Contrato(unittest.TestCase):
         self.assertEqual(len(rutas), len(set(rutas)))
         self.assertEqual(set(rutas), {nueva for nueva in gitleaks_reglas.CAMBIOS.values() if nueva}
                          | set(gitleaks_reglas.CONSERVADAS))
-        # Las 195 de omisión de 8.21.2 y la propia, cada una con su id
-        self.assertEqual(len(reglas['rules']), 196)
-        self.assertEqual(len({regla['id'] for regla in reglas['rules']}), 196)
-        self.assertEqual(reglas['rules'][-1], tomllib.loads(gitleaks_reglas.REGLA_PROPIA)['rules'][0])
+        # Las 195 de omisión de 8.21.2, la propia y las 3 de los enlaces para compartir (RC-247), cada una con su id
+        self.assertEqual(len(reglas['rules']), 199)
+        self.assertEqual(len({regla['id'] for regla in reglas['rules']}), 199)
+        self.assertEqual(reglas['rules'][-4], tomllib.loads(gitleaks_reglas.REGLA_PROPIA)['rules'][0])
+        self.assertEqual(reglas['rules'][-3:], tomllib.loads(gitleaks_reglas.REGLAS_ENLACES)['rules'])
 
     def test_4_la_imagen_pide_buildkit_y_no_fija_targetarch(self):
         """El builder clásico ignora ADD --checksum: la primera etapa lo detiene con --chmod antes de bajar nada, y
@@ -1061,7 +1365,8 @@ class LineaDeComandos(unittest.TestCase):
     def test_2_reproducir_sin_grabacion_avisa_y_sale_con_2(self):
         codigo, salida = self.correr('acme-demo.mx', '--reproducir')
         self.assertEqual(codigo, 2)
-        self.assertIn('Cobertura parcial: no se revisaron secret_in_public_repo ni email_in_public_commits.', salida)
+        self.assertIn('Cobertura parcial: no se revisaron secret_in_public_repo ni file_share_link_in_repo ni '
+                      'email_in_public_commits.', salida)
         self.assertIn('aviso: ' + github.SIN_GRABACION_DOMINIO, salida)
 
 
@@ -1101,11 +1406,14 @@ class Reglas(unittest.TestCase):
         self.assertTrue(texto.startswith('# Reglas de gitleaks 8.21.2 '))
         self.assertIn('\n# Copyright (c) 2019 Zachary Rice\n', texto)
         reglas = tomllib.loads(texto)
-        self.assertEqual(reglas['title'], 'LowTide: reglas de omisión de gitleaks y tokens falsos CIRDAN_FAKE_')
+        self.assertEqual(reglas['title'], 'LowTide: reglas de omisión de gitleaks, tokens falsos CIRDAN_FAKE_ y '
+                                          'enlaces para compartir de la nube')
         self.assertEqual(reglas['allowlist']['paths'],
                          [nueva for nueva in gitleaks_reglas.CAMBIOS.values() if nueva] + ['(^|/)node_modules/.*?$'])
         self.assertEqual((reglas['allowlist']['regexes'], reglas['allowlist']['stopwords']), (['^x$'], ['abc']))
-        self.assertEqual([regla['id'] for regla in reglas['rules']], ['uno', 'cirdan-fake-token'])
+        self.assertEqual([regla['id'] for regla in reglas['rules']],
+                         ['uno', 'cirdan-fake-token', 'cirdan-enlace-google-drive', 'cirdan-enlace-onedrive',
+                          'cirdan-enlace-dropbox'])
         self.assertEqual(reglas['rules'][0]['allowlist'], {'paths': [r'gitleaks\.toml']})  # la de cada regla no cambia
 
     def test_2_falla_si_una_ruta_de_cambios_ya_no_viene_en_la_version_de_gitleaks(self):
@@ -1129,12 +1437,13 @@ class Integracion(unittest.TestCase):
     Con INTEGRACION_GITHUB=1, como en el CI, falla en vez de saltarse si no hay git o gitleaks.
     """
 
-    def armar(self, d, extra=(), permitida=None, renombrar=None, marcas=(), rama=()):
+    def armar(self, d, extra=(), permitida=None, renombrar=None, marcas=(), rama=(), textos=None):
         """Un clon bare de un repo con un token que solo queda en el historial y otro en la versión actual. Cada ruta
         de `extra` lleva TOKEN en un último commit, y `permitida` lo lleva con un comentario gitleaks:allow. Con
         `renombrar` = (de, a), otro commit mueve el archivo de una ruta a la otra sin cambiarlo. Las rutas de `marcas`
         van en el último commit sin token, como marcas de entornos de Python. Una rama agrega las rutas de `rama` (las
-        marcas sin token y las demás con TOKEN), otro commit las quita, se fusiona con --no-ff y se borra."""
+        marcas sin token y las demás con TOKEN), otro commit las quita, se fusiona con --no-ff y se borra. `textos`
+        da {ruta: contenido} de otros archivos que van en ese último commit (RC-247)."""
         fuente, casa = os.path.join(d, 'fuente'), os.path.join(d, 'casa')
         os.mkdir(fuente)
         os.mkdir(casa)
@@ -1167,7 +1476,11 @@ class Integracion(unittest.TestCase):
             os.makedirs(os.path.join(fuente, os.path.dirname(ruta)), exist_ok=True)
             Path(fuente, ruta).write_text('home = /usr/bin\n', encoding='utf-8')
             git('add', '-f', ruta)
-        if extra or permitida or marcas:
+        for ruta, contenido in (textos or {}).items():
+            os.makedirs(os.path.join(fuente, os.path.dirname(ruta)), exist_ok=True)
+            Path(fuente, ruta).write_text(contenido, encoding='utf-8')
+            git('add', '-f', ruta)
+        if extra or permitida or marcas or textos:
             git('commit', '-q', '-m', 'cuatro')
         if renombrar:
             os.makedirs(os.path.join(fuente, os.path.dirname(renombrar[1])), exist_ok=True)
@@ -1293,6 +1606,115 @@ class Integracion(unittest.TestCase):
             destino, casa = self.armar(d, rama=rama)
             datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
         self.assertEqual([s['ruta'] for s in datos['secretos']], ['config/.env', 'venv2/bin/activate', 'viejo.txt'])
+
+
+    def con_enlaces(self, marca):
+        """Un enlace falso de cada servicio con el identificador `marca`, en un README, en docs/ y en una wiki, y los
+        ejemplos de EJEMPLOS en otro archivo de docs/. (enlaces, datos de analizar)."""
+        enlaces = enlaces_falsos(marca)
+        textos = {'README.md': 'Reporte: %s\n' % enlaces['cirdan-enlace-google-drive'],
+                  'docs/guia.md': 'La carpeta [está aquí](%s).\n' % enlaces['cirdan-enlace-onedrive'],
+                  'wiki/Inicio.md': '* Descarga: <%s>\n' % enlaces['cirdan-enlace-dropbox'],
+                  'docs/ejemplos.md': EJEMPLOS}
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, textos=textos)
+            return enlaces, github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+
+    def test_9_halla_un_enlace_de_cada_servicio_aunque_este_en_la_documentacion_y_no_lo_guarda(self):
+        """RC-247. El identificador lleva CIRDAN_FAKE_, así que la regla propia también lo halla, como secreto."""
+        marca = 'CIRDAN_FAKE_' + secrets.token_hex(16)
+        enlaces, datos = self.con_enlaces(marca)
+        self.assertEqual([(s['ruta'], s['regla']) for s in datos['secretos']], sorted([
+            ('README.md', 'cirdan-enlace-google-drive'), ('docs/guia.md', 'cirdan-enlace-onedrive'),
+            ('wiki/Inicio.md', 'cirdan-enlace-dropbox'), ('README.md', 'cirdan-fake-token'),
+            ('docs/guia.md', 'cirdan-fake-token'), ('wiki/Inicio.md', 'cirdan-fake-token'),
+            ('config/.env', 'cirdan-fake-token'), ('viejo.txt', 'cirdan-fake-token')]))
+        hallazgos = [github.hallazgo_de_gitleaks(DOMINIO, '%s/sitio' % ORG, s, AHORA) for s in datos['secretos']]
+        self.assertEqual(sorted((h.codigo, h.evidencia['tipo']) for h in hallazgos
+                                if h.codigo == 'file_share_link_in_repo'),
+                         [('file_share_link_in_repo', 'dropbox'), ('file_share_link_in_repo', 'google_drive'),
+                          ('file_share_link_in_repo', 'onedrive')])
+        texto = json.dumps([datos, [(h.titulo, h.evidencia, h.clave) for h in hallazgos]], ensure_ascii=False)
+        for enlace in enlaces.values():
+            self.assertNotIn(enlace, texto)
+        self.assertNotIn(marca[len('CIRDAN_FAKE_'):], texto)
+
+    def test_10_la_huella_de_un_enlace_no_depende_del_enlace(self):
+        def huellas(marca):
+            _, datos = self.con_enlaces(marca)
+            return [(s['ruta'], github.hallazgo_de_gitleaks(DOMINIO, '%s/sitio' % ORG, s, AHORA).huella)
+                    for s in datos['secretos'] if s['regla'] in github.SERVICIOS_ENLACE]
+        uno = huellas('CIRDAN_FAKE_' + secrets.token_hex(16))
+        self.assertEqual(len(uno), 3)
+        self.assertEqual(uno, huellas('CIRDAN_FAKE_' + secrets.token_hex(20)))
+
+    def test_11_un_enlace_con_resourcekey_o_rlkey_no_da_ademas_un_secreto(self):
+        """generic-api-key halla el valor de un resourcekey= o un rlkey= al final de la línea o antes de una comilla.
+        Como las reglas de Google Drive y Dropbox se llevan el resto del enlace, ese valor queda dentro de su secreto y
+        gitleaks quita el genérico, que daría secret_in_public_repo. El valor no lleva CIRDAN_FAKE_ porque 'fake' es
+        palabra de stopwords de generic-api-key y lo escondería: son hexadecimales al azar que se arman en cada corrida
+        y solo viven en el clon temporal."""
+        marca = 'CIRDAN_FAKE_' + secrets.token_hex(16)
+        clave = secrets.token_hex(16)
+        textos = {'README.md': 'https://drive.google.com/file/d/%s/view?usp=sharing&resourcekey=0-%s\n'
+                               % (marca, clave),
+                  'docs/config.json': '{"carpeta": "https://drive.google.com/drive/folders/%s?resourcekey=0-%s"}\n'
+                                      % (marca, clave),
+                  'wiki/Inicio.md': 'https://www.dropbox.com/scl/fi/%s/a.xlsx?rlkey=%s\n' % (marca, clave)}
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, textos=textos)
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        self.assertEqual(sorted((s['ruta'], s['regla']) for s in datos['secretos'] if s['ruta'] in textos), sorted([
+            ('README.md', 'cirdan-enlace-google-drive'), ('docs/config.json', 'cirdan-enlace-google-drive'),
+            ('wiki/Inicio.md', 'cirdan-enlace-dropbox'), ('README.md', 'cirdan-fake-token'),
+            ('docs/config.json', 'cirdan-fake-token'), ('wiki/Inicio.md', 'cirdan-fake-token')]))
+        self.assertNotIn(clave, json.dumps(datos))
+
+    def clave_generica(self):
+        """Un valor al azar que generic-api-key halla en API_KEY=<valor>: 32 caracteres de token_urlsafe sin ninguna de
+        sus stopwords ni lo que salta su allowlist. Como en test_11, no lleva CIRDAN_FAKE_ porque 'fake' es una de esas
+        stopwords, y solo vive en el clon temporal."""
+        regla = next(r for r in tomllib.loads(github.REGLAS.read_text(encoding='utf-8'))['rules']
+                     if r['id'] == 'generic-api-key')
+        salta = [re.compile(r) for r in regla['allowlist']['regexes']]
+        while True:
+            clave = secrets.token_urlsafe(24)
+            if (any(c.isdigit() for c in clave)     # gitleaks descarta un generic-* sin dígito
+                    and not any(p in clave.lower() for p in regla['allowlist']['stopwords'])
+                    and not any(r.search('API_KEY=' + clave) for r in salta)):
+                return clave
+
+    def test_12_la_plantilla_solo_cuenta_en_el_identificador_y_una_clave_tras_un_punto_y_coma_o_una_barra_sale(self):
+        """Un tu_ o un Tu_ en la ruta de SharePoint o en el nombre del archivo de Dropbox no salta el enlace, y la
+        clave pegada después del enlace con ; o | queda fuera de su secreto: gitleaks no la quita y da su
+        generic-api-key, que github.py vuelve secret_in_public_repo."""
+        marca = 'CIRDAN_FAKE_' + secrets.token_hex(16)
+        claves = [self.clave_generica(), self.clave_generica()]
+        textos = {'README.md': 'URL=https://drive.google.com/file/d/%s/view;API_KEY=%s\n' % (marca, claves[0]),
+                  'docs/config.txt': 'https://www.dropbox.com/scl/fi/%s/a.xlsx?dl=0|API_KEY=%s\n' % (marca, claves[1]),
+                  'wiki/Inicio.md': '* Descarga: https://www.dropbox.com/s/%s/Tu_reporte.pdf?dl=0\n' % marca,
+                  'docs/equipo.md': 'https://acmedemo-my.sharepoint.com/:w:/g/personal/tu_nguyen_acme_com/%s\n'
+                                    % marca,
+                  # el ; de un &amp; no corta: el resourcekey= y el rlkey= quedan dentro del enlace, sin genérico
+                  'docs/pagina.html': '<a href="https://drive.google.com/file/d/%s/view?usp=sharing&amp;'
+                                      'resourcekey=0-%s">x</a>\n' % (marca, secrets.token_hex(16)),
+                  'docs/feed.xml': '<link>https://www.dropbox.com/scl/fi/%s/a.xlsx?dl=0&amp;rlkey=%s</link>\n'
+                                   % (marca, secrets.token_hex(16))}
+        with tempfile.TemporaryDirectory() as d:
+            destino, casa = self.armar(d, textos=textos)
+            datos = github.ClienteGitHub(temporal=d).analizar(destino, casa, ORG, 'sitio', DOMINIO)
+        secretos = [s for s in datos['secretos'] if s['ruta'] in textos]
+        self.assertEqual(sorted((s['ruta'], s['regla']) for s in secretos), sorted([
+            ('README.md', 'cirdan-enlace-google-drive'), ('README.md', 'generic-api-key'),
+            ('docs/config.txt', 'cirdan-enlace-dropbox'), ('docs/config.txt', 'generic-api-key'),
+            ('wiki/Inicio.md', 'cirdan-enlace-dropbox'), ('docs/equipo.md', 'cirdan-enlace-onedrive'),
+            ('docs/pagina.html', 'cirdan-enlace-google-drive'), ('docs/feed.xml', 'cirdan-enlace-dropbox')]
+            + [(ruta, 'cirdan-fake-token') for ruta in textos]))
+        codigos = sorted(github.hallazgo_de_gitleaks(DOMINIO, '%s/sitio' % ORG, s, AHORA).codigo for s in secretos
+                         if s['regla'] == 'generic-api-key')
+        self.assertEqual(codigos, ['secret_in_public_repo', 'secret_in_public_repo'])
+        for clave in claves:
+            self.assertNotIn(clave, json.dumps(datos))
 
 
 if __name__ == '__main__':

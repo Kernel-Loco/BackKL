@@ -34,7 +34,7 @@ from pathlib import Path
 CARPETA_GRABADAS = Path(__file__).resolve().parent / 'respuestas_grabadas'   # dentro del paquete, viaja con el código
 MODOS = ('vivo', 'grabar', 'reproducir')
 ESTADOS = ('succeeded', 'failed')                                                    # scan_source_runs.status final de una corrida
-TIPOS_ACTIVO = ('domain', 'subdomain', 'ip', 'service', 'certificate', 'email', 'api_doc')   # assets.asset_type
+TIPOS_ACTIVO = ('domain', 'subdomain', 'ip', 'service', 'certificate', 'email', 'api_doc', 'profile')   # assets.asset_type
 SEVERIDADES = ('critical', 'high', 'medium', 'low')                                  # scoring_rules.base_severity
 CARACTERISTICAS = ('tipo', 'antiguedad_dias', 'exposicion', 'sensibilidad')          # las del reto (lámina 7)
 EXPOSICIONES = ('directa', 'publica')     # directa: el activo responde en internet. publica: el dato es público
@@ -70,7 +70,7 @@ class SinGrabacion(FuenteNoResponde):
 class Activo:
     tipo: str                      # uno de TIPOS_ACTIVO
     valor: str                     # nombre, IP, ip:puerto/protocolo, correo, huella del certificado o URL del documento
-    atributos: dict = field(default_factory=dict)   # va a assets.attributes. ip, service, certificate y api_doc llevan 'host' o 'hosts'
+    atributos: dict = field(default_factory=dict)   # va a assets.attributes. ip, service, certificate, api_doc y profile llevan 'host' o 'hosts'
 
 
 @dataclass
@@ -97,6 +97,7 @@ class Resultado:
     activos: list = field(default_factory=list)
     hallazgos: list = field(default_factory=list)
     sin_cobertura: list = field(default_factory=list)  # códigos que la fuente no pudo revisar: cobertura parcial, no 0
+    sin_llave: list = field(default_factory=list)  # de sin_cobertura, los que faltaron por no tener la llave (RC-229)
     revisados: list | None = None    # None si revisó todo. Si no, las partes que sí revisó completas (#23)
     sin_revisar: list | None = None  # con revisados, las que existen, revisaría y no revisó. None si no las sabe
     omitidos: list = field(default_factory=list)  # huellas de lo que sigue ahí pero un tope no deja reportar (#23)
@@ -204,6 +205,10 @@ def _errores_activo(a):
         # El filtro de alcance mira 'host' y 'hosts': con la URL de otro sitio, o con otro nombre además del suyo,
         # pasaría como si fuera del dominio
         errores.append("activo %r: debe ser una URL https del sitio de su 'host', y solo de ese" % a.valor)
+    elif a.tipo == 'profile' and _host_de_url(a.valor) is None:
+        # Un perfil público (#20, RC-56) es la URL https del perfil en su red: GitHub, LinkedIn y otras. Su sitio no es
+        # del dominio, así que el filtro de alcance mira 'hosts', los nombres del dominio que lo ligan
+        errores.append("activo %r: debe ser una URL https sin usuario, puerto, consulta ni fragmento" % a.valor)
     return errores
 
 
@@ -246,6 +251,8 @@ def validar(res, codigos=None):
         errores.append('sin_cobertura tiene códigos repetidos')
     elif codigos is not None and set(sin) - set(codigos):
         errores.append('sin_cobertura: %s no está en el catálogo de reglas' % ', '.join(sorted(set(sin) - set(codigos))))
+    if not isinstance(res.sin_llave, list) or (isinstance(sin, list) and set(res.sin_llave) - set(sin)):
+        errores.append('sin_llave debe ser una lista con códigos de sin_cobertura')
     rev, falta = res.revisados, res.sin_revisar
     errores += _errores_partes('revisados', rev, puede_faltar=True)
     errores += _errores_partes('sin_revisar', falta, puede_faltar=True)
@@ -349,8 +356,8 @@ def en_alcance_nombre(nombre, dominio):
 
 
 def en_alcance(activo, dominio):
-    """Nombres por su nombre, correos por su dominio, y IP, servicios, certificados y documentos de API por su 'host' o
-    'hosts'."""
+    """Nombres por su nombre, correos por su dominio, y IP, servicios, certificados, documentos de API y perfiles por su
+    'host' o 'hosts'."""
     if activo.tipo in ('domain', 'subdomain'):
         return en_alcance_nombre(activo.valor, dominio)
     if activo.tipo == 'email':

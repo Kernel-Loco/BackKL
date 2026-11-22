@@ -117,10 +117,11 @@ def evento_escaneo(dominio, s, ahora, export_id):
 
 
 def evento_score(dominio, sc, ahora, export_id):
-    """El último score con su banda y el score de cada categoría."""
+    """El último score con su banda, con los cortes de su juego de reglas (RC-237), y el score de cada categoría."""
+    cortes = {'medium': sc['band_medium_from'], 'high': sc['band_high_from'], 'critical': sc['band_critical_from']}
     evento = {
         'vendor_product': VENDOR_PRODUCT, 'score_id': sc['id'], 'scan_id': sc['scan_id'], 'domain': dominio,
-        'score': sc['score'], 'band': criterio.banda(sc['score']), 'method': sc['method'],
+        'score': sc['score'], 'band': criterio.banda(sc['score'], cortes), 'method': sc['method'],
         'model_version': sc['model_version'], 'rule_set_version': sc['rule_set_version'], 'reason': sc['reason'],
         'partial_coverage': sc['partial_coverage'], 'computed_at': _iso(sc['computed_at']),
         **{'score_' + c: sc['category_scores'].get(c) for c in criterio.CATEGORIAS},

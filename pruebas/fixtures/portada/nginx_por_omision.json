@@ -1,0 +1,15 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de la página por omisión de nginx, fuera del alcance de la tarjeta, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 200,
+ "cabeceras": [
+  [
+   "Server",
+   "nginx"
+  ],
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!DOCTYPE html>\n<html>\n<head>\n<title>Welcome to nginx!</title>\n</head>\n<body>\n<h1>Welcome to nginx!</h1>\n<p>If you see this page, the nginx web server is successfully installed and working.</p>\n</body>\n</html>\n"
+}

@@ -87,7 +87,17 @@ def encrypt_secret(secret, user_id):
 
 
 def decrypt_secret(blob, user_id):
-    blob = bytes(blob)
+    if isinstance(blob, memoryview):
+        blob = blob.tobytes()
+    elif isinstance(blob, str):
+        text = blob.strip()
+        if text.startswith('\\x'):
+            blob = bytes.fromhex(text[2:])
+        else:
+            # Compatibilidad con datos legados serializados como base64.
+            blob = base64.b64decode(text)
+    else:
+        blob = bytes(blob)
     return AESGCM(_key()).decrypt(blob[:12], blob[12:], str(user_id).encode()).decode()
 
 

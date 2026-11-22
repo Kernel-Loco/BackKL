@@ -22,8 +22,8 @@ from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa
 from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a, bases_por_defecto, sin_llave  # noqa: E402
 from pruebas.test_subfinder import CdxSimulado, con_cdx  # noqa: E402
 from pruebas.test_rdap import HttpSimulado as RdapSimulado, respuesta as respuesta_rdap  # noqa: E402
-from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, rdap,  # noqa: E402
-                                 registros_dns, shodan, subfinder, visita)
+from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, identidad,  # noqa: E402
+                                 rdap, registros_dns, shodan, subfinder, visita)
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
@@ -428,7 +428,10 @@ class Ejecutar(unittest.TestCase):
                     mock.patch.object(shodan, '_resolver_a', ResolvedorSimulado({'acme-demo.mx': a(CAMARA)})), \
                     mock.patch.object(rdap, '_descargar', RdapSimulado(dominios={'acme-demo.mx': respuesta_rdap('acme-demo.mx')})),                     mock.patch.object(visita, '_descargar_api', HttpSimulado()), mock.patch.object(api_docs, '_descargar_ct', HttpSimulado()), mock.patch.object(api_docs, '_visitar', lambda url, timeout: {'estado': 404, 'doc': None}),                     mock.patch.object(visita, '_visitar', lambda url, timeout: {
                         'estado': 200, 'cabeceras': [['Server', 'nginx']], 'cuerpo': '<html></html>'}), \
-                    mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo'}):
+                    mock.patch.object(identidad, '_visitar', lambda url, timeout: {
+                        'estado': 200, 'cabeceras': [['Server', 'nginx']], 'cuerpo': '<html></html>', 'cortado': False}), \
+                    mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo',
+                                                 identidad.LLAVE: 'CIRDAN_FAKE_llave_del_hmac_de_identidad'}):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
                 (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')  # de una grabación anterior
@@ -455,8 +458,9 @@ class Ejecutar(unittest.TestCase):
             self.assertIs(type(maximo), int, fuente)
             self.assertGreaterEqual(maximo, 0, fuente)
         self.assertEqual((crtsh.MAX_CONSULTAS, subfinder.MAX_CONSULTAS, github.MAX_CONSULTAS, shodan.MAX_CONSULTAS,
-                          rdap.MAX_CONSULTAS, visita.MAX_CONSULTAS, api_docs.MAX_CONSULTAS, ejemplo.MAX_CONSULTAS),
-                         (36, 25, 16, 214, 10, 184, 264, 0))
+                          rdap.MAX_CONSULTAS, visita.MAX_CONSULTAS, api_docs.MAX_CONSULTAS, identidad.MAX_CONSULTAS,
+                          ejemplo.MAX_CONSULTAS),
+                         (36, 25, 16, 214, 10, 184, 264, 171, 0))
 
     def test_15c_el_respaldo_de_ct_logs_no_pasa_de_su_maximo(self):
         """crt.sh caído en sus dos búsquedas y Cert Spotter con MAX_PAGINAS páginas que responden al último intento: 18
@@ -479,7 +483,7 @@ class Ejecutar(unittest.TestCase):
         self.assertIn(certspotter.INCOMPLETO, res.avisos)  # se cortó en MAX_PAGINAS
         self.assertEqual(res.consultas, 2 * crtsh.INTENTOS + certspotter.MAX_PAGINAS * crtsh.INTENTOS)
         self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
-        self.assertEqual(res.sin_cobertura, ['cert_expired', 'lookalike_domain'])  # con crt.sh caído no se buscan
+        self.assertEqual(res.sin_cobertura, certspotter.SIN_COBERTURA)  # con crt.sh caído no se buscan
 
     def test_15d_el_peor_caso_de_ct_logs_llega_justo_a_su_maximo(self):
         """Con crt.sh arriba y los parecidos (#109, RC-226): el comodín falla sus 3 intentos, la búsqueda por nombre
@@ -560,7 +564,8 @@ class Ejecutar(unittest.TestCase):
         ninguno = self.escanear(CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS}))
         self.assertEqual((ninguno.estado, ninguno.sin_cobertura, ninguno.avisos), ('succeeded', [], []))
         self.assertEqual(self.parecidos(ninguno), [])  # se buscó y no hay: 0 parecidos con cobertura
-        self.assertEqual({h.codigo for h in ninguno.hallazgos}, {'cert_expired', 'cert_expiring_soon'})
+        self.assertEqual({h.codigo for h in ninguno.hallazgos},
+                         {'cert_expired', 'cert_expiring_soon', 'cert_internal_name'})
 
     def test_16c_si_crtsh_no_responde_a_los_parecidos_quedan_sin_cobertura(self):
         """El Hecho cuando 3 de RC-226: nunca '0 parecidos'. crt.sh da los subdominios y luego deja de responder."""
@@ -575,7 +580,8 @@ class Ejecutar(unittest.TestCase):
         res = self.escanear(t)
         self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']))
         self.assertEqual(self.parecidos(res), [])
-        self.assertEqual({h.codigo for h in res.hallazgos}, {'cert_expired', 'cert_expiring_soon'})  # lo demás sigue
+        self.assertEqual({h.codigo for h in res.hallazgos},
+                         {'cert_expired', 'cert_expiring_soon', 'cert_internal_name'})  # lo demás sigue
         # H3 de la ronda 3: sin %marca% no se consulta ninguna variante. Solo salen sus 2 intentos, no 6 más.
         self.assertEqual([crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(u).query)['q'][0] for u in t.urls],
                          ['%.acme-demo.mx'] + ['%acme-demo%'] * crtsh.INTENTOS_PARECIDOS)
@@ -585,7 +591,7 @@ class Ejecutar(unittest.TestCase):
         self.assertIn('Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).', crtsh.resumen(res))
 
         caido = self.escanear(RespaldoSimulado())  # crt.sh caído del todo: respaldo de Cert Spotter, sin parecidos
-        self.assertEqual((caido.estado, caido.sin_cobertura), ('succeeded', ['cert_expired', 'lookalike_domain']))
+        self.assertEqual((caido.estado, caido.sin_cobertura), ('succeeded', certspotter.SIN_COBERTURA))
         self.assertEqual(self.parecidos(caido), [])
 
     def test_16c2_una_variante_sin_respuesta_no_cierra_su_parecido_y_sin_marca_no_hay_cobertura(self):

@@ -1,0 +1,19 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de ASP.NET con customErrors en Off, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 500,
+ "cabeceras": [
+  [
+   "Server",
+   "Microsoft-IIS/10.0"
+  ],
+  [
+   "X-Powered-By",
+   "ASP.NET"
+  ],
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!DOCTYPE html>\n<html>\n    <head>\n        <title>Login failed for user &#39;acme_web&#39;.</title>\n        <meta name=\"viewport\" content=\"width=device-width\" />\n        <style>\n         body {font-family:\"Verdana\";font-weight:normal;font-size: .7em;color:black;}\n        </style>\n    </head>\n\n    <body bgcolor=\"white\">\n\n            <span><H1>Server Error in '/' Application.<hr width=100% size=1 color=silver></H1>\n\n            <h2> <i>Login failed for user &#39;acme_web&#39;.</i> </h2></span>\n\n            <font face=\"Arial, Helvetica, Geneva, SunSans-Regular, sans-serif \">\n\n            <b> Description: </b>An unhandled exception occurred during the execution of the current web request.\n\n            <br><br>\n\n            <b> Stack Trace: </b> <br><br>\n\n            <table width=100% bgcolor=\"#ffffcc\">\n               <tr><td><code><pre>\n[SqlException (0x80131904): Login failed for user 'acme_web'.]\n   System.Data.SqlClient.SqlInternalConnection.OnError(SqlException exception) +2444\n</pre></code></td></tr>\n            </table>\n            <hr width=100% size=1 color=silver>\n            <b>Version Information:</b>&nbsp;Microsoft .NET Framework Version:4.0.30319; ASP.NET Version:4.8.9037.0\n            </font>\n    </body>\n</html>\n"
+}

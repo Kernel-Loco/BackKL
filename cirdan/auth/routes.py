@@ -6,6 +6,7 @@ correo, para que nadie pueda saber qué cuentas existen.
 """
 import base64
 import logging
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -25,6 +26,7 @@ INVALID = 'Correo o contraseña incorrectos.'
 LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
+OPERATOR_MFA_REQUIRED = 'Las cuentas de operador deben tener MFA activo antes de iniciar sesión.'
 CAPTCHA_INVALID = 'No se pudo comprobar que no eres un robot. Espera a que termine la verificación e inténtalo de nuevo.'
 
 
@@ -114,6 +116,90 @@ def _bad_password(org, user_id, ip):
                         background=BackgroundTask(_audit_bad_password, org, user_id, ip))
 
 
+# Etiquetas de letras, números y guiones separadas por puntos, con la última (el TLD) empezando con letra.
+_DOMINIO = re.compile(r'(?:[a-z0-9-]{1,63}\.)+[a-z][a-z0-9-]{1,62}')
+NO_ES_DOMINIO = 'no-es-dominio'
+
+
+def _email_domain(email):
+    """Del correo que no existe solo queda el dominio, nunca el correo completo (RC-302, decisión 2b de Ernesto). Si lo
+    que sigue a la última '@' no tiene forma de dominio, queda un marcador fijo: alguien que escribe la contraseña en
+    el campo del correo ('Clave@Marzo2026' o 'juan@empresa.com MiClave') no deja un pedazo de ella en el log."""
+    dominio = email.rpartition('@')[2].lower()
+    if '@' in email and len(dominio) <= 253 and _DOMINIO.fullmatch(dominio):
+        return dominio
+    return NO_ES_DOMINIO
+
+
+def _log_unknown_email(email, ip):
+    # Sin empresa no cabe en audit_log (su RLS pide organization_id = app_current_org()): va al log de la API (RC-302,
+    # decisión 1a). Corre después del 401, como _audit_bad_password con el correo que existe. %r escapa los saltos de
+    # línea, así que un correo o una IP con '\n' no inventan otra línea del log.
+    log.warning('auth.login_failed de un correo que no existe: ip=%r dominio=%r', ip, _email_domain(email))
+
+
+def _locked(task):
+    # El mismo 429 de siempre con una tarea después de la respuesta. Con raise HTTPException la tarea no correría.
+    return JSONResponse({'detail': LOCKED}, status_code=429, headers={'Retry-After': str(sessions.LOCK_SECONDS)},
+                        background=task)
+
+
+def _lock_kinds(por_correo, por_ip):
+    return [kind for kind, nuevo in (('email', por_correo), ('ip', por_ip)) if nuevo]
+
+
+def _record_login_locked(email, ip):
+    """El 429 de /login, en la bitácora de la empresa si el correo existe o en el log de la API si no (RC-302). Corre
+    después de la respuesta: el 429 sale antes de buscar el correo y así sigue, igual de rápido exista o no.
+    Solo el primero de cada ventana de bloqueo, por correo y por IP, porque audit_log no se purga."""
+    try:
+        por_correo, por_ip = sessions.first_lock('login', email, ip)
+    except Exception:
+        log.exception('No se pudo revisar en Valkey si el 429 del inicio de sesión ya tenía aviso')
+        return
+    if not (por_correo or por_ip):
+        return
+    lock = _lock_kinds(por_correo, por_ip)
+    try:
+        with transaction() as conn:
+            found = conn.execute('SELECT user_id, organization_id FROM login_lookup(%s)', (email,)).fetchone()
+        if not found:
+            log.warning('auth.login_locked de un correo que no existe: ip=%r dominio=%r bloqueo=%s',
+                        ip, _email_domain(email), '+'.join(lock))
+            return
+        org, user_id = str(found['organization_id']), str(found['user_id'])
+        with transaction(org) as conn:
+            audit(conn, org, 'auth.login_locked', user_id, ip, 'user', user_id, {'lock': lock})
+    except Exception:
+        log.exception('No se pudo escribir auth.login_locked')
+        _forget_lock_quietly('login', email, ip, por_correo, por_ip)
+
+
+def _record_mfa_locked(org, user_id, email, ip):
+    """El 429 de /mfa/verify en la bitácora de la empresa (RC-302). Solo el primero de cada ventana de bloqueo, por
+    correo y, para la IP, por empresa: con una IP bloqueada, el 429 de otra empresa también deja su evento."""
+    try:
+        por_correo, por_ip = sessions.first_lock('mfa', email, ip, org)
+    except Exception:
+        log.exception('No se pudo revisar en Valkey si el 429 del código del usuario %s ya tenía aviso', user_id)
+        return
+    if not (por_correo or por_ip):
+        return
+    try:
+        with transaction(org) as conn:
+            audit(conn, org, 'auth.mfa_locked', user_id, ip, 'user', user_id, {'lock': _lock_kinds(por_correo, por_ip)})
+    except Exception:
+        log.exception('No se pudo escribir auth.mfa_locked del usuario %s', user_id)
+        _forget_lock_quietly('mfa', email, ip, por_correo, por_ip, org)
+
+
+def _forget_lock_quietly(event, email, ip, por_correo, por_ip, org=None):
+    try:
+        sessions.forget_lock(event, email, ip, por_correo, por_ip, org)
+    except Exception:
+        log.exception('No se pudo quitar la marca del aviso de bloqueo después de un error')
+
+
 def _refund_quietly(email, ip, ticket):
     # Si Valkey también falla, sale la excepción original y el intento vence solo en 15 min.
     try:
@@ -128,7 +214,7 @@ def get_captcha(response: Response):
     return captcha.new_challenge()
 
 
-@router.post('/login',summary='Correo, contraseña y captcha; si la cuenta tiene MFA, pide el código')
+@router.post('/login', summary='Correo, contraseña y captcha; pide MFA cuando la cuenta lo requiere')
 def login(body: LoginIn, request: Request, response: Response):
     # El captcha va antes que todo: sin él no se busca el correo ni se mira el bloqueo, así que la respuesta no dice
     # nada de la cuenta. No cuenta como fallo de contraseña: si contara, cualquiera bloquearía un correo ajeno sin
@@ -142,7 +228,8 @@ def login(body: LoginIn, request: Request, response: Response):
     # Va antes de buscar el correo, así que el 429 sale igual exista o no la cuenta.
     ticket = sessions.take_login_attempt(email, ip)
     if not ticket:
-        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+        # Quién era la cuenta se busca después de mandar el 429 (RC-302).
+        return _locked(BackgroundTask(_record_login_locked, email, ip))
 
     try:
         with transaction() as conn:
@@ -157,7 +244,9 @@ def login(body: LoginIn, request: Request, response: Response):
         _refund_quietly(email, ip, ticket)
         raise
     if not found:
-        raise HTTPException(401, INVALID)
+        # La línea del log va después del 401, como la bitácora del correo que existe (RC-302).
+        return JSONResponse({'detail': INVALID}, status_code=401,
+                            background=BackgroundTask(_log_unknown_email, email, ip))
 
     org, user_id = str(found['organization_id']), str(found['user_id'])
     if not good:
@@ -168,6 +257,7 @@ def login(body: LoginIn, request: Request, response: Response):
     # La contraseña es correcta: el intento no fue un fallo y se devuelve, al correo y a la IP.
     sessions.refund_login_attempt(email, ip, ticket)
 
+    operator_mfa_required = False
     with transaction(org) as conn:
         if passwords.needs_rehash(found['password_hash'], user_id):
             # Una huella vieja sin cifrar queda cifrada en este mismo inicio de sesión (RC-330). Solo si nadie la
@@ -197,7 +287,15 @@ def login(body: LoginIn, request: Request, response: Response):
             raise HTTPException(401, INVALID)
         if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
-        user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': email}, ip, 'password')
+        operator_mfa_required = bool(conn.execute(
+            'SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required'])
+        if operator_mfa_required:
+            audit(conn, org, 'auth.operator_mfa_required', user_id, ip, 'user', user_id)
+        else:
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
+                                                    'email': email}, ip, 'password')
+    if operator_mfa_required:
+        raise HTTPException(403, OPERATOR_MFA_REQUIRED)
     _clear_fails(email)
     return {'mfa_required': False, 'user': user}
 
@@ -215,7 +313,7 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
     ip = client_ip(request)
     org, user_id, email = pending['org_id'], pending['user_id'], pending['email']
     if not sessions.take_mfa_attempt(email, ip):
-        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+        return _locked(BackgroundTask(_record_mfa_locked, org, user_id, email, ip))
     with transaction(org) as conn:
         row = conn.execute(
             'SELECT email::text, role, totp_secret_enc, last_totp_step FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
@@ -373,6 +471,8 @@ def me(session: Session = Depends(current_session)):
 
 
 COMMON_PASSWORD = 'Esa contraseña es muy común. Elige otra.'
+PWNED_PASSWORD = 'Esa contraseña salió en una filtración conocida. Elige otra.'
+NEW_PASSWORD_PROBLEMS = {'comun': COMMON_PASSWORD, 'filtrada': PWNED_PASSWORD}
 WRONG_PASSWORD_LAST = 'La contraseña actual no es correcta. Por seguridad cerramos tu sesión: vuelve a iniciarla.'
 
 
@@ -387,9 +487,19 @@ def _clear_password_attempts(user_id):
 
 @router.post('/password', summary='Cambia la contraseña del usuario de la sesión y borra sus passkeys')
 def change_password(body: PasswordIn, request: Request, session: Session = Depends(current_session)):
-    # La lista de contraseñas comunes (RC-281) va primero: no revisa la contraseña actual, así que no gasta un intento.
-    if passwords.is_common(body.new_password):
-        raise HTTPException(400, COMMON_PASSWORD)
+    # La lista de contraseñas comunes (RC-281) y Pwned Passwords (RC-334) van primero: no revisan la contraseña actual,
+    # así que no gastan un intento, y la consulta a la API (hasta 2 s) no espera con la fila de la cuenta bloqueada.
+    # Por eso las consultas a la API llevan su propio tope por usuario: pasado, se revisa solo con la lista local.
+    topada = []
+
+    def permitir():
+        if sessions.take_pwned_check(session.user_id) > sessions.MAX_PWNED_CHECKS:
+            topada.append(True)
+            return False
+        return True
+    revision = passwords.revisar_nueva(body.new_password, permitir)
+    if revision.problema:
+        raise HTTPException(400, NEW_PASSWORD_PROBLEMS[revision.problema])
     # El intento se cuenta antes de revisar la contraseña actual (RC-290), como en /mfa/verify: en paralelo tampoco se
     # revisan más de 5. Es un contador del usuario, aparte del login: quien tiene una cookie robada no bloquea el
     # inicio de sesión del dueño, y el quinto fallo le cierra la sesión.
@@ -420,6 +530,13 @@ def change_password(body: PasswordIn, request: Request, session: Session = Depen
             # de la bitácora.
             removed = _delete_passkeys(conn, session, ip, 'password_changed')
             audit(conn, session.own_org_id, 'auth.password_changed', session.user_id, ip, 'user', session.user_id)
+            if revision.sin_respuesta:
+                # Pwned Passwords no respondió en 2 s y la nueva solo pasó la lista local (decisión 2 de RC-334). Sin
+                # la contraseña ni su SHA-1.
+                # Con el tope por usuario pasado, el motivo lo dice.
+                audit(conn, session.own_org_id, 'auth.pwned_check_unavailable', session.user_id, ip, 'user',
+                      session.user_id, {'fallback': 'common_list', 'reason': 'rate_limited'} if topada
+                      else {'fallback': 'common_list'})
             # Las demás sesiones de la cuenta se cierran y queda la que cambió. Va antes del commit, como en
             # /mfa/enable: si Valkey falla, la contraseña no cambia y se puede repetir.
             sessions.delete_others(session.user_id, session.token)

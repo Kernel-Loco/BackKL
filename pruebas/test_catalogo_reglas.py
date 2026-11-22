@@ -80,7 +80,7 @@ COMENTARIO_REVISOR = re.compile(r"COMMENT ON COLUMN scoring_rule_texts\.reviewed
 NOTA_REVISOR = re.compile(r"^Table scoring_rule_texts\b.*?^\s*reviewed_by\s+text\s+\[note:\s*'([^']*)'\]",
                           re.DOTALL | re.MULTILINE)
 FILA_DOC = re.compile(r"^\|\s*(\d{2})\s*\|\s*`([a-z0-9_]+)`\s*\|\s*([a-z_]+)\s*\|\s*([a-z]+)\s*\|\s*([0-9.]+)\s*\|"
-                      r"\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*$", re.MULTILINE)
+                      r"\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*$", re.MULTILINE)
 POR_CATEGORIA_DOC = re.compile(r'^Por categoría: (.*)$', re.MULTILINE)
 TITULO_TABLA_DOC = re.compile(r'^## Las (\d+) reglas$', re.MULTILINE)
 EMITE_HOY = 'Lo emite hoy'
@@ -144,9 +144,22 @@ HUELLAS_DB = {
     'db/migraciones/017_superadmin_plataforma.sql': '4848215e21f0237565c87616256e4ebf5b79c78e498aace44f71062f5a52c04f',
     'db/migraciones/018_passkeys.sql': 'f8c60af6e20dfdc26954be4f5dda214e9557ea65847434d9d2dd5b18634139f2',
     'db/migraciones/019_texto_contenedores_internetdb.sql': 'c3136449c26b85c632294799efb11d5819377e3f5e8a8c12403dbc48264085b3',
+    'db/migraciones/020_textos_reglas_portada.sql': 'f15b71a5f16c23fe0cc5aa38f1415b0e172b3fc342e0132b9bc97e147939d736',
+    'db/migraciones/021_textos_tls_sitio.sql': '6160f534f3228be34c08335b1fdbd52774dcd4354e1451c3522484253dcf16fe',
+    'db/migraciones/022_texto_enlaces_nube_repos.sql': '6a97d1aa68668ad8758e37b499010686baf4c91bfaede39f021d44f82eecdfc7',
+    'db/migraciones/023_texto_ia_internetdb.sql': '21023fdae76fb51919a6e6edce31468b9e2d6e3fb637897441d76cf35f46e7ee',
+    'db/migraciones/024_bandas_por_organizacion.sql': '435dfb3b46d6d4b7db6b73e20630671781626fdca35b2f8f1e228671a1143fdd',
+    'db/migraciones/025_textos_higiene_certificados.sql': 'c2a50ddf2e0593e0c66666a597aeced543dca9f552947bc73593974ca2207cc5',
+    'db/migraciones/026_huellas_por_version.sql': '0ceaf2b7d16a9bd9f75130b4cb46f6ea092082c22bd859471fdb314607171529',
+    'db/migraciones/027_mfa_operador.sql': '8aa7f9edd44ddcdfa4e08450d908234763bc64214eb919f73c5aee721011bc2c',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',
+    'db/semillas/021_reglas_portada.sql': 'e87fd42714bda77d75f031eb6a48d1b25e1d72e6808a41a0fcd4863ef66ede21',
+    'db/semillas/022_reglas_tls_sitio.sql': 'b5d5f68783ac942369afcde7c60f1af610ec97641393ad80fe59086392378b6b',
+    'db/semillas/023_regla_enlaces_nube_repos.sql': '4e0ddb21fde173c25db7b5e1c141db1ca009c71c906cc958f223603ce5280666',
+    'db/semillas/024_regla_ia.sql': '6285af52ddd661d21e25cc5d46a8b1fda97c5c0cd3f22ad86394cd7850ec516f',
+    'db/semillas/025_reglas_higiene_certificados.sql': 'e83d2c5a8d274d90d51b24cfb75fb12057af687bc9b191ed3842b5e0386fde9b',
 }
 
 
@@ -446,13 +459,17 @@ class Reglas(unittest.TestCase):
         self.assertEqual(sorted(f[1] for f in FILAS_DOC), sorted(POR_CODIGO),
                          'docs/codigos_reglas.md no tiene los mismos códigos que las reglas del juego v1')
         emite_hoy = {c for fuente in REGISTRO if fuente != 'ejemplo' for c in cargar(fuente).CODIGOS}
-        for nn, code, cat, sev, tope, _, estado in FILAS_DOC:
+        for nn, code, cat, sev, tope, _, estado, falta, superficie in FILAS_DOC:
             _, i, _, _, cat_r, sev_r, _, tope_r = POR_CODIGO[code]
             self.assertEqual((i[-2:], cat, sev, Decimal(tope)), (nn, cat_r, sev_r, tope_r),
                              '%r: docs/codigos_reglas.md no coincide con su semilla' % code)
             self.assertEqual(estado == EMITE_HOY, code in emite_hoy,
                              '%r: docs/codigos_reglas.md dice %r y su recolector en REGISTRO %s lo declara'
                              % (code, estado, 'sí' if code in emite_hoy else 'no'))
+            self.assertIn(estado, (EMITE_HOY, 'Planeado', 'Previsto'))
+            self.assertTrue(falta and superficie, '%r: faltan columnas de cobertura' % code)
+            self.assertEqual(falta == '—', estado == EMITE_HOY, '%r: falta una dependencia o sobra una' % code)
+            self.assertIn(superficie, ('—', 'IoT y OT', 'APIs', 'Nube', 'Contenedores', 'Secretos'))
         titulo = TITULO_TABLA_DOC.search(doc)
         self.assertIsNotNone(titulo, 'docs/codigos_reglas.md sin el título Las N reglas')
         self.assertEqual(int(titulo.group(1)), len(REGLAS_V1), 'el título de docs/codigos_reglas.md no cuadra')
@@ -519,7 +536,7 @@ class Reglas(unittest.TestCase):
             self.assertIsNotNone(numero, '%r: su recolector en docs/codigos_reglas.md no empieza con #' % fila[1])
             if 14 <= int(numero.group(1)) <= 20:
                 osint.append(fila[1])
-        self.assertEqual(len(osint), 26, 'docs/codigos_reglas.md ya no tiene 26 reglas de #14 a #20')
+        self.assertEqual(len(osint), 31, 'docs/codigos_reglas.md ya no tiene 31 reglas de #14 a #20')
         self.assertEqual([c for c in sorted(osint) if revisor.get(c) != 'ErnestoDL'], [],
                          'reglas OSINT cuyo texto final no firmó ErnestoDL en las migraciones de db/')
 

@@ -1,0 +1,11 @@
+[
+ {"sha": "c1", "commit": {"author": {"name": "Dora Paz", "email": "dora.paz@acme-demo.mx", "date": "2026-10-20T10:00:00Z"},
+  "committer": {"name": "GitHub", "email": "noreply@github.com", "date": "2026-10-20T10:00:00Z"}},
+  "author": {"login": "DoraPaz-acme"}, "committer": {"login": "web-flow"}},
+ {"sha": "c2", "commit": {"author": {"name": "Becario", "email": "CIRDAN_FAKE_becario@hotmail.com", "date": "2026-10-01T09:00:00Z"},
+  "committer": {"name": "Becario", "email": "CIRDAN_FAKE_becario@hotmail.com", "date": "2026-10-01T09:00:00Z"}},
+  "author": {"login": "becario-fake"}, "committer": {"login": "becario-fake"}},
+ {"sha": "c3", "commit": {"author": {"name": "Alguien", "email": "12345+alguien@users.noreply.github.com", "date": "2026-09-01T09:00:00Z"},
+  "committer": {"name": "Alguien", "email": "alguien@otra-empresa.com", "date": "2026-09-01T09:00:00Z"}},
+  "author": null, "committer": null}
+]

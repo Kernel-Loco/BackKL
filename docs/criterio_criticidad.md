@@ -19,6 +19,16 @@ Responde al comentario 10 del socio formador en la revisión del 2 de octubre: �
 
 Las bandas están ancladas al ejemplo del reto: un dominio con 68 está en **riesgo alto**. El reto muestra ese 68 con barras de 80, 55, 40 y 90 y no publica sus pesos. Con los pesos v1 esas barras darían 70, que también es alto. El ancla es la banda, no el número exacto. Las notas de cada categoría usan las mismas bandas para su color en el portal.
 
+### Cortes por cliente (RC-237)
+
+La tabla de arriba es la plantilla global: medio empieza en 40, alto en 60 y crítico en 80. Cada organización puede mover esos tres cortes desde la pantalla de pesos del portal (`PUT /api/v1/scoring/weights` con `band_cutoffs`). Un banco puede querer que alto empiece en 50 y una tienda en 70.
+
+- Los cortes se guardan con el juego de reglas de la organización (`scoring_rule_sets.band_medium_from`, `band_high_from` y `band_critical_from`, migración 024), junto con sus pesos (#32). Un cambio de cortes crea una versión nueva del juego y recalcula los scores, porque el piso cambia el número. Una versión no cambia después de creada.
+- Una versión nueva que no manda cortes copia los de la anterior. La primera versión de una organización copia los del juego global.
+- Los cortes son enteros en orden y cada banda tiene al menos 10 valores: medio empieza en 10 o más, cada corte queda por lo menos 10 arriba del anterior y crítico empieza a más tardar en 91.
+- Cada score se lee con los cortes del juego con que se calculó (`domain_scores.rule_set_id`), no con los de hoy. Así un histórico no cambia de banda cuando la organización mueve sus cortes.
+- Los cortes solo tocan la banda, la letra y el piso del dominio. Las severidades de los hallazgos, el clasificador de RC-27 y el umbral de alerta (`organizations.alert_score_threshold`) no cambian con ellos.
+
 ## Letras de la A a la F (#114)
 
 Cada score lleva además una letra, que se entiende más rápido que el número. A es menos riesgo y F es más. No hay E. La letra sale del score final, ya con la regla de piso, y nunca contradice a la banda: A y B parten el bajo a la mitad.
@@ -31,13 +41,15 @@ Cada score lleva además una letra, que se entiende más rápido que el número.
 | D | 60 a 79 | Alto |
 | F | 80 a 100 | Crítico |
 
+La tabla es la de la plantilla. Con los cortes de un cliente las letras siguen a sus bandas: A va de 0 a la mitad del corte medio menos 1, B de ahí al corte medio menos 1, C es su medio, D su alto y F su crítico. Con 50, 70 y 85, A va de 0 a 24, B de 25 a 49, C de 50 a 69, D de 70 a 84 y F de 85 a 100.
+
 Por el piso, un dominio con un hallazgo crítico vigente tiene al menos D, y con dos o más tiene F. La letra es solo otra forma de leer el score: la alerta y el umbral siguen con el número de 0 a 100. Si el score tiene cobertura parcial (`partial_coverage`), la letra lleva el mismo aviso que el score. Las notas por categoría no llevan letra.
 
 ## Cómo se calcula el score de un dominio
 
 1. El motor de score (#31) calcula la nota de cada categoría con las reglas del catálogo (#30). Con `method = 'ml'` (#36), la severidad de cada hallazgo sale del clasificador con la correspondencia de la sección «Severidad de cada hallazgo», y el ponderado y el piso se aplican igual. Si el clasificador no supera a las reglas (#34), el score sigue con `method = 'rules'`.
 2. **Ponderado:** la suma de cada nota por su peso en el juego de reglas activo. Los pesos suman 1 y cambian solo con una versión nueva del juego de reglas (#32). En el juego v1 son infraestructura 30 %, identidad digital 20 %, configuración 20 % y fugas de datos 30 %. El resultado se redondea al entero, con .5 hacia arriba.
-3. **Piso:** si el dominio tiene un hallazgo crítico vigente, su score queda al menos en 60, que es la banda alto. Con dos o más, queda al menos en 80, que es la banda crítico.
+3. **Piso:** si el dominio tiene un hallazgo crítico vigente, su score queda al menos en el inicio de su banda alto (60 con la plantilla). Con dos o más, queda al menos en el inicio de su banda crítico (80 con la plantilla). Con los cortes 50, 70 y 85, un hallazgo crítico deja el dominio en 70, banda alto y letra D.
 4. **Score final:** el mayor entre el ponderado y el piso. Si el piso lo subió, el detalle del score lo dice (#31).
 
 ### Aporte de cada hallazgo (#31)
@@ -56,30 +68,30 @@ El ponderado es un promedio. Un dominio con todas sus categorías limpias y una 
 
 ## Subcategorías y KRI (#114)
 
-Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: se calculan al leer con los aportes que el score guardó en `score_contributions` y con las corridas de `scan_source_runs` de su escaneo. El mapa vive en `cirdan/score/subcategorias.py` y lleva versión (`VERSION`, hoy 2).
+Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: se calculan al leer con los aportes que el score guardó en `score_contributions` y con las corridas de `scan_source_runs` de su escaneo. El mapa vive en `cirdan/score/subcategorias.py` y lleva versión (`VERSION`, hoy 6).
 
 **Subcategorías.** Cada código de regla del catálogo (#30) cae en una subcategoría de su categoría. De cada una, la API da cuántos hallazgos vigentes tiene y cuánto suman sus aportes. Las subcategorías de una categoría suman su nota, salvo que la nota haya llegado al tope de 100.
 
 | Categoría | Subcategoría | Clave | Reglas |
 |---|---|---|---|
-| Infraestructura | Certificados | `certificates` | `cert_expired`, `cert_expiring_soon` |
-| Infraestructura | Exposición de servicios | `exposed_services` | `exposed_rdp`, `exposed_remote_admin`, `exposed_file_sharing`, `exposed_database`, `exposed_container_api`, `exposed_ot_device`, `exposed_iot_device`, `exposed_service` |
+| Infraestructura | Certificados | `certificates` | `cert_expired`, `cert_expiring_soon`, `tls_certificate_invalid`, `tls_legacy_only`, `cert_internal_name`, `cert_broad_wildcard`, `cert_new_issuer` |
+| Infraestructura | Exposición de servicios | `exposed_services` | `exposed_rdp`, `exposed_remote_admin`, `exposed_file_sharing`, `exposed_database`, `exposed_container_api`, `exposed_ai_service`, `exposed_ot_device`, `exposed_iot_device`, `exposed_service` |
 | Infraestructura | Documentación de APIs expuesta | `exposed_apis` | `exposed_api_docs`, `api_auth_not_declared` |
 | Infraestructura | Software vulnerable o sin soporte | `vulnerable_software` | `outdated_software`, `known_vulnerability` |
 | Infraestructura | Registro del dominio | `domain_registration` | `domain_expiring_soon` |
 | Identidad digital | Suplantación | `impersonation` | `lookalike_domain` |
 | Identidad digital | Correos expuestos | `exposed_emails` | `email_in_public_commits`, `personal_email_exposed`, `email_pattern_exposed` |
 | Configuración | Correo | `email` | `spf_missing`, `spf_allow_all`, `dmarc_missing`, `dmarc_policy_none` |
-| Configuración | Configuración de servidores | `server_configuration` | `server_version_disclosed`, `subdomain_takeover_risk` |
+| Configuración | Configuración de servidores | `server_configuration` | `server_version_disclosed`, `subdomain_takeover_risk`, `directory_listing`, `debug_page_exposed` |
 | Fugas de datos | Brechas de datos | `breaches` | `breach_exposure`, `breach_exposure_old`, `breach_exposure_no_passwords` |
 | Fugas de datos | Secretos expuestos | `exposed_secrets` | `secret_in_public_repo`, `secret_in_container_image` |
-| Fugas de datos | Almacenamiento público | `public_storage` | `public_bucket` |
+| Fugas de datos | Almacenamiento público | `public_storage` | `public_bucket`, `file_share_link_in_repo` |
 
 **KRI.** Encima de las 4 categorías van 5 indicadores clave de riesgo. Cada uno junta subcategorías, aunque sean de categorías distintas, y dice qué fuentes lo alimentan. De cada KRI la API da sus hallazgos vigentes, su severidad más alta, que le da el color en el portal, y lo que suman sus aportes.
 
 | KRI | Clave | Subcategorías | Fuentes |
 |---|---|---|---|
-| Certificados | `certificates` | `certificates` | `ct_logs` |
+| Certificados | `certificates` | `certificates` | `ct_logs`, `web` |
 | Exposición de servicios | `service_exposure` | `exposed_services`, `exposed_apis` | `shodan`, `api_docs` |
 | Correo | `email` | `email` | `dns` |
 | Suplantación | `impersonation` | `impersonation` | `ct_logs` |
@@ -94,11 +106,12 @@ Son una vista sobre el score que ya existe. No cambian el cálculo ni la base: s
 - `no_coverage` (sin cobertura): alguna de sus fuentes corrió y no respondió (`sources_failed`), ninguna corrió, o ninguna regla suya se revisó aunque la fuente respondiera, como Correo cuando el dominio no existe en el DNS. Una regla no se revisó si quedó sin cobertura o si la fuente que la revisa no corrió: Exposición de servicios sale así cuando `shodan` responde sin poder revisar nada y `api_docs` no corrió. Sus hallazgos, su severidad y su suma van en `null`, no en cero.
 - `no_source_yet` (sin fuente todavía): el KRI aún no tiene fuente. Así sale Reputación hasta que RC-234 esté en dev. También va en `null`.
 
-Tres límites de los estados:
+Cuatro límites de los estados:
 
 - Con una fuente caída el KRI sale `no_coverage` aunque otra fuente suya sí haya encontrado algo. Así lo pide la tarjeta: una fuente que no respondió sale sin cobertura.
 - Exposición de servicios no sale `ok` mientras `shodan.py` no tenga la API de host de Shodan o `api_docs` siga apagada. `exposed_iot_device` y `exposed_ot_device` quedan sin cobertura en todo escaneo, con la llave de Shodan o sin ella (`SIN_LLAVE` en `cirdan/recolectores/shodan.py`. La llave sola no los prende, ver `docs/servicios_externos.md`), así que lo más que alcanza es `partial`.
-- `sources_partial` va por fuente y no por regla. Si a `ct_logs` solo le faltó la respuesta de una variante de dominios parecidos, Certificados también sale `partial`, aunque sus dos reglas se revisaron completas. `scans.stats` no guarda a qué regla le faltó la parte.
+- `sources_partial` va por fuente y no por regla. Si a `ct_logs` solo le faltó la respuesta de una variante de dominios parecidos, Certificados también sale `partial`, aunque sus reglas se revisaron completas. Lo mismo con `web`: un sitio que quedó sin revisar por otra cosa (un reto, un 5xx, la NVD, o el sitio de un hallazgo TLS, que no da página) deja a `web` en `sources_partial` y Certificados sale `partial`, aunque el saludo TLS de cada sitio sí se revisó. `scans.stats` no guarda a qué regla le faltó la parte.
+- El mapa se aplica al leer. Un score de un escaneo de antes de RC-239 se lee con el mapa vigente, el 7 (`kri_map_version` 7): con `web` completo Certificados sale `ok` aunque ese escaneo no revisó `tls_certificate_invalid` ni `tls_legacy_only`, y con `web` caído sale `no_coverage`. Lo mismo con uno de antes de RC-262: si `shodan` respondió sin poder revisar nada, su `rules_without_coverage` trae los 10 códigos de entonces y no `exposed_ai_service`, así que esa regla cuenta como revisada y Exposición de servicios sale `partial` con 0 hallazgos en vez de `no_coverage` con `null`. Y uno de antes de RC-218 sale `ok` en Certificados con `ct_logs` completo aunque ese escaneo no revisó `cert_internal_name`, `cert_broad_wildcard` ni `cert_new_issuer`. Los tres casos se corrigen solos con el siguiente escaneo.
 
 Las subcategorías no dependen de la cobertura: siempre muestran los aportes del score guardado. Si un aporte es de una regla que el mapa no conoce, o que otro juego de reglas puso en otra categoría, va en una fila `other` (Sin clasificar) de la categoría de su regla, para que las subcategorías sigan sumando la nota. Los KRI juntan sus aportes por código de regla: el de una regla que el mapa no conoce no cuenta en ningún KRI, y el de una regla de un KRI que otro juego puso en otra categoría sigue contando en su KRI.
 
@@ -129,7 +142,7 @@ En el cuarto caso la nota de fugas queda en alto, pero el ponderado da 43, que e
 
 ## Alerta
 
-La alerta `score.above_threshold` se crea en cada cálculo en que el score queda **en el umbral o arriba** (score >= umbral), aunque haya bajado respecto al anterior. Si queda abajo, no se crea. Evitar alertas repetidas para un dominio que se queda arriba del umbral es una propuesta para #65, no cambia este criterio. El umbral por defecto es 60 y cada empresa lo puede cambiar (`organizations.alert_score_threshold`). Con el umbral por defecto, la alerta coincide con el inicio de la banda alto.
+La alerta `score.above_threshold` se crea en cada cálculo en que el score queda **en el umbral o arriba** (score >= umbral), aunque haya bajado respecto al anterior. Si queda abajo, no se crea. Evitar alertas repetidas para un dominio que se queda arriba del umbral es una propuesta para #65, no cambia este criterio. El umbral por defecto es 60 y cada empresa lo puede cambiar (`organizations.alert_score_threshold`). Con el umbral por defecto y los cortes de la plantilla, la alerta coincide con el inicio de la banda alto. El umbral no se mueve con los cortes del cliente: la pantalla de alertas del portal dice en qué banda del cliente queda.
 
 ## Severidad de cada hallazgo
 

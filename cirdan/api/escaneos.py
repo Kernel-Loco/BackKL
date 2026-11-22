@@ -33,6 +33,7 @@ def _scan(conn, scan_id, session):
     if scan and not in_scope(session, scan.pop('domain_id')):
         return None  # fuera del alcance de la llave se ve igual que uno que no existe
     if scan:
+        scan['stats'] = orquestador.stats_publicas(scan['stats'])  # sin el costo interno (RC-87)
         scan['sources'] = conn.execute(RUNS_SQL, (scan_id,)).fetchall()
     return scan
 

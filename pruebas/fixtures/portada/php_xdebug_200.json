@@ -1,0 +1,15 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de PHP con Xdebug, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 200,
+ "cabeceras": [
+  [
+   "X-Powered-By",
+   "PHP/8.1.2"
+  ],
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<br />\n<font size='1'><table class='xdebug-error xe-parse-error' dir='ltr' border='1' cellspacing='0' cellpadding='1'>\n<tr><th align='left' bgcolor='#f57900' colspan=\"5\"><span style='background-color: #cc0000; color: #fce94f; font-size: x-large;'>( ! )</span> Parse error: syntax error, unexpected token &quot;}&quot; in C:\\wamp64\\www\\acme\\index.php on line <i>27</i></th></tr>\n</table></font>\n"
+}

@@ -4,7 +4,7 @@
 |---|---|---|
 | [`contrato_plugin.md`](contrato_plugin.md) | Contrato de plugin de los recolectores: esquema, interfaz, filtro de alcance, reintentos y respuestas grabadas | #13 |
 | [`criterio_criticidad.md`](criterio_criticidad.md) | Criterio de criticidad: bandas, regla de piso y alerta | #29 |
-| [`codigos_reglas.md`](codigos_reglas.md) | Lista de códigos del catálogo de reglas: las 31 reglas del juego v1 con categoría, severidad, tope y recolector, y cómo agregar un código | #30 |
+| [`codigos_reglas.md`](codigos_reglas.md) | Lista de códigos del catálogo de reglas: las 40 reglas del juego v1 con categoría, severidad, tope y recolector, y cómo agregar un código | #30 |
 | [`contrato_api_v1.md`](contrato_api_v1.md) | Contrato de API v1: endpoints, campos y JSON de ejemplo en [`api_v1/`](api_v1/) | #21 |
 | [`dataset_ml.md`](dataset_ml.md) | Dataset semisintético del ML: plantillas, rúbrica de sensibilidad, reparto a ciegas y acuerdo entre etiquetadores | #33 |
 | [`cuentas_de_prueba.md`](cuentas_de_prueba.md) | **Cuentas de prueba del portal y cómo pasar el MFA** (para todo el equipo) | #25 |
@@ -12,6 +12,7 @@
 | [`politica_seguridad_privacidad.md`](politica_seguridad_privacidad.md) | Política de seguridad y privacidad de LowTide: metodología de ISO/IEC 27001, controles del Anexo A que aplican, aviso de privacidad conforme a la LFPDPPP 2025, retención, derechos ARCO con el buzón arco@lowtidesec.com, validez legal, pendientes y términos de uso del portal | #78 y #96g |
 | [`plantilla_carta_autorizacion.md`](plantilla_carta_autorizacion.md) | Plantilla de la carta de autorización que firma quien controla cada dominio: alcance, vigencia, datos personales, firmas y Anexo A de actividades | #6 |
 | [`hallazgos_esperados.md`](hallazgos_esperados.md) | Hallazgos esperados del dominio de prueba olmardo.com, por fuente, con código, severidad, fecha y estado | #10b |
+| [`medicion_cobertura.md`](medicion_cobertura.md) | Cobertura por regla y superficie moderna, método de medición y límites para falsos positivos | #84 |
 | [`servicios_externos.md`](servicios_externos.md) | Servicios externos: cuenta y dueño, plan, costo, límite, vencimiento de la llave y plan B de cada uno, las licencias y el gasto real | #8 |
 
 La base de datos se documenta en [`db/README.md`](../db/README.md).
