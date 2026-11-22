@@ -88,7 +88,7 @@ class ApiCirdan(unittest.TestCase):
         self.assertIn(code, (401, 404), body)
 
     def test_8_toda_respuesta_trae_la_proteccion_contra_marcos_y_nosniff(self):
-        # RC-283: también los errores y el 403 que da el middleware de origen antes de llegar a una ruta. /docs no
+        # RC-283 y RC-89: también errores y el 403 que da el middleware de origen antes de llegar a una ruta. /docs no
         # existe con el API_DOCS por omisión (RC-303).
         casos = (('GET', '/health', None, 200), ('GET', '/domains', None, 401), ('GET', '/no-existe', None, 404),
                  ('GET', '/docs', None, 404), ('POST', '/api/v1/auth/logout', 'https://otro.example', 403))
@@ -109,7 +109,7 @@ class ApiCirdan(unittest.TestCase):
                 self.assertIn("base-uri 'none'", cabeceras['Content-Security-Policy'])
                 self.assertIn("form-action 'none'", cabeceras['Content-Security-Policy'])
                 self.assertEqual(cabeceras.get_all('Strict-Transport-Security'),
-                                 ['max-age=31536000; includeSubDomains; preload'])
+                                 ['max-age=31536000; includeSubDomains'])
                 self.assertEqual(cabeceras.get_all('Referrer-Policy'), ['no-referrer'])
                 self.assertEqual(cabeceras.get_all('Permissions-Policy'),
                                  ['camera=(), microphone=(), geolocation=(), usb=()'])

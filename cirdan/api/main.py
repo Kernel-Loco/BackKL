@@ -191,12 +191,14 @@ async def same_origin_writes(request: Request, call_next):
 
 # Ningún sitio mete una respuesta de la API en un marco y el navegador no adivina su tipo (RC-283). Van aquí y no
 # solo en el portal porque la API también se llama sin él, y porque el portal entrega tal cual lo que reenvía a
-# /api/v1/*: sus cabeceras de next.config.ts no llegan a esas respuestas. CSP, HSTS y políticas adicionales son RC-51.
+# /api/v1/*: sus cabeceras de next.config.ts no llegan a esas respuestas. La CSP completa, HSTS, Referrer-Policy y
+# Permissions-Policy son de RC-89. HSTS va sin preload: hstspreload.org acepta el dominio de quien lo inscriba y
+# salir de la lista tarda meses. Por http (la API local) el navegador lo ignora.
 CABECERAS_SEGURIDAD = {
     'X-Frame-Options': 'DENY',
     'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     'X-Content-Type-Options': 'nosniff',
-    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
     'Referrer-Policy': 'no-referrer',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), usb=()',
 }
@@ -207,7 +209,8 @@ async def cabeceras_de_seguridad(request: Request, call_next):
     """Va después de same_origin_writes para envolverlo: su 403 también sale con las cabeceras."""
     response = await call_next(request)
     for nombre, valor in CABECERAS_SEGURIDAD.items():
-        # Una CSP más estricta que ya trae frame-ancestors 'none' se queda, como la del reporte en HTML (RC-70).
+        # Una CSP propia que ya trae frame-ancestors 'none' se queda, como la del reporte en HTML (RC-70) y la de
+        # /demo (explorer.py), que necesitan sus estilos o su script.
         if nombre == 'Content-Security-Policy' and "frame-ancestors 'none'" in response.headers.get(nombre, ''):
             continue
         response.headers[nombre] = valor

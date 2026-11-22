@@ -10,8 +10,11 @@ Las sesiones se crean con cirdan.auth.sessions, igual que al iniciar sesión, y 
 Solo leen: la base queda igual.
 """
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -197,6 +200,22 @@ class ExploradorEncendido(Explorador):
         # Ya no trae los ids de las empresas para elegir una: la empresa solo sale de la sesión.
         self.assertNotIn(ACME, html)
         self.assertNotIn(BETA, html)
+
+    def test_6b_la_csp_de_demo_deja_correr_solo_su_script(self):
+        # RC-89: con la CSP del resto de la API (default-src 'none') la página no corre. La suya lleva el hash de cada
+        # <script> que trae, sin 'unsafe-inline' en script-src, y conserva frame-ancestors 'none'.
+        with urllib.request.urlopen(self.api.base + '/demo', timeout=10) as r:
+            html, csp = r.read().decode(), r.headers.get_all('Content-Security-Policy')
+        self.assertEqual(len(csp), 1)
+        directivas = dict((d.split(' ', 1) + [''])[:2] for d in (x.strip() for x in csp[0].split(';')))
+        scripts = re.findall(r'<script>(.*?)</script>', html, re.S)
+        self.assertEqual(len(scripts), html.count('<script'))
+        huellas = ["'sha256-%s'" % base64.b64encode(hashlib.sha256(s.encode()).digest()).decode() for s in scripts]
+        self.assertEqual(directivas['script-src'].split(), huellas)
+        self.assertEqual(directivas['default-src'], "'none'")
+        self.assertEqual(directivas['connect-src'], "'self'")
+        self.assertEqual(directivas['frame-ancestors'], "'none'")
+        self.assertEqual(directivas['form-action'], "'none'")
 
     def test_7_las_tablas_son_solo_para_admin(self):
         # Traen usuarios, bitácora y valores TXT, que la API solo da a Administración (GET /api/v1/domains/txt).
