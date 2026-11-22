@@ -1,6 +1,6 @@
 # Seguridad (RC-254): en cada PR a dev o main, y en cada push a esas ramas, revisa secretos en el
 # repo y su historial (gitleaks), el código de cirdan/ (bandit), las dependencias fijas de
-# requirements.txt (pip-audit) y el estilo (ruff, solo aviso). Ningún paso consulta un dominio:
+# requirements.txt (pip-audit) y el estilo (ruff: rojo en los .py que cambia el PR, aviso en el resto). Ningún paso consulta un dominio:
 # pip-audit solo pregunta a la base de vulnerabilidades de PyPI por los paquetes del repo.
 name: Seguridad
 
@@ -26,9 +26,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false  # ningún paso escribe en el repo
 
       # Misma versión que .pre-commit-config.yaml y el Dockerfile, por docker y sin red.
-      # gitleaks-action pide licencia en organizaciones. .gitleaksignore guarda los 40 hallazgos
+      # gitleaks-action pide licencia en organizaciones. .gitleaksignore guarda los 57 hallazgos
       # históricos y la regla propia de .gitleaks.toml pone en rojo un CIRDAN_FAKE_ fuera de
       # pruebas/fixtures/.
       - name: gitleaks sobre el repo y su historial
@@ -56,11 +57,30 @@ jobs:
       - name: bandit sobre cirdan/ (todo, como aviso)
         run: bandit -r cirdan -q --exit-zero
 
-      # requirements.txt fija todo con ==, así que no hace falta instalarlo.
-      - name: pip-audit sobre requirements.txt
-        run: pip-audit -r requirements.txt --no-deps --disable-pip --progress-spinner off
+      # requirements.txt fija con == lo que nombra, pero no todas las dependencias indirectas (anyio, h11 y otras):
+      # pip-audit resuelve e instala en un entorno aparte para revisarlas también (#136, RC-254).
+      - name: pip-audit sobre requirements.txt y sus dependencias
+        run: pip-audit -r requirements.txt --strict --progress-spinner off
 
-      # Solo aviso: el código de hoy tiene errores de ruff que nadie está tocando (anotados en RC-254).
+      # Rojo con un error de ruff en un .py que el PR (o el push) agrega o cambia. Lo que ya existía no frena: se
+      # corrige cuando alguien toca ese archivo. Las expresiones de GitHub van por env, no dentro del script.
+      - name: ruff sobre los .py que cambia el PR o el push
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "::warning::Sin commit base ($BASE): ruff no puede saber qué cambió"
+            exit 0
+          fi
+          mapfile -t cambiados < <(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD -- '*.py')
+          if [ ${#cambiados[@]} -eq 0 ]; then
+            echo "Ningún .py cambió"
+            exit 0
+          fi
+          printf '%s\n' "${cambiados[@]}"
+          ruff check --no-cache --select E4,E7,E9,F --output-format github "${cambiados[@]}"
+
+      # Aviso sobre todo el repo: el código de hoy tiene errores de ruff que nadie está tocando (anotados en RC-254).
       # Las reglas van fijas para que una versión nueva de ruff no cambie lo que se revisa.
       - name: ruff (aviso)
         continue-on-error: true

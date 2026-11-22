@@ -169,7 +169,7 @@ Los controles 7.1 a 7.6, 7.11 y 7.12 (perímetro, entradas, oficinas, vigilancia
 | 8.27 Arquitectura segura | RLS con FORCE en las tablas por cliente, rol de la API sin privilegios y base y Valkey sin puertos públicos | Existe |
 | 8.28 Codificación segura | CodeQL y revisión de PR | Existe |
 | 8.29 Pruebas de seguridad | ZAP activo, pentest y reto de hackeo solo contra el propio despliegue | Falta. Llegan con #51, #58b y #85 |
-| 8.31 Separación de entornos | El CI corre las pruebas de base y API en una base desechable. En local, el paso 5 del README las manda al compose desechable de `docker-compose.pruebas.yml` con `CIRDAN_TEST_API`, `CIRDAN_TEST_PG` y `CIRDAN_TEST_VALKEY` (RC-254). `dev` y `main` separados | En parte. Sin esas variables las pruebas usan la pila local (`cirdan-pg16`, `cirdan-valkey` y el puerto 8000) sin avisar: ningún candado lo impide |
+| 8.31 Separación de entornos | El CI corre las pruebas de base y API en una base desechable. En local, el paso 5 del README las manda al compose desechable de `docker-compose.pruebas.yml` con `CIRDAN_TEST_BASE`, `CIRDAN_TEST_DB_CONTAINER`, `CIRDAN_TEST_VALKEY` y `CIRDAN_TEST_API_CONTAINER` (RC-254). `dev` y `main` separados | En parte. Sin esas variables las pruebas usan la pila local (`cirdan-pg16`, `cirdan-valkey` y el puerto 8000) sin avisar: ningún candado lo impide |
 | 8.32 Gestión de cambios | Migraciones numeradas que no se editan, PR con la clave de Jira y congelamiento desde el 25 nov | Existe |
 | 8.33 Información de prueba | Empresas ficticias (Acme Demo, Beta Corp y Grupo Olmardo) y tokens `CIRDAN_FAKE_` | Existe |
 | 8.34 Protección durante pruebas | Las pruebas que atacan nunca tocan a un cliente ni a terceros (sección 3 de #6) | Existe |

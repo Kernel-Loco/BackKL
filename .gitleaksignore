@@ -1,8 +1,8 @@
-# Hallazgos histÛricos de gitleaks que el job de seguridad ignora (RC-254). Son los 40 que da
+# Hallazgos hist√≥ricos de gitleaks que el job de seguridad ignora (RC-254). Los primeros 40 son los que da
 # .gitleaks.toml sobre el historial de dev hasta d446cc0 (16 nov), todos falsos: 39 tokens
 # CIRDAN_FAKE_ en pruebas/test_*.py, de antes de la regla que los limita a pruebas/fixtures/, y
-# el TOKEN de TXT de 12 hex de pruebas/test_txt.py. Cada lÌnea es commit:ruta:regla:lÌnea, asÌ
-# que solo cubre ese commit. Un token falso nuevo va en pruebas/fixtures/, no se agrega aquÌ.
+# el TOKEN de TXT de 12 hex de pruebas/test_txt.py. Cada l√≠nea es commit:ruta:regla:l√≠nea, as√≠
+# que solo cubre ese commit. Un token falso nuevo va en pruebas/fixtures/, no se agrega aqu√≠.
 1795e028bae906e3e30538cff6a269375595aed9:pruebas/test_txt.py:generic-api-key:40
 23d53837666920aa46857e7cd5b81f07bc63a926:pruebas/test_llave_totp.py:lowtide-token-falso-fuera-de-fixtures:177
 23d53837666920aa46857e7cd5b81f07bc63a926:pruebas/test_llave_totp.py:lowtide-token-falso-fuera-de-fixtures:25
@@ -43,3 +43,24 @@ f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-toke
 f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:418
 f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:503
 f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:517
+
+# Los 17 que dev agreg√≥ del 16 al 21 nov, antes de que el job existiera (#136, RC-254): 16 tokens
+# CIRDAN_FAKE_ en pruebas/test_*.py, que son nombres de llaves, cuentas y valores de prueba, y la URL de prueba
+# con una llave de 16 hexadecimales inventada del corte de enlaces del recolector de GitHub (pruebas/test_github.py).
+037b3b3189d24ba5782929309d3406a9b7073c75:pruebas/test_bitacora_descargas.py:lowtide-token-falso-fuera-de-fixtures:202
+037b3b3189d24ba5782929309d3406a9b7073c75:pruebas/test_bitacora_descargas.py:lowtide-token-falso-fuera-de-fixtures:205
+543c35502be4e20cc2746b6d407398efa80e2b6c:pruebas/test_certspotter.py:lowtide-token-falso-fuera-de-fixtures:1093
+543c35502be4e20cc2746b6d407398efa80e2b6c:pruebas/test_contrato.py:lowtide-token-falso-fuera-de-fixtures:434
+543c35502be4e20cc2746b6d407398efa80e2b6c:pruebas/test_identidad.py:lowtide-token-falso-fuera-de-fixtures:45
+ad807d8104692ceca53b8d9d4519887891ea38b5:pruebas/test_bitacora.py:lowtide-token-falso-fuera-de-fixtures:113
+af0ad7ee153ad7cfc9adb48351246e08a302aec7:pruebas/test_alta_dominio.py:lowtide-token-falso-fuera-de-fixtures:19
+af0ad7ee153ad7cfc9adb48351246e08a302aec7:pruebas/test_alta_dominio_integracion.py:lowtide-token-falso-fuera-de-fixtures:25
+af0ad7ee153ad7cfc9adb48351246e08a302aec7:pruebas/test_alta_dominio_integracion.py:lowtide-token-falso-fuera-de-fixtures:76
+cacbd58899d8f31ab23d14b330f1597583246c92:pruebas/test_rotar_huellas.py:lowtide-token-falso-fuera-de-fixtures:32
+e1fa41f9658f05d1e9724a36f2bcd2b4c0de4083:pruebas/test_tope_cuerpo.py:lowtide-token-falso-fuera-de-fixtures:55
+fb21f98b1455043728a0f09e4ae7fa3c59cbc8dd:pruebas/test_subfinder.py:lowtide-token-falso-fuera-de-fixtures:41
+fb21f98b1455043728a0f09e4ae7fa3c59cbc8dd:pruebas/test_subfinder.py:lowtide-token-falso-fuera-de-fixtures:42
+fb21f98b1455043728a0f09e4ae7fa3c59cbc8dd:pruebas/test_subfinder.py:lowtide-token-falso-fuera-de-fixtures:574
+fb21f98b1455043728a0f09e4ae7fa3c59cbc8dd:pruebas/test_subfinder.py:lowtide-token-falso-fuera-de-fixtures:787
+fb21f98b1455043728a0f09e4ae7fa3c59cbc8dd:pruebas/test_subfinder.py:lowtide-token-falso-fuera-de-fixtures:875
+40aa79fd7ece3985edf3eb30328c49a9e6c32318:pruebas/test_github.py:generic-api-key:581
