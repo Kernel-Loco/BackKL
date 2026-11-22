@@ -6,7 +6,9 @@ test_pesos_configurables.py entró el 5 nov y .github/workflows/pruebas.yml nunc
 validar_pesos de PUT /scoring/weights se fusionaba con el CI en verde.
 """
 import re
+import shutil
 import subprocess
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -35,6 +37,30 @@ def paso(nombre):
     inicio = texto.index('- name: ' + nombre)
     fin = texto.find('- name:', inicio + 1)
     return texto[inicio:fin if fin != -1 else len(texto)]
+
+
+@unittest.skipUnless(shutil.which('sh'), 'sin sh')
+class ResultadoDelEnlace(unittest.TestCase):
+    """La línea del paso 'Enlace al correo' que exige el OK de unittest (#28, RC-63): un aviso de Python después del OK
+    no la tumba, y un skip o una falla sí."""
+
+    def revisar(self, err):
+        (linea,) = [l.strip() for l in paso('Enlace al correo').splitlines() if 'enlace.err' in l and 'OK' in l]
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'enlace.err').write_text(err, encoding='utf-8')
+            return subprocess.run(['sh', '-c', linea], cwd=tmp, capture_output=True, timeout=30).returncode
+
+    def test_4_ok_con_un_aviso_despues(self):
+        aviso = ('/usr/local/lib/python3.15/site-packages/psycopg/_connection_base.py:153: ResourceWarning: '
+                 '<psycopg.Connection object at 0x7f> was deleted while still open\n')
+        self.assertEqual(self.revisar('test_1 ... ok\n\nRan 8 tests in 10.3s\n\nOK\n' + aviso), 0)
+        self.assertEqual(self.revisar('Ran 8 tests in 10.3s\n\nOK\n'), 0)
+
+    def test_5_skip_o_falla_no_pasan(self):
+        for err in ('Ran 8 tests in 0.0s\n\nOK (skipped=8)\n', 'Ran 8 tests\n\nFAILED (failures=1)\n',
+                    'Traceback (most recent call last):\n', ''):
+            with self.subTest(err=err[-25:]):
+                self.assertNotEqual(self.revisar(err), 0)
 
 
 class TodasEnElCi(unittest.TestCase):
