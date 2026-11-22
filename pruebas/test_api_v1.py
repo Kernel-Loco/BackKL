@@ -512,7 +512,8 @@ class ApiV1(unittest.TestCase):
         url = '/api/v1/domains/acme-demo.mx/score'
         antes = self.get(self.acme, url)
         self.assertEqual({(h['source'], h['reason']) for h in antes['coverage_gaps']},
-                         {('api_docs', 'source_not_run'), ('github', 'source_not_run'), ('web', 'source_not_run')})
+                         {('api_docs', 'source_not_run'), ('github', 'source_not_run'), ('identity', 'source_not_run'),
+                          ('web', 'source_not_run')})
         corrida = "UPDATE scan_source_runs SET %s WHERE id = '61000000-0000-4000-8000-0000000000%s';"
         escaneo = "UPDATE scans SET stats = %s WHERE id = '60000000-0000-4000-8000-000000000001';"
         ok, _, err = psql(corrida % ("status = 'failed'", '01')
