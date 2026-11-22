@@ -1218,9 +1218,12 @@ class ApiV1(unittest.TestCase):
         self.assertIn('Have I Been Pwned', texto)
         for h in datos['findings']:
             self.assertIn(h['asset'], texto)
-        # El resto de la API conserva su CSP de RC-283.
+        # El resto de la API lleva la CSP de main.py (RC-283 y RC-89).
         _, otras, _ = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/findings/export?formato=json')
-        self.assertEqual(otras['Content-Security-Policy'], "frame-ancestors 'none'")
+        self.assertIn("default-src 'none'", otras['Content-Security-Policy'])
+        self.assertIn("frame-ancestors 'none'", otras['Content-Security-Policy'])
+        self.assertIn("base-uri 'none'", otras['Content-Security-Policy'])
+        self.assertIn("form-action 'none'", otras['Content-Security-Policy'])
 
     def test_10_salida_siem_con_plan_y_sin_evidencia(self):
         url = '%s/api/v1/domains/beta-corp.mx/export/siem' % sesion.BASE
