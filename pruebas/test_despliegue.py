@@ -79,6 +79,16 @@ class Despliegue(unittest.TestCase):
         # prueba pruebas/test_documentacion_api.py.
         self.assertEqual(self.svc['api']['environment']['API_DOCS'], 'false')
 
+    def test_3b_el_enlace_al_correo_sale_del_origen_publicado(self):
+        # M4 de RC-63: PORTAL_URL vacía, aunque el .env traiga la de la PC, para que la API use el primer origen de
+        # ALLOWED_ORIGINS (pruebas/test_enlace_sin_red.py, test_12b) también en el plan B de pruebas.
+        rc, salida = _config(dict(ENV_FALSO, PORTAL_URL='http://localhost:3000',
+                                  ALLOWED_ORIGINS='https://pruebas.lowtidesec.com'))
+        self.assertEqual(rc, 0, salida[-500:])
+        api = json.loads(salida)['services']['api']['environment']
+        self.assertEqual((api['PORTAL_URL'], api['ALLOWED_ORIGINS']), ('', 'https://pruebas.lowtidesec.com'))
+        self.assertEqual(api['CORREO_API_URL'], 'https://api.resend.com/emails')
+
     def test_3_origen_y_cookie_segura(self):
         self.assertEqual(self.svc['api']['environment']['ALLOWED_ORIGINS'], ORIGEN)
         self.assertEqual(self.svc['demo-accounts']['environment']['ALLOWED_ORIGINS'], ORIGEN)
