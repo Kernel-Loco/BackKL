@@ -203,11 +203,32 @@ CABECERAS_SEGURIDAD = {
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), usb=()',
 }
 
+# /docs y /redoc (solo con API_DOCS=true, nunca en el despliegue) son páginas de FastAPI que cargan swagger-ui y redoc
+# de cdn.jsdelivr.net, la tipografía de redoc de Google Fonts y el ícono de fastapi.tiangolo.com, y /docs y
+# /docs/oauth2-redirect traen un script en línea. Con la CSP de arriba quedarían en blanco. El script en línea cambia
+# con la versión de FastAPI, así que va 'unsafe-inline' en vez de su hash: es una página de una PC de desarrollo.
+# Conserva frame-ancestors 'none', así que el middleware de abajo la deja.
+RUTAS_DOCS_HTML = frozenset({'/docs', '/docs/oauth2-redirect', '/redoc'})
+CSP_DOCS = '; '.join([
+    "default-src 'none'",
+    "script-src 'unsafe-inline' https://cdn.jsdelivr.net",
+    "style-src 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com",
+    'font-src https://fonts.gstatic.com',
+    "img-src 'self' data: https://fastapi.tiangolo.com https://cdn.redoc.ly",
+    "connect-src 'self'",
+    'worker-src blob:',
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+])
+
 
 @app.middleware('http')
 async def cabeceras_de_seguridad(request: Request, call_next):
     """Va después de same_origin_writes para envolverlo: su 403 también sale con las cabeceras."""
     response = await call_next(request)
+    if API_DOCS and request.url.path in RUTAS_DOCS_HTML and response.status_code == 200:
+        response.headers['Content-Security-Policy'] = CSP_DOCS
     for nombre, valor in CABECERAS_SEGURIDAD.items():
         # Una CSP propia que ya trae frame-ancestors 'none' se queda, como la del reporte en HTML (RC-70) y la de
         # /demo (explorer.py), que necesitan sus estilos o su script.
