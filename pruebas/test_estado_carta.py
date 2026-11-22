@@ -67,7 +67,7 @@ def _nombres(code):
 def fila(**cambios):
     r = {'id': 'd1', 'fqdn': 'acme-demo.mx', 'status': 'active', 'last_scan_at': None, 'next_scan_at': None,
          'valid_from': MANANA, 'valid_until': MANANA + timedelta(days=365), 'revoked_at': None,
-         'signer_email': 'ti@acme-demo.mx', 'auth_valid': False, 'auth_not_started': True,
+         'signer_email': 'ti@acme-demo.mx', 'template_version': 1, 'activities': list(range(1, 12)), 'auth_valid': False, 'auth_not_started': True,
          'txt_result': 'match', 'txt_checked_at': None, 'score': None, 'open_findings': None}
     r.update(cambios)
     return r

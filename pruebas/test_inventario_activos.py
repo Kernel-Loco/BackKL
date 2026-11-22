@@ -81,9 +81,11 @@ def poner_cartas():
     sql = 'BEGIN;'
     for n, fqdn in enumerate(CON_CARTA_PROPIA):
         sql += ("INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, "
-                "signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) "
+                "signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, "
+                "template_version, activities) "
                 "SELECT '%s%03d', x.organization_id, x.domain_id, 'Firma RC-231', 'Prueba', x.signer_email, "
-                "x.signed_document_key || '.rc231-%d', x.signed_document_sha256, %s - 1, %s + 30, x.accepted_by "
+                "x.signed_document_key || '.rc231-%d', x.signed_document_sha256, %s - 1, %s + 30, x.accepted_by, "
+                "x.template_version, x.activities "
                 "FROM domain_authorizations x JOIN domains d ON d.id = x.domain_id WHERE d.fqdn = '%s' "
                 "ORDER BY x.created_at, x.id LIMIT 1;" % (PREFIJO_CARTA, n, n, hoy, hoy, fqdn))
     ok, _, err = psql(sql + 'COMMIT;', user='postgres')

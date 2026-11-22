@@ -156,7 +156,9 @@ class VerificacionTxtApi(unittest.TestCase):
         with self.assertRaises(HTTPException) as error:
             self.check(ConsultaTxt((ESPERADO,)))
         self.assertEqual(error.exception.status_code, 409)
-        self.assertFalse(self.mocks[1].called)
+        # La consulta y su auditoría se guardan con el choque; el 409 sale después del commit (RC-59, concurrencia-2).
+        self.mocks[1].assert_called_once()
+        self.assertEqual(self.mocks[1].call_args.args[7], {'result': 'match', 'conflict': 'other_organization'})
 
     def test_rol_no_admin_no_puede_verificar(self):
         with patch('cirdan.auth.deps.current_session', return_value=Session(

@@ -2,7 +2,7 @@
 
 Plantilla de LowTide (tarjeta #6, RC-36). Va junto con la [política de uso ético](politica_uso_etico.md) y la [política de seguridad y privacidad](politica_seguridad_privacidad.md) (#78, RC-39), que la carta pide aceptar en su sección 10.
 
-- Los campos entre corchetes los llena la empresa. Lo que guarda la base está marcado con (base). La tabla `domain_authorizations` también guarda la ruta del PDF firmado (`signed_document_key`), su huella sha256 (`signed_document_sha256`) y el administrador que lo cargó (`accepted_by`). El alcance (plan, GitHub, Docker Hub y exclusiones) solo queda en el PDF.
+- Los campos entre corchetes los llena la empresa. Lo que guarda la base está marcado con (base). La tabla `domain_authorizations` también guarda la ruta del PDF firmado (`signed_document_key`), su huella sha256 (`signed_document_sha256`) y el administrador que lo cargó (`accepted_by`). También guarda la versión de esta plantilla (`template_version`, hoy 1) y las actividades del Anexo A que autoriza la carta (`activities`), y el orquestador no corre las fuentes de una actividad que la carta no tiene (RC-59, `cirdan/alcance_carta.py`). El resto del alcance (plan, GitHub, Docker Hub y exclusiones) solo queda en el PDF. Si cambian las actividades del Anexo A, la plantilla sube de versión en `cirdan/alcance_carta.py` y en la base.
 - Se firma una carta por cada dominio raíz, porque la base guarda una autorización por dominio.
 - Un administrador de la empresa sube el PDF firmado al portal (máximo 5 MB, tarjeta #26). LowTide guarda su huella sha256.
 - Sin una carta vigente y sin revocar, el dominio no entra a ningún análisis (punto 1 de la sección 1 de la política de uso ético).

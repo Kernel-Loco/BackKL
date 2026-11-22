@@ -96,7 +96,7 @@ Table webauthn_credentials [note: 'Passkeys (WebAuthn) de cada usuario (RC-331, 
 Table domains [note: 'Dominios raíz que el cliente quiere monitorear, con su token TXT de propiedad. Se podrán dar de alta desde el portal o por API (plan, #26, RC-59). Hoy en dev solo llegan por las semillas. No se escanean sin TXT verificado y autorización firmada vigente.'] {
   id uuid [pk]
   organization_id uuid [not null, ref: > organizations.id]
-  fqdn citext [not null, note: 'Ej. acme.mx. UNIQUE (organization_id, fqdn) e índice único parcial (fqdn) WHERE status = \'verified\': un dominio verificado pertenece a un solo cliente']
+  fqdn citext [not null, note: 'Ej. acme.mx. UNIQUE (organization_id, fqdn) e índice único parcial (fqdn) WHERE status = \'verified\': un dominio verificado pertenece a un solo cliente. Desde la 029 (RC-59) el trigger domains_fqdn_otra_organizacion tampoco deja dar de alta ni verificar uno que otra empresa tiene en verified o paused']
   status text [not null, note: 'CHECK IN (\'pending_verification\',\'verified\',\'paused\',\'removed\'). El tope del plan se revisará en check_plan_limits() (plan) con SELECT ... FOR UPDATE sobre la fila de organizations, al insertar y al volver a \'verified\'']
   txt_token text [not null, unique, note: 'Valor que el cliente publica: cirdan-verification=<token>. No cambia al renovar la autorización']
   verified_at timestamptz [note: 'Primera verificación TXT exitosa']
@@ -117,6 +117,8 @@ Table domain_authorizations [note: 'Autorización firmada por quien tiene facult
   valid_from date [not null]
   valid_until date [not null, note: 'CHECK (valid_until > valid_from). Vigente = hoy entre ambas y revoked_at IS NULL. Índice parcial (valid_until) WHERE revoked_at IS NULL para el aviso authorization.expiring']
   revoked_at timestamptz [note: 'Única columna que el trigger de inmutabilidad deja cambiar']
+  template_version smallint [note: 'RC-59, migración 029. Versión de la plantilla de la carta (hoy 1). NULL junto con activities = carta sin alcance: el orquestador no corre ninguna fuente']
+  activities "smallint[]" [note: 'RC-59. Actividades del Anexo A que autoriza la carta, del 1 al 11. cirdan/alcance_carta.py liga cada fuente a su actividad']
   accepted_by uuid [not null, ref: > users.id, note: 'Admin del cliente que cargó la autorización. NOT NULL porque la API no puede cargar autorizaciones']
 }
 

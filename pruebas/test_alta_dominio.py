@@ -22,23 +22,45 @@ BODY = {
     'fqdn': 'EJEMPLO.COM.', 'signer_name': 'Nombre de prueba', 'signer_title': 'Representante',
     'signer_email': 'test@example.com', 'valid_from': '2026-01-01', 'valid_until': '2027-01-01',
     'passive_monitoring_confirmed': True, 'letter_base64': base64.b64encode(PDF).decode(),
+    'template_version': 1, 'activities': [2, 1, 3],
 }
 
 
 class AltaDominio(unittest.TestCase):
     def test_valida_y_normaliza(self):
-        fqdn, name, title, email, start, end, pdf = v1._datos_alta(BODY)
+        fqdn, name, title, email, start, end, pdf, version, activities = v1._datos_alta(BODY)
         self.assertEqual((fqdn, name, title, email), ('ejemplo.com', 'Nombre de prueba', 'Representante', 'test@example.com'))
         self.assertLess(start, end)
         self.assertEqual(pdf, PDF)
+        self.assertEqual((version, activities), (1, [1, 2, 3]))
 
     def test_rechaza_datos_invalidos(self):
         for update in ({'fqdn': 'https://ejemplo.com'}, {'signer_name': ''}, {'signer_title': ''},
                        {'signer_email': 'mal'}, {'valid_until': '2025-01-01'}, {'valid_from': 'no-fecha'},
                        {'passive_monitoring_confirmed': False}, {'letter_base64': '!!'},
-                       {'letter_base64': base64.b64encode(b'no es pdf').decode()}):
+                       {'letter_base64': base64.b64encode(b'no es pdf').decode()},
+                       {'template_version': 2}, {'template_version': '1'}, {'activities': []},
+                       {'activities': [12]}, {'activities': [1, 1]}, {'activities': ['1']}, {'activities': None}):
             with self.subTest(update=update), self.assertRaises(HTTPException) as error:
                 v1._datos_alta({**BODY, **update})
+            self.assertEqual(error.exception.status_code, 422)
+
+    def test_faltan_o_sobran_campos(self):
+        for body in ({k: v for k, v in BODY.items() if k != 'activities'},
+                     {k: v for k, v in BODY.items() if k != 'template_version'}, {**BODY, 'extra': 1}):
+            with self.subTest(campos=sorted(body)), self.assertRaises(HTTPException) as error:
+                v1._datos_alta(body)
+            self.assertEqual(error.exception.status_code, 422)
+
+    def test_tipo_real_del_archivo(self):
+        # Se revisan los bytes, no el nombre ni el tipo que declara el navegador: un PNG o un HTML renombrados a .pdf,
+        # un PDF cortado sin %%EOF o con el encabezado fuera del inicio no pasan.
+        png = b'\x89PNG\r\n\x1a\n' + b'CIRDAN_FAKE' * 10
+        for nombre, datos in (('png', png), ('html', b'<html>%PDF-1.4</html>%%EOF'), ('sin_eof', b'%PDF-1.7\n1 0 obj\n'),
+                              ('eof_lejos', b'%PDF-1.7\n%%EOF\n' + b' ' * 2048), ('vacio', b''),
+                              ('encabezado_tarde', b' %PDF-1.4\n%%EOF')):
+            with self.subTest(archivo=nombre), self.assertRaises(HTTPException) as error:
+                v1._datos_alta({**BODY, 'letter_base64': base64.b64encode(datos).decode()})
             self.assertEqual(error.exception.status_code, 422)
 
     def test_pdf_mayor_a_cinco_mib_se_rechaza(self):
@@ -50,7 +72,7 @@ class AltaDominio(unittest.TestCase):
     def test_pdf_de_cinco_mib_se_acepta(self):
         pdf = b'%PDF-' + b'x' * (v1.MAX_CARTA - 10) + b'%%EOF'
         self.assertEqual(len(pdf), v1.MAX_CARTA)
-        self.assertEqual(v1._datos_alta({**BODY, 'letter_base64': base64.b64encode(pdf).decode()})[-1], pdf)
+        self.assertEqual(v1._datos_alta({**BODY, 'letter_base64': base64.b64encode(pdf).decode()})[6], pdf)
 
     def test_no_habilita_en_produccion(self):
         with patch.object(cartas, 'config', side_effect=lambda name, default=None: {
