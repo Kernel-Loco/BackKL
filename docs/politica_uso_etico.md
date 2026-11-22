@@ -41,7 +41,7 @@ Aplica al equipo Kernel Loco, a quien contribuya a los repositorios de LowTide y
 
 ## 3. Lo que sí ataca solo va contra LowTide
 
-Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de hackeo para el grupo) solo se hacen contra el despliegue de LowTide en su máquina virtual, con cuentas de prueba y sin datos reales de ninguna empresa. Nunca contra el dominio de un cliente, la PC del plan B ni infraestructura de terceros, aunque esté en la misma nube. No incluyen denegación de servicio ni ingeniería social, y siguen las reglas de pruebas de penetración del proveedor de nube. El reto de hackeo solo empieza con permiso escrito del profesor y con sus reglas y su alcance publicados (tarjeta #85).
+Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de hackeo para el grupo) solo se hacen contra el despliegue de LowTide en su máquina virtual, con cuentas de prueba y sin datos reales de ninguna empresa. Nunca contra el dominio de un cliente, la PC del plan B ni infraestructura de terceros, aunque esté en la misma nube. No incluyen denegación de servicio ni ingeniería social, y siguen las reglas de pruebas de penetración del proveedor de nube. El reto de hackeo solo empieza con permiso escrito del profesor y con sus reglas y su alcance publicados (tarjeta #85, [`reto_hackeo.md`](reto_hackeo.md)).
 
 ## 4. Datos personales y secretos
 

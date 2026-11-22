@@ -13,6 +13,7 @@
 | [`plantilla_carta_autorizacion.md`](plantilla_carta_autorizacion.md) | Plantilla de la carta de autorización que firma quien controla cada dominio: alcance, vigencia, datos personales, firmas y Anexo A de actividades | #6 |
 | [`hallazgos_esperados.md`](hallazgos_esperados.md) | Hallazgos esperados del dominio de prueba olmardo.com, por fuente, con código, severidad, fecha y estado | #10b |
 | [`medicion_cobertura.md`](medicion_cobertura.md) | Cobertura por regla y superficie moderna, método de medición y límites para falsos positivos | #84 |
+| [`reto_hackeo.md`](reto_hackeo.md) | Reto de hackeo para el grupo: permiso, alcance, reglas, cómo reportar, clasificación y registro de reportes con su arreglo | #85 |
 | [`servicios_externos.md`](servicios_externos.md) | Servicios externos: cuenta y dueño, plan, costo, límite, vencimiento de la llave y plan B de cada uno, las licencias y el gasto real | #8 |
 
 La base de datos se documenta en [`db/README.md`](../db/README.md).
