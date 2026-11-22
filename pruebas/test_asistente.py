@@ -497,16 +497,31 @@ class AssistantPromptAndProvider(unittest.TestCase):
 
     def test_el_prompt_no_deja_inventar_menus_ni_empezar_dmarc_en_reject_ni_anidar_listas(self):
         # La respuesta de pasos en Cloudflare del 21 nov inventó 'Scrape Shield → Hide Server Information',
-        # recomendó p=reject de entrada y anidó los pasos de cada hallazgo en una lista numerada.
+        # recomendó p=reject de entrada y anidó los pasos de cada hallazgo en una lista numerada. En la prueba en vivo
+        # del mismo día, con 'No describas menús' Workers AI siguió dando menús y se quedó en p=none.
         reglas = {linea.split('. ', 1)[0]: linea for linea in asistente.SYSTEM_PROMPT.split('\n')[2:]}
-        self.assertIn('No describas menús, botones ni rutas de pantallas de otros servicios, como Cloudflare',
-                      reglas['8'])
-        self.assertIn('documentación oficial de ese servicio y en el plan de acción del reporte', reglas['8'])
+        self.assertIn('No escribas nombres de menús, pestañas, botones, opciones ni rutas de pantallas de ningún '
+                      'servicio, como Cloudflare', reglas['8'])
+        self.assertIn('ni registros o valores de ejemplo que no vengan en los datos', reglas['8'])
+        # La 8 no puede prohibir lo que pide la 9: sus valores van nombrados como la única excepción.
+        self.assertIn('Los únicos valores de ejemplo que sí puedes escribir son p=none, rua, quarantine y reject, '
+                      'para la regla 9.', reglas['8'])
+        for valor in ('p=none', 'rua', 'quarantine', 'reject'):
+            self.assertIn(valor, reglas['9'])
+        self.assertIn('en una o dos frases qué hay que lograr, sin pasos de pantalla', reglas['8'])
+        self.assertIn('termina con una frase que diga que los pasos exactos están en la documentación oficial de ese '
+                      'servicio y en el plan de acción del reporte', reglas['8'])
+        self.assertNotIn('No describas menús', asistente.SYSTEM_PROMPT)
+        self.assertTrue(reglas['9'].endswith('Menciona siempre las tres etapas.'))
         self.assertIn('empezar con p=none y una dirección rua de un buzón de la empresa', reglas['9'])
         self.assertIn('sin escribir ninguna dirección de correo', reglas['9'])
         self.assertIn('después a reject solo cuando los reportes muestren que el correo legítimo pasa', reglas['9'])
         self.assertIn('en una línea en negritas y sin número, como **Nombre [H1]**', reglas['10'])
         self.assertIn('No pongas listas dentro de listas.', reglas['10'])
+        # La 10 no puede pedir la lista de pasos que la 8 quita: las dos piden lo mismo, una o dos frases.
+        self.assertIn('y debajo, en una o dos frases y sin lista de pasos, qué hay que lograr.', reglas['10'])
+        self.assertNotIn('lista numerada', reglas['10'])
+        self.assertNotIn('sus pasos', reglas['10'])
         # Las reglas nuevas no meten datos de la base: al modelo siguen yendo solo los tres campos.
         self.assertEqual(asistente.MODEL_FIELDS, ('title', 'category', 'severity'))
 
@@ -807,6 +822,9 @@ class AssistantPromptAndProvider(unittest.TestCase):
         self.assertEqual(request.full_url, 'https://workers.example/ai/v1/chat/completions')
         self.assertEqual(request.get_method(), 'POST')
         self.assertEqual(request.get_header('Authorization'), 'Bearer test-key')
+        # Sin un User-Agent propio el opener manda Python-urllib/3.x y api.groq.com responde 403 (error 1010).
+        self.assertEqual(request.get_header('User-agent'), 'LowTide/1.0 (asistente RC-77)')
+        self.assertEqual(asistente.PROVIDER_USER_AGENT, 'LowTide/1.0 (asistente RC-77)')
         self.assertEqual(timeout, 12.5)
         payload = json.loads(request.data)
         self.assertEqual(payload['model'], 'model')

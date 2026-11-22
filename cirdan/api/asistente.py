@@ -30,6 +30,9 @@ MAX_QUESTION_LENGTH = 1000
 MAX_CLEAN_QUESTION_LENGTH = 2 * MAX_QUESTION_LENGTH
 MAX_ANSWER_LENGTH = 4000
 MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024
+# El borde de Cloudflare de api.groq.com veta el User-Agent que pone urllib (Python-urllib/3.x) con un 403 (error
+# 1010, browser_signature_banned): sin este encabezado el respaldo nunca respondía. Prueba en vivo del 21 nov (RC-77).
+PROVIDER_USER_AGENT = 'LowTide/1.0 (asistente RC-77)'
 # Tope de toda la pregunta, sumando los dos proveedores, incluida la resolución de nombres. El portal espera un poco
 # más (proxyTimeout de next.config.ts y TIEMPO_MAXIMO_ASISTENTE_MS de FrontKL), así que el 503 llega con su mensaje.
 ASSISTANT_DEADLINE_SECONDS = 30
@@ -54,7 +57,10 @@ _SEVERITY_ORDER = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
 # Reglas 1 a 7: SISTEMA v2 de la evaluación de proveedores (RC-185), tal cual. Con él pasaron Workers AI y Groq
 # gpt-oss-120b, con los mismos max_tokens, reasoning_effort y temperatura que manda _call_provider. Las reglas 8 a 10
 # se sumaron el 21 nov (RC-77) porque, al pedirle pasos en Cloudflare, el modelo inventó menús, recomendó p=reject de
-# entrada y anidó listas numeradas.
+# entrada y anidó listas numeradas. La regla 8 se reescribió y la 9 sumó su última frase tras la prueba en vivo del
+# mismo día: con la 8 anterior Workers AI seguía dando menús de Cloudflare y la 9 se quedaba en p=none. Después la 8
+# nombró los valores de la 9 como los únicos permitidos y la 10 dejó la lista de pasos por las mismas una o dos frases
+# de la 8, porque la 8 prohibía los valores que pide la 9 y la 10 pedía la lista de pasos que la 8 quita.
 SYSTEM_PROMPT = (
     'Eres el asistente de LowTide, una plataforma que revisa lo que una empresa expone en internet. '
     'Respondes en español, en lenguaje simple y con tú, a una persona no técnica de la empresa, '
@@ -69,15 +75,18 @@ SYSTEM_PROMPT = (
     '7. El plan de acción dice cuánto bajaría el score si se resuelve cada hallazgo, no lo que va a pasar. '
     'Si te preguntan por el futuro, como el score del próximo mes, empieza con '
     '"No lo sé con los datos de este reporte" y explica de qué depende.\n'
-    '8. No describas menús, botones ni rutas de pantallas de otros servicios, como Cloudflare, GitHub o el proveedor '
-    'de correo: no vienen en los datos y cambian seguido. Di qué hay que lograr y que los pasos exactos están en la '
-    'documentación oficial de ese servicio y en el plan de acción del reporte.\n'
+    '8. No escribas nombres de menús, pestañas, botones, opciones ni rutas de pantallas de ningún servicio, como '
+    'Cloudflare, GitHub o el proveedor de correo, ni registros o valores de ejemplo que no vengan en los datos. Los '
+    'únicos valores de ejemplo que sí puedes escribir son p=none, rua, quarantine y reject, para la regla 9. Si te '
+    'piden pasos en un servicio, di por cada hallazgo en una o dos frases qué hay que lograr, sin pasos de pantalla, y '
+    'termina con una frase que diga que los pasos exactos están en la documentación oficial de ese servicio y en el '
+    'plan de acción del reporte.\n'
     '9. Si hablas de DMARC, recomienda empezar con p=none y una dirección rua de un buzón de la empresa para recibir '
     'reportes, sin escribir ninguna dirección de correo, y subir a quarantine y después a reject solo cuando los '
-    'reportes muestren que el correo legítimo pasa.\n'
+    'reportes muestren que el correo legítimo pasa. Menciona siempre las tres etapas.\n'
     '10. Si das pasos para varios hallazgos, escribe el nombre de cada uno con su cita en una línea en negritas y sin '
-    'número, como **Nombre [H1]**, y debajo sus pasos en una lista numerada que empiece en 1. No pongas listas dentro '
-    'de listas.'
+    'número, como **Nombre [H1]**, y debajo, en una o dos frases y sin lista de pasos, qué hay que lograr. No pongas '
+    'listas dentro de listas.'
 )
 
 # Nombres que ve la persona en el portal, para que la respuesta no repita los códigos de la base.
@@ -200,7 +209,7 @@ def _call_provider(base_url, api_key, model, messages, timeout):
         base_url.rstrip('/') + '/chat/completions',
         data=payload,
         headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json',
-                 'Accept': 'application/json'},
+                 'Accept': 'application/json', 'User-Agent': PROVIDER_USER_AGENT},
         method='POST',
     )
     try:
