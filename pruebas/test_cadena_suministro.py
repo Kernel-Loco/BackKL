@@ -166,9 +166,17 @@ class ComposeConImagenes(unittest.TestCase):
         self.assertEqual(svc['api'].get('ports', []), [])
 
     def test_2_sin_las_imagenes_no_arranca(self):
-        rc, salida = _config(ENV_FALSO, archivos=ARCHIVOS + ['docker-compose.imagenes.yml'])
-        self.assertNotEqual(rc, 0)
-        self.assertIn('LOWTIDE_API_IMAGEN', salida)
+        # Compose nombra solo la primera variable que le falta y el orden no es fijo, así que cada subprueba pone una
+        # sola imagen y exige el mensaje de la otra, el texto del :? de docker-compose.imagenes.yml.
+        for falta, puesta in (('LOWTIDE_API_IMAGEN', {'LOWTIDE_PORTAL_IMAGEN': PORTAL}),
+                              ('LOWTIDE_PORTAL_IMAGEN', {'LOWTIDE_API_IMAGEN': API}), (None, {})):
+            with self.subTest(falta=falta or 'las dos'):
+                rc, salida = _config(dict(ENV_FALSO, **puesta), archivos=ARCHIVOS + ['docker-compose.imagenes.yml'])
+                self.assertNotEqual(rc, 0, salida[-500:])
+                if falta:
+                    self.assertIn('Falta %s en .env' % falta, salida)
+                else:
+                    self.assertRegex(salida, r'Falta LOWTIDE_(API|PORTAL)_IMAGEN en \.env')
 
 
 if __name__ == '__main__':
