@@ -18,7 +18,8 @@ from starlette.background import BackgroundTask
 from cirdan import correo
 from cirdan.auth import captcha, passwords, sessions, totp, webauthn
 from cirdan.auth.deps import COOKIE, COOKIE_SECURE, Session, client_ip, current_session, is_platform_admin
-from cirdan.config import config
+from cirdan.auth.demo import HASH_DE_RELLENO
+from cirdan.config import config, origenes_permitidos
 from cirdan.db import audit, transaction
 
 router = APIRouter(prefix='/api/v1/auth', tags=['sesión'])
@@ -365,8 +366,10 @@ class LinkVerifyIn(BaseModel):
 
 
 def _portal_url():
-    """La dirección del portal para el enlace: de PORTAL_URL, nunca de la cabecera Host de la petición."""
-    return (config('PORTAL_URL') or 'http://localhost:3000').rstrip('/')
+    """La dirección del portal para el enlace: de PORTAL_URL, nunca de la cabecera Host de la petición. Vacía, el primer
+    origen de ALLOWED_ORIGINS: así la deja docker-compose.despliegue.yml, para que la VM mande a https://lowtidesec.com
+    y el plan B de pruebas a https://pruebas.lowtidesec.com (M4 de la revisión). Sin las dos, http://localhost:3000."""
+    return (config('PORTAL_URL') or origenes_permitidos()[0]).rstrip('/')
 
 
 def _link_daily_cap():
@@ -388,9 +391,20 @@ def _send_link(email, ip):
         if not found:
             log.warning('enlace pedido para un correo que no existe: ip=%r dominio=%r', ip, _email_domain(email))
             return
+        if found['password_hash'] == HASH_DE_RELLENO:
+            # Una cuenta de demo apagada (cirdan/auth/demo.py) sigue activa con el hash de relleno y sin MFA: con el
+            # enlace entraría sin contraseña ni código. No se le manda nada ni gasta el tope (A1 de la revisión).
+            log.warning('enlace pedido para una cuenta sin contraseña (hash de relleno): ip=%r dominio=%r', ip,
+                        _email_domain(email))
+            return
         org, user_id = str(found['organization_id']), str(found['user_id'])
         tope = _link_daily_cap()
-        if not sessions.reserve_link_send(tope):
+        reservado = sessions.reserve_link_send(tope, user_id)
+        if reservado < 0:
+            log.warning('enlace: tope diario de la cuenta alcanzado (%d): ip=%r dominio=%r',
+                        sessions.MAX_LINKS_USER_DAY, ip, _email_domain(email))
+            return
+        if not reservado:
             # Texto fijo para contar cuántas veces sale en la semana (decisión 7 de RC-327, README).
             log.warning('enlace: tope diario alcanzado (%d)', tope)
             return
@@ -405,6 +419,20 @@ def _send_link(email, ip):
                 audit(conn, org, 'auth.link_sent', user_id, ip, 'user', user_id, {'expires_minutes': LINK_MINUTES})
     except Exception:
         log.exception('enlace: falló el envío en segundo plano')
+
+
+def _audit_link_trace(token, ip):
+    """Un token que ya no sirve pero fue de una cuenta (usado, anulado por otro o vencido) queda en la bitácora de esa
+    cuenta como auth.link_rejected, sin el token (H7, M3 de la revisión). Una vez por token: los reintentos del mismo
+    no escriben más. Si falla, queda solo en el log: el 401 sale igual."""
+    try:
+        rastro = sessions.link_trace(token)
+        if rastro:
+            with transaction(rastro['org_id']) as conn:
+                audit(conn, rastro['org_id'], 'auth.link_rejected', rastro['user_id'], ip, 'user', rastro['user_id'],
+                      {'reason': rastro['reason']})
+    except Exception:
+        log.exception('enlace: no se pudo escribir auth.link_rejected del canje rechazado')
 
 
 @router.post('/link/request', status_code=202,
@@ -423,6 +451,7 @@ def request_link(body: LinkRequestIn, request: Request):
 def verify_link(body: LinkVerifyIn, request: Request, response: Response):
     pending = sessions.take_link(body.token)  # una sola vez, también con dos canjes a la vez
     if not pending:
+        _audit_link_trace(body.token, client_ip(request))
         raise HTTPException(401, LINK_INVALID)
     ip = client_ip(request)
     org, user_id, email = pending['org_id'], pending['user_id'], pending['email']
@@ -431,12 +460,16 @@ def verify_link(body: LinkVerifyIn, request: Request, response: Response):
         # Como /login: la cuenta sigue activa y su empresa en trial o active, con la fila bloqueada contra un alta de
         # TOTP a la vez (FOR NO KEY UPDATE, RC-154).
         row = conn.execute(
-            'SELECT u.role, u.email::text, u.mfa_enabled_at IS NOT NULL AND u.totp_secret_enc IS NOT NULL AS mfa_enabled '
+            'SELECT u.role, u.email::text, u.mfa_enabled_at IS NOT NULL AND u.totp_secret_enc IS NOT NULL AS mfa_enabled, '
+            '       u.password_hash = %s AS demo_off '
             '  FROM users u JOIN organizations o ON o.id = u.organization_id '
             " WHERE u.id = %s AND u.is_active AND o.status IN ('trial', 'active') FOR NO KEY UPDATE OF u",
-            (user_id,)).fetchone()
+            (HASH_DE_RELLENO, user_id)).fetchone()
         if not row:
             rejected = 'inactive'
+        elif row['demo_off']:
+            # Apagada después de pedir el enlace: tampoco entra (A1 de la revisión).
+            rejected = 'demo_off'
         elif row['mfa_enabled']:
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
                 {'user_id': user_id, 'org_id': org, 'email': row['email'], 'via': 'link_totp'})}

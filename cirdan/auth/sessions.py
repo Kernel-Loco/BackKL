@@ -49,6 +49,8 @@ LINK_SECONDS = 15 * 60
 MAX_LINKS_EMAIL = 3   # enlaces pedidos por correo en LOCK_SECONDS (#28, RC-63)
 MAX_LINKS_IP = 10     # y por IP
 LINK_DAY_SECONDS = 48 * 60 * 60  # el contador del día vive dos días: alcanza para cualquier zona y se borra solo
+MAX_LINKS_USER_DAY = 5  # envíos por cuenta al día: con unos pocos correos que existen nadie agota el tope global (M2)
+LINK_TRACE_SECONDS = 24 * 60 * 60  # cuánto se recuerda de quién era un enlace, para la bitácora del canje rechazado
 
 
 @cache
@@ -260,13 +262,27 @@ def _link_user_key(user_id):
     return 'link-user:' + _digest(str(user_id))
 
 
-# KEYS: el índice de la cuenta (link-user:) y el token nuevo (link:<hash>). ARGV: el hash nuevo, sus datos y los
-# segundos. Borra el token anterior de la cuenta y deja el nuevo en un solo paso: dos pedidos a la vez dejan uno solo.
+def _link_trace_key(digest):
+    return 'link-rastro:' + digest
+
+
+# KEYS: el índice de la cuenta (link-user:), el token nuevo (link:<hash>) y su rastro (link-rastro:<hash>). ARGV: el
+# hash nuevo, sus datos, los segundos, la cuenta y la empresa, y los segundos del rastro. Borra el token anterior de la
+# cuenta y deja el nuevo en un solo paso: dos pedidos a la vez dejan uno solo. El rastro solo guarda de qué cuenta era
+# el enlace y en qué quedó (issued, used o replaced), nunca el correo ni el token, para que un canje rechazado de una
+# cuenta que existe quede en la bitácora (H7, M3 de la revisión).
 _CREATE_LINK = '''
 local anterior = redis.call('GET', KEYS[1])
-if anterior then redis.call('DEL', 'link:' .. anterior) end
+if anterior then
+  redis.call('DEL', 'link:' .. anterior)
+  local rastro = 'link-rastro:' .. anterior
+  if redis.call('EXISTS', rastro) == 1 then redis.call('HSET', rastro, 'estado', 'replaced') end
+end
 redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+redis.call('DEL', KEYS[3])
+redis.call('HSET', KEYS[3], 'estado', 'issued', 'user_id', ARGV[4], 'org_id', ARGV[5])
+redis.call('EXPIRE', KEYS[3], ARGV[6])
 '''
 # KEYS: el token (link:<hash>). ARGV: su hash. Lo lee y lo borra en el mismo paso (como GETDEL), y limpia el índice de
 # su cuenta solo si sigue apuntando a este token. Dos canjes a la vez: uno lo recibe y el otro ve nil.
@@ -277,6 +293,8 @@ redis.call('DEL', KEYS[1])
 local data = cjson.decode(raw)
 local indice = 'link-user:' .. data.user_key
 if redis.call('GET', indice) == ARGV[1] then redis.call('DEL', indice) end
+local rastro = 'link-rastro:' .. ARGV[1]
+if redis.call('EXISTS', rastro) == 1 then redis.call('HSET', rastro, 'estado', 'used') end
 return raw
 '''
 
@@ -287,7 +305,8 @@ def create_link(data):
     token = secrets.token_urlsafe(32)
     digest = _digest(token)
     payload = json.dumps(dict(data, user_key=_digest(str(data['user_id']))))
-    _valkey().eval(_CREATE_LINK, 2, _link_user_key(data['user_id']), 'link:' + digest, digest, payload, LINK_SECONDS)
+    _valkey().eval(_CREATE_LINK, 3, _link_user_key(data['user_id']), 'link:' + digest, _link_trace_key(digest), digest,
+                   payload, LINK_SECONDS, str(data['user_id']), str(data['org_id']), LINK_TRACE_SECONDS)
     return token
 
 
@@ -304,9 +323,36 @@ def take_link(token):
     return data
 
 
+_TRACE_REASONS = {'used': 'used', 'replaced': 'replaced', 'issued': 'expired'}
+
+# KEYS: el rastro. Lo da una sola vez (HSETNX auditado): reenviar el mismo token miles de veces no llena audit_log.
+_TRACE_ONCE = '''
+if redis.call('EXISTS', KEYS[1]) == 0 then return false end
+if redis.call('HSETNX', KEYS[1], 'auditado', '1') == 0 then return false end
+return redis.call('HMGET', KEYS[1], 'estado', 'user_id', 'org_id')
+'''
+
+
+def link_trace(token):
+    """De quién era un token que take_link ya no da: {'user_id', 'org_id', 'reason'} con reason used, replaced o
+    expired, solo la primera vez que se pregunta por ese token. None si nunca existió, el envío falló, pasaron
+    LINK_TRACE_SECONDS o ya se dio una vez."""
+    if not token or len(token) > 100:
+        return None
+    raw = _valkey().eval(_TRACE_ONCE, 1, _link_trace_key(_digest(token)))
+    if not raw:
+        return None
+    estado, user_id, org_id = raw
+    reason = _TRACE_REASONS.get(estado)
+    if not reason or not user_id or not org_id:
+        return None
+    return {'user_id': user_id, 'org_id': org_id, 'reason': reason}
+
+
 def delete_link(token):
-    """Borra el token si el envío falló: un enlace que nunca llegó no debe quedar vivo."""
-    _valkey().delete('link:' + _digest(token))
+    """Borra el token si el envío falló: un enlace que nunca llegó no debe quedar vivo, y su rastro tampoco."""
+    digest = _digest(token)
+    _valkey().delete('link:' + digest, _link_trace_key(digest))
 
 
 def take_link_request(email, ip):
@@ -317,22 +363,31 @@ def take_link_request(email, ip):
     return bool(vence)
 
 
+# KEYS: el contador del día y el de la cuenta en ese día. ARGV: el tope del día, los segundos y el tope de la cuenta.
+# Revisa los dos y cuenta en un solo paso: -1 si la cuenta ya llegó a su tope (no gasta el del día), 0 si el día ya
+# llegó, o el número de envío del día.
 _RESERVE_DAY = '''
+if tonumber(redis.call('GET', KEYS[2]) or '0') >= tonumber(ARGV[3]) then return -1 end
 local n = redis.call('INCR', KEYS[1])
 if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
 if n > tonumber(ARGV[1]) then
   redis.call('DECR', KEYS[1])
   return 0
 end
+if redis.call('INCR', KEYS[2]) == 1 then redis.call('EXPIRE', KEYS[2], ARGV[2]) end
 return n
 '''
 
 
-def reserve_link_send(tope, dia=None):
-    """Reserva un envío del día (UTC) si quedan menos de `tope`; 0 si ya se llegó. Solo cuenta lo que se va a enviar.
-    `dia` solo lo pasan las pruebas, para no gastar el contador de hoy."""
+def reserve_link_send(tope, user_id, dia=None):
+    """Reserva un envío del día (UTC) si quedan menos de `tope` y la cuenta lleva menos de MAX_LINKS_USER_DAY ese día.
+    Devuelve el número de envío, 0 si el día ya llegó a `tope` o -1 si la cuenta ya llegó al suyo. Solo cuenta lo que
+    se va a enviar. Con el tope por cuenta, pedir enlaces para los pocos correos que existen y se conocen (los de demo
+    del repo, equipo@) no deja a los demás sin enlace (M2 de la revisión). `dia` solo lo pasan las pruebas, para no
+    gastar el contador de hoy."""
     dia = dia or time.strftime('%Y-%m-%d', time.gmtime())
-    return int(_valkey().eval(_RESERVE_DAY, 1, 'link:day:' + dia, tope, LINK_DAY_SECONDS))
+    return int(_valkey().eval(_RESERVE_DAY, 2, 'link:day:' + dia, 'link:day:%s:user:%s' % (dia, _digest(str(user_id))),
+                              tope, LINK_DAY_SECONDS, MAX_LINKS_USER_DAY))
 
 
 # ------------------------------------------------------------------ passkeys (RC-331)

@@ -147,8 +147,9 @@ jobs:
           $C up -d --build --wait db valkey api correo-falso
           $C run --rm pruebas python -m unittest -v pruebas/test_enlace.py > enlace.log 2> enlace.err || { cat enlace.err; exit 1; }
           cat enlace.err
-          # Sin 'skipped': fuera del compose aislado la prueba se salta y no debe contar como verde.
-          tail -1 enlace.err | grep -qx 'OK'
+          # Sin 'skipped': fuera del compose aislado la prueba se salta y no debe contar como verde. Se lee la última
+          # línea de resultado de unittest, no la última del archivo: un aviso de Python puede salir después del OK.
+          grep -E '^(OK|FAILED)( |$)' enlace.err | tail -1 | grep -qx 'OK'
           sh pruebas/enlace/revisar_log.sh enlace.log
 
       # RC-313, punto 3b: con la base a las 20:00 de México y la API en UTC, GET /api/v1/domains da 'missing' a una carta

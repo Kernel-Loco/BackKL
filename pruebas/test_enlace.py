@@ -19,6 +19,7 @@ import re
 import time
 import unittest
 import urllib.request
+from pathlib import Path
 
 from pruebas import sesion
 from pruebas.sesion import Client
@@ -32,6 +33,10 @@ NADIE = 'nadie.existe@acme-demo.mx'
 ENLACE = re.compile(r'http://portal\.prueba/login/enlace#t=([A-Za-z0-9_-]+)')
 INVALIDO = 'El enlace no es válido o ya venció. Pide otro o entra con tu contraseña.'
 TOKENS = []  # cada token visto, para buscarlo en audit_log y en el log de la API
+# El hash de relleno de las cuentas de demo apagadas. Se lee del archivo: importar cirdan.auth.demo pide las
+# variables de la base que el servicio `pruebas` no tiene.
+HASH_DE_RELLENO = re.search(r"^HASH_DE_RELLENO = '([^']+)'", (Path(__file__).resolve().parents[1] / 'cirdan' / 'auth' /
+                            'demo.py').read_text(encoding='utf-8'), re.M).group(1)
 
 
 def _falso(metodo, ruta, datos=None):
@@ -88,6 +93,14 @@ class EnlaceAislado(unittest.TestCase):
         for llave in cls.valkey.scan_iter('link*'):
             cls.valkey.delete(llave)
         _falso('DELETE', '/correos')
+        # La bitácora no se puede borrar: al repetir sin bajar el compose solo cuenta lo de esta corrida.
+        cls.desde = cls.pg.execute('SELECT clock_timestamp()').fetchone()[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        # Sin cerrar, psycopg deja un ResourceWarning después del OK de unittest.
+        cls.pg.close()
+        cls.valkey.close()
 
     def setUp(self):
         for llave in self.valkey.scan_iter('link:req:ip:*'):
@@ -97,7 +110,7 @@ class EnlaceAislado(unittest.TestCase):
         """details del último registro de esa acción de esa cuenta, o None."""
         fila = self.pg.execute(
             'SELECT a.details FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = %s AND a.action = %s'
-            ' ORDER BY a.chain_seq DESC LIMIT 1', (email, accion)).fetchone()
+            ' AND a.occurred_at >= %s ORDER BY a.chain_seq DESC LIMIT 1', (email, accion, self.desde)).fetchone()
         return fila[0] if fila else None
 
     def test_1_correo_que_existe_y_que_no_dan_la_misma_respuesta(self):
@@ -130,6 +143,7 @@ class EnlaceAislado(unittest.TestCase):
         segundo = token_de(esperar_correos(JORDAN, 2)[-1])
         self.assertNotEqual(primero, segundo)
         self.assertEqual(canjear(primero)[1], (401, {'detail': INVALIDO}))   # lo anuló el segundo
+        self.assertEqual(self.bitacora(JORDAN, 'auth.link_rejected'), {'reason': 'replaced'})   # M3
         cliente, (codigo, cuerpo) = canjear(segundo)
         self.assertEqual(codigo, 200, cuerpo)
         self.assertEqual((cuerpo['mfa_required'], cuerpo['user']['email']), (False, JORDAN))
@@ -147,6 +161,7 @@ class EnlaceAislado(unittest.TestCase):
         self.assertGreaterEqual(vencidas, 1)
         time.sleep(0.2)
         self.assertEqual(canjear(token)[1], (401, {'detail': INVALIDO}))
+        self.assertEqual(self.bitacora(OLMARDO, 'auth.link_rejected'), {'reason': 'expired'})   # M3
 
     def test_4_cuenta_desactivada_se_rechaza_y_queda_en_la_bitacora(self):
         self.assertEqual(pedir(OLMARDO)[0], 202)
@@ -190,6 +205,44 @@ class EnlaceAislado(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(canjear(token)[1], (401, {'detail': INVALIDO}))
         self.assertEqual(self.bitacora(MAYA, 'auth.link_send_failed'), {'reason': '429'})
+        self.assertIsNone(self.bitacora(MAYA, 'auth.link_rejected'))   # el que no salió no deja rastro
+
+    def test_7b_token_usado_queda_en_la_bitacora(self):
+        # M3: la segunda vez de un token de una cuenta que existe queda como auth.link_rejected, sin el token.
+        for llave in self.valkey.scan_iter('link:req:*'):
+            self.valkey.delete(llave)
+        antes = len(correos(MAYA))
+        self.assertEqual(pedir(MAYA)[0], 202)
+        token = token_de(esperar_correos(MAYA, antes + 1)[-1])
+        self.assertEqual(canjear(token)[1][0], 200)
+        self.assertEqual(canjear(token)[1], (401, {'detail': INVALIDO}))
+        self.assertEqual(self.bitacora(MAYA, 'auth.link_rejected'), {'reason': 'used'})
+        cuenta = 'SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = %s' \
+                 " AND a.action = 'auth.link_rejected'"
+        antes = self.pg.execute(cuenta, (MAYA,)).fetchone()[0]
+        for _ in range(3):
+            self.assertEqual(canjear(token)[1], (401, {'detail': INVALIDO}))
+        self.assertEqual(self.pg.execute(cuenta, (MAYA,)).fetchone()[0], antes)   # reenviarlo no llena la bitácora
+
+    def test_7c_cuenta_de_demo_apagada_ni_recibe_ni_canjea(self):
+        # A1: con el hash de relleno (como demo.py la deja en la VM), la cuenta activa y sin MFA no entra por enlace.
+        for llave in self.valkey.scan_iter('link:req:*'):
+            self.valkey.delete(llave)
+        huella = self.pg.execute('SELECT password_hash FROM users WHERE email = %s', (JORDAN,)).fetchone()[0]
+        antes = len(correos(JORDAN))
+        self.assertEqual(pedir(JORDAN)[0], 202)
+        token = token_de(esperar_correos(JORDAN, antes + 1)[-1])
+        try:
+            self.pg.execute('UPDATE users SET password_hash = %s WHERE email = %s', (HASH_DE_RELLENO, JORDAN))
+            self.assertEqual(canjear(token)[1], (401, {'detail': INVALIDO}))   # apagada después de pedirlo
+            self.assertEqual(self.bitacora(JORDAN, 'auth.link_rejected'), {'reason': 'demo_off'})
+            dia = self.valkey.get('link:day:' + time.strftime('%Y-%m-%d', time.gmtime()))
+            self.assertEqual(pedir(JORDAN)[0], 202)   # la misma respuesta
+            time.sleep(2)
+            self.assertEqual(len(correos(JORDAN)), antes + 1)   # pero no se le manda nada
+            self.assertEqual(self.valkey.get('link:day:' + time.strftime('%Y-%m-%d', time.gmtime())), dia)
+        finally:
+            self.pg.execute('UPDATE users SET password_hash = %s WHERE email = %s', (huella, JORDAN))
 
     def test_8_ningun_token_queda_en_la_bitacora(self):
         self.assertGreaterEqual(len(TOKENS), 8)

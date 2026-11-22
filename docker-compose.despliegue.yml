@@ -63,7 +63,9 @@ services:
       # de ALLOWED_ORIGINS. Si el dominio cambia, dejan de servir y se entra con contraseña y TOTP.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-lowtidesec.com}
       # El enlace al correo (#28, RC-63) lleva al portal publicado, y siempre a Resend, aunque el .env diga otra cosa.
-      PORTAL_URL: https://lowtidesec.com
+      # Vacía, la API usa el primer origen de ALLOWED_ORIGINS: https://lowtidesec.com en la VM y
+      # https://pruebas.lowtidesec.com en el plan B de pruebas (M4 de la revisión de RC-63).
+      PORTAL_URL: ""
       CORREO_API_URL: https://api.resend.com/emails
       FORWARDED_ALLOW_IPS: "10.249.91.10,10.249.92.11"
       # Nunca en el despliegue, aunque el .env diga otra cosa.

@@ -8,7 +8,8 @@ tokens=$(grep '^TOKEN_VISTO ' "$salida" | cut -d' ' -f2)
 [ -n "$tokens" ] || { echo "No hay líneas TOKEN_VISTO en $salida"; exit 1; }
 log=$($C logs --no-color api)
 for t in $tokens; do
-  if printf '%s' "$log" | grep -qF "$t"; then
+  # -e: un token puede empezar con '-' (1 de cada 64) y grep lo tomaría como opción (M5 de la revisión).
+  if printf '%s' "$log" | grep -qF -e "$t"; then
     echo "El log de la API trae un token de enlace"; exit 1
   fi
 done
