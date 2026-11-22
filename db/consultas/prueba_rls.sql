@@ -108,3 +108,14 @@ SELECT proname AS funcion,
  WHERE oid IN ('public.reserve_source_quota(text,integer)'::regprocedure,
                'public.adjust_source_quota(text,date,integer)'::regprocedure)
  ORDER BY proname;
+
+\echo '[13] domains_fqdn_otra_organizacion() (migración 029): SECURITY DEFINER, search_path que termina en pg_temp, sin EXECUTE para PUBLIC y con su trigger en domains'
+SELECT p.proname AS funcion,
+       p.prosecdef AS security_definer,
+       array_to_string(p.proconfig, '; ') AS config,
+       has_function_privilege('public', p.oid, 'EXECUTE') AS public_ejecuta,
+       (SELECT count(*) FROM pg_trigger t
+         WHERE t.tgfoid = p.oid AND t.tgrelid = 'public.domains'::regclass
+           AND t.tgname = 'domains_fqdn_otra_organizacion_iu' AND t.tgenabled = 'O') AS trigger_activo
+  FROM pg_proc p
+ WHERE p.oid = 'public.domains_fqdn_otra_organizacion()'::regprocedure;

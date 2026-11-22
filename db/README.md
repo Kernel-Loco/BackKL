@@ -42,6 +42,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `migraciones/026_huellas_por_version.sql` | Rotación de la llave de las huellas de contraseña (RC-333): función `password_hash_version_orgs(p_version)`, SECURITY DEFINER con search_path fijo que termina en `pg_temp`, que da a `cirdan_app` solo los ids de las empresas con huellas `lt<versión>$` de esa versión, sin huellas, correos, ids de usuario ni conteos. La usa `cirdan/auth/rotar_huellas.py`, que luego recorre cada empresa con RLS. La API no la lee: puede ir antes o después de reconstruirla. Se puede correr otra vez sin error |
 | `migraciones/027_mfa_operador.sql` | Permite detectar cuentas `platform_admins` aunque no tengan TOTP activo, para que el login rechace la contraseña como único factor en una cuenta operadora (#66). Solo expone esa comprobación mediante una función `SECURITY DEFINER`; no da acceso a la tabla |
 | `migraciones/028_tipo_activo_perfil.sql` | Agrega `profile` al CHECK de `assets.asset_type`: un perfil público (GitHub, LinkedIn, X, Facebook, Instagram, YouTube, TikTok o GitLab) enlazado desde el sitio, o el usuario de GitHub que firma commits de la organización con un correo del dominio (#20, RC-56). `value` es la URL https canónica del perfil. No quita ningún tipo. Va antes de la semilla 026 y de reconstruir la API: sin ella, el primer perfil hace fallar `identity` entera. Se puede correr otra vez sin error |
+| `migraciones/029_alcance_carta_y_otra_empresa.sql` | RC-59 (#26). Un trigger `SECURITY DEFINER` (`domains_fqdn_otra_organizacion`) rechaza el alta o el cambio de un dominio si otra empresa ya tiene el mismo fqdn en `verified` o `paused`, con un candado por fqdn. `domain_authorizations` suma `template_version` y `activities` (alcance de la carta, actividades del Anexo A) y las cartas que ya existen quedan con la plantilla 1 y las actividades 1 a 11. Va antes de reconstruir la API: el orquestador nuevo no corre ninguna fuente con una carta sin alcance |
 | `semillas/001_datos_demo.sql` | Datos canónicos con UUID fijos (recarga idéntica). También trae los catálogos: planes, fuentes y el juego de reglas v1 |
 | `semillas/002_dominio_prueba.sql` | Dominio de prueba olmardo.com (Grupo Olmardo, plan Business) con su TXT verificado el 13 oct 2026 y su carta firmada el 19 oct 2026, con vigencia del 19 oct 2026 al 19 oct 2027 (#9b), y la fuente `ejemplo` deshabilitada para las pruebas del orquestador. Guarda el sha256 del PDF firmado, que no va en el repo. Lo revisa `pruebas/test_dominio_prueba.py` |
 | `semillas/003_titulos_espanol.sql` | Títulos en español de los hallazgos demo, como piden los contratos #13 y #21 (RC-17) |
@@ -67,8 +68,9 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 | `semillas/024_regla_ia.sql` | La regla `exposed_ai_service` (infrastructure, high, tope 25) en el juego v1, id 37, y en cada otro juego que ya existe, también los de una organización (#144, RC-262, desviación 15). Necesita la migración 023 y va antes de reconstruir la API: sin la regla, un puerto de inteligencia artificial hace fallar la fuente `shodan` entera. Se puede correr otra vez sin error |
 | `semillas/025_reglas_higiene_certificados.sql` | Reglas 38 a 40 del juego v1, `cert_internal_name` y `cert_broad_wildcard` (infrastructure, low, peso 1.000 y tope 8.00) y `cert_new_issuer` (infrastructure, medium, peso 1.000 y tope 10.00), y las mismas en cada otro juego que ya existe, también los de una organización (#14, RC-218, desviación 15). Necesita la migración 025 y va antes de reconstruir la API |
 | `semillas/026_identidad.sql` | Fuente `identity` (osint, encendida, `keep_raw_payload` en false porque su resumen trae correos) con 1710 consultas al día, 10 corridas de 171 (#20, RC-56). Sus reglas `personal_email_exposed` y `email_pattern_exposed` ya están en v1 desde la semilla 004. Necesita la migración 028 y va antes de reconstruir la API. Se puede correr otra vez sin error |
+| `semillas/027_alcance_cartas.sql` | Alcance de las cartas de las semillas 001, 002 y 015 con la misma regla que la migración 029 (plantilla 1, actividades 1 a 11). Solo toca cartas sin alcance, así que en una base con la 029 no cambia nada (RC-59) |
 | `consultas/portal.sql` | (a) dashboard y KPIs, (b) hallazgos más críticos, (c) score por categoría, (d) explicación del hallazgo de brechas |
-| `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario tienen `search_path` fijo y no son de PUBLIC |
+| `consultas/prueba_rls.sql` | Aislamiento entre clientes, falla cerrada, autorización forzada, bitácora inmutable, que `login_lookup()` no lee una vista temporal y que las funciones del límite diario y `domains_fqdn_otra_organizacion()` (029) tienen `search_path` fijo y no son de PUBLIC |
 | `consultas/conteo_tablas.sql` | Las 25 tablas con filas y RLS, más el resumen de objetos |
 
 ## Qué se creó
@@ -77,7 +79,7 @@ Implementación real del modelo lógico de LowTide ([`cirdan_esquema.dbml`](cird
 - Base `cirdan` con 27 tablas: las 26 de los 7 grupos del DBML (`webauthn_credentials` llegó con la 018) y `platform_admins`, de la 017, que no está en el DBML. 64 FK (compuestas por `organization_id` y, donde importa, `domain_id`, más la de `scoring_rules.code` a `scoring_rule_texts` de la migración 003, la del mapeo a su texto de la 011 y la del texto a su mapeo de la 012), 76 índices (únicos, parciales y de consulta), 14 triggers y 22 políticas RLS. Son los conteos de una base nueva con las migraciones 001 a 018 (16 nov, RC-331).
 - Rol de aplicación `cirdan_app`: sin superusuario, sin `BYPASSRLS`, con privilegios mínimos (sin UPDATE/DELETE en `audit_log`, `domain_scores`, `score_contributions` ni `dns_txt_verifications`; en `domain_authorizations` solo puede cambiar `revoked_at`; en `scans` no puede fijar `queued_at`; no puede leer `data_sources.api_key_enc` ni hacer UPDATE en `data_sources`: desde la 008 el contador diario solo lo mueven `reserve_source_quota()` y `adjust_source_quota()`, que `cirdan_app` sí puede ejecutar, así que puede mover `daily_used` del día porque el ajuste acepta cualquier delta). Desde la migración 004 tampoco puede crear tablas ni vistas temporales.
 - RLS con ENABLE + FORCE en las 21 tablas por cliente: las 18 de la 001, `scoring_rule_sets` y `scoring_rules` desde la 013 y `webauthn_credentials` desde la 018. Además, `platform_admins` (017) tiene RLS forzado con una política que niega todo. Las políticas de las 21 comparan `organization_id` (o `id` en `organizations`) con `app_current_org()`, que devuelve `NULLIF(current_setting('app.current_org', true), '')::uuid`. Sin tenant no se ve nada.
-- Triggers: cadena de hashes SHA-256 por organización en `audit_log` (chain_seq, prev_hash, row_hash); bloqueo de UPDATE, DELETE y TRUNCATE en `audit_log`, `dns_txt_verifications`, `domain_scores` y `score_contributions`; `domain_authorizations` inmutable salvo `revoked_at`; `scans` exige autorización vigente y TXT `match` de la última hora; `scan_source_runs` rechaza `raw_payload` si la fuente tiene `keep_raw_payload = false` (HIBP).
+- Triggers: cadena de hashes SHA-256 por organización en `audit_log` (chain_seq, prev_hash, row_hash); bloqueo de UPDATE, DELETE y TRUNCATE en `audit_log`, `dns_txt_verifications`, `domain_scores` y `score_contributions`; `domain_authorizations` inmutable salvo `revoked_at`; `scans` exige autorización vigente y TXT `match` de la última hora; `scan_source_runs` rechaza `raw_payload` si la fuente tiene `keep_raw_payload = false` (HIBP); `domains_fqdn_otra_organizacion_iu` (029, SECURITY DEFINER) rechaza el alta o la verificación de un dominio que otra empresa tiene en `verified` o `paused`, con `unique_violation` y la restricción `domains_fqdn_otra_organizacion` que la API vuelve 409 (RC-59).
 - Datos de Acme Demo (plan Starter), los mismos de las pantallas de Figma, más Beta Corp solo para la prueba de aislamiento. La semilla 002 agrega Grupo Olmardo (plan Business) con el dominio de prueba olmardo.com.
 - Límite diario por fuente (migración 008 y semilla 005): `ct_logs` 200, que la semilla 014 sube a 400, y `subfinder` 400 consultas por día UTC, que la semilla 017 baja a 390, de toda la plataforma. La semilla 006 pone 400 a `github`, donde cada intento a la API de GitHub y cada clon cuentan como consulta, y la semilla 007 pone 640 a `shodan`, que la semilla 011 sube a 1840, donde cuentan cada intento HTTP (Cert Spotter e InternetDB) y cada A. Las demás fuentes quedan sin límite (`daily_limit` NULL). Para `subfinder` una consulta es una petición HTTP desde la semilla 017. Con la 005 sola era una fuente de su lista blanca consultada en una corrida.
 - La semilla 005 sembró `subfinder` apagada (`enabled = false`), como `censys` en la semilla 001, para que la demo en reproducir de S12 no la mostrara fallida. La semilla 017 la prende con una sola fuente, `commoncrawl`, la única de las 20 de subfinder 2.17.0 cuyos términos permiten el uso automático y mostrar sus datos a terceros (decisión 6 de `docs/servicios_externos.md`, 15 nov). La semilla 019 (RC-337) la vuelve a apagar el 17 nov porque el índice da 504 casi siempre. Desde el 15 nov `subfinder.py` ya no corre el binario: pide el índice de Common Crawl directo.
@@ -136,6 +138,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/mi
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/026_huellas_por_version.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/027_mfa_operador.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/028_tipo_activo_perfil.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/029_alcance_carta_y_otra_empresa.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -c "ALTER ROLE cirdan_app PASSWORD '<CIRDAN_APP_PASSWORD>';"
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/001_datos_demo.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/002_dominio_prueba.sql
@@ -163,6 +166,7 @@ docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/se
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/024_regla_ia.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/025_reglas_higiene_certificados.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/026_identidad.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/027_alcance_cartas.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/portal.sql
 docker exec -i cirdan-pg16 sh -c 'psql -U postgres -d cirdan -v ON_ERROR_STOP=1 2>&1' < db/consultas/prueba_rls.sql
 docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/consultas/conteo_tablas.sql
@@ -493,6 +497,16 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM da
 ```
 
 Da `1`.
+
+Para el alcance de la carta y el dominio de otra empresa (RC-59, #26) van la migración 029 y la semilla 027, en ese orden, las dos antes de reconstruir la API. El orquestador nuevo deja `failed` toda fuente de una carta sin alcance.
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/029_alcance_carta_y_otra_empresa.sql
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/semillas/027_alcance_cartas.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM domain_authorizations WHERE activities IS NULL"
+```
+
+Da `0`.
 
 ## Respaldar y restaurar
 

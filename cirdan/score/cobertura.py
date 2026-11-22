@@ -91,10 +91,16 @@ def huecos(corridas, sin_cobertura=(), parciales=(), codigos=codigos_de):
         for c in lista:
             motivos.setdefault((c, r['source']), 'no_api_key' if c in por_llave else 'source_partial')
     atribuidos = {c for (c, _), m in motivos.items() if m in ('no_api_key', 'source_partial')}
+    # Las reglas de una fuente que la carta no autoriza llegan a rules_without_coverage con su corrida en 'failed'
+    # (RC-59): ya salen con source_failed y no se repiten sin fuente.
+    caidos = {c for (c, _), m in motivos.items() if m == 'source_failed'}
     for c in sin_cobertura:
         if c in atribuidos:
             continue
-        for fuente in [f for f in sin_lista if c in codigos(f)] or [None]:
+        fuentes = [f for f in sin_lista if c in codigos(f)]
+        if not fuentes and c in caidos:
+            continue
+        for fuente in fuentes or [None]:
             motivos.setdefault((c, fuente), 'source_partial')
     for fuente in parciales:
         if fuente in corrieron:

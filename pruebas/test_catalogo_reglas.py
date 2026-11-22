@@ -152,6 +152,7 @@ HUELLAS_DB = {
     'db/migraciones/025_textos_higiene_certificados.sql': 'c2a50ddf2e0593e0c66666a597aeced543dca9f552947bc73593974ca2207cc5',
     'db/migraciones/026_huellas_por_version.sql': '0ceaf2b7d16a9bd9f75130b4cb46f6ea092082c22bd859471fdb314607171529',
     'db/migraciones/027_mfa_operador.sql': '8aa7f9edd44ddcdfa4e08450d908234763bc64214eb919f73c5aee721011bc2c',
+    'db/migraciones/029_alcance_carta_y_otra_empresa.sql': 'b278b260713911ee2e53e005bf4a38b25621824c223d1889326d670f3cb67a7f',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',

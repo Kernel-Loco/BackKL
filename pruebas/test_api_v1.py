@@ -93,9 +93,11 @@ class ApiV1(unittest.TestCase):
                "WHERE id = '41000000-0000-4000-8000-000000000001';" % (hoy, hoy))
         for nueva, base, dias in cartas:
             sql += ('INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, '
-                    'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+                    'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, '
+                    'template_version, activities) '
                     "SELECT '%s', organization_id, domain_id, signer_name, signer_title, signer_email, "
-                    "signed_document_key || '.rc313', signed_document_sha256, %s + 1, %s + %d, accepted_by "
+                    "signed_document_key || '.rc313', signed_document_sha256, %s + 1, %s + %d, accepted_by, "
+                    "template_version, activities "
                     "FROM domain_authorizations WHERE id = '%s';" % (nueva, hoy, hoy, dias, base))
         ok, salida, err = psql(sql + 'COMMIT;', user='postgres')
         self.assertTrue(ok, err)
@@ -151,8 +153,9 @@ class ApiV1(unittest.TestCase):
         for nueva, dominio, correo, desde, hasta, revocada in cartas:
             sql += ('INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, '
                     'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, revoked_at, '
-                    "accepted_by) SELECT '%s', organization_id, '%s', 'Firma RC-274', 'Prueba', '%s', "
-                    "signed_document_key || '.rc274-%s', signed_document_sha256, %s, %s, %s, accepted_by "
+                    "accepted_by, template_version, activities) SELECT '%s', organization_id, '%s', 'Firma RC-274', 'Prueba', '%s', "
+                    "signed_document_key || '.rc274-%s', signed_document_sha256, %s, %s, %s, accepted_by, "
+                    "template_version, activities "
                     "FROM domain_authorizations WHERE id = '41000000-0000-4000-8000-000000000001';"
                     % (nueva, dominio, correo, nueva[-2:], desde, hasta, revocada))
         ok, _, err = psql(sql + 'COMMIT;', user='postgres')
@@ -170,7 +173,8 @@ class ApiV1(unittest.TestCase):
         for fqdn, (estado, correo) in esperado.items():
             with self.subTest(fqdn=fqdn):
                 self.assertEqual((v1[fqdn]['status'], v1[fqdn]['signer_email']), (estado, correo), v1[fqdn])
-                self.assertEqual(set(v1[fqdn]), {'status', 'valid_from', 'valid_until', 'signer_email'})
+                self.assertEqual(set(v1[fqdn]), {'status', 'valid_from', 'valid_until', 'signer_email',
+                                                 'template_version', 'activities'})
         self.assertEqual((v1['old-example.net']['valid_from'], v1['old-example.net']['valid_until']),
                          ('2025-08-15', '2026-08-15'), 'los demás campos no cambian')
         self.assertIsNotNone(v1['partner-example.com']['valid_until'], 'la revocada sigue dando sus fechas')

@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 from psycopg.types.json import Jsonb
 
+from cirdan import alcance_carta
 from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
@@ -686,6 +687,10 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             raise RuntimeError('no hay un juego de reglas activo')
         reglas = configuracion.reglas_del_juego(c, rule_set['id'])
         pesos = configuracion.pesos_del_juego(rule_set)
+        # Alcance de la carta con la que se aceptó el escaneo (RC-59). Sin carta o sin alcance no corre ninguna fuente.
+        alcance = c.execute('SELECT a.activities FROM scans s JOIN domain_authorizations a ON a.id = s.authorization_id '
+                            'WHERE s.id = %s', (scan_id,)).fetchone()
+        actividades = alcance['activities'] if alcance else None
 
     if modo == 'vivo' and not en_vivo_permitido(fqdn):
         modo = 'reproducir'  # nunca consultar en vivo un dominio fuera de DOMINIOS_EN_VIVO
@@ -698,14 +703,20 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     for codigo in fuentes:
         intento, gastadas, previos, segundos = 0, 0, [], 0.0
         modulo = cargar(codigo)
+        permitida = alcance_carta.autorizada(codigo, actividades)
         while True:
             if not _latido(org, scan_id, conn):
                 return _ya_no_corre(org, scan_id, conn, corridas)
             reservadas, dia = 0, None
-            if con_cupo:
+            if con_cupo and permitida:
                 reservadas = getattr(modulo, 'MAX_CONSULTAS')
                 dia = _reservar(org, codigo, reservadas, conn)
-            if con_cupo and dia is None:  # sin cupo: ni se llama al recolector ni se reintenta
+            if not permitida:  # la carta no la autoriza: ni cupo, ni recolector, ni reintento; sus reglas sin cobertura
+                aviso = alcance_carta.NO_AUTORIZADA % (codigo, alcance_carta.ACTIVIDAD_DE_FUENTE.get(codigo, '?'))
+                res = Resultado(fqdn, codigo, estado='failed', error=aviso, avisos=[aviso],
+                                sin_cobertura=sorted(set(getattr(modulo, 'CODIGOS', {})) & set(reglas)))
+                status, attempt, next_retry_at = 'failed', intento, None
+            elif con_cupo and dia is None:  # sin cupo: ni se llama al recolector ni se reintenta
                 res = Resultado(fqdn, codigo, estado='failed', error=SIN_CUPO % codigo, avisos=[SIN_CUPO % codigo])
                 status, attempt, next_retry_at = 'failed', intento, None
             else:
@@ -757,7 +768,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 return _ya_no_corre(org, scan_id, conn, corridas)
             certspotter.nuevo_intento()  # el reintento vuelve a pedir lo que falló en Cert Spotter, salvo un 429
             intento = attempt
-        corridas.append({'source': codigo, 'status': status, 'error': res.error or None,
+        corridas.append({'source': codigo, 'status': status, 'error': res.error or None, 'no_autorizada': not permitida,
                          'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})
         tiempos[codigo] = segundos
         if res.estado == 'succeeded':
@@ -765,7 +776,9 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             hallazgos += len(res.hallazgos)
 
     ok = sum(1 for r in corridas if r['status'] == 'succeeded')
-    sin_cobertura = sorted({c for r in corridas if r['status'] == 'succeeded' for c in r['sin_cobertura']})
+    sin_cobertura = sorted({c for r in corridas if r['status'] == 'succeeded' or r['no_autorizada']
+                            for c in r['sin_cobertura']})
+    no_autorizadas = [r['source'] for r in corridas if r['no_autorizada']]
     a_medias = [r['source'] for r in corridas if r['status'] == 'succeeded' and r['cobertura_parcial']]
     completo = ok == len(corridas) and not sin_cobertura and not a_medias
     estado = 'completed' if completo else 'failed' if ok == 0 else 'partial'
@@ -775,6 +788,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         stats['rules_without_coverage'] = sin_cobertura
     if a_medias:
         stats['sources_partial'] = a_medias
+    if no_autorizadas:
+        stats['sources_unauthorized'] = no_autorizadas
     # Costo medido del escaneo (#52, RC-87): consultas de cada fuente con todos sus intentos, también las de una
     # fuente que falló, y segundos. seconds_by_source suma lo que tardó el recolector en cada intento, sin las
     # esperas entre reintentos. duration_seconds va del inicio de correr() hasta antes del score y sí las incluye.
