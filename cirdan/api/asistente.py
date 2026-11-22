@@ -25,6 +25,9 @@ router = APIRouter(prefix='/api/v1', tags=['asistente'])
 
 MAX_FINDINGS = 20
 MAX_QUESTION_LENGTH = 1000
+# Tope de la pregunta ya limpia. NFKC alarga algunos caracteres ('…' da '...', U+FDFA da 18): con el doble cabe lo que
+# el portal deja escribir y se sigue frenando una pregunta hecha de caracteres que crecen de más.
+MAX_CLEAN_QUESTION_LENGTH = 2 * MAX_QUESTION_LENGTH
 MAX_ANSWER_LENGTH = 4000
 MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024
 # Tope de toda la pregunta, sumando los dos proveedores, incluida la resolución de nombres. El portal espera un poco
@@ -48,8 +51,10 @@ SOURCE_TEMPLATE = 'template'
 MODEL_FIELDS = ('title', 'category', 'severity')
 _SEVERITY_ORDER = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
 
-# SISTEMA v2 de la evaluación de proveedores (RC-185), tal cual. Con él pasaron Workers AI y Groq gpt-oss-120b,
-# con los mismos max_tokens, reasoning_effort y temperatura que manda _call_provider.
+# Reglas 1 a 7: SISTEMA v2 de la evaluación de proveedores (RC-185), tal cual. Con él pasaron Workers AI y Groq
+# gpt-oss-120b, con los mismos max_tokens, reasoning_effort y temperatura que manda _call_provider. Las reglas 8 a 10
+# se sumaron el 21 nov (RC-77) porque, al pedirle pasos en Cloudflare, el modelo inventó menús, recomendó p=reject de
+# entrada y anidó listas numeradas.
 SYSTEM_PROMPT = (
     'Eres el asistente de LowTide, una plataforma que revisa lo que una empresa expone en internet. '
     'Respondes en español, en lenguaje simple y con tú, a una persona no técnica de la empresa, '
@@ -63,7 +68,15 @@ SYSTEM_PROMPT = (
     '6. Responde en 120 palabras o menos.\n'
     '7. El plan de acción dice cuánto bajaría el score si se resuelve cada hallazgo, no lo que va a pasar. '
     'Si te preguntan por el futuro, como el score del próximo mes, empieza con '
-    '"No lo sé con los datos de este reporte" y explica de qué depende.'
+    '"No lo sé con los datos de este reporte" y explica de qué depende.\n'
+    '8. No describas menús, botones ni rutas de pantallas de otros servicios, como Cloudflare, GitHub o el proveedor '
+    'de correo: no vienen en los datos y cambian seguido. Di qué hay que lograr y que los pasos exactos están en la '
+    'documentación oficial de ese servicio y en el plan de acción del reporte.\n'
+    '9. Si hablas de DMARC, recomienda empezar con p=none y una dirección rua para recibir reportes, y subir a '
+    'quarantine y después a reject solo cuando los reportes muestren que el correo legítimo pasa.\n'
+    '10. Si das pasos para varios hallazgos, escribe el nombre de cada uno con su cita en una línea en negritas y sin '
+    'número, como **Nombre [H1]**, y debajo sus pasos en una lista numerada que empiece en 1. No pongas listas dentro '
+    'de listas.'
 )
 
 # Nombres que ve la persona en el portal, para que la respuesta no repita los códigos de la base.
@@ -87,6 +100,10 @@ _IGNORABLE_RANGES = (
 
 
 def _invisible(ch):
+    # Atajo: el primer Cf es U+00AD y el primer rango de _IGNORABLE_RANGES empieza en U+034F, así que el texto ASCII
+    # y latino común no paga unicodedata.category ni el recorrido de los rangos.
+    if ch < '­':
+        return False
     if unicodedata.category(ch) == 'Cf':
         return True
     code = ord(ch)
@@ -191,9 +208,10 @@ def _call_provider(base_url, api_key, model, messages, timeout):
     except (URLError, TimeoutError, OSError, HttpProtocolError) as error:
         raise ProviderError(type(error).__name__) from None
     except ValueError:
-        # http.client rechaza una llave con saltos de línea o fuera de latin-1 y una URL con caracteres de control
-        # (UnicodeError e InvalidURL también son ValueError). El modelo va en el JSON, no en un encabezado. El mensaje
-        # original lleva el valor del encabezado, así que no se encadena ni se registra.
+        # http.client rechaza una llave con saltos de línea o fuera de latin-1 (UnicodeError también es ValueError).
+        # Una URL con caracteres de control da InvalidURL, que hereda de http.client.HTTPException y la atrapa la rama
+        # de arriba. El modelo va en el JSON, no en un encabezado. El mensaje original lleva el valor del encabezado,
+        # así que no se encadena ni se registra.
         raise ProviderError('configuración inválida') from None
 
     if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
@@ -201,7 +219,9 @@ def _call_provider(base_url, api_key, model, messages, timeout):
     try:
         body = json.loads(raw)
         answer = body['choices'][0]['message']['content']
-    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, IndexError, TypeError) as error:
+    # ValueError cubre JSONDecodeError, UnicodeDecodeError y el entero de más de 4300 dígitos (int_max_str_digits).
+    # RecursionError sale de un JSON muy anidado. Así cualquier respuesta rota pasa al respaldo y no termina en 500.
+    except (ValueError, RecursionError, KeyError, IndexError, TypeError) as error:
         raise ProviderError('respuesta JSON inválida') from error
     if not isinstance(answer, str) or not answer.strip() or len(answer) > MAX_ANSWER_LENGTH:
         raise ProviderError('respuesta de texto inválida')
@@ -275,6 +295,10 @@ def complete(question, findings, attempts=None, client_gone=None):
             logger.warning('Proveedor %s no disponible: %s', name, error)
             attempts.append({'provider': name, 'result': 'timeout' if str(error) == 'TimeoutError' else 'error'})
             continue
+        except Exception:
+            # Un error inesperado no pasa al respaldo, pero la bitácora sí dice que la pregunta salió a este proveedor.
+            attempts.append({'provider': name, 'result': 'error'})
+            raise
         attempts.append({'provider': name, 'result': 'ok'})
         return answer
     if not configured:
@@ -412,20 +436,35 @@ def _audit(session, request, action, domain_id, details):
               entity_type='domain', entity_id=domain_id, details=details, platform=session.audit_platform)
 
 
+def _audit_completed(session, request, domain_id, result, attempts):
+    """assistant.completed sin tapar lo que ya pasó: si la bitácora falla, se registra en el log y el handler sigue
+    con la respuesta ya cobrada o con su error original. assistant.asked sí es obligatorio: sin él no sale la pregunta.
+    """
+    try:
+        _audit(session, request, 'assistant.completed', domain_id, {'result': result, 'providers': attempts})
+    except Exception as error:  # noqa: BLE001 - solo el tipo: el mensaje de la base puede traer valores
+        logger.error('No se pudo registrar assistant.completed (%s): %s', result, type(error).__name__)
+
+
 @router.post('/domains/{fqdn}/assistant', summary='Responde preguntas sobre hallazgos abiertos')
 def ask_assistant(fqdn: str, body: AssistantQuestion, request: Request, response: Response,
                   session: Session = Depends(require_roles('analyst', 'admin'))):
     question = clean_question(body.question)
     if not question:
         raise HTTPException(422, 'Escribe una pregunta')
-    if len(question) > MAX_QUESTION_LENGTH:
-        raise HTTPException(422, 'La pregunta puede tener hasta %d caracteres' % MAX_QUESTION_LENGTH)
+    if len(question) > MAX_CLEAN_QUESTION_LENGTH:
+        raise HTTPException(422, 'La pregunta trae caracteres especiales que la alargan de más. Escríbela con letras '
+                                 'y signos comunes.')
 
     domain_id, findings = _get_context(session, fqdn, body.finding_ids)
     # Antes del cupo: si está lleno, la pregunta no se cuenta ni se audita.
     if not _slots.acquire(blocking=False):
         raise HTTPException(503, PROVIDER_BUSY, headers={'Cache-Control': 'no-store', 'Retry-After': '60'})
     try:
+        client_gone = _client_gone(request)
+        # Si el cliente cortó mientras se leían los hallazgos, la pregunta no se cobra ni sale al proveedor.
+        if client_gone():
+            raise HTTPException(503, PROVIDER_UNAVAILABLE, headers={'Cache-Control': 'no-store'})
         if not sessions.take_assistant_question(session.user_id):
             raise HTTPException(429, 'Alcanzaste el límite de 20 preguntas por cada 24 horas.',
                                 headers={'Cache-Control': 'no-store'})
@@ -438,23 +477,21 @@ def ask_assistant(fqdn: str, body: AssistantQuestion, request: Request, response
         # A qué proveedores salió la pregunta y cómo terminó, también si falló. Sin el texto de la pregunta ni de error.
         model_findings = [{field: finding[field] for field in MODEL_FIELDS} for finding in findings]
         try:
-            answer = complete(question, model_findings, attempts, _client_gone(request))
+            answer = complete(question, model_findings, attempts, client_gone)
         except ClientGone:
-            _audit(session, request, 'assistant.completed', domain_id,
-                   {'result': 'client_gone', 'providers': attempts})
+            _audit_completed(session, request, domain_id, 'client_gone', attempts)
             raise
         except Unavailable:
             # Ningún modelo respondió: la respuesta automática con el plan de acción, que avisa que no es de IA.
-            _audit(session, request, 'assistant.completed', domain_id, {'result': 'template', 'providers': attempts})
+            _audit_completed(session, request, domain_id, 'template', attempts)
             return {'answer': template_answer(findings), 'finding_ids': finding_ids, 'source': SOURCE_TEMPLATE}
         except HTTPException:
-            _audit(session, request, 'assistant.completed', domain_id,
-                   {'result': 'unavailable', 'providers': attempts})
+            _audit_completed(session, request, domain_id, 'unavailable', attempts)
             raise
         except Exception:
-            _audit(session, request, 'assistant.completed', domain_id, {'result': 'error', 'providers': attempts})
+            _audit_completed(session, request, domain_id, 'error', attempts)
             raise
-        _audit(session, request, 'assistant.completed', domain_id, {'result': 'answered', 'providers': attempts})
+        _audit_completed(session, request, domain_id, 'answered', attempts)
         return {'answer': answer, 'finding_ids': finding_ids, 'source': SOURCE_AI}
     finally:
         _slots.release()

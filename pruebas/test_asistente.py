@@ -188,6 +188,87 @@ class AssistantEndpoint(unittest.TestCase):
         cabe = asistente.AssistantQuestion(question='ﷺ' * 55, finding_ids=[FINDING_ID])
         self.assertLessEqual(len(asistente.clean_question(cabe.question)), asistente.MAX_QUESTION_LENGTH)
 
+    @patch.object(asistente, 'complete', return_value='Respuesta.')
+    @patch.object(asistente, 'audit')
+    @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
+    @patch.object(asistente, 'transaction')
+    def test_lo_que_el_portal_deja_escribir_cabe_aunque_nfkc_lo_alargue_un_poco(
+            self, transaction, take, audit, complete):
+        # 990 caracteres con seis '…': el portal cuenta 990 y NFKC los vuelve 1002 ('…' da '...').
+        transaction.side_effect = lambda org_id: nullcontext(self.conn)
+        pregunta = '…' * 6 + 'a' * 984
+        self.assertEqual(len(pregunta), 990)
+        self.assertGreater(len(asistente.clean_question(pregunta)), asistente.MAX_QUESTION_LENGTH)
+        body = asistente.AssistantQuestion(question=pregunta, finding_ids=[FINDING_ID])
+
+        result = asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+
+        self.assertEqual(result['answer'], 'Respuesta.')
+        complete.assert_called_once()
+
+    @patch.object(asistente, 'complete')
+    @patch.object(asistente, 'audit')
+    @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
+    @patch.object(asistente, 'transaction')
+    def test_si_el_cliente_corto_antes_de_cobrar_no_cuenta_ni_audita_ni_sale(self, transaction, take, audit, complete):
+        transaction.side_effect = lambda org_id: nullcontext(self.conn)
+        body = asistente.AssistantQuestion(question='¿Qué significa?', finding_ids=[FINDING_ID])
+        request = _request()
+        gone = threading.Event()
+        gone.set()
+        request.scope[asistente.CLIENT_GONE_SCOPE_KEY] = gone
+        slots = threading.BoundedSemaphore(1)
+
+        with patch.object(asistente, '_slots', slots), self.assertRaises(HTTPException) as error:
+            asistente.ask_assistant('acme-demo.mx', body, request, Response(), _session())
+
+        self.assertEqual(error.exception.status_code, 503)
+        take.assert_not_called()
+        audit.assert_not_called()
+        complete.assert_not_called()
+        self.assertTrue(slots.acquire(blocking=False))
+
+    @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
+    @patch.object(asistente, 'transaction')
+    def test_si_falla_la_bitacora_al_terminar_sale_lo_que_ya_paso(self, transaction, take):
+        body = asistente.AssistantQuestion(question='¿Qué significa?', finding_ids=[FINDING_ID])
+
+        def audit_que_falla_al_terminar(conn, org_id, action, **kwargs):
+            if action == 'assistant.completed':
+                raise ConnectionError('la base no responde')
+
+        casos = (
+            ('answered', {'return_value': 'Respuesta pagada.'}, None),
+            ('template', {'side_effect': asistente.Unavailable(503, asistente.PROVIDER_UNAVAILABLE)}, None),
+            ('client_gone', {'side_effect': asistente.ClientGone(503, asistente.PROVIDER_UNAVAILABLE)},
+             asistente.ClientGone),
+            ('unavailable', {'side_effect': HTTPException(503, 'otro 503')}, HTTPException),
+            ('error', {'side_effect': KeyError('error de programación')}, KeyError),
+        )
+        for resultado, complete_kwargs, esperado in casos:
+            with self.subTest(resultado=resultado):
+                self.setUp()
+                transaction.side_effect = lambda org_id: nullcontext(self.conn)
+                with patch.object(asistente, 'audit', side_effect=audit_que_falla_al_terminar), \
+                        patch.object(asistente, 'complete', **complete_kwargs), \
+                        self.assertLogs(asistente.logger, 'ERROR') as logs:
+                    if esperado is None:
+                        result = asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+                    else:
+                        with self.assertRaises(esperado) as error:
+                            asistente.ask_assistant('acme-demo.mx', body, _request(), Response(), _session())
+                if resultado == 'answered':
+                    self.assertEqual(result['answer'], 'Respuesta pagada.')
+                elif resultado == 'template':
+                    self.assertEqual(result['source'], 'template')
+                elif resultado == 'client_gone':
+                    self.assertIs(type(error.exception), asistente.ClientGone)
+                elif resultado == 'unavailable':
+                    self.assertEqual(error.exception.detail, 'otro 503')
+                self.assertEqual(logs.output, ['ERROR:cirdan.api.asistente:No se pudo registrar assistant.completed '
+                                               '(%s): ConnectionError' % resultado])
+                self.assertNotIn('la base no responde', ' '.join(logs.output))
+
     @patch.object(asistente, 'audit')
     @patch.object(asistente.sessions, 'take_assistant_question', return_value=True)
     @patch.object(asistente, 'transaction')
@@ -378,16 +459,30 @@ class AssistantPromptAndProvider(unittest.TestCase):
         ]})
         self.assertNotIn(str(FINDING_ID), user)
 
-    def test_el_prompt_es_el_sistema_v2_de_la_evaluacion(self):
+    def test_el_prompt_es_el_sistema_v2_de_la_evaluacion_mas_las_reglas_de_pasos(self):
         prompt = asistente.SYSTEM_PROMPT
         self.assertTrue(prompt.startswith('Eres el asistente de LowTide, una plataforma que revisa lo que una empresa '
                                           'expone en internet. '))
         reglas = [linea.split('. ', 1)[0] for linea in prompt.split('\n')[2:]]
-        self.assertEqual(reglas, ['1', '2', '3', '4', '5', '6', '7'])
+        self.assertEqual(reglas, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
         self.assertIn('2. Cita entre corchetes el id de cada hallazgo que uses, por ejemplo [H1].', prompt)
         self.assertIn('6. Responde en 120 palabras o menos.', prompt)
         self.assertIn('Si te preguntan por el futuro, como el score del próximo mes, empieza con '
                       '"No lo sé con los datos de este reporte" y explica de qué depende.', prompt)
+
+    def test_el_prompt_no_deja_inventar_menus_ni_empezar_dmarc_en_reject_ni_anidar_listas(self):
+        # La respuesta de pasos en Cloudflare del 21 nov inventó 'Scrape Shield → Hide Server Information',
+        # recomendó p=reject de entrada y anidó los pasos de cada hallazgo en una lista numerada.
+        reglas = {linea.split('. ', 1)[0]: linea for linea in asistente.SYSTEM_PROMPT.split('\n')[2:]}
+        self.assertIn('No describas menús, botones ni rutas de pantallas de otros servicios, como Cloudflare',
+                      reglas['8'])
+        self.assertIn('documentación oficial de ese servicio y en el plan de acción del reporte', reglas['8'])
+        self.assertIn('empezar con p=none y una dirección rua', reglas['9'])
+        self.assertIn('después a reject solo cuando los reportes muestren que el correo legítimo pasa', reglas['9'])
+        self.assertIn('en una línea en negritas y sin número, como **Nombre [H1]**', reglas['10'])
+        self.assertIn('No pongas listas dentro de listas.', reglas['10'])
+        # Las reglas nuevas no meten datos de la base: al modelo siguen yendo solo los tres campos.
+        self.assertEqual(asistente.MODEL_FIELDS, ('title', 'category', 'severity'))
 
     def test_categoria_y_criticidad_van_con_el_nombre_del_portal_y_los_ids_en_orden(self):
         messages = asistente._messages('¿Qué atiendo primero?', [
@@ -429,10 +524,17 @@ class AssistantPromptAndProvider(unittest.TestCase):
 
     def test_la_limpieza_es_lineal_aun_con_muchos_espacios_tras_un_signo_menor(self):
         # La regex anterior, <\s*/?\s*datos\s*>, retrocedía en cuadrático con '<' y espacios (alerta de CodeQL).
-        inicio = time.monotonic()
-        for pregunta in ('<' + ' ' * 60000, '< /' * 20000, '<datos' + ' ' * 60000):
-            asistente.clean_question(pregunta)
-        self.assertLess(time.monotonic() - inicio, 0.5)
+        # Compara n contra 4n en vez de un tope absoluto: en un runner lento lo lineal también tarda más, pero lo
+        # cuadrático tarda 16 veces más con 4 veces el texto.
+        def tarda(n):
+            inicio = time.perf_counter()
+            for pregunta in ('<' + ' ' * n, '< /' * (n // 3), '<datos' + ' ' * n, '\u00e1' * n):
+                asistente.clean_question(pregunta)
+            return time.perf_counter() - inicio
+
+        tarda(1000)
+        corto, largo = tarda(30000), tarda(120000)
+        self.assertLess(largo, 8 * corto + 0.1, (corto, largo))
 
     @patch.object(asistente, '_call_provider', side_effect=[asistente.ProviderError('fallo'), 'respuesta del respaldo'])
     @patch.object(asistente, 'config')
@@ -533,7 +635,6 @@ class AssistantPromptAndProvider(unittest.TestCase):
     def test_sin_el_middleware_el_cliente_cuenta_como_presente(self):
         self.assertFalse(asistente._client_gone(_request())())
 
-
     @patch.object(asistente, 'build_opener')
     def test_una_llave_con_salto_de_linea_es_error_de_configuracion_sin_la_llave(self, build_opener):
         opener = Mock()
@@ -551,10 +652,54 @@ class AssistantPromptAndProvider(unittest.TestCase):
     @patch.object(asistente, 'config')
     def test_un_error_inesperado_no_se_vuelve_503(self, config, call_provider):
         config.side_effect = {'IA_BASE_URL': 'https://workers.example/ai/v1', 'IA_API_KEY': 'k',
-                              'IA_MODELO': 'm'}.get
+                              'IA_MODELO': 'm', 'IA_RESPALDO_BASE_URL': 'https://groq.example/openai/v1',
+                              'IA_RESPALDO_API_KEY': 'k2', 'IA_RESPALDO_MODELO': 'm'}.get
+        attempts = []
 
         with self.assertRaises(KeyError):
-            asistente.complete('¿Qué significa?', [])
+            asistente.complete('¿Qué significa?', [], attempts)
+
+        # La pregunta sí salió a Workers AI: la bitácora lo dice aunque el error no sea de proveedor.
+        self.assertEqual(attempts, [{'provider': 'Workers AI', 'result': 'error'}])
+        self.assertEqual(call_provider.call_count, 1)
+
+    @patch.object(asistente, 'build_opener')
+    def test_un_json_roto_del_proveedor_es_error_de_proveedor_y_no_500(self, build_opener):
+        cuerpos = {
+            'entero de 5000 dígitos': b'{"usage":{"n":' + b'1' * 5000 + b'},"choices":[]}',
+            'anidado de más': b'[' * 200000,
+            'no es UTF-8': b'\xff\xfe{',
+            'sin choices': b'{"x":1}',
+        }
+        for caso, cuerpo in cuerpos.items():
+            with self.subTest(caso=caso):
+                response = Mock()
+                response.read.return_value = cuerpo
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=False)
+                build_opener.return_value.open.return_value = response
+                with self.assertRaises(asistente.ProviderError) as error:
+                    asistente._call_provider('https://workers.example/ai/v1', 'k', 'm', [], 5)
+                self.assertEqual(str(error.exception), 'respuesta JSON inválida')
+
+    @patch.object(asistente, 'build_opener')
+    def test_la_url_del_proveedor_se_valida_antes_de_abrir_la_conexion(self, build_opener):
+        # La llave va en Authorization: con http, usuario en la URL, query o un puerto roto no debe salir nada.
+        for url in ('http://workers.example/ai/v1', 'https://u:p@workers.example/ai/v1',
+                    'https://usuario@workers.example/ai/v1', 'https://workers.example/ai/v1?a=1',
+                    'https://workers.example/ai/v1#x', 'https://workers.example:99999/ai/v1',
+                    'https://workers.example:puerto/ai/v1', 'https:///ai/v1', 'ftp://workers.example/ai/v1'):
+            with self.subTest(url=url):
+                with self.assertRaises(asistente.ProviderError) as error:
+                    asistente._call_provider(url, 'k', 'm', [], 5)
+                self.assertEqual(str(error.exception), 'configuración de URL inválida')
+        build_opener.assert_not_called()
+
+    def test_una_url_con_caracteres_de_control_es_error_de_proveedor_y_no_500(self):
+        # http.client lanza InvalidURL antes de conectar. No es ValueError: la atrapa la rama de HTTPException.
+        with self.assertRaises(asistente.ProviderError) as error:
+            asistente._call_provider('https://workers.example/ai\nv1', 'k', 'm', [], 5)
+        self.assertEqual(str(error.exception), 'InvalidURL')
 
     @patch.object(asistente, '_call_provider', side_effect=asistente.ProviderError('sin respuesta'))
     @patch.object(asistente, 'config')
@@ -625,7 +770,8 @@ class AssistantPromptAndProvider(unittest.TestCase):
 
 def _preguntar_por_asgi(app, cliente_corta):
     """Manda una pregunta a la app por ASGI, como uvicorn: si el cliente ya cortó, receive() da http.disconnect
-    en cuanto se pide, y si no, espera. Devuelve el status y lo que vio client_gone() dentro del handler."""
+    en cuanto se pide, y si no, espera. Devuelve el status, lo que vio client_gone() dentro de complete() (None si no
+    se llamó) y si se cobró el cupo."""
     import anyio
 
     cuerpo = json.dumps({'question': '¿Qué significa?', 'finding_ids': [str(FINDING_ID)]}).encode()
@@ -658,10 +804,10 @@ def _preguntar_por_asgi(app, cliente_corta):
     from cirdan.auth import deps
     with patch.object(deps, 'current_session', return_value=_session()), \
             patch.object(asistente, '_get_context', return_value=(DOMAIN_ID, [])), \
-            patch.object(asistente.sessions, 'take_assistant_question', return_value=True), \
+            patch.object(asistente.sessions, 'take_assistant_question', return_value=True) as take, \
             patch.object(asistente, '_audit'), patch.object(asistente, 'complete', side_effect=completar):
         anyio.run(app, scope, receive, send)
-    return estado.get('status'), visto.get('client_gone')
+    return estado.get('status'), visto.get('client_gone'), take.called
 
 
 class ClientDisconnectThroughTheApp(unittest.TestCase):
@@ -669,11 +815,12 @@ class ClientDisconnectThroughTheApp(unittest.TestCase):
 
     def test_el_handler_ve_el_corte_del_cliente_detras_de_los_middlewares(self):
         from cirdan.api.main import app
-        self.assertEqual(_preguntar_por_asgi(app, cliente_corta=True), (200, True))
+        # El corte llega antes de cobrar el cupo: el handler lo ve, no cobra la pregunta ni la manda al proveedor.
+        self.assertEqual(_preguntar_por_asgi(app, cliente_corta=True), (503, None, False))
 
     def test_si_el_cliente_espera_no_cuenta_como_corte(self):
         from cirdan.api.main import app
-        self.assertEqual(_preguntar_por_asgi(app, cliente_corta=False), (200, False))
+        self.assertEqual(_preguntar_por_asgi(app, cliente_corta=False), (200, False, True))
 
     def test_otras_rutas_no_pasan_por_el_vigilante(self):
         from cirdan.api.main import app
@@ -704,6 +851,44 @@ class ClientDisconnectThroughTheApp(unittest.TestCase):
         with self.assertRaises(KeyError):
             anyio.run(vigilante, {'type': 'http', 'method': 'POST',
                                   'path': '/api/v1/domains/acme-demo.mx/assistant'}, receive, None)
+
+
+class AssistantRoles(unittest.TestCase):
+    """La ruta exige cookie de Analista o Admin: ni el Gerente ni una llave de API mandan hallazgos al proveedor."""
+
+    def _dependencia_de_sesion(self):
+        ruta = next(route for route in asistente.router.routes
+                    if route.path == '/api/v1/domains/{fqdn}/assistant' and 'POST' in route.methods)
+        (dependencia,) = [dep.call for dep in ruta.dependant.dependencies if dep.name == 'session']
+        return dependencia
+
+    def _request(self, headers=()):
+        return Request({'type': 'http', 'method': 'POST', 'path': '/api/v1/domains/acme-demo.mx/assistant',
+                        'headers': list(headers), 'query_string': b'', 'client': ('127.0.0.1', 12345)})
+
+    def test_analista_y_admin_entran(self):
+        for rol in ('analyst', 'admin'):
+            with self.subTest(rol=rol), patch('cirdan.auth.deps.current_session', return_value=Session(
+                    token='CIRDAN_FAKE_session', user_id=USER_ID, org_id=ORG_ID, role=rol,
+                    email='persona@example.test')):
+                self.assertEqual(self._dependencia_de_sesion()(self._request()).role, rol)
+
+    def test_el_gerente_recibe_403(self):
+        with patch('cirdan.auth.deps.current_session', return_value=Session(
+                token='CIRDAN_FAKE_session', user_id=USER_ID, org_id=ORG_ID, role='manager',
+                email='gerente@example.test')), self.assertRaises(HTTPException) as error:
+            self._dependencia_de_sesion()(self._request())
+        self.assertEqual(error.exception.status_code, 403)
+
+    @patch('cirdan.auth.deps.sessions.get', return_value=None)
+    def test_una_llave_de_api_sin_cookie_no_entra(self, get_session):
+        # Con api_key_or_roles la llave buscaría su registro en la base; aquí ni se mira: 401 por falta de cookie.
+        request = self._request([(b'authorization', b'Bearer CIRDAN_FAKE_llave_de_api')])
+        with patch('cirdan.auth.deps.session_or_api_key') as por_llave, \
+                self.assertRaises(HTTPException) as error:
+            self._dependencia_de_sesion()(request)
+        self.assertEqual(error.exception.status_code, 401)
+        por_llave.assert_not_called()
 
 
 if __name__ == '__main__':
