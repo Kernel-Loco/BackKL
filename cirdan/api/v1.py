@@ -274,6 +274,64 @@ def _datos_alta(body):
     return fqdn, name, title, email, start, end, pdf, body['template_version'], activities
 
 
+def _revisar_empresa_y_carta(conn, session, end):
+    """Candado consultivo de la empresa, empresa activa y carta no vencida. Devuelve el tope de dominios."""
+    conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 44))', (session.org_id,))
+    organization = conn.execute(
+        'SELECT o.status, coalesce(o.domain_limit_override, p.max_domains) AS limit '
+        'FROM organizations o JOIN plans p ON p.id = o.plan_id WHERE o.id = %s',
+        (session.org_id,),
+    ).fetchone()
+    if not organization or organization['status'] not in ('trial', 'active'):
+        raise HTTPException(403, 'La organización no está activa.')
+    # Con la fecha de la base, la misma que usan el orquestador y el trigger de scans. Va antes del tope: una
+    # carta vencida da 422 aunque la empresa ya esté en su límite.
+    if conn.execute('SELECT %s::date < current_date AS vencida', (end,)).fetchone()['vencida']:
+        raise HTTPException(422, 'La carta ya está vencida.')
+    return organization['limit']
+
+
+def _dominio_para_carta(conn, session, request, fqdn, end, token, renovar=False):
+    """(domain_id, nuevo) del dominio al que va una carta, dentro de la transacción de `conn`.
+
+    Con `renovar` (RC-211), un fqdn que ya existe en la empresa y no está removed recibe otra carta en
+    domain_authorizations. Si no, nace el dominio como en el alta (RC-59): tope de dominios y domain.added."""
+    limit = _revisar_empresa_y_carta(conn, session, end)
+    if renovar:
+        row = conn.execute("SELECT id::text FROM domains WHERE fqdn = %s AND status <> 'removed'", (fqdn,)).fetchone()
+        if row:
+            return row['id'], False
+    count = conn.execute("SELECT count(*) AS total FROM domains WHERE status <> 'removed'").fetchone()['total']
+    if count >= limit:
+        raise HTTPException(409, 'La organización alcanzó su límite de dominios.')
+    domain_id = conn.execute(
+        "INSERT INTO domains (organization_id, fqdn, status, txt_token, added_by) "
+        "VALUES (%s, %s, 'pending_verification', %s, %s) RETURNING id::text",
+        (session.org_id, fqdn, token, session.user_id),
+    ).fetchone()['id']
+    audit(conn, session.org_id, 'domain.added', session.audit_user_id, client_ip(request), 'domain',
+          domain_id, {'fqdn': fqdn}, platform=session.audit_platform)
+    return domain_id, True
+
+
+def _choque_de_dominio(error):
+    """El 409 de un UniqueViolation de domains, o None si es de otra restricción."""
+    if error.diag.constraint_name == 'domains_organization_id_fqdn_key':
+        return HTTPException(409, 'Ese dominio ya está registrado en esta organización.')
+    if error.diag.constraint_name == 'domains_fqdn_otra_organizacion':
+        return HTTPException(409, 'El dominio ya está verificado por otra organización.')
+    return None
+
+
+def _respuesta_dominio(conn, domain_id):
+    """Lo que responde el alta: el dominio como en GET /domains y su TXT."""
+    domain = next(_domain(row) for row in conn.execute(DOMAINS_SQL).fetchall() if row['id'] == domain_id)
+    token = conn.execute('SELECT txt_token FROM domains WHERE id = %s', (domain_id,)).fetchone()['txt_token']
+    return {'domain': domain, 'txt': {'fqdn': domain['fqdn'], 'status': domain['txt']['status'],
+                                      'expected_value': dns_txt.esperado(token),
+                                      'checked_at': domain['txt']['checked_at']}}
+
+
 def _registrar_dominio(body, request, session):
     if session.acting_elsewhere:
         raise HTTPException(403, 'El alta debe hacerla un administrador de la propia empresa.')
@@ -281,26 +339,7 @@ def _registrar_dominio(body, request, session):
     token = secrets.token_hex(16)
     try:
         with transaction(session.org_id) as conn:
-            conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 44))', (session.org_id,))
-            organization = conn.execute(
-                'SELECT o.status, coalesce(o.domain_limit_override, p.max_domains) AS limit '
-                'FROM organizations o JOIN plans p ON p.id = o.plan_id WHERE o.id = %s',
-                (session.org_id,),
-            ).fetchone()
-            if not organization or organization['status'] not in ('trial', 'active'):
-                raise HTTPException(403, 'La organización no está activa.')
-            # Con la fecha de la base, la misma que usan el orquestador y el trigger de scans. Va antes del tope: una
-            # carta vencida da 422 aunque la empresa ya esté en su límite.
-            if conn.execute('SELECT %s::date < current_date AS vencida', (end,)).fetchone()['vencida']:
-                raise HTTPException(422, 'La carta ya está vencida.')
-            count = conn.execute("SELECT count(*) AS total FROM domains WHERE status <> 'removed'").fetchone()['total']
-            if count >= organization['limit']:
-                raise HTTPException(409, 'La organización alcanzó su límite de dominios.')
-            domain_id = conn.execute(
-                "INSERT INTO domains (organization_id, fqdn, status, txt_token, added_by) "
-                "VALUES (%s, %s, 'pending_verification', %s, %s) RETURNING id::text",
-                (session.org_id, fqdn, token, session.user_id),
-            ).fetchone()['id']
+            domain_id, _ = _dominio_para_carta(conn, session, request, fqdn, end, token)
             key, digest = cartas.guardar(pdf, session.org_id, domain_id)
             conn.execute(
                 'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, '
@@ -309,14 +348,11 @@ def _registrar_dominio(body, request, session):
                 (session.org_id, domain_id, name, title, email, key, digest, start, end, session.user_id,
                  version, activities),
             )
-            audit(conn, session.org_id, 'domain.added', session.audit_user_id, client_ip(request), 'domain',
-                  domain_id, {'fqdn': fqdn}, platform=session.audit_platform)
             domain = next(_domain(row) for row in conn.execute(DOMAINS_SQL).fetchall() if row['id'] == domain_id)
     except UniqueViolation as error:
-        if error.diag.constraint_name == 'domains_organization_id_fqdn_key':
-            raise HTTPException(409, 'Ese dominio ya está registrado en esta organización.') from None
-        if error.diag.constraint_name == 'domains_fqdn_otra_organizacion':
-            raise HTTPException(409, 'El dominio ya está verificado por otra organización.') from None
+        choque = _choque_de_dominio(error)
+        if choque:
+            raise choque from None
         raise
     return {'domain': domain, 'txt': {'fqdn': fqdn, 'status': 'missing',
                                        'expected_value': dns_txt.esperado(token), 'checked_at': None}}

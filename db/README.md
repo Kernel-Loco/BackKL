@@ -510,6 +510,15 @@ docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT count(*) FROM do
 
 Da `0`.
 
+Para la firma de la carta con Mifiel desde el portal (RC-211, #26b) va la migración 031, antes de reconstruir la API. Crea `signature_requests` y agrega 5 columnas NULL a `domain_authorizations`, sin cambiar filas que ya existen. La firma sigue apagada mientras `FIRMA_MODO` no diga `sandbox` o `produccion`.
+
+```bash
+docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/031_solicitudes_de_firma.sql
+docker exec cirdan-pg16 psql -U postgres -d cirdan -tAc "SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'public.signature_requests'::regclass"
+```
+
+Da `t`.
+
 ## Respaldar y restaurar
 
 `respaldo/respaldar.sh` saca `pg_dump -Fc` de `cirdan` como postgres dentro del contenedor, lo cifra con age y una llave pública, lo deja con permisos 600 en una carpeta fuera del repo con los de los últimos 7 días y, en la VM, lo sube a Azure Blob (también los que un día no se pudieron subir). `respaldo/restaurar.sh` lo descifra y lo restaura siempre en una base nueva: nunca hace DROP DATABASE ni escribe sobre `cirdan`, no crea la base si no puede descifrar y le quita TEMPORARY a PUBLIC como la migración 004. `respaldo/conteos.sql` da filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base, y `respaldo/comparar.sh` compara esa salida entre dos bases del mismo contenedor. Contra la base de la VM se corre `conteos.sql` en las dos. Cómo se arma el timer en la VM, dónde queda la llave privada y cómo se baja un respaldo, en `docs/despliegue.md`, sección 'Respaldo diario'. Los respaldos traen datos personales: nunca van a git ni a la imagen (`.gitignore` y `.dockerignore` ignoran `respaldos/`, `*.dump` y `*.dump.age`). Valkey no se respalda.
@@ -524,7 +533,7 @@ La prueba 4b de `pruebas/test_catalogo_reglas.py` corre sin base y no sabe qué 
 - Las migraciones y las semillas que nombran `scoring_rules`, `scoring_rule_texts` o `scoring_rule_framework_mappings`, o un objeto (una tabla, una vista, una función) que crea o renombra un archivo que nombra los textos o el mapeo. Los nombres de las tablas se buscan en todo el texto, con comentarios y cadenas, también entre comillas y sin distinguir mayúsculas. Los de esos objetos se buscan en el SQL sin comentarios, y una función solo cuando se llama (su nombre y un paréntesis), así una función de nombre corto no hace entrar archivos que solo traen esa palabra. Lo que se crea TEMP no cuenta, porque `cargar_cirdan.sh` corre cada archivo en su propio `psql` y lo TEMP se borra al terminar.
 - Las que traen algo que arma SQL que no se ve o cambia cómo corre: `EXECUTE`, `format(`, `U&`, un `DO` con el cuerpo entre comillas simples, `set_config`, `search_path`, `session_replication_role`, `standard_conforming_strings`, `SET NAMES`, un `client_encoding` que no es UTF8, `CREATE TRIGGER` o `RULE`, `ALTER TABLE ... USING`, `COPY`, `CALL`, `CASCADE`, `dblink`, `DROP` o `ALTER SCHEMA`, `DROP` o `REASSIGN OWNED`, una escritura en las tablas `pg_` de Postgres o un meta-comando de psql (`\i`, `\set`, `\gexec`).
 
-Hoy entran 34: `db/init/cargar_cirdan.sh`, las migraciones 001 a 008, 011 a 013, 016 a 027, 029 y 030, y las semillas 001, 004 y 020 a 025. La 016 no nombra el catálogo: entra porque trae `search_path` y un trigger. La 018 tampoco: entra por el `search_path` de `passkey_lookup()`. La 024 tampoco: entra por su trigger y el `search_path` de `scoring_rule_sets_copiar_cortes()`. La 026 tampoco: entra por el `search_path` de `password_hash_version_orgs()`. La 030 tampoco: entra por el `search_path` de `scheduled_scan_candidates()`. Las demás no necesitan huella mientras no nombren esas tablas ni traigan nada de la lista.
+Hoy entran 35: `db/init/cargar_cirdan.sh`, las migraciones 001 a 008, 011 a 013, 016 a 027, 029 a 031, y las semillas 001, 004 y 020 a 025. La 016 no nombra el catálogo: entra porque trae `search_path` y un trigger. La 018 tampoco: entra por el `search_path` de `passkey_lookup()`. La 024 tampoco: entra por su trigger y el `search_path` de `scoring_rule_sets_copiar_cortes()`. La 026 tampoco: entra por el `search_path` de `password_hash_version_orgs()`. La 030 tampoco: entra por el `search_path` de `scheduled_scan_candidates()`. La 031 tampoco: entra por sus triggers. Las demás no necesitan huella mientras no nombren esas tablas ni traigan nada de la lista.
 
 Cómo se agrega una huella:
 

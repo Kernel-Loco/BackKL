@@ -14,7 +14,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from cirdan.api import main, v1
+from cirdan.api import firmas, main, v1
 from cirdan.api.main import TOPE_CUERPO, TopeDeCuerpo
 from cirdan.auth import routes, sessions
 from cirdan.auth import deps
@@ -433,9 +433,15 @@ class Middleware(unittest.TestCase):
         clases = [m.cls for m in main.app.user_middleware]
         self.assertIn(TopeDeCuerpo, clases)
         self.assertEqual(clases[-1], TopeDeCuerpo, 'el último de la lista es el más de adentro')
-        # Una sola ruta con tope propio, el del alta, y existe con ese método en la app.
-        self.assertEqual(main.TOPES_POR_RUTA, {('POST', ALTA): (v1.MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.')})
+        # Tres rutas con tope propio: el alta y las dos de la firma con Mifiel (RC-211), y existen con ese método.
+        self.assertEqual(main.TOPES_POR_RUTA, {
+            ('POST', ALTA): (v1.MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.'),
+            ('POST', '/api/v1/signature-requests'): (v1.MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.'),
+            ('POST', '/api/v1/signature-uploads'): (firmas.MAX_SUBIDA_BODY,
+                                                    'El PDF no puede superar 5 MB y el XML 7 MB.')})
         self.assertTrue(any(r.path == ALTA and 'POST' in r.methods for r in v1.router.routes))
+        for ruta in ('/api/v1/signature-requests', '/api/v1/signature-uploads'):
+            self.assertTrue(any(r.path == ruta and 'POST' in r.methods for r in firmas.router.routes))
 
     def test_8_tope_por_ruta_en_su_borde_y_las_demas_con_el_general(self):
         topes = {('POST', '/grande'): (TOPE_CUERPO * 2, 'muy grande')}

@@ -23,6 +23,7 @@ from cirdan.api.asistente import ClientDisconnectWatch, router as assistant_rout
 from cirdan.api.bitacora import router as audit_log_router
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
+from cirdan.api.firmas import MAX_SUBIDA_BODY, router as signatures_router
 from cirdan.api.llaves import router as api_keys_router
 from cirdan.api.plataforma import router as platform_router
 from cirdan.api.v1 import MAX_ALTA_BODY, router as v1_router
@@ -75,7 +76,11 @@ TOPE_CUERPO = 64 * 1024
 # de la sesión de Admin y cuenta los bytes él mismo. Aquí el tope de esa ruta es el mismo, así que un Content-Length de
 # más se corta antes de entrar y un chunked sin sesión se lee y se tira hasta ese tope, sin juntarlo. Cualquier otra
 # ruta, también '/api/v1/domains/' con diagonal final u otro método, se queda en TOPE_CUERPO.
-TOPES_POR_RUTA = {('POST', '/api/v1/domains'): (MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.')}
+# RC-211: mandar la carta a firmar con Mifiel lleva el mismo cuerpo que el alta, y subir lo firmado en la web de
+# Mifiel suma el XML, de hasta 7 MB (firmas.MAX_SUBIDA_BODY). Las dos leen el stream como register_domain.
+TOPES_POR_RUTA = {('POST', '/api/v1/domains'): (MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.'),
+                  ('POST', '/api/v1/signature-requests'): (MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.'),
+                  ('POST', '/api/v1/signature-uploads'): (MAX_SUBIDA_BODY, 'El PDF no puede superar 5 MB y el XML 7 MB.')}
 
 
 class CuerpoDemasiadoGrande(Exception):
@@ -299,6 +304,7 @@ app.include_router(scans_router)
 app.include_router(api_keys_router)
 app.include_router(platform_router)
 app.include_router(v1_router)
+app.include_router(signatures_router)
 app.include_router(assistant_router)
 app.include_router(audit_log_router)
 
