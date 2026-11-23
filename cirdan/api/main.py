@@ -252,6 +252,10 @@ async def cabeceras_de_seguridad(request: Request, call_next):
         if nombre == 'Content-Security-Policy' and "frame-ancestors 'none'" in response.headers.get(nombre, ''):
             continue
         response.headers[nombre] = valor
+    # Ninguna respuesta de la API se guarda en una caché, ni la del navegador ni la de Cloudflare: casi todas traen
+    # datos de la cuenta o de la empresa. Lo que quedó abierto del escaneo de ZAP (#51, RC-89) era /api/v1/auth/me sin
+    # Cache-Control. Una ruta que ya pone el suyo lo conserva (#75, RC-136).
+    response.headers.setdefault('Cache-Control', 'no-store')
     return response
 
 
@@ -295,8 +299,10 @@ app.add_middleware(ClientDisconnectWatch)
 
 @app.exception_handler(Exception)
 async def error_no_manejado(request: Request, exc: Exception):
-    """El 500 de un error sin manejar lo arma Starlette por fuera de los middlewares: aquí lleva las cabeceras."""
-    return PlainTextResponse('Internal Server Error', status_code=500, headers=CABECERAS_SEGURIDAD)
+    """El 500 de un error sin manejar lo arma Starlette por fuera de los middlewares: aquí lleva las cabeceras, también
+    el Cache-Control que el middleware pone a las demás respuestas (#75, RC-136)."""
+    return PlainTextResponse('Internal Server Error', status_code=500,
+                             headers={**CABECERAS_SEGURIDAD, 'Cache-Control': 'no-store'})
 
 
 app.include_router(auth_router)
