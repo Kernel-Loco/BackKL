@@ -1,0 +1,28 @@
+# Imágenes firmadas de ghcr.io en vez de compilarlas en la VM (#82, RC-117). Va encima de docker-compose.yml y
+# docker-compose.despliegue.yml, y solo con infra/verificar_imagenes.sh --levantar, que verifica la firma antes.
+# Guía: docs/cadena_de_suministro.md.
+#
+# En el .env: COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml:docker-compose.imagenes.yml y las dos
+# imágenes por digest, que salen del resumen de la corrida de imagenes.yml en cada repo.
+
+services:
+  api:
+    image: ${LOWTIDE_API_IMAGEN:?Falta LOWTIDE_API_IMAGEN en .env, ver docs/cadena_de_suministro.md}
+    build: !reset null
+    pull_policy: missing
+
+  # Escaneos programados (RC-52): la misma imagen firmada que la API, solo con su profile.
+  programador:
+    image: ${LOWTIDE_API_IMAGEN:?Falta LOWTIDE_API_IMAGEN en .env, ver docs/cadena_de_suministro.md}
+    build: !reset null
+    pull_policy: missing
+
+  demo-accounts:
+    image: ${LOWTIDE_API_IMAGEN:?Falta LOWTIDE_API_IMAGEN en .env, ver docs/cadena_de_suministro.md}
+    build: !reset null
+    pull_policy: missing
+
+  portal:
+    image: ${LOWTIDE_PORTAL_IMAGEN:?Falta LOWTIDE_PORTAL_IMAGEN en .env, ver docs/cadena_de_suministro.md}
+    build: !reset null
+    pull_policy: missing

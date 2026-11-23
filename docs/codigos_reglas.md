@@ -19,7 +19,7 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 
 | Id | Código | Categoría | Severidad base | Tope | Recolector | Estado | Qué falta | Superficie moderna |
 |---|---|---|---|---|---|---|---|---|
-| 01 | `breach_exposure` | data_leaks | critical | 40.00 | #19 RC-54 | Planeado | Recolector HIBP RC-54 | — |
+| 01 | `breach_exposure` | data_leaks | critical | 40.00 | #19 RC-54 | Lo emite hoy | — | — |
 | 02 | `cert_expired` | infrastructure | high | 20.00 | #14 RC-47 | Lo emite hoy | — | — |
 | 03 | `outdated_software` | infrastructure | high | 25.00 | #18 RC-46, #17 RC-49, RC-220 y RC-337 | Lo emite hoy | — | — |
 | 04 | `exposed_rdp` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy | — | — |
@@ -32,10 +32,10 @@ La lista de códigos que pide #30 (RC-66): una regla por cada tipo de hallazgo q
 | 11 | `dmarc_policy_none` | configuration | medium | 10.00 | #15 RC-48 | Lo emite hoy | — | — |
 | 12 | `secret_in_public_repo` | data_leaks | critical | 40.00 | #16 RC-50 | Lo emite hoy | — | Secretos |
 | 13 | `email_in_public_commits` | digital_identity | low | 8.00 | #16 RC-50 | Lo emite hoy | — | — |
-| 14 | `breach_exposure_old` | data_leaks | high | 25.00 | #19 RC-54 | Planeado | Recolector HIBP RC-54 | — |
-| 15 | `breach_exposure_no_passwords` | data_leaks | medium | 10.00 | #19 RC-54 | Planeado | Recolector HIBP RC-54 | — |
-| 16 | `personal_email_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado | Recolector de identidad pasiva RC-56 | — |
-| 17 | `email_pattern_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Planeado | Recolector de identidad pasiva RC-56 | — |
+| 14 | `breach_exposure_old` | data_leaks | high | 25.00 | #19 RC-54 | Lo emite hoy | — | — |
+| 15 | `breach_exposure_no_passwords` | data_leaks | medium | 10.00 | #19 RC-54 | Lo emite hoy | — | — |
+| 16 | `personal_email_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Lo emite hoy | — | — |
+| 17 | `email_pattern_exposed` | digital_identity | medium | 15.00 | #20 RC-56 | Lo emite hoy | — | — |
 | 18 | `exposed_remote_admin` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy | — | — |
 | 19 | `exposed_file_sharing` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy | — | — |
 | 20 | `exposed_database` | infrastructure | high | 25.00 | #17 RC-49 | Lo emite hoy | — | — |

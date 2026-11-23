@@ -25,7 +25,7 @@ from pruebas.test_llaves_api import borrar_llaves, get, poner_plan
 ALEX = 'alex.morgan@acme-demo.mx'     # admin de Acme
 DANA = 'dana.cruz@beta-corp.mx'       # admin de Beta
 CAMPOS = {'id', 'domain', 'type', 'value', 'ip', 'parent', 'parent_type', 'attributes', 'first_seen_at', 'last_seen_at'}
-ORDEN = ("array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email'], a.asset_type)")
+ORDEN = ("array_position(ARRAY['domain','subdomain','certificate','ip','service','api_doc','email','profile'], a.asset_type)")
 FORMULAS = ('=HYPERLINK("http://x.test")', '+1+1', '-2+3', '@SUM(A1)', 'ok;=1+1')
 PREFIJO_ID = '70000000-0000-4000-8000-000000231'
 PREFIJO_TOPE = '70000000-0000-4000-8231-'   # los activos de la prueba del tope de 50 000
@@ -81,9 +81,11 @@ def poner_cartas():
     sql = 'BEGIN;'
     for n, fqdn in enumerate(CON_CARTA_PROPIA):
         sql += ("INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, "
-                "signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) "
+                "signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, "
+                "template_version, activities) "
                 "SELECT '%s%03d', x.organization_id, x.domain_id, 'Firma RC-231', 'Prueba', x.signer_email, "
-                "x.signed_document_key || '.rc231-%d', x.signed_document_sha256, %s - 1, %s + 30, x.accepted_by "
+                "x.signed_document_key || '.rc231-%d', x.signed_document_sha256, %s - 1, %s + 30, x.accepted_by, "
+                "x.template_version, x.activities "
                 "FROM domain_authorizations x JOIN domains d ON d.id = x.domain_id WHERE d.fqdn = '%s' "
                 "ORDER BY x.created_at, x.id LIMIT 1;" % (PREFIJO_CARTA, n, n, hoy, hoy, fqdn))
     ok, _, err = psql(sql + 'COMMIT;', user='postgres')

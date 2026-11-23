@@ -19,12 +19,14 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Match
 
 from cirdan.auth.deps import Session, client_ip, comprobar_cookie_segura, current_session, require_roles
-from cirdan.api.asistente import router as assistant_router
+from cirdan.api.asistente import ClientDisconnectWatch, router as assistant_router
+from cirdan.api.bitacora import router as audit_log_router
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
+from cirdan.api.firmas import MAX_SUBIDA_BODY, router as signatures_router
 from cirdan.api.llaves import router as api_keys_router
 from cirdan.api.plataforma import router as platform_router
-from cirdan.api.v1 import router as v1_router
+from cirdan.api.v1 import MAX_ALTA_BODY, router as v1_router
 from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import config, origenes_permitidos
@@ -69,6 +71,17 @@ app = FastAPI(
 # llega a 6 KB. 64 KB deja unas 4 veces de margen sobre el de las passkeys.
 TOPE_CUERPO = 64 * 1024
 
+# Rutas con otro tope, por método y ruta exactos (RC-59). El alta de dominio manda la carta en base64 dentro del JSON:
+# hasta 5 MB de PDF, unos 6.7 MB con los demás campos (v1.MAX_ALTA_BODY). register_domain lee el stream solo después
+# de la sesión de Admin y cuenta los bytes él mismo. Aquí el tope de esa ruta es el mismo, así que un Content-Length de
+# más se corta antes de entrar y un chunked sin sesión se lee y se tira hasta ese tope, sin juntarlo. Cualquier otra
+# ruta, también '/api/v1/domains/' con diagonal final u otro método, se queda en TOPE_CUERPO.
+# RC-211: mandar la carta a firmar con Mifiel lleva el mismo cuerpo que el alta, y subir lo firmado en la web de
+# Mifiel suma el XML, de hasta 7 MB (firmas.MAX_SUBIDA_BODY). Las dos leen el stream como register_domain.
+TOPES_POR_RUTA = {('POST', '/api/v1/domains'): (MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.'),
+                  ('POST', '/api/v1/signature-requests'): (MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.'),
+                  ('POST', '/api/v1/signature-uploads'): (MAX_SUBIDA_BODY, 'El PDF no puede superar 5 MB y el XML 7 MB.')}
+
 
 class CuerpoDemasiadoGrande(Exception):
     """El cuerpo pasó el tope mientras llegaba."""
@@ -100,18 +113,24 @@ class TopeDeCuerpo:
     va el 413. Si la ruta responde sin haber leído todo un cuerpo chunked (/auth/me, /health, logout), el resto se lee
     y se tira, contando, antes de dejar salir la respuesta: si pasa el tope sale el 413. Sin eso uvicorn seguiría
     leyendo y tirando un cuerpo sin fin después de responder, sin tope ni timeout.
+    Las rutas de topes_por_ruta llevan su propio tope y su mensaje, con el mismo conteo. Se buscan por método y por
+    scope['path'] exactos: una ruta escrita de otra forma, o con un root_path delante, cae en el tope general.
     """
 
-    def __init__(self, app, tope=TOPE_CUERPO):
+    def __init__(self, app, tope=TOPE_CUERPO, topes_por_ruta=None):
         self.app = app
         self.tope = tope
+        self.topes_por_ruta = TOPES_POR_RUTA if topes_por_ruta is None else topes_por_ruta
 
     async def __call__(self, scope, receive, send):
         if scope['type'] != 'http':
             await self.app(scope, receive, send)
             return
-        if _content_length_excedido(scope, self.tope):
-            await self._responder_413(scope, receive, send)
+        tope, detalle = self.topes_por_ruta.get(
+            (scope.get('method'), scope.get('path')),
+            (self.tope, 'El cuerpo de la petición pasa el tope de %d KB' % (self.tope // 1024)))
+        if _content_length_excedido(scope, tope):
+            await self._responder_413(scope, receive, send, detalle)
             return
 
         recibidos = 0
@@ -127,7 +146,7 @@ class TopeDeCuerpo:
             mensaje = await receive()
             if mensaje['type'] == 'http.request':
                 recibidos += len(mensaje.get('body', b''))
-                if recibidos > self.tope:
+                if recibidos > tope:
                     excedido = True
                     raise CuerpoDemasiadoGrande()
                 if not mensaje.get('more_body', False):
@@ -160,12 +179,11 @@ class TopeDeCuerpo:
             if iniciada:
                 # La respuesta ya había empezado: no hay cómo cambiarla por un 413 y el servidor corta la conexión.
                 raise CuerpoDemasiadoGrande()
-            await self._responder_413(scope, receive, send)
+            await self._responder_413(scope, receive, send, detalle)
 
-    async def _responder_413(self, scope, receive, send):
+    async def _responder_413(self, scope, receive, send, detalle):
         # Connection: close porque el resto del cuerpo no se lee: la conexión no sirve para otra petición.
-        respuesta = JSONResponse({'detail': 'El cuerpo de la petición pasa el tope de %d KB' % (self.tope // 1024)},
-                                 status_code=413, headers={'Connection': 'close'})
+        respuesta = JSONResponse({'detail': detalle}, status_code=413, headers={'Connection': 'close'})
         await respuesta(scope, receive, send)
 
 
@@ -190,20 +208,54 @@ async def same_origin_writes(request: Request, call_next):
 
 # Ningún sitio mete una respuesta de la API en un marco y el navegador no adivina su tipo (RC-283). Van aquí y no
 # solo en el portal porque la API también se llama sin él, y porque el portal entrega tal cual lo que reenvía a
-# /api/v1/*: sus cabeceras de next.config.ts no llegan a esas respuestas. La CSP completa y HSTS son de RC-89.
-CABECERAS_SEGURIDAD = {'X-Frame-Options': 'DENY', 'Content-Security-Policy': "frame-ancestors 'none'",
-                       'X-Content-Type-Options': 'nosniff'}
+# /api/v1/*: sus cabeceras de next.config.ts no llegan a esas respuestas. La CSP completa, HSTS, Referrer-Policy y
+# Permissions-Policy son de RC-89. HSTS va sin preload: hstspreload.org acepta el dominio de quien lo inscriba y
+# salir de la lista tarda meses. Por http (la API local) el navegador lo ignora.
+CABECERAS_SEGURIDAD = {
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    'X-Content-Type-Options': 'nosniff',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), usb=()',
+}
+
+# /docs y /redoc (solo con API_DOCS=true, nunca en el despliegue) son páginas de FastAPI que cargan swagger-ui y redoc
+# de cdn.jsdelivr.net, la tipografía de redoc de Google Fonts y el ícono de fastapi.tiangolo.com, y /docs y
+# /docs/oauth2-redirect traen un script en línea. Con la CSP de arriba quedarían en blanco. El script en línea cambia
+# con la versión de FastAPI, así que va 'unsafe-inline' en vez de su hash: es una página de una PC de desarrollo.
+# Conserva frame-ancestors 'none', así que el middleware de abajo la deja.
+RUTAS_DOCS_HTML = frozenset({'/docs', '/docs/oauth2-redirect', '/redoc'})
+CSP_DOCS = '; '.join([
+    "default-src 'none'",
+    "script-src 'unsafe-inline' https://cdn.jsdelivr.net",
+    "style-src 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com",
+    'font-src https://fonts.gstatic.com',
+    "img-src 'self' data: https://fastapi.tiangolo.com https://cdn.redoc.ly",
+    "connect-src 'self'",
+    'worker-src blob:',
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+])
 
 
 @app.middleware('http')
 async def cabeceras_de_seguridad(request: Request, call_next):
     """Va después de same_origin_writes para envolverlo: su 403 también sale con las cabeceras."""
     response = await call_next(request)
+    if API_DOCS and request.url.path in RUTAS_DOCS_HTML and response.status_code == 200:
+        response.headers['Content-Security-Policy'] = CSP_DOCS
     for nombre, valor in CABECERAS_SEGURIDAD.items():
-        # Una CSP más estricta que ya trae frame-ancestors 'none' se queda, como la del reporte en HTML (RC-70).
+        # Una CSP propia que ya trae frame-ancestors 'none' se queda, como la del reporte en HTML (RC-70) y la de
+        # /demo (explorer.py), que necesitan sus estilos o su script.
         if nombre == 'Content-Security-Policy' and "frame-ancestors 'none'" in response.headers.get(nombre, ''):
             continue
         response.headers[nombre] = valor
+    # Ninguna respuesta de la API se guarda en una caché, ni la del navegador ni la de Cloudflare: casi todas traen
+    # datos de la cuenta o de la empresa. Lo que quedó abierto del escaneo de ZAP (#51, RC-89) era /api/v1/auth/me sin
+    # Cache-Control. Una ruta que ya pone el suyo lo conserva (#75, RC-136).
+    response.headers.setdefault('Cache-Control', 'no-store')
     return response
 
 
@@ -241,10 +293,16 @@ async def auditar_lecturas_de_operador(request: Request, call_next):
     return response
 
 
+# Afuera de los @app.middleware('http') de arriba, que no dejan ver el corte del cliente (asistente.py lo explica).
+app.add_middleware(ClientDisconnectWatch)
+
+
 @app.exception_handler(Exception)
 async def error_no_manejado(request: Request, exc: Exception):
-    """El 500 de un error sin manejar lo arma Starlette por fuera de los middlewares: aquí lleva las cabeceras."""
-    return PlainTextResponse('Internal Server Error', status_code=500, headers=CABECERAS_SEGURIDAD)
+    """El 500 de un error sin manejar lo arma Starlette por fuera de los middlewares: aquí lleva las cabeceras, también
+    el Cache-Control que el middleware pone a las demás respuestas (#75, RC-136)."""
+    return PlainTextResponse('Internal Server Error', status_code=500,
+                             headers={**CABECERAS_SEGURIDAD, 'Cache-Control': 'no-store'})
 
 
 app.include_router(auth_router)
@@ -252,7 +310,9 @@ app.include_router(scans_router)
 app.include_router(api_keys_router)
 app.include_router(platform_router)
 app.include_router(v1_router)
+app.include_router(signatures_router)
 app.include_router(assistant_router)
+app.include_router(audit_log_router)
 
 # Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas
 # rutas no existen (404). Nunca true en producción.

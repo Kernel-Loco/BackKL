@@ -7,18 +7,21 @@ test_login_sin_red.py. Corren dentro del contenedor, porque cirdan.api.main impo
     docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest -v pruebas/test_tope_cuerpo.py
 """
 import asyncio
+import base64
 import contextlib
 import json
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from cirdan.api import main
+from cirdan.api import firmas, main, v1
 from cirdan.api.main import TOPE_CUERPO, TopeDeCuerpo
 from cirdan.auth import routes, sessions
+from cirdan.auth import deps
 from pruebas.test_login_sin_red import ValkeyConMulti
 
 LOGIN = '/api/v1/auth/login'
+ALTA = '/api/v1/domains'
 PEDAZO = 16 * 1024
 
 
@@ -222,6 +225,116 @@ class LoginNormal(unittest.TestCase):
                 self.assertGreaterEqual(len(salida['mfa_token']), 10)
 
 
+def pdf_de(tamano):
+    """Un PDF de `tamano` bytes con cabecera y %%EOF, como los que acepta _datos_alta."""
+    inicio, fin = b'%PDF-1.4\nCIRDAN_FAKE_carta\n', b'\n%%EOF\n'
+    return inicio + b'x' * (tamano - len(inicio) - len(fin)) + fin
+
+
+def json_alta(pdf):
+    return json.dumps({
+        'fqdn': 'cirdan-fake-tope.example', 'signer_name': 'Nombre de prueba', 'signer_title': 'Representante',
+        'signer_email': 'test@example.com', 'valid_from': '2026-01-01', 'valid_until': '2027-01-01',
+        'passive_monitoring_confirmed': True, 'letter_base64': base64.b64encode(pdf).decode(),
+        'template_version': 1, 'activities': [1, 2, 3],
+    }).encode()
+
+
+class AltaDeDominio(unittest.TestCase):
+    """POST /api/v1/domains lleva el tope de v1.MAX_ALTA_BODY (RC-59): la carta en base64 pasa de 64 KB."""
+
+    def setUp(self):
+        self.altas = []
+
+        def registrar(body, request, session):
+            # Lo que la ruta hace antes de la base: valida y decodifica el PDF que llegó entero.
+            self.altas.append(len(v1._datos_alta(body)[6]))
+            return {'domain': None, 'txt': None}
+
+        for parche in (mock.patch.object(v1.cartas, 'habilitado', lambda: True),
+                       mock.patch.object(v1, '_registrar_dominio', registrar)):
+            parche.start()
+            self.addCleanup(parche.stop)
+
+    def con_sesion(self):
+        """Cookie de un Admin de prueba: sessions.get la reconoce sin Valkey. Devuelve la cabecera para llamar()."""
+        datos = {'user_id': 'u-1', 'org_id': 'o-1', 'role': 'admin', 'email': 'admin@example.com'}
+        parche = mock.patch.object(deps.sessions, 'get', lambda token: datos if token == 'CIRDAN_FAKE_sesion' else None)
+        parche.start()
+        self.addCleanup(parche.stop)
+        return [('cookie', '%s=CIRDAN_FAKE_sesion' % deps.COOKIE)]
+
+    def test_1_una_carta_de_mas_de_64_kb_y_menos_de_5_mb_se_registra(self):
+        sesion = self.con_sesion()
+        for tamano in (139 * 1024, v1.MAX_CARTA):
+            cuerpo = json_alta(pdf_de(tamano))
+            self.assertGreater(len(cuerpo), TOPE_CUERPO)
+            self.assertLessEqual(len(cuerpo), v1.MAX_ALTA_BODY)
+            for headers in ([('content-length', str(len(cuerpo)))], [('transfer-encoding', 'chunked')]):
+                with self.subTest(tamano=tamano, headers=headers):
+                    self.altas.clear()
+                    r = llamar(main.app, 'POST', ALTA, en_pedazos(cuerpo, 256 * 1024),
+                               headers=[('content-type', 'application/json')] + sesion + headers)
+                    self.assertEqual(r.status, 201, r.body)
+                    self.assertEqual(self.altas, [tamano], 'el PDF llega entero a la ruta')
+
+    def test_2_un_cuerpo_de_mas_de_max_alta_body_da_413(self):
+        sesion = self.con_sesion()
+        tope = sesion + [('content-length', str(v1.MAX_ALTA_BODY + 1))]
+        r = llamar(main.app, 'POST', ALTA, [b'{}'], headers=[('content-type', 'application/json')] + tope)
+        self.assertEqual((r.status, r.leidos), (413, 0))
+        self.assertEqual(json.loads(r.body), {'detail': 'El PDF no puede superar 5 MB.'})
+        self.assertEqual(r.headers.get('connection'), 'close')
+        self.assertEqual(r.headers.get('x-frame-options'), 'DENY')
+        # Chunked: corta en el pedazo que pasa el tope, sin juntar el resto.
+        pedazos = en_pedazos(b'x' * (v1.MAX_ALTA_BODY + 4 * PEDAZO))
+        r = llamar(main.app, 'POST', ALTA, pedazos, headers=sesion + [('transfer-encoding', 'chunked')])
+        self.assertEqual((r.status, r.inicios), (413, 1))
+        self.assertEqual(r.leidos, v1.MAX_ALTA_BODY // PEDAZO + 1)
+        self.assertEqual(json.loads(r.body), {'detail': 'El PDF no puede superar 5 MB.'})
+        # Justo en el tope pasa el middleware: el JSON que no sirve lo rechaza la ruta.
+        r = llamar(main.app, 'POST', ALTA, en_pedazos(b'x' * v1.MAX_ALTA_BODY, 256 * 1024),
+                   headers=sesion + [('content-length', str(v1.MAX_ALTA_BODY))])
+        self.assertEqual(r.status, 422)
+        self.assertEqual(self.altas, [])
+
+    def test_3_sin_sesion_da_401_o_413_y_no_entra_a_la_ruta(self):
+        # Sin sesión la ruta responde 401 sin leer: un chunked dentro del tope se lee y se tira, uno de más da 413.
+        cuerpo = json_alta(pdf_de(139 * 1024))
+        r = llamar(main.app, 'POST', ALTA, en_pedazos(cuerpo), headers=[('transfer-encoding', 'chunked')])
+        self.assertEqual((r.status, r.leidos), (401, len(en_pedazos(cuerpo))))
+        r = llamar(main.app, 'POST', ALTA, en_pedazos(b'x' * (v1.MAX_ALTA_BODY + PEDAZO)),
+                   headers=[('transfer-encoding', 'chunked')])
+        self.assertEqual((r.status, r.leidos), (413, v1.MAX_ALTA_BODY // PEDAZO + 1))
+        r = llamar(main.app, 'POST', ALTA, [b'{}'], headers=[('content-length', str(v1.MAX_ALTA_BODY + 1))])
+        self.assertEqual((r.status, r.leidos), (413, 0))
+        self.assertEqual(self.altas, [])
+
+    def test_4_las_demas_rutas_y_metodos_siguen_en_64_kb(self):
+        # Sin sesión y con la cookie de un Admin: el tope grande es solo para POST y la ruta exacta. Con sesión no van
+        # GET /domains ni verify: sus funciones entrarían a la base antes del drenado del chunked.
+        cookie = self.con_sesion()
+        grande = b'x' * (TOPE_CUERPO + 1)
+        general = {'detail': 'El cuerpo de la petición pasa el tope de 64 KB'}
+        con_base = {('GET', ALTA), ('POST', ALTA + '/cirdan-fake-tope.example/txt/verify')}
+        for sesion in ([], cookie):
+            for metodo, ruta in (('POST', ALTA + '/'), ('PUT', ALTA), ('PATCH', ALTA), ('GET', ALTA),
+                                 ('POST', '/API/V1/DOMAINS'), ('POST', ALTA + '/cirdan-fake-tope.example/txt/verify'),
+                                 ('POST', '/api/v1//domains'), (' POST', ALTA), ('post', ALTA), ('POST', LOGIN)):
+                if sesion and (metodo, ruta) in con_base:
+                    continue
+                with self.subTest(metodo=metodo, ruta=ruta, sesion=bool(sesion), chunked=False):
+                    r = llamar(main.app, metodo, ruta, [grande],
+                               headers=sesion + [('content-length', str(len(grande)))])
+                    self.assertEqual((r.status, r.leidos, json.loads(r.body)), (413, 0, general))
+                with self.subTest(metodo=metodo, ruta=ruta, sesion=bool(sesion), chunked=True):
+                    r = llamar(main.app, metodo, ruta, en_pedazos(grande),
+                               headers=sesion + [('transfer-encoding', 'chunked')])
+                    self.assertEqual((r.status, json.loads(r.body)), (413, general))
+                    self.assertEqual(r.leidos, TOPE_CUERPO // PEDAZO + 1)
+        self.assertEqual(self.altas, [])
+
+
 class Middleware(unittest.TestCase):
     """TopeDeCuerpo con una app de prueba: los bordes del tope."""
 
@@ -320,6 +433,36 @@ class Middleware(unittest.TestCase):
         clases = [m.cls for m in main.app.user_middleware]
         self.assertIn(TopeDeCuerpo, clases)
         self.assertEqual(clases[-1], TopeDeCuerpo, 'el último de la lista es el más de adentro')
+        # Tres rutas con tope propio: el alta y las dos de la firma con Mifiel (RC-211), y existen con ese método.
+        self.assertEqual(main.TOPES_POR_RUTA, {
+            ('POST', ALTA): (v1.MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.'),
+            ('POST', '/api/v1/signature-requests'): (v1.MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.'),
+            ('POST', '/api/v1/signature-uploads'): (firmas.MAX_SUBIDA_BODY,
+                                                    'El PDF no puede superar 5 MB y el XML 7 MB.')})
+        self.assertTrue(any(r.path == ALTA and 'POST' in r.methods for r in v1.router.routes))
+        for ruta in ('/api/v1/signature-requests', '/api/v1/signature-uploads'):
+            self.assertTrue(any(r.path == ruta and 'POST' in r.methods for r in firmas.router.routes))
+
+    def test_8_tope_por_ruta_en_su_borde_y_las_demas_con_el_general(self):
+        topes = {('POST', '/grande'): (TOPE_CUERPO * 2, 'muy grande')}
+        casos = (('/grande', TOPE_CUERPO * 2, 200), ('/grande', TOPE_CUERPO * 2 + 1, 413),
+                 ('/', TOPE_CUERPO + 1, 413), ('/grande/', TOPE_CUERPO + 1, 413))
+        for ruta, largo, esperado in casos:
+            for con_largo in (True, False):
+                with self.subTest(ruta=ruta, largo=largo, content_length=con_largo):
+                    headers = [('content-length', str(largo))] if con_largo else [('transfer-encoding', 'chunked')]
+                    r = llamar(TopeDeCuerpo(AppQueLee(), topes_por_ruta=topes), 'POST', ruta,
+                               en_pedazos(b'x' * largo), headers=headers)
+                    self.assertEqual(r.status, esperado)
+                    if esperado == 200:
+                        self.assertEqual(r.body, str(largo).encode())
+                    else:
+                        general = 'El cuerpo de la petición pasa el tope de 64 KB'
+                        self.assertEqual(json.loads(r.body), {'detail': 'muy grande' if ruta == '/grande' else general})
+        # Otro método en la misma ruta usa el tope general.
+        r = llamar(TopeDeCuerpo(AppQueLee(), topes_por_ruta=topes), 'PUT', '/grande',
+                   en_pedazos(b'x' * (TOPE_CUERPO + 1)), headers=[('content-length', str(TOPE_CUERPO + 1))])
+        self.assertEqual((r.status, r.leidos), (413, 0))
 
 
 if __name__ == '__main__':

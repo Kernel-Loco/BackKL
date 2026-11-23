@@ -65,7 +65,11 @@ class Armado(unittest.TestCase):
             self.assertEqual(len(hibp), 1)
             self.assertIn('Have I Been Pwned', hibp[0]['text'])
             self.assertIn('CC BY 4.0', hibp[0]['text'])
-            self.assertIn('Have I Been Pwned', reporte.html(r))
+            # La frase del Hecho cuando de RC-54, con el enlace a la fuente y a la licencia
+            self.assertIn('Fuente: <a href="https://haveibeenpwned.com">Have I Been Pwned</a>.', reporte.html(r))
+            self.assertIn('<a href="https://creativecommons.org/licenses/by/4.0/">', reporte.html(r))
+        de_hibp = dict(hallazgo(1, categoria='data_leaks', regla='breach_exposure'), source='hibp')
+        self.assertIn('Fuente: Have I Been Pwned</td>', reporte.html(armar([de_hibp])))
 
     def test_4_sin_hallazgos_lo_dice_sin_inventar_cifras(self):
         r = armar([])

@@ -126,10 +126,10 @@ CARTA_ACME_DEMO = '41000000-0000-4000-8000-000000000001'
 def renovar_carta(conn):
     conn.execute(
         'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
-        'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+        'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, activities) '
         'SELECT organization_id, domain_id, signer_name, signer_title, signer_email, '
         "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
-        'accepted_by FROM domain_authorizations WHERE id = %s', (CARTA_ACME_DEMO,))
+        'accepted_by, template_version, activities FROM domain_authorizations WHERE id = %s', (CARTA_ACME_DEMO,))
 
 
 def conexion_postgres():
@@ -205,6 +205,48 @@ class Orquestador(unittest.TestCase):
                              scan['txt_verification_id'])
         self.assertEqual((evidencia['check_reason'], evidencia['result']), ('pre_scan', 'match'))
         self.assertIn(TXT_ACME, evidencia['observed_values'])
+
+    def carta_con_alcance(self, actividades):
+        """Una carta vigente que vence después de la de renovar_carta(), así es la que toma el escaneo (RC-59)."""
+        self.conn.execute(
+            'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
+            'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, '
+            "activities) SELECT organization_id, domain_id, signer_name, signer_title, signer_email, "
+            "signed_document_key || '.rc59', signed_document_sha256, current_date - 1, current_date + 60, accepted_by, "
+            '%s, %s FROM domain_authorizations WHERE id = %s',
+            (None if actividades is None else 1, actividades, CARTA_ACME_DEMO))
+
+    def test_2b_la_fuente_que_la_carta_no_autoriza_no_corre(self):
+        self.carta_con_alcance([2])   # solo DNS: ct_logs (actividad 1) queda fuera
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(s.aceptada, s.detalle)
+        usado = self.uno("SELECT daily_used, daily_used_on FROM data_sources WHERE code = 'ct_logs'")
+        with mock.patch.object(orquestador, 'ejecutar', wraps=orquestador.ejecutar) as ejecutar, \
+                mock.patch.object(orquestador, 'en_vivo_permitido', return_value=True), \
+                mock.patch.object(orquestador, '_reservar', wraps=orquestador._reservar) as reservar:
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo', 'ct_logs'], modo='vivo',
+                                         conn=self.conn)
+        self.assertEqual([c.args[0].FUENTE for c in ejecutar.call_args_list], ['ejemplo'])
+        self.assertEqual([c.args[1] for c in reservar.call_args_list], ['ejemplo'])   # en vivo, sin cupo de ct_logs
+        self.assertEqual(self.uno("SELECT daily_used, daily_used_on FROM data_sources WHERE code = 'ct_logs'"), usado)
+        self.assertEqual(resumen['status'], 'partial')
+        self.assertEqual(resumen['stats']['sources_unauthorized'], ['ct_logs'])
+        self.assertLessEqual(set(crtsh.CODIGOS), set(resumen['stats']['rules_without_coverage']))
+        run = self.uno('SELECT r.status, r.attempt, r.next_retry_at, r.error FROM scan_source_runs r '
+                       "JOIN data_sources d ON d.id = r.source_id WHERE r.scan_id = %s AND d.code = 'ct_logs'", s.scan_id)
+        self.assertEqual((run['status'], run['attempt'], run['next_retry_at']), ('failed', 0, None))
+        self.assertIn('no autorizada por la carta (actividad 1', run['error'])
+
+    def test_2c_carta_sin_alcance_no_corre_ninguna_fuente(self):
+        self.carta_con_alcance(None)   # carta de antes de la 029 que nadie llenó: falla cerrado
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(s.aceptada, s.detalle)
+        with mock.patch.object(orquestador, 'ejecutar') as ejecutar:
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs', 'dns'], modo='reproducir',
+                                         conn=self.conn)
+        ejecutar.assert_not_called()
+        self.assertEqual(resumen['status'], 'failed')
+        self.assertEqual(resumen['stats']['sources_unauthorized'], ['ct_logs', 'dns'])
 
     def test_2_corre_el_recolector_grabado_y_cierra_el_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
@@ -1179,9 +1221,10 @@ class Orquestador(unittest.TestCase):
                                          conn=self.conn)
 
     def test_3c6_cert_spotter_se_pide_una_vez_por_pagina_en_cada_escaneo(self):
-        """RC-326, con base. Un escaneo en vivo con las cuatro fuentes que piden Cert Spotter hace 2 consultas (la
-        página y la vacía que cierra), no 8, y el cupo diario de cada fuente sube solo con lo que de verdad salió. Sin
-        compartir (certspotter.descargar directo al transporte) son 6 consultas más, 2 de ct_logs, shodan y web."""
+        """RC-326, con base. Un escaneo en vivo con las cinco fuentes que piden Cert Spotter hace 2 consultas (la
+        página y la vacía que cierra), no 10, y el cupo diario de cada fuente sube solo con lo que de verdad salió. Sin
+        compartir (certspotter.descargar directo al transporte) son 8 consultas más, 2 de ct_logs, identity, shodan y
+        web (identity desde RC-56)."""
         def escanear(compartido):
             red = RedSimulada()
             antes = {codigo: self.cupo(codigo)[1] for codigo in FUENTES_CT}
@@ -1203,10 +1246,10 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(len(con.cert_spotter), 2)
         self.assertEqual(subio, por_fuente)  # el cupo cuenta lo que gastó cada fuente, nada reservado de más
         sin, por_fuente_sin, subio_sin = escanear(compartido=False)
-        self.assertEqual(len(sin.cert_spotter), 8)
+        self.assertEqual(len(sin.cert_spotter), 10)
         self.assertEqual(subio_sin, por_fuente_sin)
         self.assertEqual({codigo: por_fuente_sin[codigo] - por_fuente[codigo] for codigo in FUENTES_CT},
-                         {'api_docs': 0, 'ct_logs': 2, 'shodan': 2, 'web': 2})
+                         {'api_docs': 0, 'ct_logs': 2, 'identity': 2, 'shodan': 2, 'web': 2})
 
     def test_3c7_un_reintento_del_orquestador_vuelve_a_pedir_cert_spotter(self):
         """RC-326, con base. Con crt.sh caído y Cert Spotter con 503, ct_logs queda en 'retrying'. Si Cert Spotter

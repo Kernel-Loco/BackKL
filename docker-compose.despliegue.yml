@@ -9,7 +9,7 @@
 # - borde: cloudflared y el portal. cloudflared no ve la API, la base ni Valkey.
 # - interna: el portal y la API.
 # - salida: solo cloudflared, para llegar a Cloudflare. La API sale a internet por la red default.
-# - default: la API, la base, Valkey y demo-accounts. Subred fija y la API con IP fija fuera del rango que Docker
+# - default: la API, la base, Valkey, demo-accounts y, con su profile, el programador. Subred fija y la API con IP fija fuera del rango que Docker
 #   reparte solo, para que la regla de DOCKER-USER de docs/despliegue.md ('Solo la API llega a IMDS') deje pedir el
 #   token de la identidad de la VM a la API y a nadie más.
 # borde e interna no salen a internet (internal) y el host no tiene IP en ellas (gateway_mode_ipv4=isolated, pide un
@@ -62,6 +62,11 @@ services:
       # Las passkeys quedan amarradas a lowtidesec.com (RC-331): sirven en https://lowtidesec.com y en su www, que vienen
       # de ALLOWED_ORIGINS. Si el dominio cambia, dejan de servir y se entra con contraseña y TOTP.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-lowtidesec.com}
+      # El enlace al correo (#28, RC-63) lleva al portal publicado, y siempre a Resend, aunque el .env diga otra cosa.
+      # Vacía, la API usa el primer origen de ALLOWED_ORIGINS: https://lowtidesec.com en la VM y
+      # https://pruebas.lowtidesec.com en el plan B de pruebas (M4 de la revisión de RC-63).
+      PORTAL_URL: ""
+      CORREO_API_URL: https://api.resend.com/emails
       FORWARDED_ALLOW_IPS: "10.249.91.10,10.249.92.11"
       # Nunca en el despliegue, aunque el .env diga otra cosa.
       DEMO_EXPLORER: "false"
@@ -95,6 +100,11 @@ services:
       # esas credenciales. Se comprueba con `docker compose logs demo-accounts`.
       DEMO_ACCOUNTS: "false"
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Falta ALLOWED_ORIGINS en .env, ver docs/despliegue.md}
+
+  # Escaneos programados (#27, RC-52), solo con `--profile programador`. Sale a internet por default, como la API, pero
+  # sin su IP fija ni NET_RAW: no llega a IMDS (no lee Key Vault) ni puede quitarle la IP a la API.
+  programador:
+    <<: [*registro, *sin-raw]
 
   portal:
     <<: *registro

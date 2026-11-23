@@ -7,6 +7,8 @@ navegador → Cloudflare (HTTPS) → cloudflared ─borde─ portal ─interna�
                                       └─salida─ Cloudflare
 ```
 
+Una VM equivalente también se crea y se borra desde código con Terraform, en su propio grupo de recursos y sin túnel por omisión: `docs/terraform.md` (#81, RC-132).
+
 ## Antes de levantar
 
 **Alta de dominios:** por ahora no se puede habilitar en el despliegue. El volumen `cirdan-cartas` guarda cartas cifradas,
@@ -33,13 +35,15 @@ empresas y con los respaldos.
    - `COOKIE_SECURE=true`. El archivo del despliegue ya la fija, pero con un origen https en `ALLOWED_ORIGINS` y sin `COOKIE_SECURE=true` la API no arranca (RC-286): así un `docker compose up` que se olvide de `docker-compose.despliegue.yml` tampoco publica la cookie de sesión sin Secure. Vale igual en el plan B y en el plan B de pruebas.
    - `TUNNEL_TOKEN`, el token del túnel de Cloudflare. Sin él la pila no arranca. Nunca va en git.
    - `COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml` y `COMPOSE_PATH_SEPARATOR=:`. Con eso cualquier `docker compose` de esa carpeta usa los dos archivos, aunque se escriba sin los `-f`. Sin ellos, un `docker compose up -d --build` recrea la API con la config de desarrollo, sin la red interna, y lowtidesec.com responde 500 en `/api/v1`. `COMPOSE_PATH_SEPARATOR=:` hace falta en Windows (plan B), donde el separador por omisión es `;`. En Linux no estorba.
-   - `DOMINIOS_EN_VIVO` y `ORGS_GITHUB_DECLARADAS` según las cartas vigentes.
+   - `DOMINIOS_EN_VIVO` y `ORGS_GITHUB_DECLARADAS` según las cartas vigentes. Mientras la llave de Have I Been Pwned sea Core 1, ningún dominio de un tercero entra en `DOMINIOS_EN_VIVO`, aunque su carta esté vigente (sección 5.8, punto 7, de la [política de seguridad y privacidad](politica_seguridad_privacidad.md)).
+   - `COMPOSE_PROFILES=programador`, solo después de aplicar la migración 030 (sección 'Escaneos programados').
    - La llave del MFA. En la VM va `TOTP_KEY_VAULT_SECRET_URL` y no va `TOTP_ENCRYPTION_KEY` (sección 'Llave del MFA en Azure Key Vault'). En el plan B es al revés (paso 3 de 'Carpeta y volumen'). Con las dos puestas, o con ninguna, la API no arranca.
    - La llave de las huellas de contraseña, con la misma regla: en la VM `PASSWORD_HASH_KEY_VAULT_SECRET_URL` y no `PASSWORD_HASH_ENCRYPTION_KEY`, y en el plan B al revés (sección 'Llave de las huellas de contraseña').
    - `PWNED_PASSWORDS_ENABLED` vacía, como viene en `.env.example`, o en `true`. Así `docker-compose.despliegue.yml` prende la revisión de contraseñas filtradas (RC-334). Con `false` queda apagada y solo se revisa la lista local.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
    - SSL/TLS > Edge Certificates: 'Always Use HTTPS' prendido. Sin él el portal también responde por `http://` y el formulario de login manda la contraseña sin cifrar hasta Cloudflare (la API la rechaza después por el Origin, pero ya viajó). Se comprueba con `curl -sI http://lowtidesec.com/login` y `curl -sI http://www.lowtidesec.com/login`: los dos responden 301 con `Location: https://...`. HSTS queda para RC-89.
+   - SSL/TLS > Edge Certificates: 'Minimum TLS Version' en **TLS 1.2** (ASVS 5.0 V12.1.1, #75). Con el valor por omisión, Cloudflare todavía acepta TLS 1.0 y 1.1. Se comprueba con `openssl s_client -connect lowtidesec.com:443 -servername lowtidesec.com -tls1_1 -cipher 'DEFAULT:@SECLEVEL=0'`, que debe fallar el saludo, y con `-tls1_2` y `-tls1_3`, que deben conectar. `@SECLEVEL=0` hace falta porque el OpenSSL local ya no ofrece TLS 1.1 por su cuenta: sin él falla siempre y no prueba nada.
 4. `docker login` con `DOCKERHUB_USERNAME` y `DOCKERHUB_TOKEN` de la cuenta 'lowtidesec' (solo lectura).
 5. Docker Engine reciente, con Compose 2.24 o más nuevo. Las redes `borde` e `interna` usan `gateway_mode_ipv4=isolated` y los puertos se quitan con `ports: !reset []`. Un Docker viejo rechaza la opción de red y `up` falla: nunca levanta la pila sin el aislamiento. Se probó con Docker Engine 29.8 y Compose 5.5.
 
@@ -211,6 +215,16 @@ Nunca se crea otra versión del secreto `password-hash-key` sin seguir estos pas
 
 En desarrollo y en el plan B es lo mismo con `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, sin Key Vault, y `docker compose exec api` como en la VM.
 
+## Escaneos programados (RC-52)
+
+El servicio `programador` vuelve a escanear cada dominio autorizado según el plan de su empresa (`plans.scan_interval`: Starter cada 7 días, Business y Enterprise cada día). Usa la misma imagen y el mismo rol de la base que la API, sin puertos y sin llegar a IMDS. Va con profile: sin `COMPOSE_PROFILES`, `docker compose up -d` no lo enciende. Al encenderlo salen en el acto los dominios con `next_scan_at` vacío o vencido, así que se enciende con el OK de quien administra la VM.
+
+1. (VM, una vez) La migración 030, antes de encenderlo. La API no la lee: `docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/030_escaneos_programados.sql`.
+2. (VM) Revisar que `DOMINIOS_EN_VIVO` del `.env` lista solo los dominios con carta vigente y, con la llave Core 1 de Have I Been Pwned, ninguno de un tercero (paso 2 de 'Antes de levantar'). El programador se salta los demás sin consultar su TXT y los vuelve a ver al día siguiente.
+3. (VM) En el `.env`, `COMPOSE_PROFILES=programador`. Con ella cada `docker compose up -d --build` de esta guía, y `infra/verificar_imagenes.sh --levantar` con las imágenes firmadas, también recrea el programador con el código nuevo. Sin ella, un programador ya encendido seguiría con la imagen de antes, porque un `up` sin su profile no lo toca.
+4. (VM) `docker compose --dry-run up -d --build` (sin recrear `cirdan-pg16`) y `docker compose up -d --build`. `docker compose ps programador` dice `running` y `docker compose logs programador` dice 'escaneo programado' con cada escaneo que pidió, sin errores.
+5. Para apagarlo: quitar `COMPOSE_PROFILES` del `.env` y `docker compose --profile programador stop programador`. Tiene 60 s para cerrar: los escaneos que dejó corriendo quedan en 'failed' y su turno queda a una hora, no al siguiente intervalo del plan, así que salen en cuanto se vuelva a encender.
+
 ## Respaldo diario (RC-233)
 
 Una vez al día, a las 09:00 UTC (03:00 en Monterrey), `lowtide-respaldo.timer` corre `db/respaldo/respaldar.sh`:
@@ -338,15 +352,31 @@ Al terminar, en la carpeta del plan B, la primera línea de `docker compose conf
 La misma pila en la PC de Ernesto, de respaldo por si la VM cae: otro túnel que publica solo `pruebas.lowtidesec.com`. ZAP activo (RC-89), ASVS (RC-136) y el pentest (RC-153) van contra el producto final en la VM, nunca contra esta pila (`docs/politica_uso_etico.md`). Queda abierto, como la VM, pero el túnel solo está arriba en las ventanas de prueba. No trae datos de la VM.
 
 1. Ernesto crea en Zero Trust el túnel de pruebas con un solo nombre público, `pruebas.lowtidesec.com`, con destino `http://portal:3000`. Ni `lowtidesec.com` ni su www apuntan a ese túnel.
-2. Los pasos 1 y 2 de 'Carpeta y volumen', con los clones en otra carpeta (por ejemplo `C:\lowtide-pruebas\`) y en el commit que se quiere probar.
-3. Su `.env` sale de `.env.example`: `COMPOSE_FILE` y `COMPOSE_PATH_SEPARATOR` como en la VM, `COMPOSE_PROJECT_NAME=lowtide-pruebas`, `ALLOWED_ORIGINS=https://pruebas.lowtidesec.com`, el `TUNNEL_TOKEN` del túnel de pruebas y llaves nuevas en `TOTP_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, distintas entre sí y de las de la VM. `COOKIE_SECURE`, `DEMO_ACCOUNTS`, `DEMO_EXPLORER`, `API_DOCS` y `FORWARDED_ALLOW_IPS` los fija `docker-compose.despliegue.yml`, diga lo que diga el `.env`. `WEBAUTHN_RP_ID` se queda en `lowtidesec.com`, que también sirve en el subdominio.
-4. La primera línea de `docker compose config` es `name: lowtide-pruebas`. Después, `docker compose up -d --build`: la base nueva se carga con las semillas y `docker compose logs demo-accounts` dice que las cuentas de demo quedaron apagadas.
-5. Las cuentas de prueba las da de alta Ernesto. Nunca se usan las de demo, que tienen contraseña y secreto TOTP en el repo público (comentario 10312 de RC-91).
+2. El paso 2 de 'Carpeta y volumen', con los clones en otra carpeta (por ejemplo `C:\lowtide-pruebas\`) y en el commit que se quiere probar. El paso 1 no hace falta: la pila de desarrollo puede seguir arriba con el archivo del paso 3.
+3. `docker-compose.yml` fija `container_name` en `cirdan-pg16`, `cirdan-valkey` y `cirdan-api`, los mismos de la pila de desarrollo, y con ella arriba el `up` choca. En el clon de pruebas va un tercer archivo, `docker-compose.pruebas-pc.yml`, que les cambia el nombre. Es solo de esa PC: no se versiona ni se agrega con `git add`. El prefijo `lote14-` es el de las pilas aisladas de prueba. En redes que cortan UDP, cloudflared no sale por QUIC (UDP 7844) y el túnel cae con el error 1033 de Cloudflare. Con `TUNNEL_TRANSPORT_PROTOCOL: http2` va por TCP 443 y vuelve con sus 4 conexiones (prueba del 20 nov). `docker compose logs cloudflared` dice con qué protocolo registró cada conexión.
+
+   ```yaml
+   services:
+     db:
+       container_name: lote14-planb-pg16
+     valkey:
+       container_name: lote14-planb-valkey
+     api:
+       container_name: lote14-planb-api
+     cloudflared:
+       environment:
+         TUNNEL_TRANSPORT_PROTOCOL: http2
+   ```
+
+4. Su `.env` sale de `.env.example`: `COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml:docker-compose.pruebas-pc.yml`, `COMPOSE_PATH_SEPARATOR=:`, `COMPOSE_PROJECT_NAME=lowtide-pruebas`, `ALLOWED_ORIGINS=https://pruebas.lowtidesec.com`, el `TUNNEL_TOKEN` del túnel de pruebas y llaves nuevas en `TOTP_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, distintas entre sí y de las de la VM. `COOKIE_SECURE`, `DEMO_ACCOUNTS`, `DEMO_EXPLORER`, `API_DOCS` y `FORWARDED_ALLOW_IPS` los fija `docker-compose.despliegue.yml`, diga lo que diga el `.env`. `WEBAUTHN_RP_ID` se queda en `lowtidesec.com`, que también sirve en el subdominio.
+5. La primera línea de `docker compose config` es `name: lowtide-pruebas` y `docker compose config --format json` trae los tres `container_name` con `lote14-planb-`. Después, `docker compose up -d --build`: la base nueva se carga con las semillas y `docker compose logs demo-accounts` dice que las cuentas de demo quedaron apagadas.
+6. Las cuentas de prueba las da de alta Ernesto. Nunca se usan las de demo, que tienen contraseña y secreto TOTP en el repo público (comentario 10312 de RC-91).
 
 En cada ventana de prueba:
 
 - Al abrir, `docker compose up -d`. Se anotan la hora y los minutos hasta que `https://pruebas.lowtidesec.com/login` respondió 200.
 - La prueba de punta a punta: login con MFA, ver un dominio y cerrar sesión, sin 403. La respuesta del login trae `Set-Cookie: lt_session` con `Secure` (RC-286). Un login con una X-Forwarded-For inventada cuenta el fallo con la IP real, y 20 fallos desde una IP no bloquean el login desde otra.
+- Esas dos pruebas de fallos van desde un navegador, con correos inventados, no con curl. El captcha se revisa antes de contar el fallo (`cirdan/auth/routes.py:221`): sin resolverlo, curl recibe 400 y el contador no sube. La X-Forwarded-For inventada se agrega a cada `POST /auth/login` que manda la página. El contador de cada IP es `login:fail:ip:<ip>` en Valkey (una IPv6 cuenta por su /64) y vence 15 min después del primer fallo (`LOCK_SECONDS`, `cirdan/auth/sessions.py:37`), así que los fallos van seguidos y se lee en seguida: `docker compose exec valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "login:fail:ip:*"'` lista las IP que contaron. El mismo comando con `get login:fail:ip:<ip>` en lugar de `--scan --pattern ...` da cuántos fallos lleva esa IP.
 - Por este túnel no va ninguna prueba activa. ZAP activo, ASVS y el pentest van contra la VM por `lowtidesec.com`, con una cuenta de prueba que da de alta Ernesto. Cómo se le abre paso al escáner en Cloudflare durante la ventana y cómo se cierra después va en RC-89.
 - Al cerrar, `docker compose stop` (la base se queda) y se anota la hora. `docker inspect -f '{{.State.StartedAt}} {{.State.FinishedAt}}' lowtide-pruebas-cloudflared-1` da las dos horas del túnel en UTC. Con `restart: unless-stopped`, un contenedor detenido a mano no vuelve a arrancar al reiniciar la PC. Uno que no se detuvo sí: si la PC se apaga o se reinicia a mitad de una ventana, Docker Desktop vuelve a levantar el túnel. Por eso el `stop` va antes de apagar, y al prender la PC fuera de una ventana se revisa `docker compose ps`. Si cloudflared quedó arriba, se detiene y se anota el rato que estuvo publicado.
 - Las horas de cada ventana van en un comentario de RC-277.

@@ -472,38 +472,71 @@ class Login(Base):
                 self.assertEqual(respuesta.status_code, 401)
                 self.assertEqual(base.updates, [])
 
+    RONDAS = 22  # par: la mitad de las rondas mide primero cada caso
+
+    def comparar_tiempos(self, otro):
+        """(mediana de (otro - inexistente) / el menor de los dos, en proporción, y las medianas del inexistente y de
+        otro, en segundos).
+
+        En el runner del CI una medida suelta va de 45 a 130 ms según los vecinos (argon2id corre en 4 hilos), y con
+        los dos casos medidos en bloques seguidos una ráfaga de carga caía entera en uno solo: fallaba en los dos
+        sentidos y también con 'base64 mala', que hace menos trabajo que el inexistente. Aquí cada ronda mide los dos
+        seguidos, alternando cuál va primero, y la diferencia es la de cada par: una ráfaga pega en los dos. Dividir
+        entre el menor hace la cota igual de estricta en los dos sentidos."""
+        def inexistente():
+            passwords.burn_time('Otra-Clave-Larga-99')
+
+        def medir(f):
+            inicio = time.perf_counter()
+            f()
+            return time.perf_counter() - inicio
+        diferencias, de_inexistente, de_otro = [], [], []
+        for ronda in range(self.RONDAS):
+            if ronda % 2 == 0:
+                a = medir(inexistente)
+                b = medir(otro)
+            else:
+                b = medir(otro)
+                a = medir(inexistente)
+            de_inexistente.append(a)
+            de_otro.append(b)
+            diferencias.append((b - a) / min(a, b))
+        return statistics.median(diferencias), statistics.median(de_inexistente), statistics.median(de_otro)
+
+    def tardan_lo_mismo_sin_argon2id(self, otro):
+        """Segunda fase: todo lo que no es argon2id (descifrar, decodificar, ramas), que se mide en microsegundos. Con
+        argon2id real, una fuga de 2 ms queda en unos 0.04 de comparar_tiempos, debajo del 0.35. Aquí argon2id no
+        corre, así que se ve sola. Cada lado toma el mínimo de 200 pares alternados: el ruido solo suma tiempo."""
+        def inexistente():
+            passwords.burn_time('Otra-Clave-Larga-99')
+        de_inexistente, de_otro = [], []
+        with mock.patch.object(passwords, '_verificar_phc', lambda phc, clave: False):
+            for vuelta in range(200):
+                for f, t in ((inexistente, de_inexistente), (otro, de_otro))[::1 if vuelta % 2 == 0 else -1]:
+                    inicio = time.perf_counter()
+                    f()
+                    t.append(time.perf_counter() - inicio)
+        a, b = min(de_inexistente), min(de_otro)
+        self.assertLess(abs(b - a), 0.001, (a, b))
+
     def test_5d_y_tardan_lo_mismo_que_un_correo_inexistente(self):
         passwords.comprobar_llave()
         no_abren = self._no_abren()
-
-        def medir(f):
-            tiempos = []
-            for _ in range(7):
-                inicio = time.perf_counter()
-                f()
-                tiempos.append(time.perf_counter() - inicio)
-            return statistics.median(tiempos)
-        inexistente = medir(lambda: passwords.burn_time('Otra-Clave-Larga-99'))
         for caso in ('otra llave', 'base64 mala'):
             with self.subTest(caso=caso):
-                no_abre = medir(lambda: passwords.verify_password(no_abren[caso], 'Otra-Clave-Larga-99', ALEX))
-                self.assertLess(abs(inexistente - no_abre) / inexistente, 0.35, (inexistente, no_abre))
+                no_abre = lambda: passwords.verify_password(no_abren[caso], 'Otra-Clave-Larga-99', ALEX)
+                diferencia, inexistente, tiempo = self.comparar_tiempos(no_abre)
+                self.assertLess(abs(diferencia), 0.35, (diferencia, inexistente, tiempo))
+                self.tardan_lo_mismo_sin_argon2id(no_abre)
 
     def test_5b_y_tardan_lo_mismo(self):
         huella = passwords.hash_password(CLAVE, ALEX)
         passwords.comprobar_llave()
-
-        def medir(f):
-            tiempos = []
-            for _ in range(7):
-                inicio = time.perf_counter()
-                f()
-                tiempos.append(time.perf_counter() - inicio)
-            return statistics.median(tiempos)
-        inexistente = medir(lambda: passwords.burn_time('Otra-Clave-Larga-99'))
-        equivocada = medir(lambda: passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX))
+        equivocada = lambda: passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX)
+        diferencia, inexistente, tiempo = self.comparar_tiempos(equivocada)
         self.assertGreater(inexistente, 0.01, 'el correo inexistente también debe gastar el tiempo de argon2id')
-        self.assertLess(abs(inexistente - equivocada) / equivocada, 0.35, (inexistente, equivocada))
+        self.assertLess(abs(diferencia), 0.35, (diferencia, inexistente, tiempo))
+        self.tardan_lo_mismo_sin_argon2id(equivocada)
 
 
 class Parametros(unittest.TestCase):

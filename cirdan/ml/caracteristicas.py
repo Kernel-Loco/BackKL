@@ -19,7 +19,8 @@ from datetime import date, datetime
 
 # Código de regla -> tipo, con los mismos nombres que cirdan/api/v1.py:20-25
 TIPO = {
-    'breach_exposure': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
+    'breach_exposure': 'correos_en_brecha', 'breach_exposure_old': 'correos_en_brecha',
+    'breach_exposure_no_passwords': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
     'cert_expiring_soon': 'certificado_por_vencer', 'outdated_software': 'software_desactualizado',
     'exposed_rdp': 'servicio_expuesto', 'dmarc_missing': 'dmarc_faltante', 'spf_missing': 'spf_faltante',
     'lookalike_domain': 'dominio_parecido',
@@ -30,6 +31,8 @@ ACTIVOS_DIRECTOS = ('ip', 'service')                          # v1.py:80
 # De qué fecha de la evidencia cuenta la antigüedad, en orden. Los demás códigos cuentan desde primera_vez.
 DESDE = {
     'breach_exposure': ('breach_date',),             # la brecha (v1.py:69-70)
+    'breach_exposure_old': ('breach_date',),         # las dos de HIBP de RC-54 cuentan igual
+    'breach_exposure_no_passwords': ('breach_date',),
     'cert_expired': ('not_after', 'vence'),          # el vencimiento (v1.py:71-72). crt.sh lo pone en vence
     'cert_expiring_soon': ('not_before', 'emitido'), # la emisión. crt.sh la pone en emitido
     'lookalike_domain': ('primer_certificado',),     # el primer certificado del parecido (crtsh._parecidos)
@@ -51,6 +54,7 @@ USO = {
 PALABRAS_SOSPECHOSAS = ('login', 'acceso', 'pago', 'cuenta', 'verifica', 'seguridad')
 DIAS_SIN_VER = 180   # un servicio que no se ve desde hace más de esto ya no da acceso confirmado
 SPF_NULO = 'v=spf1 -all'   # el dominio dice que ningún servidor manda su correo
+BRECHAS = ('breach_exposure', 'breach_exposure_old', 'breach_exposure_no_passwords')   # los 3 de HIBP (RC-54)
 
 
 def _dia(valor):
@@ -84,7 +88,7 @@ def exposicion(codigo, tipo_activo):
 def sensibilidad(codigo, evidencia, referencia):
     """La rúbrica de sensibilidad (alta, media o baja) según lo que la evidencia dice que expone el hallazgo."""
     e = evidencia or {}
-    if codigo == 'breach_exposure':
+    if codigo in BRECHAS:
         return 'alta' if DATOS_SENSIBLES & set(e.get('data_classes') or ()) else 'media'
     if codigo == 'exposed_rdp':
         ultima = e.get('ultima_vez')

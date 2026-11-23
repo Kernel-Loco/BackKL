@@ -6,8 +6,8 @@ código va con la fuente que no lo revisó y el motivo:
 - 'source_failed': la fuente corrió y no terminó 'succeeded'. Ninguno de sus códigos se revisó.
 - 'source_not_run': la fuente tiene recolector pero no corrió en ese escaneo, porque está apagada en `data_sources`
   o porque aún no existía. Ninguno de sus códigos se revisó.
-- 'no_api_key': la fuente no revisó ese código porque le faltó la llave. Hoy solo pasa con los códigos de
-  shodan.SIN_LLAVE cuando no hubo API de host.
+- 'no_api_key': la fuente no revisó ese código porque le faltó la llave. Pasa con los códigos de shodan.SIN_LLAVE
+  cuando no hubo API de host y con los de HIBP sin la llave de la plataforma (RC-54).
 - 'source_partial': la fuente respondió pero no pudo revisar ese código (su `sin_cobertura`).
 - 'partially_checked': la fuente revisó solo una parte de lo suyo (`sources_partial`: un sitio web de varios, una
   variante de crt.sh sin respuesta). Sus códigos se revisaron en esa parte y no en el resto.
@@ -15,7 +15,8 @@ código va con la fuente que no lo revisó y el motivo:
 La lista de cada fuente sale de `raw_payload->'sin_cobertura'` de su corrida y la de la llave, de `sin_llave`. Una
 corrida de antes de `sin_llave` lo toma del aviso fijo de Shodan (LIMITES dice que no hubo llave), por su comienzo y no
 por el texto de hoy. Una fuente con
-keep_raw_payload en false (GitHub) no guarda nada: sus códigos de `rules_without_coverage` se le dan por su CODIGOS.
+keep_raw_payload en false (GitHub y HIBP) no guarda nada: sus códigos de `rules_without_coverage` se le dan por su
+CODIGOS, con 'no_api_key' si también están en `rules_without_key` de `scans.stats` (RC-54) y 'source_partial' si no.
 Un código de `rules_without_coverage` que no se puede atribuir va con la fuente en None. Sin corridas (un escaneo
 sembrado) no hay de dónde sacarlo y la lista sale vacía.
 
@@ -60,12 +61,12 @@ def _sin_llave(corrida):
     return None
 
 
-def huecos(corridas, sin_cobertura=(), parciales=(), codigos=codigos_de):
+def huecos(corridas, sin_cobertura=(), parciales=(), codigos=codigos_de, sin_llave=()):
     """[{code, source, reason}] ordenada por código y fuente.
 
     `corridas`: las de `scan_source_runs` del escaneo, cada una con source, status y, de su raw_payload, sin_cobertura,
     sin_llave y avisos (None si no los guardó). `sin_cobertura`: `rules_without_coverage` de `scans.stats`.
-    `parciales`: `sources_partial` de `scans.stats`.
+    `parciales`: `sources_partial` de `scans.stats`. `sin_llave`: `rules_without_key` de `scans.stats`.
     """
     if not corridas:
         return []
@@ -91,11 +92,17 @@ def huecos(corridas, sin_cobertura=(), parciales=(), codigos=codigos_de):
         for c in lista:
             motivos.setdefault((c, r['source']), 'no_api_key' if c in por_llave else 'source_partial')
     atribuidos = {c for (c, _), m in motivos.items() if m in ('no_api_key', 'source_partial')}
+    # Las reglas de una fuente que la carta no autoriza llegan a rules_without_coverage con su corrida en 'failed'
+    # (RC-59): ya salen con source_failed y no se repiten sin fuente.
+    caidos = {c for (c, _), m in motivos.items() if m == 'source_failed'}
     for c in sin_cobertura:
         if c in atribuidos:
             continue
-        for fuente in [f for f in sin_lista if c in codigos(f)] or [None]:
-            motivos.setdefault((c, fuente), 'source_partial')
+        fuentes = [f for f in sin_lista if c in codigos(f)]
+        if not fuentes and c in caidos:
+            continue
+        for fuente in fuentes or [None]:
+            motivos.setdefault((c, fuente), 'no_api_key' if fuente and c in sin_llave else 'source_partial')
     for fuente in parciales:
         if fuente in corrieron:
             for c in codigos(fuente):

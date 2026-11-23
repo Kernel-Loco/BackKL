@@ -18,3 +18,7 @@ datos/geo/*
 respaldos
 **/*.dump
 **/*.dump.age
+
+# Grabaciones de HIBP (RC-54): ligan correos del dominio a sus brechas, no entran en la imagen
+cirdan/recolectores/respuestas_grabadas/hibp/*
+!cirdan/recolectores/respuestas_grabadas/hibp/.gitkeep

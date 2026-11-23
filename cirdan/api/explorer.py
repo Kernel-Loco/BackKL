@@ -6,6 +6,9 @@ porque traen lo que la API reserva a Administración (usuarios, bitácora y valo
 por el rol `cirdan_app`, así que los conteos y las filas que se ven son los que Row-Level Security
 deja ver a esa empresa.
 """
+import base64
+import hashlib
+import re
 import uuid
 from pathlib import Path
 
@@ -54,10 +57,28 @@ def _short(v):
     return s if len(s) <= 42 else s[:41] + '…'
 
 
+DEMO_HTML = Path(__file__).with_name('demo.html').read_text(encoding='utf-8')
+
+
+def _csp_demo(html):
+    """CSP de /demo: sus <script> en línea por su hash y fetch solo a la misma API (RC-89).
+
+    Los estilos van con 'unsafe-inline' porque la página arma con innerHTML elementos con style="..." (las barras del
+    score), que un hash no cubre. frame-ancestors 'none' hace que el middleware de main.py la conserve.
+    """
+    huellas = ' '.join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s.encode('utf-8')).digest()).decode()
+                       for s in re.findall(r'<script\b[^>]*>(.*?)</script\b[^>]*>', html, re.S | re.I))
+    return ("default-src 'none'; script-src %s; style-src 'unsafe-inline'; connect-src 'self'; "
+            "frame-ancestors 'none'; base-uri 'none'; form-action 'none'" % huellas)
+
+
+CSP_DEMO = _csp_demo(DEMO_HTML)
+
+
 @router.get('/demo', include_in_schema=False)
 def demo_page():
     # La página no trae datos: los pide con la cookie y, si no hay sesión, muestra el inicio de sesión.
-    return HTMLResponse(Path(__file__).with_name('demo.html').read_text(encoding='utf-8'))
+    return HTMLResponse(DEMO_HTML, headers={'Content-Security-Policy': CSP_DEMO})
 
 
 @router.get('/db/tables', tags=['base de datos'], summary='Las 25 tablas con las filas que ve la empresa de la sesión (solo admin)')

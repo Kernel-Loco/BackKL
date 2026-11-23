@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 from psycopg.types.json import Jsonb
 
+from cirdan import alcance_carta
 from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
@@ -83,6 +84,57 @@ ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta f
 # solo se saben al final: así dos escaneos a la vez, o la API y la línea de comandos, no pasan el límite.
 # Reproducir no sale a la red: no reserva ni ajusta.
 MODOS_CON_CUPO = ('vivo', 'grabar')
+# Códigos de HIBP cuyo hallazgo lleva su fila en breach_exposures (RC-54): nombre, fecha y clases de datos de la brecha.
+BRECHAS = ('breach_exposure', 'breach_exposure_old', 'breach_exposure_no_passwords')
+# Correos del dominio para el recolector que declara PIDE_CORREOS (HIBP, RC-54), de dos fuentes, cada una solo si la
+# carta vigente del escaneo autoriza su actividad (alcance_carta, RC-59): sin la 4 no van los de GitHub y sin la 8 no
+# van los de identidad, aunque los haya juntado una corrida con una carta anterior.
+# 1. GitHub (#16): los de los hallazgos email_in_public_commits que siguen abiertos o con riesgo aceptado. Nunca uno ya
+#    resuelto. assets.attributes se une entre fuentes, así que el correo sale del hallazgo y no de attributes.fuente.
+# 2. Identidad (#20, RC-56): los activos email del dominio que vio alguna corrida de identity que respondió
+#    ('succeeded') desde su última corrida completa (scan_source_runs.coverage = 'complete': revisó todas sus partes),
+#    esa incluida. El orquestador marca cada correo que da identity con el escaneo que lo vio (_marcar_identidad):
+#    attributes.identidad_scan en todo modo e identidad_scan_vivo solo en vivo y al grabar. Solo identity cambia esas
+#    llaves: que HIBP o GitHub suban last_seen_at no revive un correo. Así un correo que la última corrida completa ya
+#    no vio no entra, y una corrida parcial o sin cobertura (el sitio caído) no saca los que no pudo revisar. Sin
+#    ninguna corrida completa cuentan todas las que respondieron. En un escaneo en vivo no cuentan las corridas en modo
+#    reproducir (scan_source_runs.mode), que pueden traer una grabación vieja, y se lee identidad_scan_vivo, que una
+#    corrida en reproducir no pisa. Lo guardado antes de la migración 032 no tiene
+#    marca y espera a que identity lo vuelva a ver. Los correos personales (servicios gratuitos) nunca son activos,
+#    solo su HMAC (identidad.py), así que nunca se consultan. Como HIBP corre después de identity (fuentes_activas),
+#    entran los de este mismo escaneo si identity respondió.
+# Nunca un correo con un hallazgo marcado como falso positivo sobre un activo email con ese valor, de cualquier dominio
+# de la organización: el hallazgo de GitHub no lleva el dominio en la huella y el upsert lo mueve al dominio que lo vio
+# al último. Hoy solo GitHub da hallazgos sobre el activo email: un correo que solo vio identity no tiene cómo
+# excluirse así (sus hallazgos y los de HIBP cuelgan del dominio). Solo los del dominio del escaneo (assets.domain_id),
+# y hibp._correos_validos vuelve a revisar que sean del dominio o de un subdominio. RLS deja solo los de la organización
+# del escaneo, y la consulta también la fija.
+# Van primero los que HIBP no ha consultado nunca y luego los que hace más que no consulta (attributes.hibp_consultado),
+# así el tope de hibp.MAX_CORREOS rota entre escaneos y no deja siempre fuera a los mismos. `total` es cuántos había
+# antes del tope, para el aviso de los que sobran.
+_IDENTITY_RESPONDIO = (
+    "SELECT {r}.scan_id, {r}.finished_at FROM scan_source_runs {r} JOIN scans {s} ON {s}.id = {r}.scan_id "
+    "JOIN data_sources {d} ON {d}.id = {r}.source_id WHERE {s}.domain_id = %(dominio)s AND {d}.code = 'identity' "
+    "AND {r}.status = 'succeeded' AND (%(reproducir)s OR {r}.mode IS DISTINCT FROM 'reproducir')")
+CORREOS_SQL = (
+    "SELECT correo, count(*) OVER () AS total FROM ("
+    "SELECT lower(a.value) AS correo FROM findings f "
+    "JOIN assets a ON a.id = f.asset_id JOIN scoring_rules r ON r.id = f.rule_id "
+    "WHERE %(con_github)s AND f.domain_id = %(dominio)s AND r.code = 'email_in_public_commits' "
+    "AND a.asset_type = 'email' AND f.status IN ('open', 'accepted_risk') "
+    "UNION "
+    "SELECT lower(a.value) FROM assets a "
+    "WHERE %(con_identidad)s AND a.domain_id = %(dominio)s AND a.asset_type = 'email' "
+    "AND a.attributes->>(CASE WHEN %(reproducir)s THEN 'identidad_scan' ELSE 'identidad_scan_vivo' END) IN ("
+    "SELECT v.scan_id::text FROM (" + _IDENTITY_RESPONDIO.format(r='r', s='s', d='d') + ") v "
+    "WHERE v.finished_at >= COALESCE((SELECT max(u.finished_at) FROM (" + _IDENTITY_RESPONDIO.format(
+        r='r2', s='s2', d='d2') + " AND r2.coverage = 'complete') u), '-infinity'))"
+    ") c WHERE NOT EXISTS (SELECT 1 FROM findings f JOIN assets a ON a.id = f.asset_id "
+    "WHERE a.organization_id = (SELECT organization_id FROM domains WHERE id = %(dominio)s) "
+    "AND a.asset_type = 'email' AND lower(a.value) = c.correo AND f.status = 'false_positive') "
+    "ORDER BY (SELECT max(x.attributes->>'hibp_consultado') FROM assets x WHERE x.domain_id = %(dominio)s "
+    "AND x.asset_type = 'email' AND lower(x.value) = c.correo) NULLS FIRST, correo LIMIT %(tope)s")
+MAX_CORREOS = 200   # el recolector consulta menos (hibp.MAX_CORREOS) y avisa de los que sobran
 SIN_CUPO = 'Sin cupo diario: %s no tiene cupo para una corrida completa hoy (día UTC).'
 
 # Costo medido del escaneo (#52, RC-87): se guarda en scans.stats para el costo interno, pero GET /api/v1/scans y
@@ -283,9 +335,23 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
 
 
 def fuentes_activas(conn):
-    """Fuentes del escaneo normal: habilitadas en data_sources y con recolector registrado."""
+    """Fuentes del escaneo normal: habilitadas en data_sources y con recolector registrado, en orden de code.
+
+    Las que piden correos (PIDE_CORREOS, HIBP, RC-54) van al final, en orden de code entre ellas, para que lean los
+    correos que github e identity guardaron en este mismo escaneo (CORREOS_SQL). Las demás no cambian de orden. Una
+    fuente cuyo módulo no se puede importar se queda en su lugar y falla en su turno, como antes: no tumba el escaneo
+    antes de que corran las demás."""
     filas = conn.execute('SELECT code FROM data_sources WHERE enabled AND kind = %s ORDER BY code', ('osint',)).fetchall()
-    return [f['code'] for f in filas if f['code'] in REGISTRO and f['code'] != FUENTE_PRUEBAS]
+    codigos = [f['code'] for f in filas if f['code'] in REGISTRO and f['code'] != FUENTE_PRUEBAS]
+    return sorted(codigos, key=_pide_correos)
+
+
+def _pide_correos(codigo):
+    try:
+        modulo = cargar(codigo)
+    except Exception:   # nunca el texto: lo deja el bucle de correr() cuando le toque
+        return False
+    return getattr(modulo, 'PIDE_CORREOS', False) is True
 
 
 def _latido(org, scan_id, conn=None):
@@ -442,6 +508,18 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
         ).fetchone()['id']
         if previos.get(huella) in (None, 'resolved'):  # no existía o estaba resuelto: ahora queda abierto
             abiertos.add(finding_id)
+        if hallazgo.codigo in BRECHAS and isinstance(evidencia.get('breach_name'), str):
+            # La brecha del hallazgo para la API y el reporte (v1.py, LEFT JOIN breach_exposures). Solo el hecho:
+            # nombre, fecha y clases de datos, nunca contraseñas ni la descripción de la brecha.
+            clases = evidencia.get('data_classes')
+            clases = [x for x in clases if isinstance(x, str)] if isinstance(clases, list) else []
+            fecha = evidencia.get('breach_date') if isinstance(evidencia.get('breach_date'), str) else None
+            conn.execute(
+                'INSERT INTO breach_exposures (finding_id, organization_id, breach_name, breach_date, data_classes) '
+                'VALUES (%s, %s, %s, %s::date, %s::text[]) ON CONFLICT (finding_id) DO UPDATE SET '
+                'breach_name = EXCLUDED.breach_name, breach_date = EXCLUDED.breach_date, '
+                'data_classes = EXCLUDED.data_classes',
+                (finding_id, org, evidencia['breach_name'], fecha, clases))
 
     # Lo abierto de esta fuente que ya no salió se arregló (#23). No se toca lo que siguió ahí sin reportarse por un
     # tope (omitidos), ni lo que el cliente marcó como riesgo aceptado o falso positivo. Si la fuente revisó todo
@@ -624,6 +702,69 @@ def _ya_no_corre(org, scan_id, conn, corridas):
     return {'scan_id': scan_id, 'status': scan['status'], 'stats': scan['stats'] or {}, 'sources': corridas}
 
 
+def cobertura(res, modulo):
+    """scan_source_runs.coverage de una corrida (migración 032): qué partes revisó la fuente, no qué códigos.
+
+    'complete' si respondió y revisó todas sus partes (revisados es None), aunque algún código quede en sin_cobertura,
+    por ejemplo por falta de llave. 'partial' si revisó solo algunas (revisados, aunque sea vacío). 'none' si todos
+    sus códigos quedaron sin cobertura: no revisó nada. None si no respondió."""
+    if res.estado != 'succeeded':
+        return None
+    if res.revisados is not None:
+        return 'partial'
+    codigos = set(getattr(modulo, 'CODIGOS', None) or ())
+    return 'none' if codigos and codigos <= set(res.sin_cobertura) else 'complete'
+
+
+def _marcar_identidad(res, codigo, scan_id, modo):
+    """Pone el escaneo en attributes.identidad_scan de cada correo que dio identity y, en vivo o al grabar, también en
+    identidad_scan_vivo (CORREOS_SQL, RC-54). El upsert de assets une attributes con ||: solo identity escribe esas
+    llaves, y una corrida en reproducir no pisa la marca de la última en vivo."""
+    if codigo != 'identity' or res.estado != 'succeeded':
+        return
+    marca = {'identidad_scan': str(scan_id)}
+    if modo != 'reproducir':
+        marca['identidad_scan_vivo'] = str(scan_id)
+    for activo in res.activos:
+        if (activo.tipo == 'email' and isinstance(activo.atributos, dict)
+                and isinstance(activo.atributos.get('identidad'), dict)):
+            activo.atributos = {**activo.atributos, **marca}
+
+
+def _extras(org, modulo, codigo, domain_id, modo, actividades, conn=None):
+    """Las opciones que el orquestador arma para el recolector que las pide (RC-54), para contrato.ejecutar(extras=).
+
+    PIDE_CORREOS: `correos`, los de CORREOS_SQL con las ramas que autorizan las `actividades` de la carta del escaneo,
+    y `correos_total`, cuántos había antes del tope de MAX_CORREOS (0 si no hay ninguno). PIDE_LLAVE: `llave`, la de
+    data_sources.api_key_enc descifrada (cirdan/recolectores/llaves.py), solo en vivo y al grabar: al reproducir no
+    hace falta y no se lee. Si la llave no se puede leer (falta la migración 032, falta SOURCE_KEYS_ENCRYPTION_KEY o
+    no abre), va None y la fuente queda sin cobertura por falta de llave. El log nunca lleva la llave ni el valor
+    cifrado. Un error de la base aquí no tumba el escaneo: cada lectura va en su propio punto de guardado."""
+    extras = {}
+    if getattr(modulo, 'PIDE_CORREOS', False) is True:
+        try:
+            with _tx(org, conn) as c, c.transaction():
+                filas = c.execute(CORREOS_SQL, {
+                    'dominio': domain_id, 'tope': MAX_CORREOS, 'reproducir': modo == 'reproducir',
+                    'con_github': alcance_carta.autorizada('github', actividades),
+                    'con_identidad': alcance_carta.autorizada('identity', actividades)}).fetchall()
+            extras['correos'] = [f['correo'] for f in filas]
+            extras['correos_total'] = filas[0]['total'] if filas else 0
+        except psycopg.Error as e:
+            log.warning('%s: no se pudieron leer los correos del dominio (%s)', codigo, type(e).__name__)
+            extras['correos'], extras['correos_total'] = [], 0
+    if getattr(modulo, 'PIDE_LLAVE', False) is True and modo in MODOS_CON_CUPO:
+        from cirdan.recolectores import llaves   # pide cryptography: solo se carga si una fuente lo necesita
+        try:
+            with _tx(org, conn) as c, c.transaction():
+                extras['llave'] = llaves.leer(c, codigo)
+        except (psycopg.Error, llaves.LlaveIlegible) as e:
+            log.warning('%s: no se pudo leer la llave de la fuente (%s)', codigo,
+                        e if isinstance(e, llaves.LlaveIlegible) else type(e).__name__)
+            extras['llave'] = None
+    return extras
+
+
 @certspotter.un_escaneo()  # cada llamada abre el suyo y lo cierra al volver, también con una excepción
 def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None, dormir=None):
     """Ejecuta los recolectores de un escaneo aceptado y deja el estado de cada fuente.
@@ -686,6 +827,10 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             raise RuntimeError('no hay un juego de reglas activo')
         reglas = configuracion.reglas_del_juego(c, rule_set['id'])
         pesos = configuracion.pesos_del_juego(rule_set)
+        # Alcance de la carta con la que se aceptó el escaneo (RC-59). Sin carta o sin alcance no corre ninguna fuente.
+        alcance = c.execute('SELECT a.activities FROM scans s JOIN domain_authorizations a ON a.id = s.authorization_id '
+                            'WHERE s.id = %s', (scan_id,)).fetchone()
+        actividades = alcance['activities'] if alcance else None
 
     if modo == 'vivo' and not en_vivo_permitido(fqdn):
         modo = 'reproducir'  # nunca consultar en vivo un dominio fuera de DOMINIOS_EN_VIVO
@@ -698,20 +843,28 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     for codigo in fuentes:
         intento, gastadas, previos, segundos = 0, 0, [], 0.0
         modulo = cargar(codigo)
+        permitida = alcance_carta.autorizada(codigo, actividades)
         while True:
             if not _latido(org, scan_id, conn):
                 return _ya_no_corre(org, scan_id, conn, corridas)
             reservadas, dia = 0, None
-            if con_cupo:
+            if con_cupo and permitida:
                 reservadas = getattr(modulo, 'MAX_CONSULTAS')
                 dia = _reservar(org, codigo, reservadas, conn)
-            if con_cupo and dia is None:  # sin cupo: ni se llama al recolector ni se reintenta
+            if not permitida:  # la carta no la autoriza: ni cupo, ni recolector, ni reintento; sus reglas sin cobertura
+                aviso = alcance_carta.NO_AUTORIZADA % (codigo, alcance_carta.ACTIVIDAD_DE_FUENTE.get(codigo, '?'))
+                res = Resultado(fqdn, codigo, estado='failed', error=aviso, avisos=[aviso],
+                                sin_cobertura=sorted(set(getattr(modulo, 'CODIGOS', {})) & set(reglas)))
+                status, attempt, next_retry_at = 'failed', intento, None
+            elif con_cupo and dia is None:  # sin cupo: ni se llama al recolector ni se reintenta
                 res = Resultado(fqdn, codigo, estado='failed', error=SIN_CUPO % codigo, avisos=[SIN_CUPO % codigo])
                 status, attempt, next_retry_at = 'failed', intento, None
             else:
                 arranque = time.monotonic()
                 with _latiendo(org, scan_id, conn):
-                    res = ejecutar(modulo, fqdn, modo, ahora=ahora, propios=propios, codigos=reglas)
+                    extras = _extras(org, modulo, codigo, domain['id'], modo, actividades, conn)
+                    res = ejecutar(modulo, fqdn, modo, ahora=ahora, propios=propios, codigos=reglas, extras=extras)
+                _marcar_identidad(res, codigo, scan_id, modo)
                 segundos += time.monotonic() - arranque
                 if dia is not None and res.consultas != reservadas:
                     _ajustar(org, codigo, dia, res.consultas - reservadas, conn)
@@ -731,12 +884,15 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 if vivo:
                     c.execute(
                         'INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status, attempt, next_retry_at, '
-                        'raw_payload, error, finished_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now()) '
+                        'raw_payload, error, finished_at, coverage, mode) '
+                        'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now(), %s, %s) '
                         'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status, attempt = EXCLUDED.attempt, '
                         'next_retry_at = EXCLUDED.next_retry_at, raw_payload = EXCLUDED.raw_payload, error = EXCLUDED.error, '
-                        'finished_at = EXCLUDED.finished_at, updated_at = now()',
+                        'finished_at = EXCLUDED.finished_at, coverage = EXCLUDED.coverage, mode = EXCLUDED.mode, '
+                        'updated_at = now()',
                         (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
-                         Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None))
+                         Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None,
+                         cobertura(res, modulo), modo))
                     if res.estado == 'succeeded':
                         cambios = _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas,
                                                      ahora)
@@ -757,7 +913,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 return _ya_no_corre(org, scan_id, conn, corridas)
             certspotter.nuevo_intento()  # el reintento vuelve a pedir lo que falló en Cert Spotter, salvo un 429
             intento = attempt
-        corridas.append({'source': codigo, 'status': status, 'error': res.error or None,
+        corridas.append({'source': codigo, 'status': status, 'error': res.error or None, 'no_autorizada': not permitida,
                          'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})
         tiempos[codigo] = segundos
         if res.estado == 'succeeded':
@@ -765,7 +921,9 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             hallazgos += len(res.hallazgos)
 
     ok = sum(1 for r in corridas if r['status'] == 'succeeded')
-    sin_cobertura = sorted({c for r in corridas if r['status'] == 'succeeded' for c in r['sin_cobertura']})
+    sin_cobertura = sorted({c for r in corridas if r['status'] == 'succeeded' or r['no_autorizada']
+                            for c in r['sin_cobertura']})
+    no_autorizadas = [r['source'] for r in corridas if r['no_autorizada']]
     a_medias = [r['source'] for r in corridas if r['status'] == 'succeeded' and r['cobertura_parcial']]
     completo = ok == len(corridas) and not sin_cobertura and not a_medias
     estado = 'completed' if completo else 'failed' if ok == 0 else 'partial'
@@ -773,8 +931,15 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
              'resolved_findings': len(resueltos), 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
     if sin_cobertura:
         stats['rules_without_coverage'] = sin_cobertura
+    # De esas, las que faltaron por no tener la llave de la fuente (HIBP, RC-54). Su fuente no guarda raw_payload
+    # (keep_raw_payload false), así que coverage_gaps de la API las lee de aquí para dar 'no_api_key'.
+    sin_llave = sorted({c for r in corridas if r['status'] == 'succeeded' for c in r['sin_llave']})
+    if sin_llave:
+        stats['rules_without_key'] = sin_llave
     if a_medias:
         stats['sources_partial'] = a_medias
+    if no_autorizadas:
+        stats['sources_unauthorized'] = no_autorizadas
     # Costo medido del escaneo (#52, RC-87): consultas de cada fuente con todos sus intentos, también las de una
     # fuente que falló, y segundos. seconds_by_source suma lo que tardó el recolector en cada intento, sin las
     # esperas entre reintentos. duration_seconds va del inicio de correr() hasta antes del score y sí las incluye.
