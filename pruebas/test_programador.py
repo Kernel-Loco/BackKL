@@ -130,10 +130,12 @@ class Base(unittest.TestCase):
                                       lanzar_con=lambda org, scan_id, fqdn: self.lanzados.append((org, scan_id, fqdn)))
 
     def escaneos(self, dominio):
+        """Los escaneos programados que creó esta prueba: queued_at es now() de su transacción (t0). Los de la semilla,
+        que también pueden ser 'scheduled', son de antes."""
         self.empresa(ORG[dominio])
         return self.conn.execute("SELECT id::text, status, trigger_type, requested_by FROM scans "
-                                 "WHERE domain_id = %s AND trigger_type = 'scheduled' ORDER BY queued_at, id",
-                                 (dominio,)).fetchall()
+                                 "WHERE domain_id = %s AND trigger_type = 'scheduled' AND queued_at >= %s "
+                                 'ORDER BY queued_at, id', (dominio, self.t0)).fetchall()
 
     def terminar(self, dominio):
         """El escaneo en curso termina, como al cerrar correr(): deja de contar en el índice único."""
@@ -312,8 +314,14 @@ class SinAutorizacion(Base):
         self.assertEqual(dns.llamadas, [])
 
     def test_14_empresa_suspendida_o_cancelada(self):
+        # La transacción de setUp tiene tomadas las filas de domains: se deshace antes de que postgres las cambie,
+        # y lock_timeout hace que un candado olvidado falle en segundos en vez de colgar la prueba.
+        self.tx.__exit__(None, None, None)
+        self.tx = self.conn.transaction(force_rollback=True)
+        self.tx.__enter__()
         with conexion_postgres() as pg:
             with pg.transaction(force_rollback=True):
+                pg.execute("SET LOCAL lock_timeout = '5s'")
                 pg.execute("UPDATE domains SET next_scan_at = NULL WHERE id = %s", (ACME_DEMO,))
                 antes = {r['domain_id'] for r in pg.execute(
                     'SELECT domain_id::text FROM scheduled_scan_candidates(now(), 500)').fetchall()}
