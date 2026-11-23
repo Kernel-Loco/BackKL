@@ -25,7 +25,7 @@ from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.llaves import router as api_keys_router
 from cirdan.api.plataforma import router as platform_router
-from cirdan.api.v1 import router as v1_router
+from cirdan.api.v1 import MAX_ALTA_BODY, router as v1_router
 from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import config, origenes_permitidos
@@ -70,6 +70,13 @@ app = FastAPI(
 # llega a 6 KB. 64 KB deja unas 4 veces de margen sobre el de las passkeys.
 TOPE_CUERPO = 64 * 1024
 
+# Rutas con otro tope, por método y ruta exactos (RC-59). El alta de dominio manda la carta en base64 dentro del JSON:
+# hasta 5 MB de PDF, unos 6.7 MB con los demás campos (v1.MAX_ALTA_BODY). register_domain lee el stream solo después
+# de la sesión de Admin y cuenta los bytes él mismo. Aquí el tope de esa ruta es el mismo, así que un Content-Length de
+# más se corta antes de entrar y un chunked sin sesión se lee y se tira hasta ese tope, sin juntarlo. Cualquier otra
+# ruta, también '/api/v1/domains/' con diagonal final u otro método, se queda en TOPE_CUERPO.
+TOPES_POR_RUTA = {('POST', '/api/v1/domains'): (MAX_ALTA_BODY, 'El PDF no puede superar 5 MB.')}
+
 
 class CuerpoDemasiadoGrande(Exception):
     """El cuerpo pasó el tope mientras llegaba."""
@@ -101,18 +108,24 @@ class TopeDeCuerpo:
     va el 413. Si la ruta responde sin haber leído todo un cuerpo chunked (/auth/me, /health, logout), el resto se lee
     y se tira, contando, antes de dejar salir la respuesta: si pasa el tope sale el 413. Sin eso uvicorn seguiría
     leyendo y tirando un cuerpo sin fin después de responder, sin tope ni timeout.
+    Las rutas de topes_por_ruta llevan su propio tope y su mensaje, con el mismo conteo. Se buscan por método y por
+    scope['path'] exactos: una ruta escrita de otra forma, o con un root_path delante, cae en el tope general.
     """
 
-    def __init__(self, app, tope=TOPE_CUERPO):
+    def __init__(self, app, tope=TOPE_CUERPO, topes_por_ruta=None):
         self.app = app
         self.tope = tope
+        self.topes_por_ruta = TOPES_POR_RUTA if topes_por_ruta is None else topes_por_ruta
 
     async def __call__(self, scope, receive, send):
         if scope['type'] != 'http':
             await self.app(scope, receive, send)
             return
-        if _content_length_excedido(scope, self.tope):
-            await self._responder_413(scope, receive, send)
+        tope, detalle = self.topes_por_ruta.get(
+            (scope.get('method'), scope.get('path')),
+            (self.tope, 'El cuerpo de la petición pasa el tope de %d KB' % (self.tope // 1024)))
+        if _content_length_excedido(scope, tope):
+            await self._responder_413(scope, receive, send, detalle)
             return
 
         recibidos = 0
@@ -128,7 +141,7 @@ class TopeDeCuerpo:
             mensaje = await receive()
             if mensaje['type'] == 'http.request':
                 recibidos += len(mensaje.get('body', b''))
-                if recibidos > self.tope:
+                if recibidos > tope:
                     excedido = True
                     raise CuerpoDemasiadoGrande()
                 if not mensaje.get('more_body', False):
@@ -161,12 +174,11 @@ class TopeDeCuerpo:
             if iniciada:
                 # La respuesta ya había empezado: no hay cómo cambiarla por un 413 y el servidor corta la conexión.
                 raise CuerpoDemasiadoGrande()
-            await self._responder_413(scope, receive, send)
+            await self._responder_413(scope, receive, send, detalle)
 
-    async def _responder_413(self, scope, receive, send):
+    async def _responder_413(self, scope, receive, send, detalle):
         # Connection: close porque el resto del cuerpo no se lee: la conexión no sirve para otra petición.
-        respuesta = JSONResponse({'detail': 'El cuerpo de la petición pasa el tope de %d KB' % (self.tope // 1024)},
-                                 status_code=413, headers={'Connection': 'close'})
+        respuesta = JSONResponse({'detail': detalle}, status_code=413, headers={'Connection': 'close'})
         await respuesta(scope, receive, send)
 
 
