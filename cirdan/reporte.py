@@ -40,6 +40,12 @@ ATRIBUCIONES = (
              'de Troy Hunt, bajo la licencia CC BY 4.0. LowTide solo guarda el hecho de la exposición, '
              'nunca contraseñas ni otros datos filtrados.',
      'url': 'https://haveibeenpwned.com', 'license_url': 'https://creativecommons.org/licenses/by/4.0/'},
+    # Cada hallazgo trae su salvaguarda CIS y su control ISO (RC-160). La de CIS pide atribución, como dice NOTICE.
+    {'source': 'cis', 'name': 'CIS Controls v8.1',
+     'text': 'Las salvaguardas de cada hallazgo son de CIS Controls v8.1, © Center for Internet Security, Inc., '
+             'bajo la licencia CC BY-NC-ND 4.0. LowTide solo cita su número y un nombre breve propio, no su texto. '
+             'ISO/IEC 27001:2022 solo se cita por número de control del Anexo A.',
+     'url': 'https://www.cisecurity.org/controls/v8-1', 'license_url': 'https://creativecommons.org/licenses/by-nc-nd/4.0/'},
 )
 
 
@@ -69,6 +75,27 @@ def activo(h):
     return tope(valor, MAX_ACTIVO)
 
 
+def marcos(h):
+    """El control ISO 27001 y la salvaguarda CIS del hallazgo (RC-160), de los frameworks de GET /findings.
+    Solo número y nombre breve: el texto de ISO y de CIS no se copia. Sin mapeo, None en cada uno."""
+    f = h.get('frameworks') or {}
+    iso, cis = f.get('iso_27001_2022'), f.get('cis_controls_v8_1')
+    return {
+        'iso_27001_2022': {'control_id': iso['control_id'], 'control_name': iso['control_name']} if iso else None,
+        'cis_controls_v8_1': {'safeguard_id': cis['safeguard_id'], 'safeguard_name': cis['safeguard_name']} if cis else None,
+    }
+
+
+def marco_iso(m):
+    iso = (m or {}).get('iso_27001_2022')
+    return ('%s %s' % (iso['control_id'], iso['control_name'])).strip() if iso else ''
+
+
+def marco_cis(m):
+    cis = (m or {}).get('cis_controls_v8_1')
+    return ('%s %s' % (cis['safeguard_id'], cis['safeguard_name'])).strip() if cis else ''
+
+
 def armar(dominio, organizacion, autorizacion, score, ultimo_escaneo, hallazgos, recomendaciones, generado=None):
     """hallazgos: los de GET /findings, ya ordenados de más a menos severo. recomendaciones: {código de regla: texto}."""
     por_severidad = {s: 0 for s in SEVERIDADES}
@@ -79,7 +106,7 @@ def armar(dominio, organizacion, autorizacion, score, ultimo_escaneo, hallazgos,
     principales = [{
         'title': tope(h['title'], MAX_TITULO), 'severity': h['severity'], 'category': h['category'], 'asset': activo(h),
         'source': h['source'], 'detected_at': h['detected_at'], 'recurrence': h['recurrence'],
-        'action': accion_corta(recomendaciones.get(h['rule_code'])),
+        'action': accion_corta(recomendaciones.get(h['rule_code'])), 'frameworks': marcos(h),
     } for h in hallazgos[:MAX_HALLAZGOS]]
     return {
         'domain': dominio, 'organization': organizacion,
@@ -154,15 +181,23 @@ def _atribuciones(r):
         _e(x['url']), _e(x['name']), _e(x['text']), _e(x['license_url']), _e(x['license_url']))
         for x in r['attributions'])
 
+def _linea_marcos(m):
+    """'<br>ISO 27001: A.5.17 … · CIS: 5.2 …' en la celda del hallazgo, o nada si no trae mapeo."""
+    partes = [('ISO 27001', marco_iso(m)), ('CIS', marco_cis(m))]
+    partes = ['%s: %s' % (k, _e(v)) for k, v in partes if v]
+    return '<br><span class="nota">%s</span>' % ' · '.join(partes) if partes else ''
+
+
 def html(r):
     """El reporte como página HTML sola, sin scripts ni recursos externos. Todo valor va escapado."""
     filas_ind = _filas_indicadores(r)
     filas_dist = _filas_distribucion(r)
     if r['findings']:
         filas_h = ''.join(
-            '<tr><td>%s</td><td><strong>%s</strong><br>Activo: %s<br>Fuente: %s</td><td>%s</td><td>%s</td></tr>' % (
+            '<tr><td>%s</td><td><strong>%s</strong><br>Activo: %s<br>Fuente: %s%s</td><td>%s</td><td>%s</td></tr>' % (
                 _e(ETIQUETA_SEVERIDAD.get(h['severity'], h['severity'])), _e(h['title']), _e(h['asset']),
-                _e(ETIQUETA_FUENTE.get(h['source'], h['source'])), _e(_fecha(h['detected_at'])), _e(h['action']))
+                _e(ETIQUETA_FUENTE.get(h['source'], h['source'])), _linea_marcos(h.get('frameworks')),
+                _e(_fecha(h['detected_at'])), _e(h['action']))
             for h in r['findings'])
     else:
         filas_h = '<tr><td colspan="4">El dominio no tiene hallazgos abiertos.</td></tr>'
