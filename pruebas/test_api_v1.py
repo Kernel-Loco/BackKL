@@ -1263,6 +1263,35 @@ class ApiV1(unittest.TestCase):
         self.assertIn("base-uri 'none'", otras['Content-Security-Policy'])
         self.assertIn("form-action 'none'", otras['Content-Security-Policy'])
 
+    def test_9g_reporte_tecnico_json_html_403_y_sin_gerente(self):
+        # RC-81: la misma autorización que el ejecutivo y el mismo permiso que la lista de hallazgos (trae evidencia).
+        for formato in ('json', 'html'):
+            url = '/api/v1/domains/old-example.net/report/technical?formato=%s' % formato
+            self.assertEqual(self.acme.get(url)[0], 403, url)
+            self.assertEqual(self.beta.get(url)[0], 404, url)
+            self.assertEqual(sesion.Client().get(url.replace('old-example.net', 'acme-demo.mx'))[0], 401, url)
+        self.assertEqual(self.acme.get('/api/v1/domains/acme-demo.mx/report/technical?formato=pdf')[0], 422)
+        self.assertEqual(sesion.login('maya.reed@acme-demo.mx').get('/api/v1/domains/acme-demo.mx/report/technical')[0], 403)
+
+        datos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/report/technical')
+        ejecutivo = self.get(self.acme, '/api/v1/domains/acme-demo.mx/report')
+        hallazgos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')
+        self.assertEqual(datos['kind'], 'technical')
+        for clave in ('total_open', 'open_findings', 'by_category', 'score', 'authorization', 'attributions'):
+            self.assertEqual(datos[clave], ejecutivo[clave], clave)
+        self.assertEqual([h['id'] for h in datos['findings']], [h['id'] for h in hallazgos['items']][:200])
+        self.assertTrue(all(h['recommendation'] and h['meaning'] for h in datos['findings']))  # textos de 003
+        self.assertEqual(sum(r['count'] for r in datos['remediations']), datos['total_open'])
+        self.assertTrue(all(set(f) == {'source', 'status', 'attempt', 'finished_at'} for f in datos['sources']))
+
+        _, headers, texto = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/report/technical?formato=html')
+        self.assertTrue(headers['Content-Type'].startswith('text/html'))
+        self.assertIn('acme-demo.mx-reporte-tecnico.html', headers['Content-Disposition'])
+        self.assertIn("default-src 'none'", headers['Content-Security-Policy'])
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.assertIn('Have I Been Pwned', texto)
+        self.assertIn('Detalle de hallazgos', texto)
+
     def test_10_salida_siem_con_plan_y_sin_evidencia(self):
         url = '%s/api/v1/domains/beta-corp.mx/export/siem' % sesion.BASE
         with self.beta.opener.open(url, timeout=10) as r:

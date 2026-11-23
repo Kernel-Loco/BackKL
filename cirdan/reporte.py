@@ -123,8 +123,7 @@ def lectura(r):
     return frases
 
 
-def html(r):
-    """El reporte como página HTML sola, sin scripts ni recursos externos. Todo valor va escapado."""
+def _filas_indicadores(r):
     s = r['score']
     if s:
         score = '%s, letra %s (%s)' % (s['score'], s['grade'], ETIQUETA_BANDA.get(s['band'], s['band']))
@@ -140,10 +139,25 @@ def html(r):
         ('Último escaneo', _fecha(r['last_scan_at'])),
         ('Autorización vigente', '%s a %s' % (_fecha(a.get('valid_from')), _fecha(a.get('valid_until')))),
     ]
-    filas_ind = ''.join('<tr><th scope="row">%s</th><td>%s</td></tr>' % (_e(k), _e(v)) for k, v in indicadores)
-    filas_dist = ''.join('<tr><td>%s</td><td>%d</td><td>%s</td><td>%d</td></tr>' % (
+    return ''.join('<tr><th scope="row">%s</th><td>%s</td></tr>' % (_e(k), _e(v)) for k, v in indicadores)
+
+
+def _filas_distribucion(r):
+    return ''.join('<tr><td>%s</td><td>%d</td><td>%s</td><td>%d</td></tr>' % (
         _e(ETIQUETA_SEVERIDAD[sv]), r['open_findings'][sv], _e(ETIQUETA_CATEGORIA[c]), r['by_category'][c])
         for sv, c in zip(SEVERIDADES, CATEGORIAS))
+
+
+
+def _atribuciones(r):
+    return ''.join('<p class="nota">Fuente: <a href="%s">%s</a>. %s Licencia: <a href="%s">%s</a>.</p>' % (
+        _e(x['url']), _e(x['name']), _e(x['text']), _e(x['license_url']), _e(x['license_url']))
+        for x in r['attributions'])
+
+def html(r):
+    """El reporte como página HTML sola, sin scripts ni recursos externos. Todo valor va escapado."""
+    filas_ind = _filas_indicadores(r)
+    filas_dist = _filas_distribucion(r)
     if r['findings']:
         filas_h = ''.join(
             '<tr><td>%s</td><td><strong>%s</strong><br>Activo: %s<br>Fuente: %s</td><td>%s</td><td>%s</td></tr>' % (
@@ -156,9 +170,7 @@ def html(r):
     if r['findings_omitted']:
         omitidos = ('<p class="nota">Y %d hallazgos abiertos más, de menor severidad. La lista completa está en la '
                     'exportación de hallazgos del portal.</p>' % r['findings_omitted'])
-    atrib = ''.join('<p class="nota">Fuente: <a href="%s">%s</a>. %s Licencia: <a href="%s">%s</a>.</p>' % (
-        _e(x['url']), _e(x['name']), _e(x['text']), _e(x['license_url']), _e(x['license_url']))
-        for x in r['attributions'])
+    atrib = _atribuciones(r)
     return '''<!doctype html>
 <html lang="es">
 <head>
