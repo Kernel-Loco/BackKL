@@ -30,7 +30,7 @@ ETIQUETA_CATEGORIA = {'infrastructure': 'Infraestructura', 'digital_identity': '
 ETIQUETA_BANDA = {'low': 'Bajo', 'medium': 'Medio', 'high': 'Alto', 'critical': 'Crítico'}
 # Las de SOURCE_LABELS del portal (FrontKL src/config/labels.ts). Una fuente sin etiqueta sale con su código.
 ETIQUETA_FUENTE = {'ct_logs': 'crt.sh', 'dns': 'DNS', 'whois': 'WHOIS', 'shodan': 'Shodan', 'github': 'GitHub',
-                   'censys': 'Censys', 'hibp': 'HIBP API'}
+                   'censys': 'Censys', 'hibp': 'Have I Been Pwned'}
 
 # La misma atribución de NOTICE. Va siempre: la categoría de fugas de datos sale de HIBP aunque hoy no haya
 # hallazgos suyos, y su licencia (CC BY 4.0) pide nombrar la fuente donde se muestran sus datos.
@@ -156,8 +156,9 @@ def html(r):
     if r['findings_omitted']:
         omitidos = ('<p class="nota">Y %d hallazgos abiertos más, de menor severidad. La lista completa está en la '
                     'exportación de hallazgos del portal.</p>' % r['findings_omitted'])
-    atrib = ''.join('<p class="nota">%s Licencia: <a href="%s">%s</a>.</p>' % (
-        _e(x['text']), _e(x['license_url']), _e(x['license_url'])) for x in r['attributions'])
+    atrib = ''.join('<p class="nota">Fuente: <a href="%s">%s</a>. %s Licencia: <a href="%s">%s</a>.</p>' % (
+        _e(x['url']), _e(x['name']), _e(x['text']), _e(x['license_url']), _e(x['license_url']))
+        for x in r['attributions'])
     return '''<!doctype html>
 <html lang="es">
 <head>

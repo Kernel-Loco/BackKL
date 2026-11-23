@@ -57,6 +57,11 @@ jobs:
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
           sed -i "s|^PASSWORD_HASH_ENCRYPTION_KEY=.*|PASSWORD_HASH_ENCRYPTION_KEY=$llave|" .env
           grep -q '^PASSWORD_HASH_ENCRYPTION_KEY=.\{44\}$' .env
+          # Otra para las llaves de API de las fuentes (RC-54). Ninguna fuente tiene llave en el CI: HIBP queda sin
+          # cobertura por falta de llave y nunca sale a la red.
+          llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+          sed -i "s|^SOURCE_KEYS_ENCRYPTION_KEY=.*|SOURCE_KEYS_ENCRYPTION_KEY=$llave|" .env
+          grep -q '^SOURCE_KEYS_ENCRYPTION_KEY=.\{44\}$' .env
           # Sin llave anterior de las huellas (RC-333) y sin consultas en vivo a Pwned Passwords (RC-334).
           grep -qx 'PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY=' .env
           grep -qx 'PWNED_PASSWORDS_ENABLED=' .env
@@ -124,7 +129,7 @@ jobs:
           pruebas.test_subfinder.Integracion pruebas/test_estado_carta.py
           pruebas/test_alta_dominio.py pruebas/test_verificacion_txt_api.py pruebas/test_alta_dominio_integracion.py
           pruebas/test_firma.py pruebas/test_firma_base.py
-          pruebas/test_enlace_sin_red.py pruebas/test_recuperar_sin_red.py pruebas/test_programador.py
+          pruebas/test_enlace_sin_red.py pruebas/test_recuperar_sin_red.py pruebas/test_programador.py pruebas/test_llave_fuentes.py
 
       - name: Pruebas sin base ni red
         run: >-
@@ -134,7 +139,7 @@ jobs:
           pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py
           pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py pruebas/test_borde.py
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
-          pruebas/test_contrasenas_comunes.py pruebas/test_identidad.py
+          pruebas/test_contrasenas_comunes.py pruebas/test_identidad.py pruebas/test_hibp.py
           pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_plan_zap.py pruebas/test_reto_hackeo.py pruebas/test_siem.py pruebas/test_despliegue.py
           pruebas/test_ci.py pruebas/test_cadena_suministro.py pruebas/test_terraform.py pruebas/test_alcance_carta.py
 

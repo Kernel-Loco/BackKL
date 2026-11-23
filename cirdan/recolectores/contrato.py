@@ -391,7 +391,7 @@ def _conteo(n):
     return n if type(n) is int and 0 <= n < 2 ** 63 else 0
 
 
-def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=None):
+def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=None, extras=None):
     """Lo que llama el orquestador: nunca lanza excepciones y siempre devuelve un Resultado del contrato.
 
     Si el dominio no es un nombre válido, no llama al recolector. El resultado tiene que ser del dominio
@@ -400,6 +400,9 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
     A recolectar() le pasa dominio, cliente, ahora y propios, más las opciones que el recolector declare en
     EN_ESCANEO (un diccionario, ninguna si no lo trae). Así crt.sh busca dominios parecidos en cada escaneo
     (#109, RC-226). Un EN_ESCANEO que no es un diccionario de opciones deja la fuente en 'failed'.
+    `extras` son las opciones que arma el orquestador para el recolector que las pide: los correos del dominio y la
+    llave de la fuente para HIBP (PIDE_CORREOS y PIDE_LLAVE, RC-54). Tampoco pueden repetir una de EN_ESCANEO ni
+    llamarse dominio, cliente, ahora o propios. Un error nunca trae su valor: puede ser la llave.
     """
     fuente = getattr(recolector, 'FUENTE', '') or getattr(recolector, '__name__', '?')
     fuente = fuente if isinstance(fuente, str) else '?'
@@ -416,6 +419,10 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
         opciones = {} if opciones is None else opciones  # [], '' o 0 no son un diccionario: failed, no se ignoran
         if not isinstance(opciones, dict) or set(opciones) & {'dominio', 'cliente', 'ahora', 'propios'}:
             return fallido('EN_ESCANEO debe ser un diccionario de opciones de recolectar()')
+        extras = {} if extras is None else extras
+        if not isinstance(extras, dict) or set(extras) & ({'dominio', 'cliente', 'ahora', 'propios'} | set(opciones)):
+            return fallido('las opciones del orquestador no pueden repetir las de recolectar() ni las de EN_ESCANEO')
+        opciones = {**opciones, **extras}
         cliente = recolector.crear_cliente(modo, autorizado)
         res = recolector.recolectar(autorizado, cliente, ahora=ahora, propios=propios, **opciones)
     except Exception as e:  # un recolector con errores no tumba el escaneo

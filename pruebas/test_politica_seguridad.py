@@ -99,8 +99,9 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
         # Una brecha puede revelar datos sensibles, que piden consentimiento expreso y por escrito (r15-datos-1).
         for cita in ('5. Brechas que revelan datos sensibles:', '(art. 2, fracción VI)',
                      'el consentimiento expreso y por escrito, que el aviso de la empresa no da',
-                     'Hoy nada separa esas brechas', 'es parte de la revisión legal de la sección 9',
-                     'antes de que exista el recolector de brechas (#19, RC-54)'):
+                     'Mientras la revisión legal de la sección 9 no decida otra cosa',
+                     'el recolector de brechas (#19, RC-54) las descarta: no crea hallazgo, no liga ningún correo',
+                     'La llave de HIBP no se compra antes de esa revisión'):
             with self.subTest(seccion='5.3', cita=cita):
                 self.assertIn(cita, empleados)
         matriz = _seccion(self.texto, '5.1 Quién responde')
