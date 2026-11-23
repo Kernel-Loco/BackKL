@@ -392,7 +392,7 @@ class Declaracion(unittest.TestCase):
 class Secretos(unittest.TestCase):
     """D3 y D5: un hallazgo por repo, ruta y regla, sin valor ni commit."""
 
-    def test_1_un_hallazgo_por_repo_ruta_y_regla_con_la_fecha_mas_vieja(self):
+    def test_1_un_hallazgo_por_repo_ruta_y_regla_con_rango_de_fechas(self):
         reporte = [hallazgo_gitleaks(fecha='2026-09-20T00:00:00Z'),
                    hallazgo_gitleaks(fecha='2026-09-01T12:00:00Z', Commit='b' * 40),
                    hallazgo_gitleaks('generic-api-key', 'app.py', '2026-10-01T00:00:00Z')]
@@ -405,10 +405,19 @@ class Secretos(unittest.TestCase):
         self.assertEqual(h.titulo, 'Clave de acceso publicada en GitHub: acme-demo/sitio, archivo config/.env')
         self.assertEqual(h.evidencia, {'title': h.titulo, 'repo': 'acme-demo/sitio', 'ruta': 'config/.env',
                                        'tipo': 'cirdan-fake-token', 'huella': h.huella,
-                                       'primera_vez': '2026-09-01T12:00:00+00:00'})
+                                       'primera_vez': '2026-09-01T12:00:00+00:00',
+                                       'ultima_vez': '2026-09-20T00:00:00+00:00'})
         self.assertEqual(h.caracteristicas, {'tipo': 'secreto_en_repositorio', 'antiguedad_dias': 44,
                                              'exposicion': 'publica', 'sensibilidad': 'alta'})
         self.assertEqual(h.huella, huella('secret_in_public_repo', 'acme-demo/sitio', 'config/.env', 'cirdan-fake-token'))
+
+    def test_1b_la_fecha_mas_reciente_compara_instantes_con_zonas_distintas(self):
+        reporte = [hallazgo_gitleaks(fecha='2026-09-20T01:00:00+02:00'),
+                   hallazgo_gitleaks(fecha='2026-09-20T00:30:00Z')]
+        res, _ = recolectar(procesos=ProcesosSimulados(reportes={'sitio': reporte, 'api': []}))
+        h = next(h for h in res.hallazgos if h.codigo == 'secret_in_public_repo')
+        self.assertEqual(h.evidencia['primera_vez'], '2026-09-19T23:00:00+00:00')
+        self.assertEqual(h.evidencia['ultima_vez'], '2026-09-20T00:30:00+00:00')
 
     def test_2_la_huella_no_depende_del_valor_ni_del_commit(self):
         uno, _ = recolectar(procesos=ProcesosSimulados(

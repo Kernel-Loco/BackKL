@@ -76,6 +76,8 @@ LATIDO = 60                           # segundos entre marcas
 TOPE_CORRIDA = timedelta(minutes=20)  # una corrida no marca vida más allá de esto
 ABANDONO = timedelta(minutes=30)      # sin marca en ese tiempo, el escaneo se da por caído
 ERROR_ABANDONO = 'El escaneo se cortó: pasaron más de 30 minutos sin marca de vida'
+ACCION_HALLAZGO_RESUELTO = 'finding.resolved'
+MOTIVO_SECRETO_ROTADO = 'secret_rotated'
 ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta fuente'
 
 # Límite diario por fuente (#13b, RC-184): vive en data_sources (daily_limit, daily_used, daily_used_on) y solo
@@ -492,7 +494,7 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
             evidencia['activo_no_encontrado'] = hallazgo.activo
             asset_id = raiz
         huella = bytes.fromhex(hallazgo.huella)
-        finding_id = conn.execute(
+        finding = conn.execute(
             'INSERT INTO findings (organization_id, domain_id, asset_id, rule_id, source_id, fingerprint, severity, '
             "status, evidence, cve_id, detected_at, last_scan_id) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, now(), %s) "
@@ -500,13 +502,34 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
             'domain_id = EXCLUDED.domain_id, asset_id = EXCLUDED.asset_id, rule_id = EXCLUDED.rule_id, '
             'source_id = EXCLUDED.source_id, severity = EXCLUDED.severity, evidence = EXCLUDED.evidence, '
             'cve_id = EXCLUDED.cve_id, '
-            'status = CASE WHEN findings.status = %s THEN %s ELSE findings.status END, '
-            'resolved_at = CASE WHEN findings.status = %s THEN NULL ELSE findings.resolved_at END, '
-            'last_scan_id = EXCLUDED.last_scan_id, updated_at = now() RETURNING id::text',
+            'status = CASE WHEN findings.status = %s AND NOT ('
+            'EXISTS (SELECT 1 FROM scoring_rules r JOIN audit_log al '
+            'ON al.organization_id = findings.organization_id '
+            'WHERE r.id = findings.rule_id AND r.code = %s AND al.entity_type = %s '
+            'AND al.entity_id = findings.id AND al.actor_user_id IS NOT NULL AND al.action = %s '
+            'AND al.details->>%s = %s '
+            'AND al.occurred_at >= findings.resolved_at '
+            'AND COALESCE(NULLIF(EXCLUDED.evidence->>%s, %s)::timestamptz <= al.occurred_at, TRUE)'
+            ')) THEN %s ELSE findings.status END, '
+            'resolved_at = CASE WHEN findings.status = %s THEN CASE WHEN EXISTS ('
+            'SELECT 1 FROM scoring_rules r JOIN audit_log al '
+            'ON al.organization_id = findings.organization_id '
+            'WHERE r.id = findings.rule_id AND r.code = %s AND al.entity_type = %s '
+            'AND al.entity_id = findings.id AND al.actor_user_id IS NOT NULL AND al.action = %s '
+            'AND al.details->>%s = %s '
+            'AND al.occurred_at >= findings.resolved_at '
+            'AND COALESCE(NULLIF(EXCLUDED.evidence->>%s, %s)::timestamptz <= al.occurred_at, TRUE)'
+            ') THEN findings.resolved_at ELSE NULL END ELSE findings.resolved_at END, '
+            'last_scan_id = EXCLUDED.last_scan_id, updated_at = now() RETURNING id::text, status',
             (org, domain_id, asset_id, regla['id'], source_id, huella, hallazgo.severidad,
-             Jsonb(evidencia), _cve_de(hallazgo), scan_id, 'resolved', 'open', 'resolved'),
-        ).fetchone()['id']
-        if previos.get(huella) in (None, 'resolved'):  # no existía o estaba resuelto: ahora queda abierto
+             Jsonb(evidencia), _cve_de(hallazgo), scan_id, 'resolved', 'secret_in_public_repo', 'finding',
+             ACCION_HALLAZGO_RESUELTO, 'reason', MOTIVO_SECRETO_ROTADO, 'ultima_vez', '', 'open', 'resolved',
+             'secret_in_public_repo', 'finding', ACCION_HALLAZGO_RESUELTO, 'reason', MOTIVO_SECRETO_ROTADO,
+             'ultima_vez', ''),
+        ).fetchone()
+        finding_id = finding['id']
+        if previos.get(huella) in (None, 'resolved') and finding['status'] == 'open':
+            # Un secreto rotado sigue resuelto si no volvió a aparecer después de la declaración.
             abiertos.add(finding_id)
         if hallazgo.codigo in BRECHAS and isinstance(evidencia.get('breach_name'), str):
             # La brecha del hallazgo para la API y el reporte (v1.py, LEFT JOIN breach_exposures). Solo el hecho:

@@ -83,7 +83,8 @@ def resultado_github(*hallazgos, revisados=None, sin_revisar=None):
 
 def secreto(repo, ruta):
     return github.hallazgo_secreto('acme-demo.mx', 'acme-demo/' + repo, {'ruta': ruta, 'regla': 'cirdan-fake-token',
-                                                                         'primera_vez': '2026-09-01T12:00:00Z'}, AHORA)
+                                                                         'primera_vez': '2026-09-01T12:00:00Z',
+                                                                         'ultima_vez': '2026-09-01T12:00:00Z'}, AHORA)
 
 
 def correo(usuario, *repos):
@@ -451,6 +452,40 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['status'], 'failed')
         self.assertEqual(llamadas, [])
         self.assertIsNone(self.uno('SELECT 1 FROM domain_scores WHERE scan_id = %s', s.scan_id))
+
+    def escanear_secreto_github(self, ultima_vez):
+        huella = 'ab' * 32
+        titulo = 'Clave de acceso publicada en GitHub: acme-demo/api, archivo config/.env'
+        hallazgo = Hallazgo(
+            'secret_in_public_repo', 'critical', 'acme-demo.mx', titulo,
+            {'title': titulo, 'repo': 'acme-demo/api', 'ruta': 'config/.env', 'tipo': 'test-token',
+             'huella': huella, 'primera_vez': '2026-09-01T00:00:00+00:00', 'ultima_vez': ultima_vez},
+            {'tipo': 'secreto_en_repositorio', 'antiguedad_dias': 0, 'exposicion': 'publica', 'sensibilidad': 'alta'},
+            huella,
+        )
+        resultado = Resultado('acme-demo.mx', 'github', activos=[Activo('domain', 'acme-demo.mx')],
+                              hallazgos=[hallazgo])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with mock.patch.object(orquestador, 'ejecutar', return_value=resultado):
+            orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['github'], modo='reproducir', conn=self.conn)
+        return self.uno('SELECT id::text FROM findings WHERE fingerprint = %s', bytes.fromhex(huella))['id']
+
+    def test_2h_un_secreto_rotado_no_se_reabre_sin_un_commit_posterior(self):
+        finding_id = self.escanear_secreto_github('2026-09-20T00:00:00+00:00')
+        self.conn.execute("UPDATE findings SET status = 'resolved', resolved_at = now() WHERE id = %s", (finding_id,))
+        actor_id = self.uno('SELECT id::text FROM users WHERE organization_id = %s ORDER BY id LIMIT 1', ACME)['id']
+        orquestador.audit(self.conn, ACME, orquestador.ACCION_HALLAZGO_RESUELTO, actor_id, entity_type='finding',
+                          entity_id=finding_id, details={'reason': orquestador.MOTIVO_SECRETO_ROTADO})
+
+        self.escanear_secreto_github('2026-09-20T00:00:00+00:00')
+        estado = self.estado(finding_id)
+        self.assertEqual(estado['status'], 'resolved')
+        self.assertIsNotNone(estado['resolved_at'])
+
+        self.escanear_secreto_github('2099-01-01T00:00:00+00:00')
+        estado = self.estado(finding_id)
+        self.assertEqual(estado['status'], 'open')
+        self.assertIsNone(estado['resolved_at'])
 
     def test_2b_lo_que_la_fuente_ya_no_encuentra_queda_resuelto_y_deja_de_sumar(self):
         _, f = self.escanear_ejemplo()

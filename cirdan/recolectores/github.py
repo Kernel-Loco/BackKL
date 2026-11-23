@@ -35,9 +35,9 @@ Qué consulta, y nada más:
   la corrida (keep_raw_payload). Al grabar, ese repo cuenta como falla y no se graba sin filtrar.
 
 Sin secretos ni datos personales de más:
-- gitleaks corre con --redact y su reporte se lee por lista blanca: RuleID, File y Date. Nunca Secret, Match, Author,
-  Email ni Message. Si un hallazgo trae Secret o Match sin redactar, la corrida se descarta: queda sin cobertura con un
-  aviso fijo, sin grabar nada, y no se reintenta, porque daría lo mismo.
+- gitleaks corre con --redact y su reporte se lee por lista blanca: RuleID, File y Date (primera y última aparición).
+  Nunca Secret, Match, Author, Email ni Message. Si un hallazgo trae Secret o Match sin redactar, la corrida se
+  descarta: queda sin cobertura con un aviso fijo, sin grabar nada, y no se reintenta, porque daría lo mismo.
 - La huella es el sha256 de código, repo, ruta y regla: no depende del valor del secreto, que no se usa, no se guarda ni
   sale del proceso. Si llega sin redactar, solo se lee para comprobarlo y la corrida se descarta.
 - De git log solo salen los correos del autor y de quien subió cada commit, en minúsculas. Los nombres nunca. Los que no
@@ -242,6 +242,15 @@ def _primera(a, b):
     return min(x for x in (a, b) if x) if a or b else None
 
 
+def _fecha_extrema(a, b, extremo):
+    fechas = []
+    for valor in (a, b):
+        fecha = _fecha(valor)
+        if fecha:
+            fechas.append(fecha_iso(fecha))
+    return extremo(fechas).astimezone(timezone.utc).isoformat() if fechas else None
+
+
 def _repo_valido(nombre):
     return (isinstance(nombre, str) and bool(REPO_VALIDO.fullmatch(nombre)) and '..' not in nombre
             and bool(nombre.strip('.')))
@@ -353,7 +362,7 @@ class SecretoSinRedactar(FuenteNoResponde):
 
 
 def leer_reporte(texto):
-    """[{regla, ruta, primera_vez}] del reporte JSON de gitleaks: uno por ruta y regla, con la fecha más vieja.
+    """[{regla, ruta, primera_vez, ultima_vez}] del reporte de gitleaks: un rango de fechas por ruta y regla.
 
     Solo lee RuleID, File y Date. Secret y Match solo se miran para comprobar que vienen redactados. Lanza
     SecretoSinRedactar si no, y ValueError si el reporte no tiene la forma de gitleaks."""
@@ -369,8 +378,11 @@ def leer_reporte(texto):
             raise SecretoSinRedactar()
         regla = f.get('RuleID') if isinstance(f.get('RuleID'), str) and REGLA_VALIDA.fullmatch(f['RuleID']) else 'desconocida'
         llave = (_ruta(f.get('File')), regla)
-        vistos[llave] = _primera(vistos.get(llave), _fecha(f.get('Date')))
-    return [{'regla': regla, 'ruta': ruta, 'primera_vez': fecha} for (ruta, regla), fecha in sorted(vistos.items())]
+        primera, ultima = vistos.get(llave, (None, None))
+        vistos[llave] = (_fecha_extrema(primera, f.get('Date'), min),
+                         _fecha_extrema(ultima, f.get('Date'), max))
+    return [{'regla': regla, 'ruta': ruta, 'primera_vez': primera, 'ultima_vez': ultima}
+            for (ruta, regla), (primera, ultima) in sorted(vistos.items())]
 
 
 def leer_entornos(texto):
@@ -462,7 +474,9 @@ def revision_valida(datos, dominio):
     for s in datos['secretos']:
         if isinstance(s, dict) and isinstance(s.get('regla'), str) and REGLA_VALIDA.fullmatch(s['regla']):
             llave = (_ruta(s.get('ruta')), s['regla'])
-            secretos[llave] = _primera(secretos.get(llave), _fecha(s.get('primera_vez')))
+            primera, ultima = secretos.get(llave, (None, None))
+            secretos[llave] = (_fecha_extrema(primera, s.get('primera_vez'), min),
+                               _fecha_extrema(ultima, s.get('ultima_vez'), max))
     correos = {}
     for c in datos['correos']:
         if (isinstance(c, dict) and isinstance(c.get('correo'), str) and correo_valido(c['correo'], dominio)
@@ -473,7 +487,8 @@ def revision_valida(datos, dominio):
 
     def conteo(n):
         return n if type(n) is int and n >= 0 else 0
-    return {'secretos': [{'regla': regla, 'ruta': ruta, 'primera_vez': f} for (ruta, regla), f in sorted(secretos.items())],
+    return {'secretos': [{'regla': regla, 'ruta': ruta, 'primera_vez': primera, 'ultima_vez': ultima}
+                         for (ruta, regla), (primera, ultima) in sorted(secretos.items())],
             'correos': [correos[c] for c in sorted(correos)],
             'ajenos': conteo(datos.get('ajenos')), 'invalidos': conteo(datos.get('invalidos'))}
 
@@ -856,7 +871,7 @@ def _caracteristicas(codigo, tipo_activo, evidencia, ahora, sensibilidad):
 
 
 def hallazgo_secreto(dominio, repo, secreto, ahora, aviso=None):
-    """secret_in_public_repo sobre el dominio. La evidencia lleva repo, ruta, tipo (la regla de gitleaks) y huella,
+    """secret_in_public_repo sobre el dominio. La evidencia lleva repo, ruta, tipo, huella y rango de fechas,
     nunca el valor ni el commit. La sensibilidad es alta: es una credencial (rúbrica de caracteristicas.py). Si no se
     pudieron buscar los entornos de Python del repo, lleva también `aviso` (SIN_ENTORNOS con la causa): el portal
     muestra la evidencia, y el resumen de la corrida, con sus avisos, no se guarda (keep_raw_payload)."""
@@ -864,7 +879,7 @@ def hallazgo_secreto(dominio, repo, secreto, ahora, aviso=None):
     titulo = 'Clave de acceso publicada en GitHub: %s, archivo %s' % (repo, secreto['ruta'])
     huella = _huella(codigo, repo, secreto['ruta'], secreto['regla'])
     evidencia = {'title': titulo, 'repo': repo, 'ruta': secreto['ruta'], 'tipo': secreto['regla'], 'huella': huella,
-                 'primera_vez': secreto['primera_vez']}
+                 'primera_vez': secreto['primera_vez'], 'ultima_vez': secreto['ultima_vez']}
     if aviso:
         evidencia['aviso'] = aviso
     return Hallazgo(codigo, CODIGOS[codigo], dominio, titulo, evidencia,
