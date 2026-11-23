@@ -1,6 +1,7 @@
 # Plan de ZAP (Automation Framework) para RC-89. Cómo y cuándo se corre: docs/pruebas_zap.md.
-# Solo contra https://lowtidesec.com, con la cookie de una cuenta de prueba en ZAP_LT_SESSION (variable de entorno,
-# nunca en un archivo).
+# Solo contra https://lowtidesec.com. La cookie de la cuenta de prueba entra por las variables ZAP_AUTH_HEADER,
+# ZAP_AUTH_HEADER_VALUE y ZAP_AUTH_HEADER_SITE del docker run (nunca en un archivo): ZAP 2.17 no sustituye ${VAR}
+# dentro de las reglas del Replacer y mandaría el texto literal (22 nov).
 env:
   contexts:
     - name: lowtide
@@ -30,13 +31,7 @@ jobs:
     parameters:
       deleteAllRules: true
     rules:
-      # Las dos reglas solo valen para lowtidesec.com: sin `url` ZAP mandaría la cookie a cualquier host al que llegue
-      # (beacon de Cloudflare, servidores de OAST, actualizaciones de ZAP).
-      - description: Sesión de la cuenta de prueba
-        url: "^https://lowtidesec\\.com/.*$"
-        matchType: req_header
-        matchString: Cookie
-        replacementString: "lt_session=${ZAP_LT_SESSION}"
+      # Solo vale para lowtidesec.com (campo `url`).
       - description: Origin que la API acepta en los POST
         url: "^https://lowtidesec\\.com/.*$"
         matchType: req_header
