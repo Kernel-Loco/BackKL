@@ -48,10 +48,10 @@ class EscaneosApi(unittest.TestCase):
         # toca.
         sesion.psql(
             'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
-            'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+            'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, activities) '
             'SELECT organization_id, domain_id, signer_name, signer_title, signer_email, '
             "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
-            "accepted_by FROM domain_authorizations a WHERE id = '41000000-0000-4000-8000-000000000001' "
+            "accepted_by, template_version, activities FROM domain_authorizations a WHERE id = '41000000-0000-4000-8000-000000000001' "
             'AND NOT EXISTS (SELECT 1 FROM domain_authorizations v WHERE v.domain_id = a.domain_id '
             'AND v.revoked_at IS NULL AND current_date BETWEEN v.valid_from AND v.valid_until)')
         code, body = self.analista.post(SCANS % 'acme-demo.mx')

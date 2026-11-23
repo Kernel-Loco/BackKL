@@ -1,0 +1,65 @@
+# Compose aislado y sin red para pruebas/test_enlace.py (#28, RC-63) y pruebas/test_recuperar.py (RC-335): base,
+# Valkey y API nuevos en una red interna, sin salida a internet ni puertos hacia la PC, con Resend simulado
+# (correo_falso.py). La prueba corre en el servicio `pruebas`, dentro de esa misma red, porque una red interna no
+# publica puertos. Nunca toca cirdan-pg16.
+#
+#   C='docker compose -p backkl-enlace -f docker-compose.yml -f pruebas/enlace/docker-compose.yml'
+#   $C up -d --build --wait db valkey api correo-falso
+#   $C run --rm pruebas
+#   $C down -v
+services:
+  db:
+    container_name: backkl-enlace-pg16
+    ports: !reset []
+    networks: [aislada]
+
+  valkey:
+    container_name: backkl-enlace-valkey
+    ports: !reset []
+    networks: [aislada]
+
+  demo-accounts:
+    environment:
+      DEMO_ACCOUNTS: "true"   # las pruebas entran con las cuentas de demo, como en el CI
+    networks: [aislada]
+
+  api:
+    container_name: backkl-enlace-api
+    ports: !reset []
+    networks: [aislada]
+    environment:
+      CORREO_API_URL: http://correo-falso:8025/emails
+      CORREO_API_KEY: prueba-sin-red   # el simulado no la revisa; con ella la API sí intenta enviar
+      PORTAL_URL: http://portal.prueba
+      ENLACE_TOPE_DIARIO: "80"
+
+  correo-falso:
+    image: python:3.15-slim
+    command: ["python", "/srv/correo_falso.py"]
+    volumes:
+      - ./pruebas/enlace/correo_falso.py:/srv/correo_falso.py:ro
+    networks: [aislada]
+
+  pruebas:
+    image: backkl-enlace-api   # la imagen que construye `api` en este proyecto: trae psycopg y redis
+    profiles: [pruebas]
+    command: ["python", "-m", "unittest", "-v", "pruebas/test_enlace.py", "pruebas/test_recuperar.py"]
+    volumes:
+      - ./pruebas:/app/pruebas:ro
+      - ./cirdan/auth/demo.py:/app/cirdan/auth/demo.py:ro
+    environment:
+      CIRDAN_TEST_BASE: http://api:8000
+      ENLACE_CORREO_FALSO: http://correo-falso:8025
+      PGHOST: db
+      PGPORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD en .env}
+      VALKEY_URL: redis://:${VALKEY_PASSWORD}@valkey:6379/0
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [aislada]
+
+networks:
+  aislada:
+    internal: true

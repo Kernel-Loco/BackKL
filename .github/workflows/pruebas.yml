@@ -57,6 +57,11 @@ jobs:
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
           sed -i "s|^PASSWORD_HASH_ENCRYPTION_KEY=.*|PASSWORD_HASH_ENCRYPTION_KEY=$llave|" .env
           grep -q '^PASSWORD_HASH_ENCRYPTION_KEY=.\{44\}$' .env
+          # Otra para las llaves de API de las fuentes (RC-54). Ninguna fuente tiene llave en el CI: HIBP queda sin
+          # cobertura por falta de llave y nunca sale a la red.
+          llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+          sed -i "s|^SOURCE_KEYS_ENCRYPTION_KEY=.*|SOURCE_KEYS_ENCRYPTION_KEY=$llave|" .env
+          grep -q '^SOURCE_KEYS_ENCRYPTION_KEY=.\{44\}$' .env
           # Sin llave anterior de las huellas (RC-333) y sin consultas en vivo a Pwned Passwords (RC-334).
           grep -qx 'PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY=' .env
           grep -qx 'PWNED_PASSWORDS_ENABLED=' .env
@@ -123,6 +128,8 @@ jobs:
           pruebas.test_rdap.Transporte pruebas.test_crtsh.TopeDeBytes pruebas.test_visita.SaludoReal pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
           pruebas.test_subfinder.Integracion pruebas/test_estado_carta.py
           pruebas/test_alta_dominio.py pruebas/test_verificacion_txt_api.py pruebas/test_alta_dominio_integracion.py
+          pruebas/test_firma.py pruebas/test_firma_base.py
+          pruebas/test_enlace_sin_red.py pruebas/test_recuperar_sin_red.py pruebas/test_programador.py pruebas/test_llave_fuentes.py
 
       - name: Pruebas sin base ni red
         run: >-
@@ -132,10 +139,27 @@ jobs:
           pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py
           pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py pruebas/test_borde.py
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
-          pruebas/test_contrasenas_comunes.py pruebas/test_identidad.py
-          pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_siem.py pruebas/test_despliegue.py
+          pruebas/test_contrasenas_comunes.py pruebas/test_identidad.py pruebas/test_hibp.py
+          pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_plan_zap.py pruebas/test_reto_hackeo.py pruebas/test_asvs.py pruebas/test_siem.py pruebas/test_despliegue.py
           pruebas/test_reporte_tecnico.py
-          pruebas/test_ci.py pruebas/test_cadena_suministro.py pruebas/test_terraform.py
+          pruebas/test_ci.py pruebas/test_cadena_suministro.py pruebas/test_terraform.py pruebas/test_alcance_carta.py
+
+      # #28 (RC-63): el enlace al correo de punta a punta en otro compose, aislado y sin red, con Resend simulado,
+      # y en el mismo compose la recuperación de la contraseña con un enlace (RC-335, test_recuperar.py)
+      # (pruebas/enlace). La prueba corre dentro de esa red, porque una red interna no publica puertos. Después,
+      # revisar_log.sh busca en el log de esa API cada token que vio la prueba.
+      - name: Enlace al correo en un compose aislado y sin red
+        run: |
+          C='docker compose -p backkl-enlace -f docker-compose.yml -f pruebas/enlace/docker-compose.yml'
+          trap "$C down -v" EXIT
+          $C up -d --build --wait db valkey api correo-falso
+          $C run --rm pruebas python -m unittest -v pruebas/test_enlace.py pruebas/test_recuperar.py > enlace.log 2> enlace.err || { cat enlace.err; exit 1; }
+          cat enlace.err
+          # Sin 'skipped': fuera del compose aislado la prueba se salta y no debe contar como verde. Se lee la última
+          # línea de resultado de unittest, no la última del archivo: un aviso de Python puede salir después del OK.
+          grep -E '^(OK|FAILED)( |$)' enlace.err | tail -1 | grep -qx 'OK'
+          sh pruebas/enlace/revisar_log.sh enlace.log
+
       # RC-313, punto 3b: con la base a las 20:00 de México y la API en UTC, GET /api/v1/domains da 'missing' a una carta
       # que empieza mañana. La base se levanta otra vez con libfaketime (pruebas/hora_base) en las 02:00 UTC de hoy, que
       # son las 20:00 de México de ayer. La API no cambia y queda un día delante. Va al final porque deja la base con otra

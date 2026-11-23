@@ -550,7 +550,7 @@ class RastroDeBloqueos(unittest.TestCase):
         transaccion.assert_not_called()
 
     def test_7_el_429_del_codigo_es_el_de_siempre_con_la_tarea_despues(self):
-        pendiente = {'user_id': 'u-1', 'org_id': 'o-1', 'email': self.EMAIL}
+        pendiente = {'user_id': 'u-1', 'org_id': 'o-1', 'email': self.EMAIL, 'tag': 'marca'}
         with mock.patch.object(sessions, 'take_mfa', lambda _: dict(pendiente)), \
                 mock.patch.object(sessions, 'take_mfa_attempt', lambda *_: False):
             salida = routes.verify_mfa(routes.MfaIn(mfa_token='t' * 20, code='123456'), None, Response())

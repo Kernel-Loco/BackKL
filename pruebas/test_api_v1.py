@@ -93,9 +93,11 @@ class ApiV1(unittest.TestCase):
                "WHERE id = '41000000-0000-4000-8000-000000000001';" % (hoy, hoy))
         for nueva, base, dias in cartas:
             sql += ('INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, '
-                    'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+                    'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, '
+                    'template_version, activities) '
                     "SELECT '%s', organization_id, domain_id, signer_name, signer_title, signer_email, "
-                    "signed_document_key || '.rc313', signed_document_sha256, %s + 1, %s + %d, accepted_by "
+                    "signed_document_key || '.rc313', signed_document_sha256, %s + 1, %s + %d, accepted_by, "
+                    "template_version, activities "
                     "FROM domain_authorizations WHERE id = '%s';" % (nueva, hoy, hoy, dias, base))
         ok, salida, err = psql(sql + 'COMMIT;', user='postgres')
         self.assertTrue(ok, err)
@@ -151,8 +153,9 @@ class ApiV1(unittest.TestCase):
         for nueva, dominio, correo, desde, hasta, revocada in cartas:
             sql += ('INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, '
                     'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, revoked_at, '
-                    "accepted_by) SELECT '%s', organization_id, '%s', 'Firma RC-274', 'Prueba', '%s', "
-                    "signed_document_key || '.rc274-%s', signed_document_sha256, %s, %s, %s, accepted_by "
+                    "accepted_by, template_version, activities) SELECT '%s', organization_id, '%s', 'Firma RC-274', 'Prueba', '%s', "
+                    "signed_document_key || '.rc274-%s', signed_document_sha256, %s, %s, %s, accepted_by, "
+                    "template_version, activities "
                     "FROM domain_authorizations WHERE id = '41000000-0000-4000-8000-000000000001';"
                     % (nueva, dominio, correo, nueva[-2:], desde, hasta, revocada))
         ok, _, err = psql(sql + 'COMMIT;', user='postgres')
@@ -170,7 +173,8 @@ class ApiV1(unittest.TestCase):
         for fqdn, (estado, correo) in esperado.items():
             with self.subTest(fqdn=fqdn):
                 self.assertEqual((v1[fqdn]['status'], v1[fqdn]['signer_email']), (estado, correo), v1[fqdn])
-                self.assertEqual(set(v1[fqdn]), {'status', 'valid_from', 'valid_until', 'signer_email'})
+                self.assertEqual(set(v1[fqdn]), {'status', 'valid_from', 'valid_until', 'signer_email',
+                                                 'template_version', 'activities'})
         self.assertEqual((v1['old-example.net']['valid_from'], v1['old-example.net']['valid_until']),
                          ('2025-08-15', '2026-08-15'), 'los demás campos no cambian')
         self.assertIsNotNone(v1['partner-example.com']['valid_until'], 'la revocada sigue dando sus fechas')
@@ -1129,6 +1133,7 @@ class ApiV1(unittest.TestCase):
             fila = dict(zip(filas[0], next(f for f in filas[1:] if f[1] == hallazgo)))
             self.assertEqual(fila['titulo'], '\'=HYPERLINK("http://x","clic")')
             self.assertEqual(json.loads(fila['evidencia'])['banner'], '@SUM(1)')  # el JSON empieza con {, no es fórmula
+            self.assertEqual((filas[0][-1], fila['atribucion']), ('atribucion', ''))  # solo las filas de HIBP (RC-54)
             _, headers, texto = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/findings/export?formato=json')
             data = json.loads(texto)
             self.assertEqual(data, self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings'))
@@ -1137,6 +1142,39 @@ class ApiV1(unittest.TestCase):
                              '=HYPERLINK("http://x","clic")')  # el JSON no se toca
         finally:
             ok, _, err = psql("DELETE FROM findings WHERE id = '%s';" % hallazgo, user='postgres')
+            self.assertTrue(ok, err)
+
+    def test_9f_exportacion_con_la_atribucion_de_hibp(self):
+        # RC-54: la licencia CC BY 4.0 de HIBP pide la fuente con enlace donde se muestran sus datos. Un hallazgo de
+        # HIBP con su brecha, que se borra al terminar.
+        hallazgo = '80000000-0000-4000-8000-0000000005f8'
+        ok, _, err = psql('''
+            INSERT INTO findings (id, organization_id, domain_id, asset_id, rule_id, source_id, fingerprint,
+                                  severity, status, evidence, detected_at)
+            SELECT '%s', d.organization_id, d.id,
+                   (SELECT a.id FROM assets a WHERE a.domain_id = d.id ORDER BY a.id LIMIT 1),
+                   (SELECT r.id FROM scoring_rules r WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001'
+                       AND r.code = 'breach_exposure'),
+                   (SELECT s.id FROM data_sources s WHERE s.code = 'hibp'),
+                   sha256('rc54-prueba-atribucion'), 'critical', 'open',
+                   '{"title": "Correos de acme-demo.mx en la brecha Prueba", "breach_name": "Prueba"}', now()
+              FROM domains d WHERE d.fqdn = 'acme-demo.mx';
+            INSERT INTO breach_exposures (finding_id, organization_id, breach_name, breach_date, data_classes)
+            SELECT id, organization_id, 'Prueba', '2026-06-01', ARRAY['Email addresses', 'Passwords']
+              FROM findings WHERE id = '%s';
+        ''' % (hallazgo, hallazgo), user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            _, _, texto = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/findings/export?formato=csv')
+            filas = list(csv.reader(io.StringIO(texto[1:], newline='')))
+            fila = dict(zip(filas[0], next(f for f in filas[1:] if f[1] == hallazgo)))
+            self.assertEqual(fila['fuente'], 'hibp')
+            self.assertEqual(fila['atribucion'], 'Fuente: Have I Been Pwned (https://haveibeenpwned.com), CC BY 4.0 '
+                                                 '(https://creativecommons.org/licenses/by/4.0/)')
+            self.assertTrue(all(f[-1] == '' for f in filas[1:] if f[1] != hallazgo and f[9] != 'hibp'))
+        finally:
+            ok, _, err = psql("DELETE FROM breach_exposures WHERE finding_id = '%s'; "
+                              "DELETE FROM findings WHERE id = '%s';" % (hallazgo, hallazgo), user='postgres')
             self.assertTrue(ok, err)
 
     def test_9e_comparacion_con_hallazgo_que_cambio_de_dominio(self):
@@ -1218,9 +1256,12 @@ class ApiV1(unittest.TestCase):
         self.assertIn('Have I Been Pwned', texto)
         for h in datos['findings']:
             self.assertIn(h['asset'], texto)
-        # El resto de la API conserva su CSP de RC-283.
+        # El resto de la API lleva la CSP de main.py (RC-283 y RC-89).
         _, otras, _ = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/findings/export?formato=json')
-        self.assertEqual(otras['Content-Security-Policy'], "frame-ancestors 'none'")
+        self.assertIn("default-src 'none'", otras['Content-Security-Policy'])
+        self.assertIn("frame-ancestors 'none'", otras['Content-Security-Policy'])
+        self.assertIn("base-uri 'none'", otras['Content-Security-Policy'])
+        self.assertIn("form-action 'none'", otras['Content-Security-Policy'])
 
     def test_9g_reporte_tecnico_json_html_403_y_sin_gerente(self):
         # RC-81: la misma autorización que el ejecutivo y el mismo permiso que la lista de hallazgos (trae evidencia).

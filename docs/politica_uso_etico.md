@@ -41,7 +41,7 @@ Aplica al equipo Kernel Loco, a quien contribuya a los repositorios de LowTide y
 
 ## 3. Lo que sí ataca solo va contra LowTide
 
-Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de hackeo para el grupo) solo se hacen contra el despliegue de LowTide en su máquina virtual, con cuentas de prueba y sin datos reales de ninguna empresa. Nunca contra el dominio de un cliente, la PC del plan B ni infraestructura de terceros, aunque esté en la misma nube. No incluyen denegación de servicio ni ingeniería social, y siguen las reglas de pruebas de penetración del proveedor de nube. El reto de hackeo solo empieza con permiso escrito del profesor y con sus reglas y su alcance publicados (tarjeta #85).
+Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de hackeo para el grupo) solo se hacen contra el despliegue de LowTide en su máquina virtual, con cuentas de prueba y sin datos reales de ninguna empresa. Nunca contra el dominio de un cliente, la PC del plan B ni infraestructura de terceros, aunque esté en la misma nube. No incluyen denegación de servicio ni ingeniería social, y siguen las reglas de pruebas de penetración del proveedor de nube. El reto de hackeo solo empieza con permiso escrito del profesor y con sus reglas y su alcance publicados (tarjeta #85, [`reto_hackeo.md`](reto_hackeo.md)).
 
 ## 4. Datos personales y secretos
 
@@ -53,6 +53,7 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 6. Nunca se sube al repositorio un `.env`, una contraseña, una llave ni un token. Los repositorios son públicos. Se nombran las variables, nunca sus valores.
 7. Los papeles de cada parte ante la LFPDPPP (la empresa como responsable y el equipo como encargado), la retención y el borrado los fijan la carta de autorización y la [política de seguridad y privacidad](politica_seguridad_privacidad.md) de la tarjeta #78.
 8. Si una vulneración de seguridad de LowTide (la máquina virtual, la base o un respaldo) afecta datos de una empresa, el equipo le avisa en el plazo de la sección 6 de su carta para que ella informe a las personas afectadas, y avisa al profesor.
+9. Las llaves de la API de Mifiel (`MIFIEL_APP_ID` y `MIFIEL_APP_SECRET`) solo viven en el `.env`, y la firma desde el portal está apagada mientras `FIRMA_MODO` no diga `sandbox` o `produccion` (RC-211). LowTide no guarda la respuesta completa de Mifiel ni la copia en `audit_log`, que solo lleva el dominio, el entorno y el estado, nunca el nombre ni el correo de quien firma. Tampoco registra enlaces de firma. Del documento en Mifiel guarda su id, su estado, el PDF firmado, el XML y sus huellas, cifrados como la carta. Cada consulta a Mifiel la pide un administrador con un clic, sin consultas periódicas. Las pruebas usan respuestas inventadas con tokens `CIRDAN_FAKE_` y nunca llaman a Mifiel.
 
 ## 5. Datos de terceros
 
@@ -67,7 +68,7 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 2. Las demostraciones, las láminas y los repositorios solo usan datos de empresas ficticias (Acme Demo, Beta Corp y Grupo Olmardo) o datos de un cliente anonimizados y con su permiso por escrito.
 3. Las respuestas reales grabadas de un dominio que no sea del equipo nunca se suben a un repositorio. Las respuestas inventadas para pruebas, como la del recolector `ejemplo`, sí se pueden subir.
 4. Los nombres que se siembran en certificados del dominio de prueba quedan para siempre en registros públicos. No llevan nombres de personas reales, de terceros ni el nombre comercial del producto.
-5. Antes de cargar una carta en LowTide, un integrante del equipo comprueba que el dominio, la razón social y quien firma coincidan con la copia del poder y de la identificación que pide la sección 1 de la carta, y lo anota en la bitácora.
+5. Antes de que una carta quede vigente en LowTide, se suba a mano o se firme con Mifiel, un integrante del equipo comprueba que el dominio, la razón social y quien firma coincidan con la copia del poder y de la identificación que pide la sección 1 de la carta. Si se firmó con Mifiel, compara además el nombre y el RFC del certificado que muestra la hoja de firmas. Lo anota en la bitácora del equipo en Jira, sin copiar datos del poder ni de la identificación.
 6. La carta del dominio de prueba la firma como persona física el integrante a cuyo nombre se registra el dominio. No se inventan razón social, RFC, escritura ni notario.
 
 ## 7. Uso aceptable para las empresas
@@ -95,9 +96,10 @@ Las pruebas activas (ZAP en modo activo, pruebas de penetración y el reto de ha
 |---|---|---|
 | Solo dominios con carta vigente y TXT verificado | Trigger en `scans` y orquestador | Existen los dos. El orquestador es de la tarjeta #22 |
 | Solo activos del dominio autorizado | Filtro de alcance de `ejecutar()` | Existe. El CLI de un recolector no pasa por él |
-| Cada empresa solo ve sus datos | RLS con ENABLE y FORCE en las 18 tablas por cliente | Existe en la base. Desde la tarjeta #25 la API toma la empresa de la sesión, y desde RC-58 también el explorador de `/demo` y `/db`, que solo existe con `DEMO_EXPLORER=true`. Ninguna ruta acepta ya el encabezado `X-Organization` |
+| Cada empresa solo ve sus datos | RLS con ENABLE y FORCE en las 23 tablas por cliente | Existe en la base. Desde la tarjeta #25 la API toma la empresa de la sesión, y desde RC-58 también el explorador de `/demo` y `/db`, que solo existe con `DEMO_EXPLORER=true`. Ninguna ruta acepta ya el encabezado `X-Organization` |
 | La carta no se edita | `domain_authorizations` inmutable salvo `revoked_at` | Existe |
 | Una revocación no se deshace | Bloquear que `revoked_at` vuelva a NULL | Falta. Hoy el trigger deja regresarlo. Una migración que lo impide está propuesta en un comentario de la tarjeta #26 (13 oct), sin decidir |
+| Una carta firmada con Mifiel solo vale cuando el Admin la confirma | La solicitud vive en `signature_requests` y la fila de `domain_authorizations` solo nace al confirmar, con `accepted_by`. Un trigger exige que sea copia exacta de la solicitud firmada (dominio, firmante, fechas, actividades y huellas) y que venga de producción, porque una firma del sandbox no tiene validez legal, y la solicitud no se borra ni salta de estado (migración 031) | Existe (RC-211). La revisión del poder y de la identificación de la sección 6 punto 5 sigue siendo manual |
 | Revocar una carta desde el portal | Pantalla o API para fijar `revoked_at` | Falta. Propuesto en el mismo comentario de la tarjeta #26 (13 oct), sin decidir |
 | Sin respuesta cruda de HIBP | `scan_source_runs` rechaza `raw_payload` de esa fuente | Existe |
 | Fuentes con secretos sin respuesta cruda | `keep_raw_payload = false` en `data_sources` | Existe para GitHub (semilla 006, #16). Su recolector además corre gitleaks con `--redact`, lee el reporte por lista blanca y nunca graba ni devuelve el valor de un secreto. `scan_source_runs.error` se guarda siempre, así que solo lleva textos fijos |

@@ -22,8 +22,8 @@ from pruebas.test_github import BINARIOS, ApiSimulada, ProcesosSimulados  # noqa
 from pruebas.test_shodan import CAMARA, CAMARA_8080, HttpSimulado, ResolvedorSimulado, a, bases_por_defecto, sin_llave  # noqa: E402
 from pruebas.test_subfinder import CdxSimulado, con_cdx  # noqa: E402
 from pruebas.test_rdap import HttpSimulado as RdapSimulado, respuesta as respuesta_rdap  # noqa: E402
-from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, identidad,  # noqa: E402
-                                 rdap, registros_dns, shodan, subfinder, visita)
+from cirdan.recolectores import (REGISTRO, api_docs, cargar, certspotter, contrato, crtsh, ejemplo, geoip, github, hibp,  # noqa: E402
+                                 identidad, rdap, registros_dns, shodan, subfinder, visita)
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado  # noqa: E402
 
 HUELLA = 'a' * 64
@@ -403,7 +403,8 @@ class Ejecutar(unittest.TestCase):
         acme-demo (sin declaración GitHub no consulta ni graba nada), y Shodan con Cert Spotter e InternetDB simulados y
         el A de acme-demo.mx en una IP con el 8080 abierto, RDAP con el bootstrap y el registro simulados, y la visita
         web con Cert Spotter y la página de acme-demo.mx simulados (un nginx sin versión, que no pide endoflife.date ni
-        la NVD), y la documentación de APIs con Cert Spotter simulado y un 404 en cada ruta.
+        la NVD), y la documentación de APIs con Cert Spotter simulado y un 404 en cada ruta. HIBP con la llave de prueba
+        pública de HIBP y su API simulada: el dominio sin brechas (404).
         Un recolector nuevo en REGISTRO necesita aquí su simulación, o correría su fuente real.
         dns y shodan ubican sus IP con unas Bases falsas (geo-G6): la prueba no lee datos/geo ni abre maxminddb, así que
         da lo mismo en una PC con las bases que sin ellas, y _POR_OMISION queda como estaba."""
@@ -428,14 +429,15 @@ class Ejecutar(unittest.TestCase):
                     mock.patch.object(shodan, '_resolver_a', ResolvedorSimulado({'acme-demo.mx': a(CAMARA)})), \
                     mock.patch.object(rdap, '_descargar', RdapSimulado(dominios={'acme-demo.mx': respuesta_rdap('acme-demo.mx')})),                     mock.patch.object(visita, '_descargar_api', HttpSimulado()), mock.patch.object(api_docs, '_descargar_ct', HttpSimulado()), mock.patch.object(api_docs, '_visitar', lambda url, timeout: {'estado': 404, 'doc': None}),                     mock.patch.object(visita, '_visitar', lambda url, timeout: {
                         'estado': 200, 'cabeceras': [['Server', 'nginx']], 'cuerpo': '<html></html>'}), \
-                    mock.patch.object(identidad, '_visitar', lambda url, timeout: {
+                    mock.patch.object(hibp, '_descargar', lambda url, cabeceras, timeout=15: (404, None, b'')),                     mock.patch.object(identidad, '_visitar', lambda url, timeout: {
                         'estado': 200, 'cabeceras': [['Server', 'nginx']], 'cuerpo': '<html></html>', 'cortado': False}), \
                     mock.patch.dict(os.environ, {github.DECLARADAS: 'acme-demo.mx=acme-demo',
                                                  identidad.LLAVE: 'CIRDAN_FAKE_llave_del_hmac_de_identidad'}):
                 carpeta = Path(d) / 'acme-demo.mx'
                 carpeta.mkdir()
                 (carpeta / 'viejo.json').write_text('[]', encoding='utf-8')  # de una grabación anterior
-                res = contrato.ejecutar(modulo, 'acme-demo.mx', modo='grabar', ahora=AHORA)
+                extras = {'llave': '0' * 32, 'correos': []} if fuente == 'hibp' else None
+                res = contrato.ejecutar(modulo, 'acme-demo.mx', modo='grabar', ahora=AHORA, extras=extras)
                 self.assertEqual(res.estado, 'succeeded', (fuente, res.error))
                 self.assertFalse((carpeta / 'viejo.json').exists(), fuente)
                 self.assertIsNotNone(contrato.Grabadora.inicio(carpeta), fuente)

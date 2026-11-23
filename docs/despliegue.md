@@ -35,13 +35,15 @@ empresas y con los respaldos.
    - `COOKIE_SECURE=true`. El archivo del despliegue ya la fija, pero con un origen https en `ALLOWED_ORIGINS` y sin `COOKIE_SECURE=true` la API no arranca (RC-286): así un `docker compose up` que se olvide de `docker-compose.despliegue.yml` tampoco publica la cookie de sesión sin Secure. Vale igual en el plan B y en el plan B de pruebas.
    - `TUNNEL_TOKEN`, el token del túnel de Cloudflare. Sin él la pila no arranca. Nunca va en git.
    - `COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml` y `COMPOSE_PATH_SEPARATOR=:`. Con eso cualquier `docker compose` de esa carpeta usa los dos archivos, aunque se escriba sin los `-f`. Sin ellos, un `docker compose up -d --build` recrea la API con la config de desarrollo, sin la red interna, y lowtidesec.com responde 500 en `/api/v1`. `COMPOSE_PATH_SEPARATOR=:` hace falta en Windows (plan B), donde el separador por omisión es `;`. En Linux no estorba.
-   - `DOMINIOS_EN_VIVO` y `ORGS_GITHUB_DECLARADAS` según las cartas vigentes.
+   - `DOMINIOS_EN_VIVO` y `ORGS_GITHUB_DECLARADAS` según las cartas vigentes. Mientras la llave de Have I Been Pwned sea Core 1, ningún dominio de un tercero entra en `DOMINIOS_EN_VIVO`, aunque su carta esté vigente (sección 5.8, punto 7, de la [política de seguridad y privacidad](politica_seguridad_privacidad.md)).
+   - `COMPOSE_PROFILES=programador`, solo después de aplicar la migración 030 (sección 'Escaneos programados').
    - La llave del MFA. En la VM va `TOTP_KEY_VAULT_SECRET_URL` y no va `TOTP_ENCRYPTION_KEY` (sección 'Llave del MFA en Azure Key Vault'). En el plan B es al revés (paso 3 de 'Carpeta y volumen'). Con las dos puestas, o con ninguna, la API no arranca.
    - La llave de las huellas de contraseña, con la misma regla: en la VM `PASSWORD_HASH_KEY_VAULT_SECRET_URL` y no `PASSWORD_HASH_ENCRYPTION_KEY`, y en el plan B al revés (sección 'Llave de las huellas de contraseña').
    - `PWNED_PASSWORDS_ENABLED` vacía, como viene en `.env.example`, o en `true`. Así `docker-compose.despliegue.yml` prende la revisión de contraseñas filtradas (RC-334). Con `false` queda apagada y solo se revisa la lista local.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
    - SSL/TLS > Edge Certificates: 'Always Use HTTPS' prendido. Sin él el portal también responde por `http://` y el formulario de login manda la contraseña sin cifrar hasta Cloudflare (la API la rechaza después por el Origin, pero ya viajó). Se comprueba con `curl -sI http://lowtidesec.com/login` y `curl -sI http://www.lowtidesec.com/login`: los dos responden 301 con `Location: https://...`. HSTS queda para RC-89.
+   - SSL/TLS > Edge Certificates: 'Minimum TLS Version' en **TLS 1.2** (ASVS 5.0 V12.1.1, #75). Con el valor por omisión, Cloudflare todavía acepta TLS 1.0 y 1.1. Se comprueba con `openssl s_client -connect lowtidesec.com:443 -servername lowtidesec.com -tls1_1 -cipher 'DEFAULT:@SECLEVEL=0'`, que debe fallar el saludo, y con `-tls1_2` y `-tls1_3`, que deben conectar. `@SECLEVEL=0` hace falta porque el OpenSSL local ya no ofrece TLS 1.1 por su cuenta: sin él falla siempre y no prueba nada.
 4. `docker login` con `DOCKERHUB_USERNAME` y `DOCKERHUB_TOKEN` de la cuenta 'lowtidesec' (solo lectura).
 5. Docker Engine reciente, con Compose 2.24 o más nuevo. Las redes `borde` e `interna` usan `gateway_mode_ipv4=isolated` y los puertos se quitan con `ports: !reset []`. Un Docker viejo rechaza la opción de red y `up` falla: nunca levanta la pila sin el aislamiento. Se probó con Docker Engine 29.8 y Compose 5.5.
 
@@ -212,6 +214,16 @@ Nunca se crea otra versión del secreto `password-hash-key` sin seguir estos pas
 7. (VM) Quitar `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL` del `.env` y reconstruir como en el paso 4. `PASSWORD_HASH_KEY_VERSION` se queda. Después se puede quitar el rol de la identidad sobre el secreto de antes. El secreto de antes y su copia del gestor se quedan al menos 33 días después del paso 6: cada respaldo dura de 30 a 32 días ('Respaldo diario') y los de antes de rotar traen huellas de la versión anterior, que solo abren con esa llave. Para restaurar uno de ellos se le vuelve a dar a la identidad 'Key Vault Secrets User' sobre el secreto de antes, como en el paso 2 (sin ese rol la API recibe 403 y no arranca), y se vuelve a poner la anterior como en el paso 3.
 
 En desarrollo y en el plan B es lo mismo con `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, sin Key Vault, y `docker compose exec api` como en la VM.
+
+## Escaneos programados (RC-52)
+
+El servicio `programador` vuelve a escanear cada dominio autorizado según el plan de su empresa (`plans.scan_interval`: Starter cada 7 días, Business y Enterprise cada día). Usa la misma imagen y el mismo rol de la base que la API, sin puertos y sin llegar a IMDS. Va con profile: sin `COMPOSE_PROFILES`, `docker compose up -d` no lo enciende. Al encenderlo salen en el acto los dominios con `next_scan_at` vacío o vencido, así que se enciende con el OK de quien administra la VM.
+
+1. (VM, una vez) La migración 030, antes de encenderlo. La API no la lee: `docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/030_escaneos_programados.sql`.
+2. (VM) Revisar que `DOMINIOS_EN_VIVO` del `.env` lista solo los dominios con carta vigente y, con la llave Core 1 de Have I Been Pwned, ninguno de un tercero (paso 2 de 'Antes de levantar'). El programador se salta los demás sin consultar su TXT y los vuelve a ver al día siguiente.
+3. (VM) En el `.env`, `COMPOSE_PROFILES=programador`. Con ella cada `docker compose up -d --build` de esta guía, y `infra/verificar_imagenes.sh --levantar` con las imágenes firmadas, también recrea el programador con el código nuevo. Sin ella, un programador ya encendido seguiría con la imagen de antes, porque un `up` sin su profile no lo toca.
+4. (VM) `docker compose --dry-run up -d --build` (sin recrear `cirdan-pg16`) y `docker compose up -d --build`. `docker compose ps programador` dice `running` y `docker compose logs programador` dice 'escaneo programado' con cada escaneo que pidió, sin errores.
+5. Para apagarlo: quitar `COMPOSE_PROFILES` del `.env` y `docker compose --profile programador stop programador`. Tiene 60 s para cerrar: los escaneos que dejó corriendo quedan en 'failed' y su turno queda a una hora, no al siguiente intervalo del plan, así que salen en cuanto se vuelva a encender.
 
 ## Respaldo diario (RC-233)
 

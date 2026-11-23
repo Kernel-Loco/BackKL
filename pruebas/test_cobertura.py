@@ -4,7 +4,7 @@
 """
 import unittest
 
-from cirdan.recolectores import REGISTRO, api_docs, crtsh, shodan
+from cirdan.recolectores import REGISTRO, api_docs, crtsh, github, shodan
 from cirdan.score import cobertura
 
 TODAS = [f for f in REGISTRO if f != cobertura.FUENTE_PRUEBAS]
@@ -132,6 +132,13 @@ class Huecos(unittest.TestCase):
     def test_lo_ya_atribuido_por_raw_payload_no_se_repite(self):
         corridas = [corrida(f) for f in TODAS if f != 'dns'] + [corrida('dns', sin_cobertura=['dmarc_missing'])]
         self.assertEqual(de(cobertura.huecos(corridas, ['dmarc_missing'])), [('dmarc_missing', 'dns')])
+
+    def test_fuente_que_la_carta_no_autoriza_sale_una_vez_y_con_su_fuente(self):
+        # RC-59: carta sin la actividad 4. GitHub queda 'failed' y sus reglas también llegan a rules_without_coverage.
+        corridas = [corrida(f) for f in TODAS if f != 'github'] + [corrida('github', 'failed', sin_cobertura=None)]
+        huecos = cobertura.huecos(corridas, sorted(github.CODIGOS))
+        self.assertEqual(de(huecos), [(c, 'github') for c in sorted(github.CODIGOS)])
+        self.assertEqual({h['reason'] for h in huecos}, {'source_failed'})
 
     def test_motivos_conocidos(self):
         corridas = [corrida('ct_logs', 'failed'), corrida('shodan', sin_cobertura=['exposed_ot_device'],

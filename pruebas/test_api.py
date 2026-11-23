@@ -88,7 +88,7 @@ class ApiCirdan(unittest.TestCase):
         self.assertIn(code, (401, 404), body)
 
     def test_8_toda_respuesta_trae_la_proteccion_contra_marcos_y_nosniff(self):
-        # RC-283: también los errores y el 403 que da el middleware de origen antes de llegar a una ruta. /docs no
+        # RC-283 y RC-89: también errores y el 403 que da el middleware de origen antes de llegar a una ruta. /docs no
         # existe con el API_DOCS por omisión (RC-303).
         casos = (('GET', '/health', None, 200), ('GET', '/domains', None, 401), ('GET', '/no-existe', None, 404),
                  ('GET', '/docs', None, 404), ('POST', '/api/v1/auth/logout', 'https://otro.example', 403))
@@ -104,7 +104,29 @@ class ApiCirdan(unittest.TestCase):
                 self.assertEqual(estado, esperado)
                 self.assertEqual(cabeceras.get_all('X-Frame-Options'), ['DENY'])
                 self.assertEqual(cabeceras.get_all('X-Content-Type-Options'), ['nosniff'])
-                self.assertEqual(cabeceras.get_all('Content-Security-Policy'), ["frame-ancestors 'none'"])
+                self.assertIn("default-src 'none'", cabeceras['Content-Security-Policy'])
+                self.assertIn("frame-ancestors 'none'", cabeceras['Content-Security-Policy'])
+                self.assertIn("base-uri 'none'", cabeceras['Content-Security-Policy'])
+                self.assertIn("form-action 'none'", cabeceras['Content-Security-Policy'])
+                self.assertEqual(cabeceras.get_all('Strict-Transport-Security'),
+                                 ['max-age=31536000; includeSubDomains'])
+                self.assertEqual(cabeceras.get_all('Referrer-Policy'), ['no-referrer'])
+                self.assertEqual(cabeceras.get_all('Permissions-Policy'),
+                                 ['camera=(), microphone=(), geolocation=(), usb=()'])
+                # RC-136: nada de la API queda en una caché, tampoco los errores (el pendiente de ZAP en /auth/me)
+                self.assertEqual(cabeceras.get_all('Cache-Control'), ['no-store'])
+
+    def test_9_auth_me_sin_cache_y_el_captcha_conserva_el_suyo(self):
+        # RC-136: /api/v1/auth/me sin sesión (401) y el reto del captcha, que ya ponía no-store, salen con uno solo.
+        for ruta, esperado in (('/api/v1/auth/me', 401), ('/api/v1/auth/captcha', 200)):
+            try:
+                with urllib.request.urlopen(sesion.BASE + ruta, timeout=10) as r:
+                    estado, cabeceras = r.status, r.headers
+            except urllib.error.HTTPError as e:
+                estado, cabeceras = e.code, e.headers
+            with self.subTest(ruta=ruta):
+                self.assertEqual(estado, esperado)
+                self.assertEqual(cabeceras.get_all('Cache-Control'), ['no-store'])
 
 
 if __name__ == '__main__':

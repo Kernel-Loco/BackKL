@@ -26,12 +26,12 @@ from psycopg import IsolationLevel
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
-from cirdan import cartas, orquestador, reporte, reporte_tecnico, siem
+from cirdan import alcance_carta, cartas, orquestador, reporte, reporte_tecnico, siem
 from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
 from cirdan.auth.deps import (Session, api_key_or_roles, client_ip, current_session, in_scope, require_roles,
                               session_or_api_key)
-from cirdan.exportar import csv_con_bom
+from cirdan.exportar import ATRIBUCION_POR_FUENTE, csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.orquestador import txt as dns_txt
 from cirdan.db import audit, transaction
@@ -47,7 +47,8 @@ LEE_HALLAZGOS = api_key_or_roles('analyst', 'admin')
 # Desde #23 vienen guardadas en la evidencia. Para los hallazgos de la semilla, que no las traen, se calculan
 # con las mismas reglas del contrato #21.
 TIPO = {
-    'breach_exposure': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
+    'breach_exposure': 'correos_en_brecha', 'breach_exposure_old': 'correos_en_brecha',
+    'breach_exposure_no_passwords': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
     'cert_expiring_soon': 'certificado_por_vencer', 'outdated_software': 'software_desactualizado',
     'exposed_rdp': 'servicio_expuesto', 'dmarc_missing': 'dmarc_faltante', 'spf_missing': 'spf_faltante',
     'lookalike_domain': 'dominio_parecido',
@@ -149,7 +150,7 @@ def _domain_id(session, fqdn):
 # (sección 5.6 de docs/politica_seguridad_privacidad.md) y la base da NULL, con su fecha de México (RC-274).
 DOMAINS_SQL = '''
 SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
-       a.valid_from, a.valid_until, a.revoked_at,
+       a.valid_from, a.valid_until, a.revoked_at, a.template_version, a.activities,
        CASE WHEN a.revoked_at IS NULL AND current_date BETWEEN a.valid_from AND a.valid_until
             THEN a.signer_email::text END AS signer_email,
        (a.id IS NOT NULL AND a.revoked_at IS NULL AND current_date BETWEEN a.valid_from AND a.valid_until) AS auth_valid,
@@ -208,7 +209,8 @@ def _domain(r):
     return {
         'id': r['id'], 'fqdn': r['fqdn'], 'status': r['status'],
         'authorization': {'status': auth, 'valid_from': r['valid_from'], 'valid_until': r['valid_until'],
-                          'signer_email': r['signer_email']},
+                          'signer_email': r['signer_email'], 'template_version': r['template_version'],
+                          'activities': r['activities']},
         'txt': {'status': txt, 'checked_at': r['txt_checked_at']},
         'scan_eligibility': {'can_scan': not reasons, 'reasons': reasons},
         'score': r['score'], 'band': criterio.banda(r['score'], cortes) if r['score'] is not None else None,
@@ -239,7 +241,8 @@ EMAIL_ALTA = re.compile(r'[^\s@]+@[^\s@]+\.[^\s@]+')
 
 def _datos_alta(body):
     campos = ('fqdn', 'signer_name', 'signer_title', 'signer_email', 'valid_from', 'valid_until', 'letter_base64')
-    if not isinstance(body, dict) or set(body) != set(campos) | {'passive_monitoring_confirmed'}:
+    if not isinstance(body, dict) or set(body) != set(campos) | {'passive_monitoring_confirmed', 'template_version',
+                                                                    'activities'}:
         raise HTTPException(422, 'Revisa los datos del dominio y de la carta.')
     if any(not isinstance(body[c], str) for c in campos) or body['passive_monitoring_confirmed'] is not True:
         raise HTTPException(422, 'Revisa los datos y confirma la autorización.')
@@ -258,6 +261,9 @@ def _datos_alta(body):
         raise HTTPException(422, 'Escribe fechas válidas para la carta.') from None
     if end <= start:
         raise HTTPException(422, 'La fecha de fin debe ser posterior al inicio.')
+    activities = alcance_carta.actividades_validas(body['template_version'], body['activities'])
+    if activities is None:
+        raise HTTPException(422, 'Marca las actividades del Anexo A que autoriza la carta.')
     try:
         pdf = base64.b64decode(body['letter_base64'], validate=True)
     except (ValueError, binascii.Error):
@@ -266,45 +272,88 @@ def _datos_alta(body):
         raise HTTPException(413, 'El PDF no puede superar 5 MB.')
     if not pdf.startswith(b'%PDF-') or b'%%EOF' not in pdf[-1024:]:
         raise HTTPException(422, 'La carta debe ser un PDF válido.')
-    return fqdn, name, title, email, start, end, pdf
+    return fqdn, name, title, email, start, end, pdf, body['template_version'], activities
+
+
+def _revisar_empresa_y_carta(conn, session, end):
+    """Candado consultivo de la empresa, empresa activa y carta no vencida. Devuelve el tope de dominios."""
+    conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 44))', (session.org_id,))
+    organization = conn.execute(
+        'SELECT o.status, coalesce(o.domain_limit_override, p.max_domains) AS limit '
+        'FROM organizations o JOIN plans p ON p.id = o.plan_id WHERE o.id = %s',
+        (session.org_id,),
+    ).fetchone()
+    if not organization or organization['status'] not in ('trial', 'active'):
+        raise HTTPException(403, 'La organización no está activa.')
+    # Con la fecha de la base, la misma que usan el orquestador y el trigger de scans. Va antes del tope: una
+    # carta vencida da 422 aunque la empresa ya esté en su límite.
+    if conn.execute('SELECT %s::date < current_date AS vencida', (end,)).fetchone()['vencida']:
+        raise HTTPException(422, 'La carta ya está vencida.')
+    return organization['limit']
+
+
+def _dominio_para_carta(conn, session, request, fqdn, end, token, renovar=False):
+    """(domain_id, nuevo) del dominio al que va una carta, dentro de la transacción de `conn`.
+
+    Con `renovar` (RC-211), un fqdn que ya existe en la empresa y no está removed recibe otra carta en
+    domain_authorizations. Si no, nace el dominio como en el alta (RC-59): tope de dominios y domain.added."""
+    limit = _revisar_empresa_y_carta(conn, session, end)
+    if renovar:
+        row = conn.execute("SELECT id::text FROM domains WHERE fqdn = %s AND status <> 'removed'", (fqdn,)).fetchone()
+        if row:
+            return row['id'], False
+    count = conn.execute("SELECT count(*) AS total FROM domains WHERE status <> 'removed'").fetchone()['total']
+    if count >= limit:
+        raise HTTPException(409, 'La organización alcanzó su límite de dominios.')
+    domain_id = conn.execute(
+        "INSERT INTO domains (organization_id, fqdn, status, txt_token, added_by) "
+        "VALUES (%s, %s, 'pending_verification', %s, %s) RETURNING id::text",
+        (session.org_id, fqdn, token, session.user_id),
+    ).fetchone()['id']
+    audit(conn, session.org_id, 'domain.added', session.audit_user_id, client_ip(request), 'domain',
+          domain_id, {'fqdn': fqdn}, platform=session.audit_platform)
+    return domain_id, True
+
+
+def _choque_de_dominio(error):
+    """El 409 de un UniqueViolation de domains, o None si es de otra restricción."""
+    if error.diag.constraint_name == 'domains_organization_id_fqdn_key':
+        return HTTPException(409, 'Ese dominio ya está registrado en esta organización.')
+    if error.diag.constraint_name == 'domains_fqdn_otra_organizacion':
+        return HTTPException(409, 'El dominio ya está verificado por otra organización.')
+    return None
+
+
+def _respuesta_dominio(conn, domain_id):
+    """Lo que responde el alta: el dominio como en GET /domains y su TXT."""
+    domain = next(_domain(row) for row in conn.execute(DOMAINS_SQL).fetchall() if row['id'] == domain_id)
+    token = conn.execute('SELECT txt_token FROM domains WHERE id = %s', (domain_id,)).fetchone()['txt_token']
+    return {'domain': domain, 'txt': {'fqdn': domain['fqdn'], 'status': domain['txt']['status'],
+                                      'expected_value': dns_txt.esperado(token),
+                                      'checked_at': domain['txt']['checked_at']}}
 
 
 def _registrar_dominio(body, request, session):
     if session.acting_elsewhere:
         raise HTTPException(403, 'El alta debe hacerla un administrador de la propia empresa.')
-    fqdn, name, title, email, start, end, pdf = _datos_alta(body)
+    fqdn, name, title, email, start, end, pdf, version, activities = _datos_alta(body)
     token = secrets.token_hex(16)
     try:
         with transaction(session.org_id) as conn:
-            conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 44))', (session.org_id,))
-            organization = conn.execute(
-                'SELECT o.status, coalesce(o.domain_limit_override, p.max_domains) AS limit '
-                'FROM organizations o JOIN plans p ON p.id = o.plan_id WHERE o.id = %s',
-                (session.org_id,),
-            ).fetchone()
-            if not organization or organization['status'] not in ('trial', 'active'):
-                raise HTTPException(403, 'La organización no está activa.')
-            count = conn.execute("SELECT count(*) AS total FROM domains WHERE status <> 'removed'").fetchone()['total']
-            if count >= organization['limit']:
-                raise HTTPException(409, 'La organización alcanzó su límite de dominios.')
-            domain_id = conn.execute(
-                "INSERT INTO domains (organization_id, fqdn, status, txt_token, added_by) "
-                "VALUES (%s, %s, 'pending_verification', %s, %s) RETURNING id::text",
-                (session.org_id, fqdn, token, session.user_id),
-            ).fetchone()['id']
+            domain_id, _ = _dominio_para_carta(conn, session, request, fqdn, end, token)
             key, digest = cartas.guardar(pdf, session.org_id, domain_id)
             conn.execute(
                 'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, '
-                'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
-                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
-                (session.org_id, domain_id, name, title, email, key, digest, start, end, session.user_id),
+                'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, '
+                'template_version, activities) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                (session.org_id, domain_id, name, title, email, key, digest, start, end, session.user_id,
+                 version, activities),
             )
-            audit(conn, session.org_id, 'domain.added', session.audit_user_id, client_ip(request), 'domain',
-                  domain_id, {'fqdn': fqdn}, platform=session.audit_platform)
             domain = next(_domain(row) for row in conn.execute(DOMAINS_SQL).fetchall() if row['id'] == domain_id)
     except UniqueViolation as error:
-        if error.diag.constraint_name == 'domains_organization_id_fqdn_key':
-            raise HTTPException(409, 'Ese dominio ya está registrado en esta organización.') from None
+        choque = _choque_de_dominio(error)
+        if choque:
+            raise choque from None
         raise
     return {'domain': domain, 'txt': {'fqdn': fqdn, 'status': 'missing',
                                        'expected_value': dns_txt.esperado(token), 'checked_at': None}}
@@ -351,6 +400,7 @@ def verify_domain_txt(fqdn: str, request: Request, session: Session = Depends(re
             (session.org_id, domain['id'], 'onboarding', esperado,
              [esperado] if resultado == 'match' else None, consulta.resolver_ip, resultado),
         ).fetchone()['checked_at']
+        choque = False
         if resultado == 'match' and domain['status'] == 'pending_verification':
             try:
                 with conn.transaction():
@@ -359,12 +409,16 @@ def verify_domain_txt(fqdn: str, request: Request, session: Session = Depends(re
                         "updated_at = now() WHERE id = %s", (domain['id'],)
                     )
             except UniqueViolation:
-                raise HTTPException(409, 'El dominio ya está verificado por otra organización.')
+                # Solo se deshace el UPDATE: la consulta y su auditoría se guardan y el 409 sale después del commit.
+                choque = True
         audit(conn, session.org_id, 'domain.txt_checked', session.audit_user_id, client_ip(request), 'domain',
-              domain['id'], {'result': resultado}, platform=session.audit_platform)
+              domain['id'], {'result': resultado, **({'conflict': 'other_organization'} if choque else {})},
+              platform=session.audit_platform)
         rows = conn.execute(DOMAINS_SQL).fetchall()
         updated = next(_domain(row) for row in rows if row['id'] == domain['id'])
 
+    if choque:
+        raise HTTPException(409, 'El dominio ya está verificado por otra organización.')
     if resultado == 'dns_error':
         raise HTTPException(503, 'No se pudo consultar el DNS. Inténtalo de nuevo más tarde.')
     return {
@@ -527,7 +581,7 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
                                        stats.get('sources_partial') or ())
     # Los códigos que el escaneo del score no revisó, con su fuente y su motivo, para que el portal los nombre (RC-229).
     huecos = cobertura.huecos(filas_corridas, stats.get('rules_without_coverage') or (),
-                              stats.get('sources_partial') or ())
+                              stats.get('sources_partial') or (), sin_llave=stats.get('rules_without_key') or ())
     cortes = configuracion.cortes_de_fila(rows[-1])
     categories = [{'category': c, 'score': rows[-1]['category_scores'][c],
                    'band': criterio.banda(rows[-1]['category_scores'][c], cortes),
@@ -619,8 +673,11 @@ def _json(data):
 ENCABEZADOS_HALLAZGOS = (
     'dominio', 'hallazgo_id', 'titulo', 'severidad', 'severidad_base', 'categoria', 'regla', 'activo',
     'tipo_activo', 'fuente', 'estado', 'recurrencia', 'cve', 'cvss', 'epss', 'en_kev', 'detectado',
-    'ultimo_escaneo_id', 'mitre_attack', 'iso_27001_2022', 'cis_controls_v8_1', 'evidencia',
+    'ultimo_escaneo_id', 'mitre_attack', 'iso_27001_2022', 'cis_controls_v8_1', 'evidencia', 'atribucion',
 )
+# La licencia CC BY 4.0 de HIBP pide nombrar la fuente con enlace donde se muestran sus datos (RC-54). En el CSV va en
+# su propia columna, solo en las filas de HIBP: una fila de comentario rompería a quien lo importa.
+ATRIBUCION_CSV = ATRIBUCION_POR_FUENTE
 
 
 REPORTE_DESCARGADO = 'report.downloaded'
@@ -662,7 +719,8 @@ def export_findings(request: Request, fqdn: str, formato: str = Query(default='j
                       i['asset'], i['asset_type'], i['source'], i['status'], i['recurrence'], i['cve_id'], i['cvss'],
                       i['epss'], i['in_kev'], i['detected_at'], i['last_scan_id'],
                       i['frameworks']['mitre_attack']['technique_id'], i['frameworks']['iso_27001_2022']['control_id'],
-                      i['frameworks']['cis_controls_v8_1']['safeguard_id'], i['evidence']) for i in items]
+                      i['frameworks']['cis_controls_v8_1']['safeguard_id'], i['evidence'],
+                      ATRIBUCION_CSV.get(i['source'], '')) for i in items]
             respuesta = _descarga(csv_con_bom(ENCABEZADOS_HALLAZGOS, filas), 'text/csv; charset=utf-8',
                                   '%s-hallazgos.csv' % fqdn)
         _registrar_descarga(conn, session, request, 'findings', formato, domain_id, len(items))
