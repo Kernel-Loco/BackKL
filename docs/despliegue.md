@@ -43,6 +43,7 @@ empresas y con los respaldos.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
    - SSL/TLS > Edge Certificates: 'Always Use HTTPS' prendido. Sin él el portal también responde por `http://` y el formulario de login manda la contraseña sin cifrar hasta Cloudflare (la API la rechaza después por el Origin, pero ya viajó). Se comprueba con `curl -sI http://lowtidesec.com/login` y `curl -sI http://www.lowtidesec.com/login`: los dos responden 301 con `Location: https://...`. HSTS queda para RC-89.
+   - SSL/TLS > Edge Certificates: 'Minimum TLS Version' en **TLS 1.2** (ASVS 5.0 V12.1.1, #75). Con el valor por omisión, Cloudflare todavía acepta TLS 1.0 y 1.1. Se comprueba con `openssl s_client -connect lowtidesec.com:443 -servername lowtidesec.com -tls1_1 -cipher 'DEFAULT:@SECLEVEL=0'`, que debe fallar el saludo, y con `-tls1_2` y `-tls1_3`, que deben conectar. `@SECLEVEL=0` hace falta porque el OpenSSL local ya no ofrece TLS 1.1 por su cuenta: sin él falla siempre y no prueba nada.
 4. `docker login` con `DOCKERHUB_USERNAME` y `DOCKERHUB_TOKEN` de la cuenta 'lowtidesec' (solo lectura).
 5. Docker Engine reciente, con Compose 2.24 o más nuevo. Las redes `borde` e `interna` usan `gateway_mode_ipv4=isolated` y los puertos se quitan con `ports: !reset []`. Un Docker viejo rechaza la opción de red y `up` falla: nunca levanta la pila sin el aislamiento. Se probó con Docker Engine 29.8 y Compose 5.5.
 
