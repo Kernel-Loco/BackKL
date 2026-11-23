@@ -71,6 +71,10 @@ services:
       CARTA_STORAGE_DIR: /var/lib/cirdan/cartas
       CARTA_ENCRYPTION_KEY: ${CARTA_ENCRYPTION_KEY:-}
       CARTA_KEY_VAULT_SECRET_URL: ${CARTA_KEY_VAULT_SECRET_URL:-}
+      # Firma con Mifiel (RC-211): apagado por omisión, sin llamar a su API.
+      FIRMA_MODO: ${FIRMA_MODO:-apagado}
+      MIFIEL_APP_ID: ${MIFIEL_APP_ID:-}
+      MIFIEL_APP_SECRET: ${MIFIEL_APP_SECRET:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Dominio al que quedan amarradas las passkeys (RC-331). localhost en tu PC; los orígenes salen de ALLOWED_ORIGINS.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
