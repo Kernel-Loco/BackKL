@@ -45,6 +45,29 @@ _slots = threading.BoundedSemaphore(ASSISTANT_MAX_CONCURRENT)
 PROVIDER_BUSY = 'El asistente está atendiendo muchas preguntas. Inténtalo en un minuto.'
 PROVIDER_UNAVAILABLE = ('El asistente no está disponible. Inténtalo en un minuto o consulta el reporte del dominio, '
                         'que incluye qué significa cada hallazgo y qué hacer.')
+PROMPT_INJECTION_REJECTED = 'Solo puedo responder preguntas sobre los hallazgos seleccionados.'
+
+_PROMPT_INJECTION_PATTERNS = tuple(re.compile(pattern) for pattern in (
+    r'\b(?:ignore|disregard|forget|override|ignora|ignorar|omite|olvida|desatiende)\b.{0,100}'
+    r'\b(?:all|every|previous|prior|above|earlier|system|developer|todas?|anteriores?|previas?|'
+    r'instrucciones?|reglas?|mensajes?|prompt|prompts)\b',
+    r'\b(?:reveal|show|print|repeat|copy|disclose|muestra|revela|imprime|repite|copia|divulga)\b.{0,100}'
+    r'\b(?:system|developer|hidden|internal|sistema|desarrollador|ocult[oa]s?|intern[oa]s?)\b.{0,40}'
+    r'\b(?:prompt|instructions?|instrucciones?)\b',
+    r'\b(?:bypass|jailbreak|disable|evade|salt[aá]|desactiva|elude|evade)\b.{0,100}'
+    r'\b(?:safety|guardrails|restrictions?|security|seguridad|filtros?|reglas?)\b',
+    r'\b(?:you are now|act as|pretend to be|from now on|act[uú]a como|finge ser|ahora eres|'
+    r'a partir de ahora)\b.{0,100}\b(?:unrestricted|developer|system|sin restricciones|sin filtros|'
+    r'modo desarrollador|modo sistema)\b',
+    r'\b(?:developer mode|modo desarrollador|dan mode|jailbreak)\b',
+))
+
+
+def _is_prompt_injection(question):
+    normalized = unicodedata.normalize('NFKC', question)
+    normalized = ''.join(char for char in normalized if unicodedata.category(char) != 'Cf').casefold()
+    return any(pattern.search(normalized) for pattern in _PROMPT_INJECTION_PATTERNS)
+
 # Primera línea de la respuesta automática: la persona sabe que no es de IA aunque el portal no lea `source`.
 TEMPLATE_NOTICE = ('Respuesta automática, no es de IA: ningún modelo de IA respondió, así que no contesta tu pregunta. '
                    'Estos son los pasos del plan de acción para los hallazgos enviados, del más grave al menos grave.')
@@ -481,6 +504,8 @@ def ask_assistant(fqdn: str, body: AssistantQuestion, request: Request, response
     question = clean_question(body.question)
     if not question:
         raise HTTPException(422, 'Escribe una pregunta')
+    if _is_prompt_injection(question):
+        raise HTTPException(422, PROMPT_INJECTION_REJECTED)
     if len(question) > MAX_CLEAN_QUESTION_LENGTH:
         raise HTTPException(422, 'La pregunta trae caracteres especiales que la alargan de más. Escríbela con letras '
                                  'y signos comunes.')
