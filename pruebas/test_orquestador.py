@@ -83,7 +83,8 @@ def resultado_github(*hallazgos, revisados=None, sin_revisar=None):
 
 def secreto(repo, ruta):
     return github.hallazgo_secreto('acme-demo.mx', 'acme-demo/' + repo, {'ruta': ruta, 'regla': 'cirdan-fake-token',
-                                                                         'primera_vez': '2026-09-01T12:00:00Z'}, AHORA)
+                                                                         'primera_vez': '2026-09-01T12:00:00Z',
+                                                                         'ultima_vez': '2026-09-01T12:00:00Z'}, AHORA)
 
 
 def correo(usuario, *repos):
@@ -467,7 +468,7 @@ class Orquestador(unittest.TestCase):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         with mock.patch.object(orquestador, 'ejecutar', return_value=resultado):
             orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['github'], modo='reproducir', conn=self.conn)
-        return self.uno('SELECT id::text FROM findings WHERE fingerprint = %s', (bytes.fromhex(huella),))['id']
+        return self.uno('SELECT id::text FROM findings WHERE fingerprint = %s', bytes.fromhex(huella))['id']
 
     def test_2h_un_secreto_rotado_no_se_reabre_sin_un_commit_posterior(self):
         finding_id = self.escanear_secreto_github('2026-09-20T00:00:00+00:00')
