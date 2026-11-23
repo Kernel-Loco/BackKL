@@ -384,18 +384,22 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
             with self.subTest(seccion='9', cita=cita):
                 self.assertIn(cita, pendientes)
         legal = next(f for f in pendientes.splitlines() if f.startswith('| Que Cloudflare, Groq y Microsoft'))
-        self.assertTrue(legal.endswith('| Revisión legal, antes del primer cliente real y de #19 (RC-54) |'),
+        self.assertTrue(legal.endswith('| Revisión legal, antes del primer cliente real. Para #19 (RC-54) con '
+                                       'olmardo.com, la del 23 nov 2026 |'),
                         'la fila de las brechas sensibles no es la de revisión legal antes de #19 '
                         '(r15-datos-1 y r16-reg-1)')
         for cita in ('cómo se tratan las brechas que revelan datos sensibles (sección 5.3, punto 5)',
                      'si basta el texto modelo de la sección 5.4'):
             with self.subTest(seccion='9 revisión legal', cita=cita):
                 self.assertIn(cita, legal, 'las brechas sensibles no van a la revisión legal (r15-datos-1)')
-        # La fecha prevista de #19 en la carta (Anexo A, actividad 7) queda como pendiente de carta (r17-reg-1).
+        # La fecha prevista de #19 en la carta (Anexo A, actividad 7) va después de la revisión del 23 nov (RC-54).
         with self.subTest(seccion='9 revisión legal', regla='fecha de #19 en la carta'):
-            self.assertIn('que la carta mueva la fecha prevista de la actividad 7 de su Anexo A (Have I Been '
-                          'Pwned, #19), hoy el 6 nov 2026, a después de esta revisión', legal,
-                          'la fecha de #19 en la carta no queda como pendiente de la revisión legal (r17-reg-1)')
+            self.assertIn('la carta ya prevé la actividad 7 de su Anexo A desde el 30 nov 2026', legal,
+                          'la fila de la revisión legal no dice la fecha nueva de #19 en la carta')
+            self.assertNotIn('hoy el 6 nov 2026', legal, 'la fila de la revisión legal sigue con la fecha vieja')
+            carta = _texto(RAIZ / 'docs' / 'plantilla_carta_autorizacion.md')
+            fila7 = next(f for f in carta.split('## Anexo A', 1)[1].splitlines() if f.startswith('| 7 |'))
+            self.assertTrue(fila7.endswith('| 30 nov 2026 |'), 'la actividad 7 de la carta no va tras la revisión')
         # Los documentos que fechan #19 o la llave de HIBP los ponen detrás de esa revisión (r17-reg-1).
         esperados = _texto(RAIZ / 'docs' / 'hallazgos_esperados.md')
         fila13 = next(f for f in esperados.splitlines() if f.startswith('| 13 |'))
