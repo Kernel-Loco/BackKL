@@ -132,14 +132,18 @@ class ReporteAsvs(unittest.TestCase):
         self.assertEqual(en_pendientes, abiertos)
 
     def test_7_las_rutas_citadas_existen(self):
-        frontkl = RAIZ.parent / 'FrontKL'
+        # Las de FrontKL solo se revisan con una copia de FrontKL en una rama que ya trae la página (src/config/asvs.ts):
+        # el CI de BackKL no tiene ese repo, y una copia local puede estar en cualquier rama (RC-93 la encontró en una
+        # sin la página).
+        frontkl_con_pagina = (RAIZ.parent / 'FrontKL' / 'src' / 'config' / 'asvs.ts').exists()
         for ruta in sorted(set(RUTA.findall(self.texto))):
+            if ruta.startswith('FrontKL/'):
+                if frontkl_con_pagina:
+                    with self.subTest(ruta=ruta):
+                        self.assertTrue((RAIZ.parent / ruta).exists(), ruta)
+                continue
             with self.subTest(ruta=ruta):
-                if ruta.startswith('FrontKL/'):
-                    if not frontkl.is_dir():
-                        continue  # en el CI de BackKL no está el otro repo
-                    self.assertTrue((RAIZ.parent / ruta).exists(), ruta)
-                elif ruta.startswith(('asvs/', 'api_v1/', 'zap/')) or ruta == 'pruebas_zap.md':
+                if ruta.startswith(('asvs/', 'api_v1/', 'zap/')) or ruta == 'pruebas_zap.md':
                     self.assertTrue((RAIZ / 'docs' / ruta).exists(), ruta)
                 else:
                     self.assertTrue((RAIZ / ruta).exists(), ruta)
