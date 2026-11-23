@@ -261,6 +261,15 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(s['stop_grace_period'], '1m0s')  # tiempos-3: detener() alcanza a cerrar los escaneos
         for llave in ('TOTP', 'PASSWORD_HASH', 'CARTA', 'IA_', 'CORREO'):
             self.assertEqual([k for k in s['environment'] if k.startswith(llave)], [], llave)
+        # El HEALTHCHECK de la imagen es el de la API (/health en el 8000) y el programador no abre puertos: sin
+        # quitarlo queda 'unhealthy' aunque funcione. Tampoco lo vuelve a poner el compose de las imágenes firmadas.
+        self.assertEqual(s.get('healthcheck'), {'disable': True})
+        con_imagenes = dict(ENV_FALSO, LOWTIDE_API_IMAGEN='ghcr.io/ejemplo/api@sha256:' + '0' * 64,
+                            LOWTIDE_PORTAL_IMAGEN='ghcr.io/ejemplo/portal@sha256:' + '0' * 64)
+        rc, salida = _config(con_imagenes, archivos=ARCHIVOS + ['docker-compose.imagenes.yml'],
+                             perfiles=('programador',))
+        self.assertEqual(rc, 0, salida[-500:])
+        self.assertEqual(json.loads(salida)['services']['programador'].get('healthcheck'), {'disable': True})
         # En la VM va COMPOSE_PROFILES=programador en el .env (docs/despliegue.md, 'Escaneos programados'): así cada
         # `up -d --build` también lo recrea con el código nuevo.
         rc, salida = _config(dict(ENV_FALSO, COMPOSE_PROFILES='programador'))

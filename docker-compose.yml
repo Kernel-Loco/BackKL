@@ -171,6 +171,10 @@ services:
     # los escaneos que siguen corriendo. Los 10 s de Docker no siempre alcanzan.
     stop_grace_period: 60s
     restart: unless-stopped
+    # El HEALTHCHECK de la imagen pega a /health de la API en el 8000, que aquí nadie escucha: sin esto queda
+    # 'unhealthy' a los 200 s aunque funcione. Si el proceso muere, restart lo levanta (vm-lowtide, 22 nov).
+    healthcheck:
+      disable: true
 
   # Corre una vez en cada `up`: con DEMO_ACCOUNTS=true pone contraseña y MFA a las cuentas
   # de la semilla (cirdan/auth/demo.py). Con false las apaga: les vuelve a poner el hash de relleno
