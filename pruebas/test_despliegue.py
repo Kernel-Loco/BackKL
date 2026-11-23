@@ -258,8 +258,14 @@ class Despliegue(unittest.TestCase):
         self.assertIn('NET_RAW', s.get('cap_drop') or [])
         self.assertEqual(s['logging'], cfg['services']['db']['logging'])
         self.assertTrue(s['init'])
+        self.assertEqual(s['stop_grace_period'], '1m0s')  # tiempos-3: detener() alcanza a cerrar los escaneos
         for llave in ('TOTP', 'PASSWORD_HASH', 'CARTA', 'IA_', 'CORREO'):
             self.assertEqual([k for k in s['environment'] if k.startswith(llave)], [], llave)
+        # En la VM va COMPOSE_PROFILES=programador en el .env (docs/despliegue.md, 'Escaneos programados'): así cada
+        # `up -d --build` también lo recrea con el código nuevo.
+        rc, salida = _config(dict(ENV_FALSO, COMPOSE_PROFILES='programador'))
+        self.assertEqual(rc, 0, salida[-500:])
+        self.assertIn('programador', json.loads(salida)['services'])
 
     def test_15_el_healthcheck_espera_a_la_llave_de_key_vault(self):
         # Hallazgos 8, 11 y 12: la API puede tardar hasta keyvault.PLAZO en leer cada llave antes de rendirse, y desde

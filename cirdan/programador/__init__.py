@@ -13,15 +13,18 @@ vuelta cada PROGRAMADOR_INTERVALO segundos (60 por omisión). En cada vuelta:
    revisa otra vez la carta, consulta el TXT en vivo (evidencia 'pre_scan') y crea el escaneo. El trigger
    scans_require_authorization y el índice único de un escaneo activo por dominio siguen de candados. Así el turno y
    el escaneo se confirman juntos o ninguno.
-3. Si solicitar() lo rechaza por scan_in_progress, el turno queda completo: el escaneo en curso lo cubre. Si lo
-   rechaza por otra cosa (TXT que ya no está, carta que venció hoy), queda auditado como cualquier rechazo y el
-   siguiente intento va a `ahora + least(scan_interval, 1 día)`. Si algo lanza, la transacción se deshace y el
-   siguiente intento va a una hora, en otra transacción.
+3. Si solicitar() lo rechaza (un escaneo a pedido en curso, TXT que ya no está, carta que venció hoy), queda
+   auditado como cualquier rechazo y el siguiente intento va a `ahora + least(scan_interval, 1 día)`: con
+   scan_in_progress tampoco se da el turno completo, porque el que corre puede fallar. Si algo lanza, la transacción
+   se deshace y el siguiente intento va a una hora, en otra transacción.
 4. Los aceptados corren en un hilo aparte después de confirmar, como en la API (cirdan/api/escaneos.py). A lo más
-   PROGRAMADOR_MAX_ESCANEOS (2 por omisión, comentario 10262) a la vez en el proceso.
+   PROGRAMADOR_MAX_ESCANEOS (2 por omisión, comentario 10262) a la vez en el proceso. Si el escaneo termina en
+   'failed' (lanzó, ninguna fuente respondió, no se pudo lanzar o lo cerró detener()), el turno reclamado baja a
+   `ahora + 1 hora` (least: nunca lo aleja), en vez de esperar el intervalo entero.
 
-Un dominio fuera de DOMINIOS_EN_VIVO se salta sin reclamar ni auditar: solicitar() lo rechazaría con
-live_scan_not_allowed en cada vuelta. En la VM DOMINIOS_EN_VIVO es '*'.
+Un dominio fuera de DOMINIOS_EN_VIVO se salta sin auditar ni consultar: solicitar() lo rechazaría con
+live_scan_not_allowed en cada vuelta. Su turno se pospone un día para que no ocupe el lote de cada vuelta. En la VM
+DOMINIOS_EN_VIVO lleva la lista de los dominios con carta vigente (docs/despliegue.md).
 
 Una sola instancia: __main__ toma un candado de sesión (pg_try_advisory_lock) en una conexión propia y sin él no da
 vueltas. Si se encendieran dos, SKIP LOCKED y el índice único siguen evitando escaneos dobles.
@@ -63,6 +66,23 @@ RETURNING d.fqdn::text AS fqdn, p.scan_interval
 '''
 POSPONER_SQL = ('UPDATE domains SET next_scan_at = coalesce(%s::timestamptz, now()) '
                 '+ least(%s::interval, %s::interval) WHERE id = %s')
+# Un dominio fuera de DOMINIOS_EN_VIVO: sin reclamar ni auditar, solo se aparta un día del frente del lote. Mismo
+# SKIP LOCKED y misma condición de vencido que RECLAMAR_SQL, así no espera ni pisa un turno que otro tomó.
+APARTAR_SQL = '''
+UPDATE domains SET next_scan_at = coalesce(%(ahora)s::timestamptz, now()) + %(espera)s::interval
+ WHERE id = (SELECT id FROM domains
+              WHERE id = %(id)s
+                AND (next_scan_at IS NULL OR next_scan_at <= coalesce(%(ahora)s::timestamptz, now()))
+                FOR UPDATE SKIP LOCKED)
+'''
+# El escaneo programado quedó en 'failed': el turno que reclamó baja a `ahora + espera`. least() nunca lo aleja, y si el
+# escaneo terminó bien (completed o partial) no cambia nada.
+REINTENTAR_SQL = '''
+UPDATE domains d
+   SET next_scan_at = least(d.next_scan_at, coalesce(%(ahora)s::timestamptz, now()) + %(espera)s::interval)
+  FROM scans s
+ WHERE s.id = %(scan)s AND s.domain_id = d.id AND s.status = 'failed'
+'''
 
 _hilos = {}               # scan_id -> (org, hilo) de los escaneos que lanzó este proceso
 _hilos_candado = threading.Lock()
@@ -98,12 +118,23 @@ def en_curso():
         return len(_hilos)
 
 
+def _reintentar_pronto(org, scan_id, ahora=None, conn=None):
+    """Si el escaneo quedó en 'failed', su dominio se intenta otra vez en ESPERA_ERROR y no al siguiente turno."""
+    try:
+        with _en_empresa(org, conn) as c:
+            c.execute(REINTENTAR_SQL, {'ahora': ahora, 'espera': ESPERA_ERROR, 'scan': scan_id})
+    except Exception:
+        log.exception('no se pudo adelantar el turno del escaneo %s', scan_id)
+
+
 def _correr(org, scan_id, fqdn):
     try:
         orquestador.correr(org, scan_id, fqdn)
     except Exception as e:  # nunca dejar un escaneo en 'running' para siempre
         log.exception('el escaneo programado %s falló', scan_id)
         orquestador.marcar_fallido(org, scan_id, e)
+    finally:
+        _reintentar_pronto(org, scan_id)
 
 
 def lanzar(org, scan_id, fqdn):
@@ -123,6 +154,7 @@ def detener(motivo='El programador se detuvo antes de terminar el escaneo'):
             orquestador.marcar_fallido(org, scan_id, RuntimeError(motivo))
         except Exception:
             log.exception('no se pudo cerrar el escaneo %s', scan_id)
+        _reintentar_pronto(org, scan_id)
 
 
 @contextmanager
@@ -151,13 +183,16 @@ def _turno(org, domain_id, ahora, consultar, conn):
     """Reclama el turno del dominio y pide su escaneo en la misma transacción. None si no tocaba o no se consulta."""
     with _en_empresa(org, conn) as c:
         dominio = c.execute('SELECT fqdn::text FROM domains WHERE id = %s', (domain_id,)).fetchone()
-        if not dominio or (consultar is None and not orquestador.en_vivo_permitido(dominio['fqdn'])):
+        if not dominio:
+            return None
+        if consultar is None and not orquestador.en_vivo_permitido(dominio['fqdn']):
+            c.execute(APARTAR_SQL, {'ahora': ahora, 'espera': TOPE_RECHAZO, 'id': domain_id})
             return None
         turno = c.execute(RECLAMAR_SQL, {'ahora': ahora, 'id': domain_id}).fetchone()
         if not turno:
             return None  # otro proceso lo tomó o ya no está vencido
         solicitud = orquestador.solicitar(org, turno['fqdn'], trigger='scheduled', consultar=consultar, conn=c)
-        if not solicitud.aceptada and solicitud.motivos != ['scan_in_progress']:
+        if not solicitud.aceptada:  # también scan_in_progress: el escaneo en curso puede fallar
             c.execute(POSPONER_SQL, (ahora, turno['scan_interval'], TOPE_RECHAZO, domain_id))
         return solicitud
 
@@ -170,12 +205,13 @@ def _posponer_por_error(org, domain_id, ahora, conn):
         log.exception('no se pudo posponer el dominio %s', domain_id)
 
 
-def una_vuelta(ahora=None, consultar=None, lanzar_con=None, conn=None, tope=None):
+def una_vuelta(ahora=None, consultar=None, lanzar_con=None, conn=None, tope=None, parada=None):
     """Pide los escaneos que ya tocan y devuelve las solicitudes (aceptadas y rechazadas) de los turnos reclamados.
 
     `ahora` es el reloj simulado de las pruebas (None: now() de la base). `consultar` reemplaza la consulta DNS,
     `lanzar_con` reemplaza el hilo que corre el escaneo y `conn` es la conexión de la prueba, que se deshace al final.
-    `tope` reemplaza PROGRAMADOR_MAX_ESCANEOS.
+    `tope` reemplaza PROGRAMADOR_MAX_ESCANEOS. Con `parada` (threading.Event) puesta no empieza otro dominio: SIGTERM
+    no espera a que se consulte el TXT de todo el lote.
     """
     lanzar_con = lanzar_con or lanzar
     cupo = (tope if tope is not None else max_escaneos()) - en_curso()
@@ -185,7 +221,7 @@ def una_vuelta(ahora=None, consultar=None, lanzar_con=None, conn=None, tope=None
     with _tx(conn) as c:
         candidatos = c.execute(CANDIDATOS_SQL, (ahora, LOTE)).fetchall()
     for cand in candidatos:
-        if cupo <= 0:
+        if cupo <= 0 or (parada is not None and parada.is_set()):
             break
         org, domain_id = cand['organization_id'], cand['domain_id']
         try:
@@ -204,7 +240,11 @@ def una_vuelta(ahora=None, consultar=None, lanzar_con=None, conn=None, tope=None
                 lanzar_con(org, solicitud.scan_id, solicitud.fqdn)
             except Exception as e:  # sin hilo nadie lo cerraría: que no quede en 'running'
                 log.exception('no se pudo lanzar el escaneo %s', solicitud.scan_id)
-                orquestador.marcar_fallido(org, solicitud.scan_id, e)
+                try:
+                    orquestador.marcar_fallido(org, solicitud.scan_id, e)
+                except Exception:
+                    log.exception('no se pudo cerrar el escaneo %s', solicitud.scan_id)
+                _reintentar_pronto(org, solicitud.scan_id, ahora, conn)
         else:
             log.info('escaneo programado rechazado del dominio %s: %s', domain_id, ', '.join(solicitud.motivos))
     return solicitudes

@@ -13,7 +13,9 @@ Business y Enterprise cada día) sin duplicar escaneos, y no corre sin autorizac
 La de una empresa suspendida entra como postgres y se salta sin POSTGRES_PASSWORD (como en test_orquestador.py).
 """
 import os
+import threading
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, time as hora, timedelta, timezone
 from unittest import mock
 
@@ -143,6 +145,11 @@ class Base(unittest.TestCase):
         self.conn.execute("UPDATE scans SET status = 'completed', finished_at = now() "
                           "WHERE domain_id = %s AND status IN ('queued', 'running')", (dominio,))
 
+    def fallido(self, org, scan_id, error):
+        """marcar_fallido() en la conexión de la prueba."""
+        self.uno(org, "UPDATE scans SET status = 'failed', finished_at = now() WHERE id = %s AND status = 'running' "
+                      'RETURNING id', scan_id)
+
     def candidatos(self, ahora):
         return {r['domain_id'] for r in self.conn.execute(
             'SELECT domain_id::text FROM scheduled_scan_candidates(%s, 500)', (ahora,)).fetchall()}
@@ -231,7 +238,8 @@ class SinDuplicar(Base):
 
     def test_7_con_un_escaneo_en_curso_no_se_crea_otro(self):
         # El índice único de un escaneo activo por dominio sigue de tercer candado: con uno a pedido en curso, el
-        # programado se rechaza por scan_in_progress y el turno queda completo, porque el que corre lo cubre.
+        # programado se rechaza por scan_in_progress. El turno no queda completo (el que corre puede fallar): va a
+        # least(intervalo, 1 día), un día en Starter en vez de 7.
         self.empresa(ACME)
         a_pedido = orquestador.solicitar(ACME, 'acme-demo.mx', consultar=responde(TXT[ACME_DEMO]), conn=self.conn)
         self.assertTrue(a_pedido.aceptada, a_pedido.detalle)
@@ -240,7 +248,7 @@ class SinDuplicar(Base):
         self.assertEqual([(x.aceptada, x.motivos) for x in s], [(False, ['scan_in_progress'])])
         self.assertEqual(self.lanzados, [])
         self.assertEqual(self.escaneos(ACME_DEMO), [])
-        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(days=7))
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(days=1))
 
     def test_8_tope_de_escaneos_a_la_vez(self):
         self.vence(ACME_DEMO)
@@ -333,15 +341,21 @@ class SinAutorizacion(Base):
                     self.assertNotIn(ACME, {r['organization_id'] for r in filas}, estado)
 
     def test_15_fuera_de_dominios_en_vivo_no_reclama(self):
-        # Sin DNS simulado solo se consultan en vivo los de DOMINIOS_EN_VIVO: acme-demo.mx se salta sin reclamar,
-        # sin auditar y sin tocar la red.
+        # Sin DNS simulado solo se consultan en vivo los de DOMINIOS_EN_VIVO: acme-demo.mx se salta sin escaneo, sin
+        # auditar y sin tocar la red. Su turno se aparta un día para que 100 dominios así al frente del lote no dejen
+        # fuera a los permitidos.
         self.vence(ACME_DEMO)
         with mock.patch.dict(os.environ, {'DOMINIOS_EN_VIVO': 'olmardo.com'}), \
                 mock.patch.object(orquestador.dns_txt, 'consultar_dns', side_effect=AssertionError('salió a la red')):
             s = programador.una_vuelta(ahora=self.t0, conn=self.conn, tope=10,
                                        lanzar_con=lambda *a: self.lanzados.append(a))
+            self.assertEqual(programador.una_vuelta(ahora=self.t0 + timedelta(hours=23), conn=self.conn, tope=10,
+                                                    lanzar_con=lambda *a: self.lanzados.append(a)), [])
         self.assertEqual(s, [])
-        self.assertIsNone(self.turno(ACME_DEMO))
+        self.assertEqual(self.lanzados, [])
+        self.assertEqual(self.escaneos(ACME_DEMO), [])
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(days=1))
+        self.assertNotIn(ACME_DEMO, self.candidatos(self.t0 + timedelta(hours=23)))
         self.assertIsNone(self.uno(ACME, "SELECT 1 FROM audit_log WHERE action = 'scan.rejected' AND entity_id = %s "
                                          'AND created_at >= %s', ACME_DEMO, self.t0))
 
@@ -354,13 +368,100 @@ class SinAutorizacion(Base):
         self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1))
 
     def test_17_si_no_se_puede_lanzar_queda_fallido(self):
+        # marcar_fallido abre su propia transacción y no vería el escaneo sin confirmar de la prueba: lo hace aquí.
         self.vence(ACME_DEMO)
-        with mock.patch.object(orquestador, 'marcar_fallido') as marcar, self.assertLogs('cirdan.programador', 'ERROR'):
+        with mock.patch.object(orquestador, 'marcar_fallido', side_effect=self.fallido) as marcar, \
+                self.assertLogs('cirdan.programador', 'ERROR'):
             s = programador.una_vuelta(ahora=self.t0, consultar=responde(TXT[ACME_DEMO]), conn=self.conn, tope=10,
                                        lanzar_con=mock.Mock(side_effect=RuntimeError('sin hilos')))
         self.assertEqual(len(s), 1)
         marcar.assert_called_once()
         self.assertEqual(marcar.call_args.args[:2], (ACME, s[0].scan_id))
+        # El turno de 7 días baja a una hora.
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1))
+
+
+class TrasLanzar(Base):
+    """Lo que pasa con el turno cuando el escaneo ya corre en su hilo. _correr() y detener() abren sus propias
+    transacciones: aquí cirdan.db.transaction se cambia por un punto de guardado en la conexión de la prueba, para que
+    vean el escaneo sin confirmar y todo se deshaga al final. now() de la base es t0 en toda la prueba."""
+
+    def setUp(self):
+        super().setUp()
+        self.vence(ACME_DEMO)
+        s = self.vuelta(self.t0)
+        self.assertEqual([x.aceptada for x in s], [True], [x.detalle for x in s])
+        self.scan_id = s[0].scan_id
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(days=7))
+        conn = self.conn
+
+        @contextmanager
+        def en_la_prueba(org=None, isolation=None):
+            with conn.transaction():
+                if org:
+                    conn.execute("SELECT set_config('app.current_org', %s, true)", (str(org),))
+                yield conn
+
+        parche = mock.patch.object(programador, 'transaction', en_la_prueba)
+        parche.start()
+        self.addCleanup(parche.stop)
+
+    def estado(self):
+        return self.uno(ACME, 'SELECT status FROM scans WHERE id = %s', self.scan_id)['status']
+
+    def test_24_si_el_escaneo_falla_se_intenta_otra_vez_en_una_hora(self):
+        with mock.patch.object(orquestador, 'correr', side_effect=RuntimeError('recolector caído')), \
+                mock.patch.object(orquestador, 'marcar_fallido', side_effect=self.fallido), \
+                self.assertLogs('cirdan.programador', 'ERROR'):
+            programador._correr(ACME, self.scan_id, 'acme-demo.mx')
+        self.assertEqual(self.estado(), 'failed')
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1))
+        s = self.vuelta(self.t0 + timedelta(hours=1))
+        self.assertEqual([(x.fqdn, x.aceptada) for x in s], [('acme-demo.mx', True)], [x.detalle for x in s])
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1, days=7))
+
+    def test_25_failed_sin_excepcion_tambien_y_completed_no_mueve_el_turno(self):
+        # correr() no lanza cuando ninguna fuente responde: deja el escaneo en 'failed' y regresa.
+        def termina(estado):
+            def correr(org, scan_id, fqdn):
+                self.uno(org, 'UPDATE scans SET status = %s, finished_at = now() WHERE id = %s RETURNING id',
+                         estado, scan_id)
+                return {'scan_id': scan_id, 'status': estado}
+            return correr
+
+        with mock.patch.object(orquestador, 'correr', side_effect=termina('completed')):
+            programador._correr(ACME, self.scan_id, 'acme-demo.mx')
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(days=7))
+        self.empresa(ACME)
+        self.conn.execute("UPDATE scans SET status = 'running', finished_at = NULL WHERE id = %s", (self.scan_id,))
+        with mock.patch.object(orquestador, 'correr', side_effect=termina('failed')):
+            programador._correr(ACME, self.scan_id, 'acme-demo.mx')
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1))
+
+    def test_26_detener_cierra_el_escaneo_y_adelanta_el_turno(self):
+        hilo = mock.Mock(is_alive=mock.Mock(return_value=True))
+        with programador._hilos_candado:
+            programador._hilos[self.scan_id] = (ACME, hilo)
+        self.addCleanup(programador._hilos.pop, self.scan_id, None)
+        with mock.patch.object(orquestador, 'marcar_fallido', side_effect=self.fallido) as marcar:
+            programador.detener()
+        self.assertEqual(marcar.call_args.args[:2], (ACME, self.scan_id))
+        self.assertEqual(self.estado(), 'failed')
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1))
+        # Un escaneo que ya no corre no se toca.
+        hilo.is_alive.return_value = False
+        with mock.patch.object(orquestador, 'marcar_fallido') as marcar:
+            programador.detener()
+        marcar.assert_not_called()
+
+    def test_27_con_la_parada_puesta_no_empieza_otro_dominio(self):
+        self.terminar(ACME_DEMO)
+        self.vence(ACME_TIENDA)
+        parada = threading.Event()
+        parada.set()
+        self.assertEqual(programador.una_vuelta(ahora=self.t0, consultar=responde(*TXT.values()), conn=self.conn,
+                                                tope=10, parada=parada, lanzar_con=mock.Mock()), [])
+        self.assertIsNone(self.turno(ACME_TIENDA))
 
 
 class Funcion(Base):
@@ -407,7 +508,7 @@ class Servicio(unittest.TestCase):
     def test_21_una_vez_da_una_vuelta_con_candado(self):
         with mock.patch.object(programador, 'una_vuelta') as vuelta, mock.patch.object(servicio.signal, 'signal'):
             self.assertEqual(servicio.main(['--una-vez']), 0)
-        vuelta.assert_called_once_with()
+        vuelta.assert_called_once_with(parada=mock.ANY)
 
     def test_22_sin_candado_no_da_vuelta(self):
         otro = servicio.tomar_candado()

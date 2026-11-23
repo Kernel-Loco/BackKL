@@ -143,7 +143,8 @@ services:
   # ya les toca según plans.scan_interval (cirdan/programador). Misma imagen y rol que la API, sin puertos. Va con
   # profile: `docker compose up -d` no lo enciende. Se enciende a propósito con
   # `docker compose --profile programador up -d programador`, porque al arrancar salen en el acto los dominios con
-  # next_scan_at vacío o vencido. Pide la migración 030 aplicada.
+  # next_scan_at vacío o vencido. Pide la migración 030 aplicada. En la VM va COMPOSE_PROFILES=programador en el .env,
+  # para que cada `up -d --build` lo recree con el código nuevo (docs/despliegue.md, 'Escaneos programados').
   programador:
     build: .
     command: ["python", "-m", "cirdan.programador"]
@@ -166,6 +167,9 @@ services:
         condition: service_healthy
     # tini como PID 1, como la API: recoge los git que el recolector de GitHub mata por tiempo y pasa SIGTERM.
     init: true
+    # Con SIGTERM no empieza otro dominio, pero el que está consultando su TXT termina, y detener() cierra en la base
+    # los escaneos que siguen corriendo. Los 10 s de Docker no siempre alcanzan.
+    stop_grace_period: 60s
     restart: unless-stopped
 
   # Corre una vez en cada `up`: con DEMO_ACCOUNTS=true pone contraseña y MFA a las cuentas

@@ -4,7 +4,8 @@
     python -m cirdan.programador --una-vez  # una sola vuelta, espera a sus escaneos y sale (código 0)
 
 Con Docker: docker compose --profile programador up -d programador. No se enciende con `docker compose up -d`
-(profiles en docker-compose.yml): al encenderlo salen en el acto los dominios con next_scan_at vacío o vencido.
+(profiles en docker-compose.yml) salvo con COMPOSE_PROFILES=programador en el .env, como en la VM (docs/despliegue.md,
+'Escaneos programados'): al encenderlo salen en el acto los dominios con next_scan_at vacío o vencido.
 
 Solo da vueltas mientras tiene el candado de sesión CANDADO en su propia conexión. Si otro programador lo tiene, espera
 y lo vuelve a intentar en cada vuelta. Si la conexión del candado se cae, la cierra y lo vuelve a tomar.
@@ -72,7 +73,7 @@ def main(argv=None):
                         log.warning('otro programador tiene el candado: esta instancia espera')
                     avisado = candado is None
                 if candado is not None:
-                    programador.una_vuelta()
+                    programador.una_vuelta(parada=parada)
             except Exception:
                 log.exception('falló la vuelta del programador')
             if args.una_vez:
