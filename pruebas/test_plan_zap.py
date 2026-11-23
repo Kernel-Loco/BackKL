@@ -34,15 +34,26 @@ class PlanZap(unittest.TestCase):
         cls.guia = GUIA.read_text(encoding='utf-8')
 
     def test_1_el_replacer_solo_toca_lowtidesec(self):
-        """Sin `url`, ZAP pondría la cookie en cualquier petición que saliera de él, también hacia terceros."""
+        """Sin `url`, ZAP pondría el Origin en cualquier petición que saliera de él, también hacia terceros."""
         replacer = bloque(self.plan, '- type: replacer', '- type: spider')
         reglas = re.split(r'\n\s+- description:', replacer)[1:]
-        self.assertEqual(len(reglas), 2, replacer)
-        for regla in reglas:
-            self.assertIn(URL_LOWTIDE, regla)
-        self.assertIn('lt_session=${ZAP_LT_SESSION}', replacer)
+        self.assertEqual(len(reglas), 1, replacer)
+        self.assertIn(URL_LOWTIDE, reglas[0])
+        self.assertIn('matchString: Origin', reglas[0])
+        # La cookie ya no va en el Replacer: ZAP 2.17 no sustituye ${VAR} en sus reglas y mandaría el texto literal.
+        self.assertNotIn('Cookie', replacer)
+        self.assertNotIn('ZAP_LT_SESSION', replacer)
         # Cada regla tiene un solo url y es el de lowtidesec.com.
-        self.assertEqual(re.findall(r'^\s+url: .*$', replacer, re.M), ['        ' + URL_LOWTIDE] * 2)
+        self.assertEqual(re.findall(r'^\s+url: .*$', replacer, re.M), ['        ' + URL_LOWTIDE])
+
+    def test_1b_la_cookie_solo_va_a_lowtidesec(self):
+        """La cookie entra por las variables de autenticación de ZAP, limitadas al host lowtidesec.com."""
+        run = next(linea for linea in self.guia.splitlines() if 'docker run' in linea and 'plan.yaml' in linea)
+        self.assertIn('-e ZAP_AUTH_HEADER=Cookie', run)
+        self.assertRegex(run, r'-e ZAP_AUTH_HEADER_SITE=lowtidesec\.com\s')
+        # El valor se pasa por el entorno, nunca escrito en la línea del comando.
+        self.assertRegex(run, r'-e ZAP_AUTH_HEADER_VALUE\s')
+        self.assertNotRegex(run, r'-e ZAP_AUTH_HEADER_VALUE=')
 
     def test_2_reglas_de_denegacion_de_servicio_apagadas(self):
         ascan = bloque(self.plan, '- type: activeScan', '- type: report')
