@@ -1,5 +1,6 @@
 """Endpoints de inicio de sesión: /api/v1/auth/captcha, /login, /mfa/verify, /mfa/setup, /mfa/enable, /logout, /me,
-/password, las passkeys (/passkeys, RC-331) y el enlace al correo (/link/request y /link/verify, #28, RC-63).
+/password, las passkeys (/passkeys, RC-331), el enlace al correo (/link/request y /link/verify, #28, RC-63) y la
+recuperación de la contraseña con un enlace (/password-reset y /password-reset/confirm, RC-335).
 
 Los errores de credenciales usan siempre el mismo mensaje y el mismo tiempo, exista o no el
 correo, para que nadie pueda saber qué cuentas existen.
@@ -487,6 +488,171 @@ def verify_link(body: LinkVerifyIn, request: Request, response: Response):
         raise HTTPException(401, LINK_INVALID)
     _clear_fails(email)
     return {'mfa_required': False, 'user': user}
+
+
+# ------------------------------------------------------------------ recuperar la contraseña con un enlace (RC-335)
+
+# El mismo texto para todos, exista o no la cuenta, y aunque el enlace no salga.
+RESET_SENT = ('Si el correo tiene cuenta, te enviamos un enlace para elegir una contraseña nueva. Vence en 30 minutos. '
+              'Si no llega, pide a un Administrador de tu organización que restablezca tu contraseña.')
+RESET_INVALID = 'El enlace no es válido o ya venció. Pide otro desde «¿Olvidaste tu contraseña?».'
+RESET_AGAIN = ' El enlace ya se usó: pide otro.'
+RESET_LENGTH = 'La contraseña nueva debe tener entre %d y %d caracteres.' % (passwords.MIN_LENGTH, passwords.MAX_LENGTH)
+RESET_DONE = 'Tu contraseña cambió y cerramos todas tus sesiones. Inicia sesión con la nueva.'
+RESET_MINUTES = sessions.RESET_SECONDS // 60
+RESET_REJECTED_REASONS = {'comun': 'common', 'filtrada': 'pwned'}
+
+
+class PasswordResetIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    captcha: str | None = Field(default=None, max_length=captcha.MAX_PAYLOAD)
+
+
+class PasswordResetConfirmIn(BaseModel):
+    token: str = Field(min_length=20, max_length=100)
+    # Sin el mínimo ni el máximo de la política en el modelo: el token se gasta antes de revisar la contraseña (Hecho
+    # cuando, punto 2), y un 422 del modelo saldría antes. El tope de 1024 solo acota el cuerpo.
+    new_password: str = Field(min_length=1, max_length=1024)
+
+
+def _send_reset(email, ip):
+    """Corre después del 202, así que la respuesta tarda lo mismo exista o no la cuenta. Ni el token ni el enlace van
+    al log ni a la bitácora; el correo solo va a Resend."""
+    try:
+        if not sessions.take_reset_request(email, ip):
+            log.warning('recuperar: límite de pedidos alcanzado: ip=%r dominio=%r', ip, _email_domain(email))
+            return
+        with transaction() as conn:
+            found = conn.execute('SELECT * FROM login_lookup(%s)', (email,)).fetchone()
+        if not found:
+            log.warning('recuperar pedido para un correo que no existe: ip=%r dominio=%r', ip, _email_domain(email))
+            return
+        if found['password_hash'] == HASH_DE_RELLENO:
+            # Una cuenta de demo apagada (cirdan/auth/demo.py) no se revive con una contraseña nueva, como en RC-63.
+            log.warning('recuperar pedido para una cuenta sin contraseña (hash de relleno): ip=%r dominio=%r', ip,
+                        _email_domain(email))
+            return
+        org, user_id = str(found['organization_id']), str(found['user_id'])
+        reservado = sessions.reserve_link_send(_link_daily_cap(), user_id, tipo='reset')
+        if reservado <= 0:
+            motivo = 'tope_cuenta' if reservado < 0 else 'tope_diario'
+            log.warning('recuperar: %s alcanzado', motivo)
+            token = None
+        else:
+            token = sessions.create_reset({'user_id': user_id, 'org_id': org, 'email': email})
+            motivo = correo.enviar_recuperacion(email, '%s/forgot-password/reset#t=%s' % (_portal_url(), token),
+                                                RESET_MINUTES)
+            if motivo:
+                sessions.delete_reset(token)  # un enlace que no llegó no queda vivo
+        with transaction(org) as conn:
+            if motivo:
+                audit(conn, org, 'auth.password_reset_send_failed', user_id, ip, 'user', user_id, {'reason': motivo})
+            else:
+                audit(conn, org, 'auth.password_reset_requested', user_id, ip, 'user', user_id,
+                      {'expires_minutes': RESET_MINUTES})
+    except Exception:
+        log.exception('recuperar: falló el envío en segundo plano')
+
+
+def _after_reset(user_id, org, email, ip):
+    """Después de responder: borra los fallos de login y de cambio de contraseña y manda el aviso. Si algo falla queda
+    en el log: la contraseña ya cambió y las sesiones ya se cerraron."""
+    try:
+        sessions.clear_fails(email)
+    except Exception:
+        log.exception('recuperar: no se pudieron borrar los fallos de login del usuario %s', user_id)
+    _clear_password_attempts(user_id)
+    try:
+        reservado = sessions.reserve_link_send(_link_daily_cap(), user_id, tipo='aviso')
+        motivo = ('tope_cuenta' if reservado < 0 else 'tope_diario') if reservado <= 0 \
+            else correo.enviar_aviso_cambio(email)
+        if motivo:
+            with transaction(org) as conn:
+                audit(conn, org, 'auth.password_reset_notice_failed', user_id, ip, 'user', user_id, {'reason': motivo})
+    except Exception:
+        log.exception('recuperar: no se pudo mandar el aviso de contraseña cambiada del usuario %s', user_id)
+
+
+def _reset_rejected(org, user_id, ip, reason, detail):
+    """El token ya se gastó: deja el rechazo en la bitácora de la cuenta (sin la contraseña) y responde 400."""
+    with transaction(org) as conn:
+        audit(conn, org, 'auth.password_reset_rejected', user_id, ip, 'user', user_id, {'reason': reason})
+    raise HTTPException(400, detail)
+
+
+@router.post('/password-reset', status_code=202,
+             summary='Pide un enlace para recuperar la contraseña; responde igual exista o no la cuenta')
+def request_password_reset(body: PasswordResetIn, request: Request):
+    # El captcha va primero, como en /login y /link/request: sin él no se cuenta nada ni se busca el correo.
+    if not captcha.verify(body.captcha):
+        raise HTTPException(400, CAPTCHA_INVALID)
+    email = body.email.strip().lower()
+    return JSONResponse({'detail': RESET_SENT}, status_code=202, headers=NO_STORE,
+                        background=BackgroundTask(_send_reset, email, client_ip(request)))
+
+
+@router.post('/password-reset/confirm',
+             summary='Canjea el enlace de recuperación por una contraseña nueva y cierra todas las sesiones')
+def confirm_password_reset(body: PasswordResetConfirmIn, request: Request):
+    # El token se gasta antes de revisar nada (Hecho cuando, punto 2): una sola vez, también con dos canjes a la vez.
+    pending = sessions.take_reset(body.token)
+    if not pending:
+        raise HTTPException(400, RESET_INVALID)
+    ip = client_ip(request)
+    org, user_id = pending['org_id'], pending['user_id']
+    new = body.new_password
+    if not passwords.MIN_LENGTH <= len(new) <= passwords.MAX_LENGTH:
+        _reset_rejected(org, user_id, ip, 'length', RESET_LENGTH + RESET_AGAIN)
+    topada = []
+
+    def permitir():
+        # El mismo tope por usuario de consultas a Pwned Passwords que /password (RC-334).
+        if sessions.take_pwned_check(user_id) > sessions.MAX_PWNED_CHECKS:
+            topada.append(True)
+            return False
+        return True
+    # Antes de bloquear la fila: la consulta a la API tarda hasta 2 s.
+    revision = passwords.revisar_nueva(new, permitir)
+    if revision.problema:
+        _reset_rejected(org, user_id, ip, RESET_REJECTED_REASONS[revision.problema],
+                        NEW_PASSWORD_PROBLEMS[revision.problema] + RESET_AGAIN)
+    rejected = None
+    with transaction(org) as conn:
+        # Como /link/verify: la cuenta sigue activa y su empresa en trial o active, y no es una de demo apagada. FOR NO
+        # KEY UPDATE, el mismo lock que /login y /password: un cambio a la vez.
+        row = conn.execute(
+            'SELECT u.email::text, u.password_hash = %s AS demo_off '
+            '  FROM users u JOIN organizations o ON o.id = u.organization_id '
+            " WHERE u.id = %s AND u.is_active AND o.status IN ('trial', 'active') FOR NO KEY UPDATE OF u",
+            (HASH_DE_RELLENO, user_id)).fetchone()
+        if not row:
+            rejected = 'inactive'
+        elif row['demo_off']:
+            rejected = 'demo_off'
+        else:
+            conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
+                         (passwords.hash_password(new, user_id), user_id))
+            # Como /password: quien tenía la contraseña anterior pudo registrar una passkey sin TOTP (RC-331). Se borran
+            # antes de cualquier audit(), para no esperar una fila de passkey con el candado de la bitácora. El TOTP
+            # no se toca: el siguiente inicio de sesión lo pide.
+            removed = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s RETURNING id::text',
+                                   (user_id,)).fetchall()
+            for passkey in removed:
+                audit(conn, org, 'auth.passkey_deleted', user_id, ip, 'passkey', passkey['id'],
+                      {'reason': 'password_reset'})
+            audit(conn, org, 'auth.password_reset', user_id, ip, 'user', user_id, {'passkeys_removed': len(removed)})
+            if revision.sin_respuesta:
+                audit(conn, org, 'auth.pwned_check_unavailable', user_id, ip, 'user', user_id,
+                      {'fallback': 'common_list', 'reason': 'rate_limited'} if topada else {'fallback': 'common_list'})
+            # Todas las sesiones de la cuenta, en cualquier empresa. Antes del commit, como /password: si Valkey falla,
+            # la contraseña no cambia (el token sí queda gastado y se pide otro).
+            sessions.delete_others(user_id, None)
+        if rejected:
+            audit(conn, org, 'auth.password_reset_rejected', user_id, ip, 'user', user_id, {'reason': rejected})
+    if rejected:
+        raise HTTPException(400, RESET_INVALID)
+    return JSONResponse({'detail': RESET_DONE, 'passkeys_removed': len(removed)}, headers=NO_STORE,
+                        background=BackgroundTask(_after_reset, user_id, org, row['email'].lower(), ip))
 
 
 MFA_ALREADY ='La verificación en dos pasos ya está activa en tu cuenta.'
