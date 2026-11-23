@@ -6,7 +6,7 @@ Comparar dos fotos dice qué hallazgo es nuevo, cuál ya no está y cuál sigue,
 'gone' no dice por qué ya no está: puede estar resuelto, marcado como falso positivo o, si 'desde' es
 más nuevo que 'hasta', ser uno que apareció después. El estado de hoy va en status_now.
 """
-from cirdan.exportar import csv_con_bom
+from cirdan.exportar import ATRIBUCION_POR_REGLA, csv_con_bom
 
 CAMBIOS = ('new', 'gone', 'kept')
 _ORDEN_SEVERIDAD = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
@@ -14,7 +14,7 @@ _ORDEN_SEVERIDAD = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
 ENCABEZADOS_CSV = (
     'dominio', 'desde_score_id', 'desde_fecha', 'hasta_score_id', 'hasta_fecha', 'hallazgo_id', 'cambio',
     'cambio_severidad', 'titulo', 'regla', 'categoria', 'activo', 'tipo_activo', 'severidad_desde',
-    'severidad_hasta', 'puntos_desde', 'puntos_hasta', 'estado_actual',
+    'severidad_hasta', 'puntos_desde', 'puntos_hasta', 'estado_actual', 'atribucion',
 )
 
 
@@ -59,5 +59,5 @@ def exportar_csv(comparacion):
     filas = [(comparacion['domain'], d['score_id'], d['computed_at'], h['score_id'], h['computed_at'],
               i['finding_id'], i['change'], i['severity_changed'], i['title'], i['rule_code'], i['category'],
               i['asset'], i['asset_type'], i['severity_from'], i['severity_to'], i['penalty_from'], i['penalty_to'],
-              i['status_now']) for i in comparacion['items']]
+              i['status_now'], ATRIBUCION_POR_REGLA.get(i['rule_code'], '')) for i in comparacion['items']]
     return csv_con_bom(ENCABEZADOS_CSV, filas)

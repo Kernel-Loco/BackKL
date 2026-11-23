@@ -103,6 +103,9 @@ services:
       # InternetDB: exposed_iot_device, exposed_ot_device y outdated_software salen de sus etiquetas y, sin ellas,
       # quedan sin cobertura (docs/servicios_externos.md). El valor va solo en el .env, nunca en git.
       SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      # Llave que descifra las llaves de API de las fuentes guardadas en data_sources.api_key_enc (RC-54, la de
+      # HIBP). Vacía, HIBP queda sin cobertura por falta de llave. El valor va solo en el .env.
+      SOURCE_KEYS_ENCRYPTION_KEY: ${SOURCE_KEYS_ENCRYPTION_KEY:-}
       # Llave del HMAC de la huella de los correos personales del recolector de identidad (RC-56), de 32
       # caracteres o más. Vacía, personal_email_exposed queda sin cobertura. El valor va solo en el .env.
       IDENTITY_HMAC_KEY: ${IDENTITY_HMAC_KEY:-}
@@ -162,6 +165,7 @@ services:
       DOMINIOS_EN_VIVO: ${DOMINIOS_EN_VIVO:-olmardo.com}
       ORGS_GITHUB_DECLARADAS: ${ORGS_GITHUB_DECLARADAS:-olmardo.com=olmardo}
       SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      SOURCE_KEYS_ENCRYPTION_KEY: ${SOURCE_KEYS_ENCRYPTION_KEY:-}
       IDENTITY_HMAC_KEY: ${IDENTITY_HMAC_KEY:-}
       # Segundos entre vueltas y escaneos programados a la vez (comentario 10262 de RC-52).
       PROGRAMADOR_INTERVALO: ${PROGRAMADOR_INTERVALO:-60}

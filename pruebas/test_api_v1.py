@@ -1133,6 +1133,7 @@ class ApiV1(unittest.TestCase):
             fila = dict(zip(filas[0], next(f for f in filas[1:] if f[1] == hallazgo)))
             self.assertEqual(fila['titulo'], '\'=HYPERLINK("http://x","clic")')
             self.assertEqual(json.loads(fila['evidencia'])['banner'], '@SUM(1)')  # el JSON empieza con {, no es fórmula
+            self.assertEqual((filas[0][-1], fila['atribucion']), ('atribucion', ''))  # solo las filas de HIBP (RC-54)
             _, headers, texto = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/findings/export?formato=json')
             data = json.loads(texto)
             self.assertEqual(data, self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings'))
@@ -1141,6 +1142,39 @@ class ApiV1(unittest.TestCase):
                              '=HYPERLINK("http://x","clic")')  # el JSON no se toca
         finally:
             ok, _, err = psql("DELETE FROM findings WHERE id = '%s';" % hallazgo, user='postgres')
+            self.assertTrue(ok, err)
+
+    def test_9f_exportacion_con_la_atribucion_de_hibp(self):
+        # RC-54: la licencia CC BY 4.0 de HIBP pide la fuente con enlace donde se muestran sus datos. Un hallazgo de
+        # HIBP con su brecha, que se borra al terminar.
+        hallazgo = '80000000-0000-4000-8000-0000000005f8'
+        ok, _, err = psql('''
+            INSERT INTO findings (id, organization_id, domain_id, asset_id, rule_id, source_id, fingerprint,
+                                  severity, status, evidence, detected_at)
+            SELECT '%s', d.organization_id, d.id,
+                   (SELECT a.id FROM assets a WHERE a.domain_id = d.id ORDER BY a.id LIMIT 1),
+                   (SELECT r.id FROM scoring_rules r WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001'
+                       AND r.code = 'breach_exposure'),
+                   (SELECT s.id FROM data_sources s WHERE s.code = 'hibp'),
+                   sha256('rc54-prueba-atribucion'), 'critical', 'open',
+                   '{"title": "Correos de acme-demo.mx en la brecha Prueba", "breach_name": "Prueba"}', now()
+              FROM domains d WHERE d.fqdn = 'acme-demo.mx';
+            INSERT INTO breach_exposures (finding_id, organization_id, breach_name, breach_date, data_classes)
+            SELECT id, organization_id, 'Prueba', '2026-06-01', ARRAY['Email addresses', 'Passwords']
+              FROM findings WHERE id = '%s';
+        ''' % (hallazgo, hallazgo), user='postgres')
+        self.assertTrue(ok, err)
+        try:
+            _, _, texto = self.descargar(self.acme, '/api/v1/domains/acme-demo.mx/findings/export?formato=csv')
+            filas = list(csv.reader(io.StringIO(texto[1:], newline='')))
+            fila = dict(zip(filas[0], next(f for f in filas[1:] if f[1] == hallazgo)))
+            self.assertEqual(fila['fuente'], 'hibp')
+            self.assertEqual(fila['atribucion'], 'Fuente: Have I Been Pwned (https://haveibeenpwned.com), CC BY 4.0 '
+                                                 '(https://creativecommons.org/licenses/by/4.0/)')
+            self.assertTrue(all(f[-1] == '' for f in filas[1:] if f[1] != hallazgo and f[9] != 'hibp'))
+        finally:
+            ok, _, err = psql("DELETE FROM breach_exposures WHERE finding_id = '%s'; "
+                              "DELETE FROM findings WHERE id = '%s';" % (hallazgo, hallazgo), user='postgres')
             self.assertTrue(ok, err)
 
     def test_9e_comparacion_con_hallazgo_que_cambio_de_dominio(self):

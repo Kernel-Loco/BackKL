@@ -31,7 +31,7 @@ from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
 from cirdan.auth.deps import (Session, api_key_or_roles, client_ip, current_session, in_scope, require_roles,
                               session_or_api_key)
-from cirdan.exportar import csv_con_bom
+from cirdan.exportar import ATRIBUCION_POR_FUENTE, csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.orquestador import txt as dns_txt
 from cirdan.db import audit, transaction
@@ -47,7 +47,8 @@ LEE_HALLAZGOS = api_key_or_roles('analyst', 'admin')
 # Desde #23 vienen guardadas en la evidencia. Para los hallazgos de la semilla, que no las traen, se calculan
 # con las mismas reglas del contrato #21.
 TIPO = {
-    'breach_exposure': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
+    'breach_exposure': 'correos_en_brecha', 'breach_exposure_old': 'correos_en_brecha',
+    'breach_exposure_no_passwords': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
     'cert_expiring_soon': 'certificado_por_vencer', 'outdated_software': 'software_desactualizado',
     'exposed_rdp': 'servicio_expuesto', 'dmarc_missing': 'dmarc_faltante', 'spf_missing': 'spf_faltante',
     'lookalike_domain': 'dominio_parecido',
@@ -580,7 +581,7 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
                                        stats.get('sources_partial') or ())
     # Los códigos que el escaneo del score no revisó, con su fuente y su motivo, para que el portal los nombre (RC-229).
     huecos = cobertura.huecos(filas_corridas, stats.get('rules_without_coverage') or (),
-                              stats.get('sources_partial') or ())
+                              stats.get('sources_partial') or (), sin_llave=stats.get('rules_without_key') or ())
     cortes = configuracion.cortes_de_fila(rows[-1])
     categories = [{'category': c, 'score': rows[-1]['category_scores'][c],
                    'band': criterio.banda(rows[-1]['category_scores'][c], cortes),
@@ -672,8 +673,11 @@ def _json(data):
 ENCABEZADOS_HALLAZGOS = (
     'dominio', 'hallazgo_id', 'titulo', 'severidad', 'severidad_base', 'categoria', 'regla', 'activo',
     'tipo_activo', 'fuente', 'estado', 'recurrencia', 'cve', 'cvss', 'epss', 'en_kev', 'detectado',
-    'ultimo_escaneo_id', 'mitre_attack', 'iso_27001_2022', 'cis_controls_v8_1', 'evidencia',
+    'ultimo_escaneo_id', 'mitre_attack', 'iso_27001_2022', 'cis_controls_v8_1', 'evidencia', 'atribucion',
 )
+# La licencia CC BY 4.0 de HIBP pide nombrar la fuente con enlace donde se muestran sus datos (RC-54). En el CSV va en
+# su propia columna, solo en las filas de HIBP: una fila de comentario rompería a quien lo importa.
+ATRIBUCION_CSV = ATRIBUCION_POR_FUENTE
 
 
 REPORTE_DESCARGADO = 'report.downloaded'
@@ -715,7 +719,8 @@ def export_findings(request: Request, fqdn: str, formato: str = Query(default='j
                       i['asset'], i['asset_type'], i['source'], i['status'], i['recurrence'], i['cve_id'], i['cvss'],
                       i['epss'], i['in_kev'], i['detected_at'], i['last_scan_id'],
                       i['frameworks']['mitre_attack']['technique_id'], i['frameworks']['iso_27001_2022']['control_id'],
-                      i['frameworks']['cis_controls_v8_1']['safeguard_id'], i['evidence']) for i in items]
+                      i['frameworks']['cis_controls_v8_1']['safeguard_id'], i['evidence'],
+                      ATRIBUCION_CSV.get(i['source'], '')) for i in items]
             respuesta = _descarga(csv_con_bom(ENCABEZADOS_HALLAZGOS, filas), 'text/csv; charset=utf-8',
                                   '%s-hallazgos.csv' % fqdn)
         _registrar_descarga(conn, session, request, 'findings', formato, domain_id, len(items))
