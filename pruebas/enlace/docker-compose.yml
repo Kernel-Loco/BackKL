@@ -1,6 +1,7 @@
-# Compose aislado y sin red para pruebas/test_enlace.py (#28, RC-63): base, Valkey y API nuevos en una red interna, sin
-# salida a internet ni puertos hacia la PC, con Resend simulado (correo_falso.py). La prueba corre en el servicio
-# `pruebas`, dentro de esa misma red, porque una red interna no publica puertos. Nunca toca cirdan-pg16.
+# Compose aislado y sin red para pruebas/test_enlace.py (#28, RC-63) y pruebas/test_recuperar.py (RC-335): base,
+# Valkey y API nuevos en una red interna, sin salida a internet ni puertos hacia la PC, con Resend simulado
+# (correo_falso.py). La prueba corre en el servicio `pruebas`, dentro de esa misma red, porque una red interna no
+# publica puertos. Nunca toca cirdan-pg16.
 #
 #   C='docker compose -p backkl-enlace -f docker-compose.yml -f pruebas/enlace/docker-compose.yml'
 #   $C up -d --build --wait db valkey api correo-falso
@@ -42,7 +43,7 @@ services:
   pruebas:
     image: backkl-enlace-api   # la imagen que construye `api` en este proyecto: trae psycopg y redis
     profiles: [pruebas]
-    command: ["python", "-m", "unittest", "-v", "pruebas/test_enlace.py"]
+    command: ["python", "-m", "unittest", "-v", "pruebas/test_enlace.py", "pruebas/test_recuperar.py"]
     volumes:
       - ./pruebas:/app/pruebas:ro
       - ./cirdan/auth/demo.py:/app/cirdan/auth/demo.py:ro

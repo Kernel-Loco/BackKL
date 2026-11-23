@@ -51,6 +51,10 @@ MAX_LINKS_IP = 10     # y por IP
 LINK_DAY_SECONDS = 48 * 60 * 60  # el contador del día vive dos días: alcanza para cualquier zona y se borra solo
 MAX_LINKS_USER_DAY = 5  # envíos por cuenta al día: con unos pocos correos que existen nadie agota el tope global (M2)
 LINK_TRACE_SECONDS = 24 * 60 * 60  # cuánto se recuerda de quién era un enlace, para la bitácora del canje rechazado
+RESET_SECONDS = 30 * 60  # enlace para recuperar la contraseña (RC-335)
+RESET_WINDOW_SECONDS = 60 * 60  # ventana de los límites de pedidos de recuperación
+MAX_RESETS_EMAIL = 3   # pedidos por correo por hora (RC-335)
+MAX_RESETS_IP = 20     # y por IP
 
 
 @cache
@@ -379,15 +383,98 @@ return n
 '''
 
 
-def reserve_link_send(tope, user_id, dia=None):
+SEND_KINDS = ('user', 'reset', 'aviso')  # enlace para entrar, enlace para recuperar y aviso de contraseña cambiada
+AVISO_RESERVA = 10  # envíos del día que solo puede usar el aviso de contraseña cambiada, por encima de `tope` (RC-335)
+
+
+def reserve_link_send(tope, user_id, dia=None, tipo='user'):
     """Reserva un envío del día (UTC) si quedan menos de `tope` y la cuenta lleva menos de MAX_LINKS_USER_DAY ese día.
     Devuelve el número de envío, 0 si el día ya llegó a `tope` o -1 si la cuenta ya llegó al suyo. Solo cuenta lo que
     se va a enviar. Con el tope por cuenta, pedir enlaces para los pocos correos que existen y se conocen (los de demo
     del repo, equipo@) no deja a los demás sin enlace (M2 de la revisión). `dia` solo lo pasan las pruebas, para no
-    gastar el contador de hoy."""
+    gastar el contador de hoy. El contador del día es uno para todos los correos, porque el cupo de Resend también lo
+    es. Los enlaces para entrar ('user', RC-63) y para recuperar la contraseña ('reset', RC-335) comparten el tope de
+    la cuenta y su llave de RC-63: separados, cada correo conocido gastaba el doble del día (H1 de la revisión). El aviso
+    de contraseña cambiada ('aviso') lleva su propio tope por cuenta y AVISO_RESERVA envíos más del día, para que un
+    día agotado no lo deje sin salir. Con `tope` en 0 no sale nada, tampoco el aviso."""
+    if tipo not in SEND_KINDS:
+        raise ValueError(tipo)
     dia = dia or time.strftime('%Y-%m-%d', time.gmtime())
-    return int(_valkey().eval(_RESERVE_DAY, 2, 'link:day:' + dia, 'link:day:%s:user:%s' % (dia, _digest(str(user_id))),
-                              tope, LINK_DAY_SECONDS, MAX_LINKS_USER_DAY))
+    cuenta = 'link:day:%s:%s:%s' % (dia, 'aviso' if tipo == 'aviso' else 'user', _digest(str(user_id)))
+    if tipo == 'aviso' and tope > 0:
+        tope += AVISO_RESERVA
+    return int(_valkey().eval(_RESERVE_DAY, 2, 'link:day:' + dia, cuenta, tope, LINK_DAY_SECONDS, MAX_LINKS_USER_DAY))
+
+
+# ------------------------------------------------------------------ recuperar la contraseña (RC-335)
+
+def _reset_user_key(user_id):
+    return 'pwreset-user:' + _digest(str(user_id))
+
+
+# KEYS: el índice de la cuenta (pwreset-user:) y el token nuevo (pwreset:<hash>). ARGV: el hash nuevo y los segundos.
+# Corre cuando Resend ya aceptó el correo nuevo: borra el anterior de la cuenta y apunta el índice al nuevo en un solo
+# paso. Si el nuevo ya no existe (se canjeó o se borró), no toca nada. Dos pedidos a la vez dejan uno solo.
+_ACTIVATE_RESET = '''
+if redis.call('EXISTS', KEYS[2]) == 0 then return 0 end
+local anterior = redis.call('GET', KEYS[1])
+if anterior and anterior ~= ARGV[1] then redis.call('DEL', 'pwreset:' .. anterior) end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return 1
+'''
+# KEYS: el token (pwreset:<hash>). ARGV: su hash. Lo lee y lo borra en el mismo paso (como GETDEL), y limpia el índice
+# de su cuenta solo si sigue apuntando a este token. Dos canjes a la vez: uno lo recibe y el otro ve nil.
+_TAKE_RESET = '''
+local raw = redis.call('GET', KEYS[1])
+if not raw then return false end
+redis.call('DEL', KEYS[1])
+local indice = 'pwreset-user:' .. cjson.decode(raw).user_key
+if redis.call('GET', indice) == ARGV[1] then redis.call('DEL', indice) end
+return raw
+'''
+
+
+def create_reset(data):
+    """Crea el token del enlace para recuperar la contraseña de `data` (user_id, org_id y tag, sin el correo: H5 de la
+    revisión) y lo devuelve: 32 bytes al azar (256 bits). En Valkey solo queda su SHA-256 y vence en RESET_SECONDS.
+    Todavía no anula el anterior: eso lo hace activate_reset cuando el correo salió (H4 de la revisión)."""
+    token = secrets.token_urlsafe(32)
+    payload = json.dumps(dict(data, user_key=_digest(str(data['user_id']))))
+    _valkey().set('pwreset:' + _digest(token), payload, ex=RESET_SECONDS)
+    return token
+
+
+def activate_reset(user_id, token):
+    """El correo con `token` salió: anula el enlace anterior de la cuenta. Si el envío falla no se llama, y el anterior
+    sigue sirviendo."""
+    digest = _digest(token)
+    _valkey().eval(_ACTIVATE_RESET, 2, _reset_user_key(user_id), 'pwreset:' + digest, digest, RESET_SECONDS)
+
+
+def take_reset(token):
+    """Los datos del token, una sola vez; None si no existe, venció, ya se usó o lo anuló otro más nuevo que sí salió."""
+    if not token or len(token) > 100:
+        return None
+    digest = _digest(token)
+    raw = _valkey().eval(_TAKE_RESET, 1, 'pwreset:' + digest, digest)
+    if not raw:
+        return None
+    data = json.loads(raw)
+    data.pop('user_key', None)
+    return data
+
+
+def delete_reset(token):
+    """Borra el token si el envío falló: un enlace que nunca llegó no debe quedar vivo."""
+    _valkey().delete('pwreset:' + _digest(token))
+
+
+def take_reset_request(email, ip):
+    """Cuenta un pedido de recuperación para el correo y la IP; False si el correo ya pidió MAX_RESETS_EMAIL o la IP
+    MAX_RESETS_IP en la última hora, y entonces no cuenta nada. Revisar y contar van en un solo paso, como /login."""
+    vence = _valkey().eval(_TAKE, 2, 'pwreset:req:email:' + _digest(email.lower()), 'pwreset:req:ip:' + _ip_bloque(ip),
+                           MAX_RESETS_EMAIL, MAX_RESETS_IP, RESET_WINDOW_SECONDS)
+    return bool(vence)
 
 
 # ------------------------------------------------------------------ passkeys (RC-331)

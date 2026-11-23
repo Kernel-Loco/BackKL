@@ -138,10 +138,24 @@ Pruebas: `pruebas/test_enlace_sin_red.py` (17, dentro del contenedor: `docker co
 ```bash
 C='docker compose -p backkl-enlace -f docker-compose.yml -f pruebas/enlace/docker-compose.yml'
 $C up -d --build --wait db valkey api correo-falso
-$C run --rm pruebas python -m unittest -v pruebas/test_enlace.py > enlace.log
+$C run --rm pruebas python -m unittest -v pruebas/test_enlace.py pruebas/test_recuperar.py > enlace.log
 sh pruebas/enlace/revisar_log.sh enlace.log
 $C down -v
 ```
+
+### Recuperar la contraseña con un enlace (RC-335)
+
+Usa el mismo envío, el mismo compose de pruebas y la misma idea de token que el enlace para entrar (RC-63).
+
+- **Pedir:** `POST /api/v1/auth/password-reset` con `email` y `captcha` revisa el captcha (400 sin él) y responde siempre 202 con el mismo texto. Lo demás corre después de responder: los límites, la búsqueda con `login_lookup()` (solo cuentas activas de empresas en `trial` o `active`, nunca una cuenta de demo apagada), el token y el envío.
+- **Token y enlace:** 32 bytes al azar. En Valkey solo va su SHA-256 (`pwreset:`), vence a los 30 min, se canjea una sola vez de forma atómica y pedir otro anula el anterior en cuanto Resend acepta el nuevo (si el nuevo no sale, el anterior sigue). No guarda el correo, solo la cuenta y una marca de la huella de la contraseña: si la contraseña cambia antes del canje (por `/password` o por otro enlace), el enlace ya no sirve. El enlace es `PORTAL_URL/forgot-password/reset#t=<token>`: el token va después de `#` y el portal lo quita de la barra al leerlo.
+- **Límites:** 3 pedidos por correo y 20 por IP cada hora. El tope del día `ENLACE_TOPE_DIARIO` se comparte con RC-63 porque el cupo de Resend es uno solo, y también el de cada cuenta (5 al día entre enlaces para entrar y para recuperar). El aviso de contraseña cambiada lleva su propio tope por cuenta y puede usar 10 envíos más que `ENLACE_TOPE_DIARIO`, para que un día agotado no lo deje sin salir.
+- **Canje:** `POST /api/v1/auth/password-reset/confirm` con `token` y `new_password`. Gasta el token antes de revisar nada, así que una contraseña corta, común (RC-281) o filtrada (RC-334) da 400 y pide otro enlace. Guarda la huella con `lt1$` (RC-330), cierra todas las sesiones de la cuenta, borra sus fallos de login y sus passkeys (como `/password`, porque quien tenía la contraseña anterior pudo registrar la suya). El TOTP no se toca: el siguiente inicio de sesión lo pide. Un token que no existe, vencido o ya usado, una cuenta desactivada o de una empresa suspendida dan 400. La respuesta borra la cookie de sesión de ese navegador. Lo que se abrió con la contraseña anterior tampoco crea una sesión después del cambio: un `/login` que se cruza con el canje vuelve a mirar la huella con la fila bloqueada, y los `mfa_token` y los enlaces para entrar llevan la marca de la huella con la que se pidieron.
+- **Aviso:** después del cambio sale un segundo correo, sin enlace, que avisa que la contraseña cambió.
+- **Plan B:** sin `CORREO_API_KEY`, al llegar a un tope o si Resend no acepta el envío, la respuesta es la misma, el token se borra y queda el motivo en la bitácora. El login no cambia.
+- **Bitácora:** `auth.password_reset_requested` (solo si la cuenta existe), `auth.password_reset_send_failed` y `auth.password_reset_notice_failed` (con el motivo), `auth.password_reset_rejected` (con `reason`: `length`, `common`, `pwned`, `inactive`, `demo_off` o `password_changed`), `auth.password_reset` (con `passkeys_removed`) y `auth.passkey_deleted` con `reason: password_reset`. Nunca el token, el enlace ni la contraseña.
+
+Pruebas: `pruebas/test_recuperar_sin_red.py` (28, dentro del contenedor, como `test_enlace_sin_red.py`) y `pruebas/test_recuperar.py` (9, el Hecho cuando en el compose de arriba, que ya las corre).
 
 ### Cuentas de demo
 
