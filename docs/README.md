@@ -14,6 +14,7 @@
 | [`hallazgos_esperados.md`](hallazgos_esperados.md) | Hallazgos esperados del dominio de prueba olmardo.com, por fuente, con código, severidad, fecha y estado | #10b |
 | [`medicion_cobertura.md`](medicion_cobertura.md) | Cobertura por regla y superficie moderna, método de medición y límites para falsos positivos | #84 |
 | [`reto_hackeo.md`](reto_hackeo.md) | Reto de hackeo para el grupo: permiso, alcance, reglas, cómo reportar, clasificación y registro de reportes con su arreglo | #85 |
+| [`asvs_nivel1.md`](asvs_nivel1.md) | LowTide revisado con OWASP ASVS 5.0 nivel 1: los 70 requisitos con su estado y evidencia, y los pendientes con su arreglo. La lista oficial fijada está en `asvs/` | #75 |
 | [`servicios_externos.md`](servicios_externos.md) | Servicios externos: cuenta y dueño, plan, costo, límite, vencimiento de la llave y plan B de cada uno, las licencias y el gasto real | #8 |
 
 La base de datos se documenta en [`db/README.md`](../db/README.md).

@@ -12,7 +12,7 @@ ZAP en modo de escaneo activo completo contra el producto final en la VM, por `h
 | `X-Content-Type-Options` | `nosniff` | `nosniff` |
 | `Referrer-Policy` | `same-origin` | `no-referrer` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), usb=()` | Igual |
-| `Cache-Control` | `private, no-cache, no-store, max-age=0, must-revalidate, no-transform` (`src/proxy.ts`) | La de cada ruta |
+| `Cache-Control` | `private, no-cache, no-store, max-age=0, must-revalidate, no-transform` (`src/proxy.ts`) | `no-store` en toda respuesta, también el 500; una ruta que pone el suyo lo conserva (`cirdan/api/main.py`, #75) |
 
 HSTS va sin `preload` (decisión del 22 nov): hstspreload.org acepta el dominio de quien lo inscriba y salir de la lista tarda meses. Cloudflare no pone HSTS: lo ponen el portal y la API, que quedan en git con sus pruebas.
 
@@ -80,6 +80,8 @@ En PowerShell, antes del `docker run` (sin el prefijo de bash): `$env:ZAP_AUTH_H
 ## Reporte
 
 El reporte de ZAP va en `docs/zap/reporte_zap.html` y la tabla de abajo lleva cada alerta media o alta con su estado. El Hecho cuando pide cero altas abiertas y cada media corregida o justificada.
+
+Este resultado es evidencia de la revisión con OWASP ASVS 5.0 nivel 1 (#75): [`asvs_nivel1.md`](asvs_nivel1.md). El `Cache-Control` que faltaba en `/api/v1/auth/me` se agregó ahí a toda respuesta de la API.
 
 | Alerta | Riesgo | Dónde | Estado | Por qué |
 |---|---|---|---|---|

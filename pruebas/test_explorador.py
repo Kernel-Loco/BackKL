@@ -275,6 +275,8 @@ class ErrorSinManejar(unittest.TestCase):
         cabeceras = [(k.decode().lower(), v.decode()) for k, v in inicio[0]['headers']]
         for nombre, valor in main.CABECERAS_SEGURIDAD.items():
             self.assertEqual([v for k, v in cabeceras if k == nombre.lower()], [valor], nombre)
+        # RC-136: el 500 tampoco se guarda en una caché, como las respuestas que pasan por el middleware
+        self.assertEqual([v for k, v in cabeceras if k == 'cache-control'], ['no-store'])
         cuerpo = b''.join(m.get('body', b'') for m in mensajes if m['type'] == 'http.response.body')
         self.assertEqual(cuerpo, b'Internal Server Error')
 
