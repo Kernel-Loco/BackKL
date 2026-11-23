@@ -11,18 +11,20 @@ Una VM equivalente también se crea y se borra desde código con Terraform, en s
 
 ## Antes de levantar
 
-**Alta de dominios:** por ahora no se puede habilitar en el despliegue. El volumen `cirdan-cartas` guarda cartas cifradas,
-pero el respaldo descrito más abajo solo incluye la base y no ese volumen. El despliegue fija `CARTA_ALTA_ENABLED=false`
-y la API también rechaza el alta con `COOKIE_SECURE=true`. Antes de activarla se necesita implementar y probar respaldo
-y restauración coordinados de la base, las cartas y la llave, además de revisar la política de retención. La verificación
-TXT de dominios ya registrados sí funciona para los que estén en `DOMINIOS_EN_VIVO`.
+**Alta de dominios:** el compose de despliegue ya la habilita. El respaldo diario incluye, en un solo paquete cifrado,
+la base, el volumen con las cartas cifradas y la llave de cartas; la restauración completa verifica la llave y cada
+documento referenciado antes de usar los destinos nuevos. El respaldo usa la retención actual de Azure: inmutabilidad
+de 7 días y borrado entre 30 y 32 días. El acceso al alta en producción requiere además la URL versionada de Key Vault
+en `CARTA_KEY_VAULT_SECRET_URL`; el compose falla si falta. La verificación TXT de dominios ya registrados sigue
+funcionando para los que estén en `DOMINIOS_EN_VIVO`.
 
 Para pruebas locales sin datos reales: monta el volumen mediante `docker compose`, pon `CARTA_ALTA_ENABLED=true` y
 una llave aleatoria `CARTA_ENCRYPTION_KEY` de 32 bytes en base64 url-safe, diferente de las del MFA y contraseñas.
 El directorio del contenedor es `/var/lib/cirdan/cartas`, privado del usuario de la API. Fuera de Docker se debe
 configurar `CARTA_STORAGE_DIR` con un directorio absoluto, privado y persistente. Como alternativa a la llave directa,
-`CARTA_KEY_VAULT_SECRET_URL` acepta una URL versionada de Azure Key Vault; nunca se configuran ambas. No se debe cambiar
-ni perder la llave: todavía no hay herramienta de rotación. El PDF se cifra con AES-256-GCM y la base guarda su SHA-256
+`CARTA_KEY_VAULT_SECRET_URL` acepta una URL versionada de Azure Key Vault; nunca se configuran ambas. La llave original
+se conserva como secreto versionado y cada respaldo completo lleva una copia cifrada con age para recuperar la bóveda.
+No se debe rotar ni borrar una versión mientras existan cartas cifradas con ella. El PDF se cifra con AES-256-GCM y la base guarda su SHA-256
 y nombre opaco, no la carta en claro. La API comprueba la estructura básica del PDF, no su firma: el administrador
 confirma que la carta firmada autoriza el dominio. Si una transacción falla después de escribir el archivo puede quedar
 un archivo cifrado huérfano; no se borra automáticamente porque el resultado de una confirmación fallida puede ser
@@ -39,6 +41,7 @@ empresas y con los respaldos.
    - `COMPOSE_PROFILES=programador`, solo después de aplicar la migración 030 (sección 'Escaneos programados').
    - La llave del MFA. En la VM va `TOTP_KEY_VAULT_SECRET_URL` y no va `TOTP_ENCRYPTION_KEY` (sección 'Llave del MFA en Azure Key Vault'). En el plan B es al revés (paso 3 de 'Carpeta y volumen'). Con las dos puestas, o con ninguna, la API no arranca.
    - La llave de las huellas de contraseña, con la misma regla: en la VM `PASSWORD_HASH_KEY_VAULT_SECRET_URL` y no `PASSWORD_HASH_ENCRYPTION_KEY`, y en el plan B al revés (sección 'Llave de las huellas de contraseña').
+   - `CARTA_KEY_VAULT_SECRET_URL`, con versión, para la llave de las cartas. En producción no pongas `CARTA_ENCRYPTION_KEY`; la API pide la llave con la identidad administrada y el respaldo guarda una copia protegida con age.
    - `PWNED_PASSWORDS_ENABLED` vacía, como viene en `.env.example`, o en `true`. Así `docker-compose.despliegue.yml` prende la revisión de contraseñas filtradas (RC-334). Con `false` queda apagada y solo se revisa la lista local.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
@@ -85,6 +88,20 @@ La API tiene IP fija en `default` (10.249.93.20). Por eso en la VM los comandos 
 - Si Key Vault o la identidad fallan, la API no arranca y `docker compose logs api` dice por qué (HTTP 403 es que falta el rol y HTTP 404, que el nombre o la versión de la URL no existen, y ese no se reintenta). Ningún mensaje lleva el token ni la llave. Cada lectura reintenta hasta 90 s en total, para aguantar un IMDS que se está actualizando, y el HEALTHCHECK del Dockerfile le da 200 s antes de contar fallos, porque con la llave de las huellas también en Key Vault (RC-330) son dos lecturas seguidas, cada una con sus 90 s. Si se rinde, uvicorn sale y `restart: unless-stopped` la vuelve a levantar.
 - Lo que no cambia: quien sea root en la VM puede pedir el mismo token. Un contenedor que no sea la API no puede, por la regla de 'Solo la API llega a IMDS'. Lo que se gana es que cada lectura queda en el registro de la bóveda y que quitar el rol corta el acceso.
 - Costo: Key Vault Standard cobra 0.03 USD por cada 10 mil operaciones, sin cuota por bóveda. Por cada llave en Key Vault la API hace dos peticiones por arranque, una a la identidad y otra a la bóveda, y solo la de la bóveda cuenta como operación. Con la del MFA y la de las huellas son cuatro peticiones y dos operaciones.
+
+## Llave de las cartas en Azure Key Vault (RC-339)
+
+En producción, crea una llave aleatoria distinta de las del MFA y de las huellas, guárdala como secreto y dale a la identidad administrada de la VM `Key Vault Secrets User` sobre ese secreto. La URL versionada que devuelve el comando va en `CARTA_KEY_VAULT_SECRET_URL`; el valor no va en `.env`:
+
+```bash
+umask 077
+llave=$(mktemp /dev/shm/carta-key.XXXXXX)
+python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())' > "$llave"
+az keyvault secret set --vault-name <boveda> --name carta-encryption-key --file "$llave" --query id -o tsv
+rm -f -- "$llave"
+```
+
+Guarda la llave en el gestor de contraseñas además de Key Vault. No crees una versión nueva ni borres la actual mientras haya cartas cifradas con ella: la URL fijada en el `.env` no cambia sola, y la restauración completa crea una nueva versión de la misma llave. La privada de age debe estar disponible en el procedimiento de recuperación del equipo; se necesita para abrir los paquetes, incluso si Key Vault no está disponible.
 
 ### Solo la API llega a IMDS
 
@@ -225,16 +242,17 @@ El servicio `programador` vuelve a escanear cada dominio autorizado según el pl
 4. (VM) `docker compose --dry-run up -d --build` (sin recrear `cirdan-pg16`) y `docker compose up -d --build`. `docker compose ps programador` dice `running` y `docker compose logs programador` dice 'escaneo programado' con cada escaneo que pidió, sin errores.
 5. Para apagarlo: quitar `COMPOSE_PROFILES` del `.env` y `docker compose --profile programador stop programador`. Tiene 60 s para cerrar: los escaneos que dejó corriendo quedan en 'failed' y su turno queda a una hora, no al siguiente intervalo del plan, así que salen en cuanto se vuelva a encender.
 
-## Respaldo diario (RC-233)
+## Respaldo diario (RC-233, RC-28 y RC-339)
 
 Una vez al día, a las 09:00 UTC (03:00 en Monterrey), `lowtide-respaldo.timer` corre `db/respaldo/respaldar.sh`:
 
 1. Espera hasta 5 minutos a que `cirdan-pg16` acepte conexiones: si la VM estaba apagada a esa hora, el timer corre al arrancar, antes que la base.
-2. `pg_dump -Fc` de la base `cirdan` con el usuario postgres dentro de `cirdan-pg16`. Nunca con `cirdan_app`, que con FORCE RLS no ve todas las filas.
-3. Lo cifra al vuelo con [age](https://age-encryption.org) y una llave pública. El respaldo sin cifrar nunca toca el disco. La llave privada no está en la VM: vive en la PC de Ernesto, cifrada con DPAPI, y en el gestor de contraseñas. Quien entre a la VM no puede leer los respaldos.
-4. Deja `cirdan_<fecha UTC>_<8 hex al azar>.dump.age` en `/var/backups/lowtide` (carpeta 700, archivo 600). El sufijo al azar hace que nadie pueda ocupar antes en Azure el nombre del respaldo de mañana.
-5. Lo sube a un contenedor de Azure Blob con la identidad administrada de la VM, la misma de Key Vault. No hay llave de almacenamiento en la VM: el token sale de IMDS y llega a `curl` por stdin. La subida nunca escribe encima de un blob con el mismo nombre (`If-None-Match: *`), Azure revisa el MD5 del archivo y el blob lleva su sha256 en `x-ms-meta-sha256`. Si `curl` reintenta una subida que sí llegó, Azure responde `403 UnauthorizedBlobOverwrite`, porque la identidad no puede escribir encima, y el respaldo cuenta como subido solo si el blob que ya está tiene el mismo MD5. En cada corrida también sube los respaldos locales que todavía no están en Azure, así que una subida que falló un día se repite al siguiente.
-6. Conserva en la VM los respaldos de los últimos 7 días que tienen alguno (una corrida a mano no le quita su lugar a un día). Nunca borra uno que no está en Azure, salvo que ya haya más de 31. La retención solo borra archivos con ese nombre exacto dentro de esa carpeta.
+2. Toma `pg_dump -Fc` como postgres (nunca `cirdan_app`, que con FORCE RLS no ve todas las filas), seguido del volumen de cartas y la llave activa que obtiene la API.
+3. Cifra cada componente con age y agrupa únicamente esos archivos cifrados. Los temporales viven en `/run` (tmpfs); ni el dump ni la llave de cartas en claro se escriben en disco persistente. El paquete completo se cifra de nuevo con age y una llave pública. La llave privada de recuperación no está en la VM: vive en el gestor de contraseñas y en los medios seguros de recuperación del equipo.
+4. Deja `cirdan_<fecha UTC>_<8 hex al azar>.backup.age` en `/var/backups/lowtide` (carpeta 700, archivo 600). El sufijo al azar hace que nadie pueda ocupar antes en Azure el nombre del respaldo de mañana.
+5. La base se captura primero. Como el archivo de carta se sincroniza antes de que su referencia se confirme en la base y las cartas son inmutables, esa secuencia puede incluir archivos huérfanos, pero no omite una carta que la base restaurada referencia. `restaurar_completo.sh` comprueba después que cada referencia abre con la llave restaurada y su SHA-256 coincide.
+6. Sube el paquete a Azure Blob con la identidad administrada de la VM. No hay llave de almacenamiento en la VM: el token sale de IMDS y llega a `curl` por stdin. La subida nunca escribe encima de un blob con el mismo nombre (`If-None-Match: *`), Azure revisa el MD5 del archivo y el blob lleva su sha256 en `x-ms-meta-sha256`. Si `curl` reintenta una subida que sí llegó, Azure responde `403 UnauthorizedBlobOverwrite`, porque la identidad no puede escribir encima, y el respaldo cuenta como subido solo si el blob que ya está tiene el mismo MD5. En cada corrida también sube los respaldos locales que todavía no están en Azure, así que una subida que falló un día se repite al siguiente.
+7. Conserva en la VM los respaldos de los últimos 7 días que tienen alguno (una corrida a mano no le quita su lugar a un día). Nunca borra uno que no está en Azure, salvo que ya haya más de 31. Los antiguos `.dump.age` se conservan y cargan como legado, pero contienen solo la base y no son puntos completos de recuperación.
 
 El contenedor tiene una política de inmutabilidad de 7 días: nadie, ni con el rol de la VM, borra ni cambia un respaldo antes de ese plazo. Una regla del ciclo de vida lo borra después de 30 días, y como Azure la aplica una vez al día, cada blob dura entre 30 y 32 días. La regla borra por antigüedad, no por cantidad: si los respaldos dejan de llegar, el último bueno se borra a los 30 días, así que ese es el plazo para enterarse (ver la alerta de abajo). Valkey no se respalda: guarda sesiones, MFA pendientes y bloqueos, y no escribe a disco. El respaldo no lleva contraseñas de roles: en una base nueva los roles los crea `db/init`.
 
@@ -277,7 +295,7 @@ En la VM, desde `/opt/lowtide/BackKL`:
 ```bash
 sudo apt-get install -y age
 sudo install -d -m 700 /etc/lowtide /var/backups/lowtide
-sudo install -m 600 db/respaldo/respaldo.conf.example /etc/lowtide/respaldo.conf   # y se llenan RECEPTOR_AGE y CUENTA_BLOB
+sudo install -m 600 db/respaldo/respaldo.conf.example /etc/lowtide/respaldo.conf   # y se llenan RECEPTOR_AGE, CUENTA_BLOB y CONTENEDOR_BLOB
 sudo install -m 644 db/respaldo/lowtide-respaldo.service db/respaldo/lowtide-respaldo.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now lowtide-respaldo.timer
@@ -285,20 +303,21 @@ sudo systemctl start lowtide-respaldo.service   # el primero, para ver que sube
 journalctl -u lowtide-respaldo -n 20 --no-pager
 ```
 
-`respaldar.sh` se niega si `/etc/lowtide/respaldo.conf` es un enlace, no es de root o el grupo u otros pueden escribirla: quien la cambie decide para quién se cifran los respaldos. El registro dice `respaldo: cirdan_<fecha>_<sufijo>.dump.age, <bytes> bytes, sha256 ...`, `respaldo: subido a ...` y `respaldo: listo`. `systemctl list-timers lowtide-respaldo.timer` da la siguiente corrida. Un `403` al subir es que falta el rol de la identidad en el contenedor, o que el rol se acaba de dar y Azure tarda unos minutos en verlo. Si la subida falla, la unidad queda en `failed` con cuántos respaldos locales faltan por subir, y la corrida del día siguiente los vuelve a intentar.
+`respaldar.sh` se niega si `/etc/lowtide/respaldo.conf` es un enlace, no es de root o el grupo u otros pueden escribirla: quien la cambie decide para quién se cifran los respaldos. La ejecución falla si falta el contenedor de la API, el volumen de cartas, la llave o el espacio tmpfs. El registro dice `respaldo: cirdan_<fecha>_<sufijo>.backup.age, <bytes> bytes, sha256 ...`, `respaldo: subido a ...` y `respaldo: listo`. `systemctl list-timers lowtide-respaldo.timer` da la siguiente corrida. Un `403` al subir es que falta el rol de la identidad en el contenedor, o que el rol se acaba de dar y Azure tarda unos minutos en verlo. Si la subida falla, la unidad queda en `failed` con cuántos respaldos locales faltan por subir, y la corrida del día siguiente los vuelve a intentar.
 
 ### Restaurar
 
-`db/respaldo/restaurar.sh` siempre crea una base nueva con otro nombre. Nunca hace DROP DATABASE ni escribe sobre `cirdan`, y se niega si la base ya existe. Antes de crearla descifra el respaldo completo: con otra llave o un archivo cortado falla sin dejar ninguna base. Después de restaurar le quita TEMPORARY a PUBLIC, como la migración 004, porque `pg_dump` no guarda los permisos de la base. Se corre donde esté la llave privada, en Git Bash o Linux, contra el contenedor de una base de Postgres 16 con los roles de `db/init`, por ejemplo una pila aislada:
+Para recuperar el conjunto completo se usa `restaurar_completo.sh`. Siempre crea una base y un volumen Docker nuevos; nunca borra ni reemplaza los existentes. Desencripta en `/run` (tmpfs), recrea una nueva versión de la llave en Key Vault, y valida con AES-GCM y las huellas de la base cada carta referenciada antes de terminar. La cuenta que ejecuta la restauración necesita `az login`, permisos para crear una versión del secreto y acceso al contenedor de Postgres. El contenedor de la API aporta la imagen Python usada para poblar y verificar el volumen restaurado.
 
 ```bash
 az storage blob download --auth-mode login --account-name stlowtiderespaldo -c respaldos -n <blob> -f <blob>
-AGE_IDENTIDAD=<ruta del archivo de la llave privada> db/respaldo/restaurar.sh <blob> <contenedor> cirdan_restaurada
+AGE_IDENTIDAD=<ruta del archivo de la llave privada> db/respaldo/restaurar_completo.sh \
+  <blob> cirdan-pg16 cirdan-api cirdan_restaurada lowtide-cartas-restauradas <boveda> carta-encryption-key
 ```
 
-`AGE_IDENTIDAD` es la ruta del archivo de la llave, nunca la llave misma, y con `AGE_IDENTIDAD=-` la lee de stdin para no dejarla en un archivo (así la manda el script de restauración de la PC de Ernesto, que también revisa el sha256 del blob bajado). Para saber si la restauración quedó completa se corre `db/respaldo/conteos.sql` como postgres en la base de la VM y en la restaurada, y se comparan las dos salidas: filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base. Las tablas que cambiaron después del respaldo (la bitácora, por ejemplo) pueden traer más filas en la VM. `db/respaldo/comparar.sh` hace esa comparación solo entre dos bases del mismo contenedor: en una pila aislada, su `cirdan` es la de las semillas, no la de la VM. Para volver a poner un respaldo en la base de producción se siguen los pasos de 'Copiar los datos de la VM' en el plan B, con su `pg_restore --clean`.
+`AGE_IDENTIDAD` es la ruta del archivo de la llave, nunca la llave misma; con `AGE_IDENTIDAD=-` la lee de stdin para no dejarla en un archivo. El script comprueba que la base y el volumen nuevos no existan, nunca sobrescribe datos y solo devuelve la URL versionada de Key Vault, no la llave. Al terminar, pon en el `.env` las tres variables que imprime (`PGDATABASE`, `CARTA_VOLUME_NAME` y `CARTA_KEY_VAULT_SECRET_URL`), detén y recrea la API; el compose de producción conserva `CARTA_ALTA_ENABLED=true`. Si la verificación falla, no apuntes la API a esos destinos. El respaldo crea una base aparte para poder comparar primero con `db/respaldo/conteos.sql`; `db/respaldo/comparar.sh` también compara filas, RLS, FORCE, políticas y permisos. La restauración del plan B se hace en esa misma base nueva, no con `pg_restore --clean` sobre la base que ya está en uso.
 
-`pruebas/test_respaldo.py` saca un respaldo de la base del compose de prueba, lo restaura en una base nueva y compara todo, y revisa la retención por días, que la restauración no pise ninguna base ni deje una vacía con otra llave, que no muestre la llave, que la configuración no la pueda cambiar otro usuario y que una configuración mala no deje nada. Corre en el CI con las pruebas de la base. En una PC solo corre con `RESPALDO_CONTENEDOR` apuntando a una pila aislada, nunca contra `cirdan-pg16`. No prueba la subida a Azure, que se revisa en la VM con el primer `systemctl start`.
+`pruebas/test_respaldo.py` cubre el cifrado, la restauración de base, la retención y la subida simulada. `pruebas/test_respaldo_cartas.py` cubre el contenido seguro del paquete y, en el CI, la restauración de DB, volumen y llave y la autenticación AES-GCM de la carta. En una PC, las pruebas con Docker solo corren si se indican `RESPALDO_CONTENEDOR` y `RESPALDO_CARTAS_CONTENEDOR` de una pila aislada; nunca usan por omisión los contenedores de desarrollo.
 
 ## Plan B
 

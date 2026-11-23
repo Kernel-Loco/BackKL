@@ -47,7 +47,7 @@ services:
     environment:
       PGHOST: db
       PGPORT: "5432"
-      PGDATABASE: cirdan
+      PGDATABASE: ${PGDATABASE:-cirdan}
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
       VALKEY_URL: redis://:${VALKEY_PASSWORD}@valkey:6379/0
       # Llave del MFA: la llave misma en .env (desarrollo, CI y plan B) o, en la VM, la URL del secreto de
@@ -159,7 +159,7 @@ services:
     environment:
       PGHOST: db
       PGPORT: "5432"
-      PGDATABASE: cirdan
+      PGDATABASE: ${PGDATABASE:-cirdan}
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
       # Lo mismo que la API le pasa al orquestador y a los recolectores.
       DOMINIOS_EN_VIVO: ${DOMINIOS_EN_VIVO:-olmardo.com}
@@ -195,7 +195,7 @@ services:
     environment:
       PGHOST: db
       PGPORT: "5432"
-      PGDATABASE: cirdan
+      PGDATABASE: ${PGDATABASE:-cirdan}
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
       TOTP_KEY_VAULT_SECRET_URL: ${TOTP_KEY_VAULT_SECRET_URL:-}
@@ -215,3 +215,4 @@ services:
 volumes:
   cirdan-pg16-data:
   cirdan-cartas:
+    name: ${CARTA_VOLUME_NAME:-${COMPOSE_PROJECT_NAME:-backkl}_cirdan-cartas}

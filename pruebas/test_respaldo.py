@@ -1,4 +1,4 @@
-"""Pruebas del respaldo de la base (#115, RC-233): db/respaldo/respaldar.sh, restaurar.sh y comparar.sh.
+"""Pruebas de respaldos (#115, RC-233, RC-28 y RC-339): base, paquete completo y restauración segura.
 
 Sacan un respaldo cifrado con age de la base `cirdan` del compose de prueba, lo restauran en una base nueva y
 comparan filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base. También revisan la
@@ -41,7 +41,9 @@ def contenedor(env):
 
 
 CONTENEDOR = contenedor(os.environ)
-PATRON = re.compile(r'^cirdan_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}\.dump\.age$')
+CONTENEDOR_CARTAS = (os.environ.get('RESPALDO_CARTAS_CONTENEDOR') or '').strip() or (
+    'cirdan-api' if en_ci(os.environ) else None)
+PATRON = re.compile(r'^cirdan_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}\.(?:backup|dump)\.age$')
 PREFIJO = 'cirdan_prueba_respaldo_%d_' % os.getpid()
 HERRAMIENTAS = ('bash', 'age', 'age-keygen', 'docker')
 FALTAN = [h for h in HERRAMIENTAS if not shutil.which(h)]
@@ -93,6 +95,7 @@ class Contenedor(unittest.TestCase):
 
 @unittest.skipIf(FALTAN and not en_ci(os.environ), 'faltan %s' % ', '.join(FALTAN))
 @unittest.skipIf(not CONTENEDOR, 'sin RESPALDO_CONTENEDOR: fuera del CI se nombra la base de una pila aislada')
+@unittest.skipIf(not CONTENEDOR_CARTAS, 'sin RESPALDO_CARTAS_CONTENEDOR: nombra la API de una pila aislada')
 class Respaldo(unittest.TestCase):
 
     @classmethod
@@ -116,7 +119,8 @@ class Respaldo(unittest.TestCase):
             psql('DROP DATABASE "%s";' % b)
 
     def conf(self, carpeta, **extra):
-        valores = {'CONTENEDOR_BASE': CONTENEDOR, 'CARPETA': carpeta.as_posix(), 'RECEPTOR_AGE': self.publica,
+        valores = {'CONTENEDOR_BASE': CONTENEDOR, 'CONTENEDOR_CARTAS': CONTENEDOR_CARTAS,
+                   'CARPETA': carpeta.as_posix(), 'RECEPTOR_AGE': self.publica,
                    'SUBIR': '0', 'RETENCION': '7', **extra}
         ruta = carpeta.parent / ('%s.conf' % carpeta.name)
         ruta.write_text(''.join('%s=%s\n' % kv for kv in valores.items()), encoding='utf-8')
@@ -216,7 +220,8 @@ class Respaldo(unittest.TestCase):
         self.assertEqual(esquema(conteos('cirdan')), esquema(self.cirdan_antes))
 
     def test_4_configuracion_mala_no_deja_nada(self):
-        casos = [{'RECEPTOR_AGE': 'age1nooo'}, {'CLAVE_RARA': 'x'}, {'RETENCION': '0'}, {'SUBIR': '1'},
+        casos = [{'RECEPTOR_AGE': 'age1nooo'}, {'CLAVE_RARA': 'x'}, {'RETENCION': '0'},
+                 {'CONTENEDOR_CARTAS': '-invalido'}, {'SUBIR': '1'},
                  {'SUBIR': '1', 'CUENTA_BLOB': 'Mala_Cuenta'}, {'CONTENEDOR_BASE': '-x'},
                  {'CARPETA': '/tmp/con espacio'}, {'CARPETA': '/tmp/../etc'}]
         for i, extra in enumerate(casos):

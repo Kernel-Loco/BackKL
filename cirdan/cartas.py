@@ -18,8 +18,7 @@ _vault_key = None
 
 
 def habilitado():
-    # Hasta que exista el respaldo, no se acepta alta con cookies de producción.
-    return config('CARTA_ALTA_ENABLED', 'false').lower() == 'true' and config('COOKIE_SECURE', 'false').lower() != 'true'
+    return config('CARTA_ALTA_ENABLED', 'false').lower() == 'true'
 
 
 def _key():

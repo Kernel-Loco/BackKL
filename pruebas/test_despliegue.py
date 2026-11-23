@@ -31,6 +31,7 @@ ENV_FALSO = {
     'TOTP_ENCRYPTION_KEY': 'CIRDAN_FAKE_totp',
     'ALLOWED_ORIGINS': ORIGEN,
     'TUNNEL_TOKEN': 'CIRDAN_FAKE_tunel',
+    'CARTA_KEY_VAULT_SECRET_URL': 'https://fake-vault.vault.azure.net/secrets/carta-key/0123456789abcdef0123456789abcdef',
     # Lo que un .env copiado de una PC de desarrollo traería: el despliegue tiene que ganarle.
     'DEMO_ACCOUNTS': 'true',
     'DEMO_EXPLORER': 'true',
@@ -95,13 +96,26 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(self.svc['api']['environment']['ALLOWED_ORIGINS'], ORIGEN)
         self.assertEqual(self.svc['demo-accounts']['environment']['ALLOWED_ORIGINS'], ORIGEN)
         self.assertEqual(self.svc['api']['environment']['COOKIE_SECURE'], 'true')
+        self.assertEqual(self.svc['api']['environment']['CARTA_ALTA_ENABLED'], 'true')
+        self.assertEqual(self.svc['api']['environment']['CARTA_KEY_VAULT_SECRET_URL'],
+                         ENV_FALSO['CARTA_KEY_VAULT_SECRET_URL'])
 
     def test_4_variables_obligatorias(self):
-        for falta in ('ALLOWED_ORIGINS', 'TUNNEL_TOKEN'):
+        for falta in ('ALLOWED_ORIGINS', 'TUNNEL_TOKEN', 'CARTA_KEY_VAULT_SECRET_URL'):
             env = {k: v for k, v in ENV_FALSO.items() if k != falta}
             rc, salida = _config(env)
             self.assertNotEqual(rc, 0, falta)
             self.assertIn('Falta ' + falta, salida)
+
+    def test_4b_el_volumen_de_cartas_se_puede_cambiar_al_restaurar(self):
+        carta = self.svc['api']['volumes'][0]
+        self.assertEqual(carta['type'], 'volume')
+        self.assertEqual(carta['source'], 'prueba-despliegue_cirdan-cartas')
+        rc, salida = _config(dict(ENV_FALSO, CARTA_VOLUME_NAME='cartas-restauradas'))
+        self.assertEqual(rc, 0, salida[-500:])
+        cfg = json.loads(salida)
+        self.assertEqual(cfg['services']['api']['volumes'][0]['source'], 'cartas-restauradas')
+        self.assertEqual(cfg['volumes']['cirdan-cartas']['name'], 'cartas-restauradas')
 
     def test_5_ningun_puerto_publicado_en_el_host(self):
         # Ni en 127.0.0.1: docker-compose.yml publica db, valkey y api en loopback y el despliegue los quita.

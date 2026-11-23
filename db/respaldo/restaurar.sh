@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Restaura un respaldo de respaldar.sh en una base NUEVA (#115, RC-233). Nunca hace DROP DATABASE ni escribe
-# sobre cirdan: si la base ya existe, se niega.
+# Restaura la base de un respaldo antiguo o completo en una base NUEVA (#115, RC-233, RC-339). Nunca hace DROP
+# DATABASE ni escribe sobre cirdan: si la base ya existe, se niega. Para recuperar también cartas y su llave usa
+# restaurar_completo.sh.
 #
-#   AGE_IDENTIDAD=<archivo de la llave privada de age, o -> db/respaldo/restaurar.sh <respaldo.dump.age> <contenedor> <base_nueva>
+#   AGE_IDENTIDAD=<archivo de la llave privada de age, o -> db/respaldo/restaurar.sh <respaldo.age> <contenedor> <base_nueva>
 #
 # AGE_IDENTIDAD es la RUTA del archivo de la llave, nunca la llave. Con AGE_IDENTIDAD=- la llave llega por stdin
 # (así no toca el disco), y el respaldo va siempre como archivo.
@@ -14,7 +15,7 @@ export LC_ALL=C
 
 falla() { echo "restaurar: ERROR: $*" >&2; exit 1; }
 
-[ $# -eq 3 ] || falla "uso: AGE_IDENTIDAD=<archivo de la llave o -> $0 <respaldo.dump.age> <contenedor> <base_nueva>"
+[ $# -eq 3 ] || falla "uso: AGE_IDENTIDAD=<archivo de la llave o -> $0 <respaldo.age> <contenedor> <base_nueva>"
 respaldo=$1 contenedor=$2 base=$3
 identidad=${AGE_IDENTIDAD:-}
 llave=
@@ -39,28 +40,44 @@ esac
 command -v age >/dev/null || falla "falta age"
 
 descifrar() {
+  local archivo=$1
   if [ "$identidad" = - ]; then
-    printf '%s\n' "$llave" | age -d -i - "$respaldo"
+    printf '%s\n' "$llave" | age -d -i - "$archivo"
   else
-    age -d -i "$identidad" "$respaldo"
+    age -d -i "$identidad" "$archivo"
   fi
 }
 psql_c() {
   MSYS_NO_PATHCONV=1 docker exec -i "$contenedor" sh -c 'exec psql -U "$POSTGRES_USER" -d postgres -X -q -At -v ON_ERROR_STOP=1'
 }
 
+trabajo=
+directorio_script=$(cd -- "$(dirname -- "$0")" && pwd)
+limpiar() { [ -z "$trabajo" ] || rm -rf -- "$trabajo"; }
+trap limpiar EXIT
+if [[ $respaldo == *.backup.age ]]; then
+  [ "$(findmnt -n -o FSTYPE --target /run 2>/dev/null)" = tmpfs ] || falla "/run debe ser tmpfs para proteger los temporales"
+  command -v python3 >/dev/null || falla "falta python3"
+  trabajo=$(mktemp -d /run/lowtide-restaurar.XXXXXX)
+  descifrar "$respaldo" > "$trabajo/paquete.tar" || falla "no se pudo descifrar el paquete"
+  mkdir -m 700 "$trabajo/cifrado"
+  python3 "$directorio_script/paquete.py" extraer "$trabajo/paquete.tar" "$trabajo/cifrado" \
+    || falla "el paquete cifrado no tiene una estructura válida"
+  respaldo="$trabajo/cifrado/cirdan.dump.age"
+fi
+
 existe=$(printf "SELECT count(*) FROM pg_database WHERE datname = '%s';\n" "$base" | psql_c)
 [ "$existe" = 0 ] || falla "la base $base ya existe: este script no la borra ni la pisa"
 
 # Antes de crear la base: age revisa la autenticación de cada bloque, así que una llave equivocada o un archivo
 # cortado fallan aquí y no queda ninguna base vacía que estorbe al reintentar.
-descifrar > /dev/null || falla "no se pudo descifrar $respaldo (otra llave o archivo incompleto). No se creó ninguna base."
+descifrar "$respaldo" > /dev/null || falla "no se pudo descifrar $respaldo (otra llave o archivo incompleto). No se creó ninguna base."
 
 printf 'CREATE DATABASE "%s";\n' "$base" | psql_c
 echo "restaurar: base $base creada en $contenedor"
 
 # --single-transaction y --exit-on-error: si algo falla, la base nueva queda vacía, no a medias.
-if ! descifrar | MSYS_NO_PATHCONV=1 docker exec -i -e BASE="$base" "$contenedor" \
+if ! descifrar "$respaldo" | MSYS_NO_PATHCONV=1 docker exec -i -e BASE="$base" "$contenedor" \
        sh -c 'exec pg_restore -U "$POSTGRES_USER" -d "$BASE" --no-password --single-transaction --exit-on-error'; then
   falla "pg_restore falló: la base $base quedó vacía y este script no la borra. Reintenta con otro nombre."
 fi

@@ -74,10 +74,10 @@ class AltaDominio(unittest.TestCase):
         self.assertEqual(len(pdf), v1.MAX_CARTA)
         self.assertEqual(v1._datos_alta({**BODY, 'letter_base64': base64.b64encode(pdf).decode()})[6], pdf)
 
-    def test_no_habilita_en_produccion(self):
+    def test_habilita_con_cookie_segura_cuando_se_configura(self):
         with patch.object(cartas, 'config', side_effect=lambda name, default=None: {
                 'CARTA_ALTA_ENABLED': 'true', 'COOKIE_SECURE': 'true'}.get(name, default)):
-            self.assertFalse(cartas.habilitado())
+            self.assertTrue(cartas.habilitado())
 
     def test_sin_habilitar_no_lee_la_peticion(self):
         request = Request({'type': 'http', 'method': 'POST', 'path': '/', 'headers': []})
