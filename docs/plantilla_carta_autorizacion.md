@@ -122,7 +122,7 @@ Fecha: [fecha]
 | 4 | Secretos expuestos y correos en commits | Repositorios públicos de la organización de GitHub ligada al dominio | No | 27 oct 2026 |
 | 5 | Servicios y dispositivos expuestos | Shodan e InternetDB, con datos que ya recolectaron | No | 27 oct 2026 |
 | 6 | Tecnologías web, servidor y versiones | Visita web normal a los sitios del dominio | Sí, como cualquier visitante | 6 nov 2026 |
-| 7 | Correos del dominio en brechas conocidas | Have I Been Pwned, por dominio si la empresa lo verificó o por cada correo encontrado si no | No | 6 nov 2026 |
+| 7 | Correos del dominio en brechas conocidas | Have I Been Pwned, por dominio si la empresa lo verificó o por cada correo encontrado si no | No | 30 nov 2026 |
 | 8 | Correos y perfiles públicos ligados al dominio | El sitio público, los commits de la organización de GitHub, los usuarios de GitHub con correo del dominio, los perfiles públicos enlazados desde el sitio y los certificados | Solo la lectura de las páginas públicas del sitio | 13 nov 2026 |
 | 9 | Documentación de APIs expuesta (función extra, puede no estar disponible) | Hasta 10 rutas fijas de documentación en subdominios autorizados, solo GET y sin llamar a los servicios documentados | Sí, solo esas rutas | 13 nov 2026 |
 | 10 | Almacenamiento en la nube público (función extra, puede no estar disponible) | Comprobación anónima de si un bucket se puede listar, solo cuando sale de un CNAME del dominio o cuando el sitio lo enlaza y su nombre contiene el dominio, sin listar ni descargar archivos. También detecta un CNAME que apunta a un bucket que ya no existe | No toca los servidores del dominio, pero sí hace una petición anónima al bucket en el proveedor de nube | 20 nov 2026 |
