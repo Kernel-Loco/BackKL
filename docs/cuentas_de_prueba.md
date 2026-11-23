@@ -20,6 +20,8 @@ La contraseña es la misma para las cinco: **`Lowtide-Demo-2026`**
 | `dana.cruz@beta-corp.mx` | Administrador | Beta Corp | Solo los datos de Beta Corp. Sirve para comprobar que una empresa no ve los datos de otra |
 | `admin@olmardo.com` | Administrador | Grupo Olmardo | Cuenta de demo con contraseña pública. Sirve para probar el escaneo de olmardo.com en tu PC. No es la de las demos con el socio |
 
+Las cuentas `pruebas-p1@lowtidesec.com`, `pruebas-p2@lowtidesec.com` y `pruebas-p3@lowtidesec.com` de Grupo Olmardo no son de demo: las crea Ernesto en la VM solo para las pruebas con usuarios (#50, [`pruebas_usuarios.md`](pruebas_usuarios.md)) y se desactivan al terminar las sesiones.
+
 ## Cómo pasar el MFA (verificación en dos pasos)
 
 Después de la contraseña, el portal pide un código de 6 dígitos que cambia cada 30 segundos. Hay dos formas de obtenerlo.
