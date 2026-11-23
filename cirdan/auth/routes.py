@@ -262,6 +262,9 @@ def login(body: LoginIn, request: Request, response: Response):
     sessions.refund_login_attempt(email, ip, ticket)
 
     operator_mfa_required = False
+    # La huella que abrió esta contraseña. Si cambia antes de crear la sesión (un restablecimiento o un /password en
+    # paralelo), la sesión no se crea con la contraseña anterior (H7 de la revisión de RC-335).
+    huella = found['password_hash']
     with transaction(org) as conn:
         if passwords.needs_rehash(found['password_hash'], user_id):
             # Una huella vieja sin cifrar queda cifrada en este mismo inicio de sesión (RC-330). Solo si nadie la
@@ -269,28 +272,42 @@ def login(body: LoginIn, request: Request, response: Response):
             # Sin fila cambiada, otra petición guardó una huella nueva mientras tanto: la de un login en paralelo de
             # la misma cuenta (doble clic), que la cifró con esta misma contraseña, o la de un cambio de contraseña.
             # Se relee y solo entra si la contraseña también abre la huella que quedó.
-            if not conn.execute('UPDATE users SET password_hash = %s WHERE id = %s AND password_hash = %s',
-                                (passwords.hash_password(body.password, user_id), user_id,
-                                 found['password_hash'])).rowcount:
+            nueva = passwords.hash_password(body.password, user_id)
+            if conn.execute('UPDATE users SET password_hash = %s WHERE id = %s AND password_hash = %s',
+                            (nueva, user_id, found['password_hash'])).rowcount:
+                huella = nueva
+            else:
                 actual = conn.execute('SELECT password_hash FROM users WHERE id = %s', (user_id,)).fetchone()
                 if not actual or not passwords.verify_password(actual['password_hash'], body.password, user_id):
                     # Ya no abre la huella de ahora: vuelve a contar como fallo y queda en la bitácora como el otro 401.
                     sessions.register_fail(email, ip)
                     return _bad_password(org, user_id, ip)
+                huella = actual['password_hash']
         if found['mfa_enabled']:
             # Los fallos del correo se borran hasta que el código sea correcto. Borrados aquí, quien
-            # tiene la contraseña repetiría el login y 5 códigos sin llegar nunca al bloqueo.
-            return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
+            # tiene la contraseña repetiría el login y 5 códigos sin llegar nunca al bloqueo. El mfa_token lleva la
+            # marca de la huella: si la contraseña cambia antes del código, ya no sirve (H6 de la revisión de RC-335).
+            return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
+                {'user_id': user_id, 'org_id': org, 'email': email, 'tag': sessions.password_tag(huella)})}
         # login_lookup() no devuelve el rol (migración 004): se lee aquí con RLS, como en /mfa/verify.
         # FOR NO KEY UPDATE (RC-154), como el UPDATE de last_login_at que viene: un alta de TOTP a la vez espera
         # a que esta sesión entre al índice y la cierra, o esta lectura espera al alta y la ve ya activa. Con FOR
         # SHARE dos logins a la vez de la misma cuenta chocaban en un deadlock al subir al lock del UPDATE.
-        row = conn.execute('SELECT role, %s AS mfa_enabled FROM users WHERE id = %%s AND is_active FOR NO KEY UPDATE'
-                           % MFA_ENABLED_SQL, (user_id,)).fetchone()
+        row = conn.execute('SELECT role, password_hash, %s AS mfa_enabled FROM users WHERE id = %%s AND is_active '
+                           'FOR NO KEY UPDATE' % MFA_ENABLED_SQL, (user_id,)).fetchone()
         if not row:  # se desactivó la cuenta entre la búsqueda y aquí
             raise HTTPException(401, INVALID)
+        if row['password_hash'] != huella:
+            # Otra petición cambió la huella después de revisar la contraseña: un restablecimiento o un /password que ya
+            # cerró las sesiones, o un login en paralelo que la cifró (RC-330). Solo sigue si la contraseña también abre
+            # la de ahora; si no, cuenta como fallo, como arriba (H7 de la revisión de RC-335).
+            if not passwords.verify_password(row['password_hash'], body.password, user_id):
+                sessions.register_fail(email, ip)
+                return _bad_password(org, user_id, ip)
+            huella = row['password_hash']
         if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
-            return {'mfa_required': True, 'mfa_token': sessions.create_mfa({'user_id': user_id, 'org_id': org, 'email': email})}
+            return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
+                {'user_id': user_id, 'org_id': org, 'email': email, 'tag': sessions.password_tag(huella)})}
         operator_mfa_required = bool(conn.execute(
             'SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required'])
         if operator_mfa_required:
@@ -309,7 +326,7 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
     # El intento se gasta antes de revisar el código, en el mfa_token y en el correo, para que ni
     # las peticiones en paralelo ni volver a iniciar sesión den más de 5 códigos.
     pending = sessions.take_mfa(body.mfa_token)
-    if pending and 'email' not in pending:  # token creado antes de este cambio
+    if pending and ('email' not in pending or 'tag' not in pending):  # token creado antes de este cambio
         sessions.delete_mfa(body.mfa_token)
         pending = None
     if not pending:
@@ -319,14 +336,18 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
     if not sessions.take_mfa_attempt(email, ip):
         return _locked(BackgroundTask(_record_mfa_locked, org, user_id, email, ip))
     with transaction(org) as conn:
+        # FOR NO KEY UPDATE, el mismo lock que /login, /password y el restablecimiento (RC-335): un cambio de contraseña a
+        # la vez espera a que esta sesión entre al índice y la cierra, o esta lectura espera al cambio y ve la huella
+        # nueva. Con otra huella que la del login que dio el mfa_token, ya no sirve (H6 de la revisión de RC-335).
         row = conn.execute(
-            'SELECT email::text, role, totp_secret_enc, last_totp_step FROM users WHERE id = %s AND is_active', (user_id,)).fetchone()
-        if not row or not row['totp_secret_enc']:
+            'SELECT email::text, role, password_hash, totp_secret_enc, last_totp_step FROM users '
+            ' WHERE id = %s AND is_active FOR NO KEY UPDATE', (user_id,)).fetchone()
+        if not row or not row['totp_secret_enc'] or sessions.password_tag(row['password_hash']) != pending['tag']:
             sessions.delete_mfa(body.mfa_token)
             raise HTTPException(401, MFA_EXPIRED)
         step = totp.verify_code(totp.decrypt_secret(row['totp_secret_enc'], user_id), body.code, row['last_totp_step'])
-        # La fila se leyó sin bloquearla: el UPDATE solo guarda el paso si ninguna otra petición (otro /mfa/verify o el
-        # registro de una passkey) gastó ese código o uno posterior desde la lectura. Si no cambia nada, es un código usado.
+        # El UPDATE solo guarda el paso si ninguna otra petición (otro /mfa/verify o el registro de una passkey) gastó ese
+        # código o uno posterior. Si no cambia nada, es un código usado.
         if step is not None and not conn.execute(
                 'UPDATE users SET last_totp_step = %s WHERE id = %s AND (last_totp_step IS NULL OR last_totp_step < %s)',
                 (step, user_id, step)).rowcount:
@@ -409,7 +430,9 @@ def _send_link(email, ip):
             # Texto fijo para contar cuántas veces sale en la semana (decisión 7 de RC-327, README).
             log.warning('enlace: tope diario alcanzado (%d)', tope)
             return
-        token = sessions.create_link({'user_id': user_id, 'org_id': org, 'email': email})
+        # Con la marca de la huella: si la contraseña cambia antes del canje, el enlace ya no sirve (H6 de RC-335).
+        token = sessions.create_link({'user_id': user_id, 'org_id': org, 'email': email,
+                                      'tag': sessions.password_tag(found['password_hash'])})
         motivo = correo.enviar_enlace(email, '%s/login/enlace#t=%s' % (_portal_url(), token), LINK_MINUTES)
         if motivo:
             sessions.delete_link(token)  # un enlace que no llegó no queda vivo
@@ -462,7 +485,7 @@ def verify_link(body: LinkVerifyIn, request: Request, response: Response):
         # TOTP a la vez (FOR NO KEY UPDATE, RC-154).
         row = conn.execute(
             'SELECT u.role, u.email::text, u.mfa_enabled_at IS NOT NULL AND u.totp_secret_enc IS NOT NULL AS mfa_enabled, '
-            '       u.password_hash = %s AS demo_off '
+            '       u.password_hash = %s AS demo_off, u.password_hash '
             '  FROM users u JOIN organizations o ON o.id = u.organization_id '
             " WHERE u.id = %s AND u.is_active AND o.status IN ('trial', 'active') FOR NO KEY UPDATE OF u",
             (HASH_DE_RELLENO, user_id)).fetchone()
@@ -471,9 +494,14 @@ def verify_link(body: LinkVerifyIn, request: Request, response: Response):
         elif row['demo_off']:
             # Apagada después de pedir el enlace: tampoco entra (A1 de la revisión).
             rejected = 'demo_off'
+        elif sessions.password_tag(row['password_hash']) != pending.get('tag'):
+            # La contraseña cambió después de pedir el enlace (un restablecimiento o /password), o es un enlace de antes
+            # de la marca: ya no entra (H6 de la revisión de RC-335).
+            rejected = 'password_changed'
         elif row['mfa_enabled']:
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
-                {'user_id': user_id, 'org_id': org, 'email': row['email'], 'via': 'link_totp'})}
+                {'user_id': user_id, 'org_id': org, 'email': row['email'], 'via': 'link_totp',
+                 'tag': sessions.password_tag(row['password_hash'])})}
         elif conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required']:
             rejected = 'operator_mfa_required'
         else:
@@ -510,9 +538,9 @@ class PasswordResetIn(BaseModel):
 
 class PasswordResetConfirmIn(BaseModel):
     token: str = Field(min_length=20, max_length=100)
-    # Sin el mínimo ni el máximo de la política en el modelo: el token se gasta antes de revisar la contraseña (Hecho
-    # cuando, punto 2), y un 422 del modelo saldría antes. El tope de 1024 solo acota el cuerpo.
-    new_password: str = Field(min_length=1, max_length=1024)
+    # Sin largo en el modelo: el token se gasta antes de revisar la contraseña (Hecho cuando, punto 2), y un 422 del
+    # modelo saldría antes y lo dejaría vivo (H9 de la revisión). El cuerpo ya lo acota el tope global de main.py.
+    new_password: str
 
 
 def _send_reset(email, ip):
@@ -539,11 +567,16 @@ def _send_reset(email, ip):
             log.warning('recuperar: %s alcanzado', motivo)
             token = None
         else:
-            token = sessions.create_reset({'user_id': user_id, 'org_id': org, 'email': email})
+            # Sin el correo (H5 de la revisión) y con la marca de la huella: si la contraseña cambia antes del canje
+            # (por /password o por otro enlace), este ya no sirve (H2).
+            token = sessions.create_reset({'user_id': user_id, 'org_id': org,
+                                           'tag': sessions.password_tag(found['password_hash'])})
             motivo = correo.enviar_recuperacion(email, '%s/forgot-password/reset#t=%s' % (_portal_url(), token),
                                                 RESET_MINUTES)
             if motivo:
-                sessions.delete_reset(token)  # un enlace que no llegó no queda vivo
+                sessions.delete_reset(token)  # un enlace que no llegó no queda vivo, y el anterior sigue (H4)
+            else:
+                sessions.activate_reset(user_id, token)  # salió: ahora sí anula el anterior
         with transaction(org) as conn:
             if motivo:
                 audit(conn, org, 'auth.password_reset_send_failed', user_id, ip, 'user', user_id, {'reason': motivo})
@@ -621,7 +654,7 @@ def confirm_password_reset(body: PasswordResetConfirmIn, request: Request):
         # Como /link/verify: la cuenta sigue activa y su empresa en trial o active, y no es una de demo apagada. FOR NO
         # KEY UPDATE, el mismo lock que /login y /password: un cambio a la vez.
         row = conn.execute(
-            'SELECT u.email::text, u.password_hash = %s AS demo_off '
+            'SELECT u.email::text, u.password_hash = %s AS demo_off, u.password_hash '
             '  FROM users u JOIN organizations o ON o.id = u.organization_id '
             " WHERE u.id = %s AND u.is_active AND o.status IN ('trial', 'active') FOR NO KEY UPDATE OF u",
             (HASH_DE_RELLENO, user_id)).fetchone()
@@ -629,6 +662,9 @@ def confirm_password_reset(body: PasswordResetConfirmIn, request: Request):
             rejected = 'inactive'
         elif row['demo_off']:
             rejected = 'demo_off'
+        elif sessions.password_tag(row['password_hash']) != pending.get('tag'):
+            # La contraseña cambió después de pedir el enlace (/password u otro enlace): este ya no sirve (H2).
+            rejected = 'password_changed'
         else:
             conn.execute('UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s',
                          (passwords.hash_password(new, user_id), user_id))
@@ -651,8 +687,12 @@ def confirm_password_reset(body: PasswordResetConfirmIn, request: Request):
             audit(conn, org, 'auth.password_reset_rejected', user_id, ip, 'user', user_id, {'reason': rejected})
     if rejected:
         raise HTTPException(400, RESET_INVALID)
-    return JSONResponse({'detail': RESET_DONE, 'passkeys_removed': len(removed)}, headers=NO_STORE,
-                        background=BackgroundTask(_after_reset, user_id, org, row['email'].lower(), ip))
+    response = JSONResponse({'detail': RESET_DONE, 'passkeys_removed': len(removed)}, headers=NO_STORE,
+                            background=BackgroundTask(_after_reset, user_id, org, row['email'].lower(), ip))
+    # La sesión de este navegador, si había, ya se cerró: sin la cookie, /login muestra el aviso en vez de rebotar a
+    # /dashboard y a «Tu sesión ya no es válida» (H8 de la revisión).
+    response.delete_cookie(COOKIE, path='/', httponly=True, secure=COOKIE_SECURE, samesite='lax')
+    return response
 
 
 MFA_ALREADY ='La verificación en dos pasos ya está activa en tu cuenta.'

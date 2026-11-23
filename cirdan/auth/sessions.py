@@ -384,6 +384,7 @@ return n
 
 
 SEND_KINDS = ('user', 'reset', 'aviso')  # enlace para entrar, enlace para recuperar y aviso de contraseña cambiada
+AVISO_RESERVA = 10  # envíos del día que solo puede usar el aviso de contraseña cambiada, por encima de `tope` (RC-335)
 
 
 def reserve_link_send(tope, user_id, dia=None, tipo='user'):
@@ -392,12 +393,16 @@ def reserve_link_send(tope, user_id, dia=None, tipo='user'):
     se va a enviar. Con el tope por cuenta, pedir enlaces para los pocos correos que existen y se conocen (los de demo
     del repo, equipo@) no deja a los demás sin enlace (M2 de la revisión). `dia` solo lo pasan las pruebas, para no
     gastar el contador de hoy. El contador del día es uno para todos los correos, porque el cupo de Resend también lo
-    es; el de la cuenta va aparte por `tipo` (SEND_KINDS): pedir enlaces para entrar no gasta los de recuperar la
-    contraseña (RC-335). 'user' es el de RC-63 y conserva su llave."""
+    es. Los enlaces para entrar ('user', RC-63) y para recuperar la contraseña ('reset', RC-335) comparten el tope de
+    la cuenta y su llave de RC-63: separados, cada correo conocido gastaba el doble del día (H1 de la revisión). El aviso
+    de contraseña cambiada ('aviso') lleva su propio tope por cuenta y AVISO_RESERVA envíos más del día, para que un
+    día agotado no lo deje sin salir. Con `tope` en 0 no sale nada, tampoco el aviso."""
     if tipo not in SEND_KINDS:
         raise ValueError(tipo)
     dia = dia or time.strftime('%Y-%m-%d', time.gmtime())
-    cuenta = 'link:day:%s:%s:%s' % (dia, tipo, _digest(str(user_id)))
+    cuenta = 'link:day:%s:%s:%s' % (dia, 'aviso' if tipo == 'aviso' else 'user', _digest(str(user_id)))
+    if tipo == 'aviso' and tope > 0:
+        tope += AVISO_RESERVA
     return int(_valkey().eval(_RESERVE_DAY, 2, 'link:day:' + dia, cuenta, tope, LINK_DAY_SECONDS, MAX_LINKS_USER_DAY))
 
 
@@ -407,13 +412,15 @@ def _reset_user_key(user_id):
     return 'pwreset-user:' + _digest(str(user_id))
 
 
-# KEYS: el índice de la cuenta (pwreset-user:) y el token nuevo (pwreset:<hash>). ARGV: el hash nuevo, sus datos y los
-# segundos. Borra el token anterior de la cuenta y deja el nuevo en un solo paso: dos pedidos a la vez dejan uno solo.
-_CREATE_RESET = '''
+# KEYS: el índice de la cuenta (pwreset-user:) y el token nuevo (pwreset:<hash>). ARGV: el hash nuevo y los segundos.
+# Corre cuando Resend ya aceptó el correo nuevo: borra el anterior de la cuenta y apunta el índice al nuevo en un solo
+# paso. Si el nuevo ya no existe (se canjeó o se borró), no toca nada. Dos pedidos a la vez dejan uno solo.
+_ACTIVATE_RESET = '''
+if redis.call('EXISTS', KEYS[2]) == 0 then return 0 end
 local anterior = redis.call('GET', KEYS[1])
-if anterior then redis.call('DEL', 'pwreset:' .. anterior) end
-redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
-redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+if anterior and anterior ~= ARGV[1] then redis.call('DEL', 'pwreset:' .. anterior) end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return 1
 '''
 # KEYS: el token (pwreset:<hash>). ARGV: su hash. Lo lee y lo borra en el mismo paso (como GETDEL), y limpia el índice
 # de su cuenta solo si sigue apuntando a este token. Dos canjes a la vez: uno lo recibe y el otro ve nil.
@@ -428,18 +435,24 @@ return raw
 
 
 def create_reset(data):
-    """Crea el token del enlace para recuperar la contraseña de `data` (user_id, org_id, email) y lo devuelve: 32 bytes
-    al azar (256 bits). En Valkey solo queda su SHA-256, vence en RESET_SECONDS y anula el anterior de la cuenta."""
+    """Crea el token del enlace para recuperar la contraseña de `data` (user_id, org_id y tag, sin el correo: H5 de la
+    revisión) y lo devuelve: 32 bytes al azar (256 bits). En Valkey solo queda su SHA-256 y vence en RESET_SECONDS.
+    Todavía no anula el anterior: eso lo hace activate_reset cuando el correo salió (H4 de la revisión)."""
     token = secrets.token_urlsafe(32)
-    digest = _digest(token)
     payload = json.dumps(dict(data, user_key=_digest(str(data['user_id']))))
-    _valkey().eval(_CREATE_RESET, 2, _reset_user_key(data['user_id']), 'pwreset:' + digest, digest, payload,
-                   RESET_SECONDS)
+    _valkey().set('pwreset:' + _digest(token), payload, ex=RESET_SECONDS)
     return token
 
 
+def activate_reset(user_id, token):
+    """El correo con `token` salió: anula el enlace anterior de la cuenta. Si el envío falla no se llama, y el anterior
+    sigue sirviendo."""
+    digest = _digest(token)
+    _valkey().eval(_ACTIVATE_RESET, 2, _reset_user_key(user_id), 'pwreset:' + digest, digest, RESET_SECONDS)
+
+
 def take_reset(token):
-    """Los datos del token, una sola vez; None si no existe, venció, ya se usó o lo anuló otro más nuevo."""
+    """Los datos del token, una sola vez; None si no existe, venció, ya se usó o lo anuló otro más nuevo que sí salió."""
     if not token or len(token) > 100:
         return None
     digest = _digest(token)

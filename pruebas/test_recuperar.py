@@ -101,9 +101,10 @@ class RecuperarAislado(unittest.TestCase):
                                           (list(CUENTAS),)).fetchall())
         cls.pg.execute('UPDATE users SET mfa_enabled_at = NULL, totp_secret_enc = NULL WHERE email IN (%s, %s, %s)',
                        (MAYA, JORDAN, OLMARDO))
-        # Desde cero también al repetirla sin bajar el compose: tokens, contadores de pedidos y los del día de esta
-        # tarjeta. Los del enlace para entrar (link:day:*:user:*) no se tocan.
-        for patron in ('pwreset*', 'link:day:*:reset:*', 'link:day:*:aviso:*'):
+        # Desde cero también al repetirla sin bajar el compose: tokens, contadores de pedidos y los del día. Los del día
+        # van todos: el enlace para entrar (RC-63) y el de recuperar comparten el de la cuenta (H1 de la revisión), y
+        # test_enlace.py corre antes en el mismo compose.
+        for patron in ('pwreset*', 'link:day:*'):
             for llave in cls.valkey.scan_iter(patron):
                 cls.valkey.delete(llave)
         _falso('DELETE', '/correos')

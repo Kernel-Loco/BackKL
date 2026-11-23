@@ -322,14 +322,16 @@ class Rutas(unittest.TestCase):
     def test_16_canje_superadmin_sin_mfa_403_y_bitacora(self):
         bitacora = []
         conn = mock.MagicMock()
-        fila_usuario = {'role': 'admin', 'email': 'equipo@lowtidesec.com', 'mfa_enabled': False, 'demo_off': False}
+        fila_usuario = {'role': 'admin', 'email': 'equipo@lowtidesec.com', 'mfa_enabled': False, 'demo_off': False,
+                        'password_hash': 'lt1$huella'}
         conn.execute.return_value.fetchone.side_effect = [fila_usuario, {'required': True}]
 
         @contextlib.contextmanager
         def transaccion(org=None):
             yield conn
 
-        pendiente = {'user_id': str(uuid.uuid4()), 'org_id': str(uuid.uuid4()), 'email': 'equipo@lowtidesec.com'}
+        pendiente = {'user_id': str(uuid.uuid4()), 'org_id': str(uuid.uuid4()), 'email': 'equipo@lowtidesec.com',
+                     'tag': routes.sessions.password_tag('lt1$huella')}
         with mock.patch.object(routes.sessions, 'take_link', return_value=pendiente), \
                 mock.patch.object(routes, 'transaction', transaccion), \
                 mock.patch.object(routes, 'audit', lambda *a: bitacora.append(a)), \
