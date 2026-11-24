@@ -44,13 +44,15 @@ La primera subida crea los paquetes `backkl` y `frontkl` en ghcr.io. En *Package
 
 1. Conectarlos a su repo (Kernel-Loco/BackKL y Kernel-Loco/FrontKL), para que el `GITHUB_TOKEN` de cada uno pueda
    escribir.
-2. Hacerlos públicos, o darle a la VM un token de solo lectura (`read:packages`) para `docker login ghcr.io`. Los dos
-   repos ya son públicos.
+2. Hacerlos públicos (*Change visibility*), para que la VM los baje y `cosign` los verifique sin cuenta. Los dos repos
+   ya son públicos. Antes hay que permitir paquetes públicos en la organización (*Settings*, *Packages*, *Package
+   creation*, casilla *Public*). Los dos son públicos desde el 23 nov.
 
 ## En la VM: verificar antes de levantar
 
-Hoy la VM compila las imágenes con `docker compose up -d --build`. Para levantar las firmadas en vez de compilarlas,
-quien administra la VM (Ernesto) agrega al `.env`:
+La VM ya no compila: desde el 23 nov levanta las imágenes firmadas que verifica este script. Para cambiar a una
+versión nueva, quien administra la VM (Ernesto) pone en el `.env` los digest de la corrida de `imagenes.yml` del push
+a dev o main:
 
 ```bash
 COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml:docker-compose.imagenes.yml
