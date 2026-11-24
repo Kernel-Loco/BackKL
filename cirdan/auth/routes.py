@@ -308,7 +308,9 @@ def login(body: LoginIn, request: Request, response: Response):
         if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
                 {'user_id': user_id, 'org_id': org, 'email': email, 'tag': sessions.password_tag(huella)})}
-        operator_mfa_required = bool(conn.execute(
+        # Una cuenta 'operator' de la consola del integrador (#66, RC-126, migración 033) o un superadmin (027) no entra
+        # con solo la contraseña: primero activa su TOTP (comentario 10270 de RC-126, punto 2).
+        operator_mfa_required = row['role'] == 'operator' or bool(conn.execute(
             'SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required'])
         if operator_mfa_required:
             audit(conn, org, 'auth.operator_mfa_required', user_id, ip, 'user', user_id)
@@ -502,7 +504,8 @@ def verify_link(body: LinkVerifyIn, request: Request, response: Response):
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
                 {'user_id': user_id, 'org_id': org, 'email': row['email'], 'via': 'link_totp',
                  'tag': sessions.password_tag(row['password_hash'])})}
-        elif conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required']:
+        elif row['role'] == 'operator' or conn.execute(
+                'SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required']:
             rejected = 'operator_mfa_required'
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
@@ -1150,10 +1153,15 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
         return JSONResponse({'detail': PASSKEY_INVALID}, status_code=401,
                             background=BackgroundTask(_audit_passkey_login_failed, org, user_id, ip, reason))
     with transaction(org) as conn:
-        row = conn.execute('SELECT role, email::text FROM users WHERE id = %s AND is_active FOR NO KEY UPDATE',
-                           (user_id,)).fetchone()
+        row = conn.execute('SELECT role, email::text, %s AS mfa_enabled FROM users WHERE id = %%s AND is_active '
+                           'FOR NO KEY UPDATE' % MFA_ENABLED_SQL, (user_id,)).fetchone()
         if not row:  # se desactivó la cuenta entre la búsqueda y aquí
             reason = 'inactive'
+        elif row['role'] == 'operator' and not row['mfa_enabled']:
+            # Un operator de la consola del integrador (#66, RC-126) tampoco entra con passkey sin su TOTP activo,
+            # igual que con contraseña o con enlace (comentario 10270, punto 2). El reto ya se gastó: no se repite.
+            audit(conn, org, 'auth.operator_mfa_required', user_id, ip, 'user', user_id)
+            reason = 'operator_mfa_required'
         # Solo si nadie la borró ni la usó con otro contador desde la búsqueda: si no, puede ser una respuesta repetida
         # o un autenticador clonado, y queda en la bitácora.
         elif not conn.execute('UPDATE webauthn_credentials SET sign_count = %s, backed_up = %s, last_used_at = now() '
@@ -1163,6 +1171,8 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
                                                    'email': row['email']}, ip, 'passkey')
+    if reason == 'operator_mfa_required':
+        raise HTTPException(403, OPERATOR_MFA_REQUIRED)
     if reason:
         sessions.register_fail(email, ip)
         return JSONResponse({'detail': PASSKEY_INVALID}, status_code=401,

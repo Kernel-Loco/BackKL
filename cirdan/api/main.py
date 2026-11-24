@@ -25,6 +25,7 @@ from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.firmas import MAX_SUBIDA_BODY, router as signatures_router
 from cirdan.api.llaves import router as api_keys_router
+from cirdan.api.operador import router as operator_router
 from cirdan.api.plataforma import router as platform_router
 from cirdan.api.v1 import MAX_ALTA_BODY, router as v1_router
 from cirdan.auth import passwords, totp
@@ -309,6 +310,7 @@ app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(api_keys_router)
 app.include_router(platform_router)
+app.include_router(operator_router)
 app.include_router(v1_router)
 app.include_router(signatures_router)
 app.include_router(assistant_router)

@@ -85,8 +85,23 @@ def current_session(request: Request) -> Session:
         # las 8 h.
         sessions.delete(token)
         raise HTTPException(401, SESION_TERMINADA)
+    if session.role == ROL_OPERADOR and not _ruta_de_operador(request):
+        # Un operator de la consola del integrador (#66, RC-126) solo usa su cuenta y la consola: en su propia empresa
+        # no lee dominios, hallazgos, reportes ni exportaciones, aunque la ruta no pida un rol (migración 033).
+        raise HTTPException(403, SIN_PERMISO)
     request.state.cirdan_session = session
     return session
+
+
+ROL_OPERADOR = 'operator'
+RUTAS_DE_OPERADOR = ('/api/v1/auth/', '/api/v1/operator/')
+
+
+def _ruta_de_operador(request: Request) -> bool:
+    """Si la petición es de /api/v1/auth/* o /api/v1/operator. Se mira la plantilla de la ruta que resolvió FastAPI
+    (sin root_path ni valores de la URL) y, si no la hay, el path."""
+    ruta = getattr(request.scope.get('route'), 'path', None) or request.url.path
+    return ruta == '/api/v1/operator' or ruta.startswith(RUTAS_DE_OPERADOR)
 
 
 def is_platform_admin(user_id) -> bool:
