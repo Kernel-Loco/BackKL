@@ -76,6 +76,8 @@ COPY --from=subfinder --chmod=0755 /out/subfinder /usr/local/bin/subfinder
 COPY --from=subfinder /out/licencia/ /usr/share/licenses/subfinder/
 COPY --from=gitleaks --chmod=0755 /out/gitleaks /usr/local/bin/gitleaks
 COPY --from=gitleaks /out/licencia/ /usr/share/licenses/gitleaks/
+# PRUEBA DE RC-117, NO FUSIONAR: gosu de postgres:16.15 trae la crítica CVE-2025-68121. Trivy tiene que frenar.
+COPY --from=postgres:16.15 /usr/local/bin/gosu /usr/local/bin/gosu-sembrado
 
 # Bases de DB-IP Lite para el país y el ASN de las IP (#15b, RC-166), bajadas a mano a datos/geo/ (ver
 # cirdan/recolectores/geoip.py y NOTICE). Van antes de cirdan/ para que un cambio en el código no vuelva a copiar sus
