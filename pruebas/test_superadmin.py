@@ -191,11 +191,34 @@ class Superadmin(unittest.TestCase):
             postgres("UPDATE users SET totp_secret_enc = NULL, mfa_enabled_at = NULL WHERE id = '%s';" % DANA_ID)
             cliente = Client()
             code, body = sesion.post_login(cliente, DANA, sesion.PASSWORD)
+            # Sin el token de alta del Admin (RC-5): con la contraseña sola daría una sesión de superadmin (H1).
             self.assertEqual((code, body), (403, {
                 'detail': 'Las cuentas de operador deben tener MFA activo antes de iniciar sesión.'
             }))
             self.assertIsNone(cliente.cookie())
         finally:
+            postgres("UPDATE users SET totp_secret_enc = decode('%s', 'hex'), mfa_enabled_at = '%s'::timestamptz"
+                     " WHERE id = '%s';" % (secreto, habilitado, DANA_ID))
+
+    def test_09b_el_token_de_alta_no_sirve_si_la_cuenta_pasa_a_operador(self):
+        # Un token sacado como Admin sin TOTP deja de servir si la cuenta entra a platform_admins (H1 de RC-5).
+        secreto = scalar("SELECT encode(totp_secret_enc, 'hex') FROM users WHERE id = '%s';" % DANA_ID,
+                         user='postgres')
+        habilitado = scalar("SELECT mfa_enabled_at::text FROM users WHERE id = '%s';" % DANA_ID, user='postgres')
+        try:
+            postgres("UPDATE users SET totp_secret_enc = NULL, mfa_enabled_at = NULL WHERE id = '%s';" % DANA_ID)
+            quitar_superadmin(DANA_ID)
+            code, body = sesion.post_login(Client(), DANA, sesion.PASSWORD)
+            self.assertEqual((code, body.get('mfa_setup_required')), (403, True), body)
+            hacer_superadmin(DANA_ID)
+            cliente = Client()
+            self.assertEqual(cliente.post('/api/v1/auth/mfa/enroll/setup', {'mfa_setup_token': body['mfa_setup_token']}),
+                             (401, {'detail': 'Tu verificación expiró. Inicia sesión de nuevo.'}))
+            self.assertIsNone(cliente.cookie())
+            self.assertEqual(scalar("SELECT totp_secret_enc IS NULL FROM users WHERE id = '%s';" % DANA_ID,
+                                    user='postgres'), 't')
+        finally:
+            hacer_superadmin(DANA_ID)
             postgres("UPDATE users SET totp_secret_enc = decode('%s', 'hex'), mfa_enabled_at = '%s'::timestamptz"
                      " WHERE id = '%s';" % (secreto, habilitado, DANA_ID))
 

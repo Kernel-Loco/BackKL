@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 import urllib.error
 import uuid
@@ -341,6 +340,40 @@ class Rutas(unittest.TestCase):
         self.assertEqual((e.exception.status_code, e.exception.detail), (403, routes.OPERATOR_MFA_REQUIRED))
         sesion.assert_not_called()
         self.assertEqual((bitacora[0][2], bitacora[0][-1]), ('auth.link_rejected', {'reason': 'operator_mfa_required'}))
+
+    def test_16c_canje_de_un_admin_sin_mfa_403_sin_token_de_alta(self):
+        # RC-5: el Admin sin TOTP tampoco entra por enlace, y activarlo pide la contraseña: el 403 no trae token.
+        for rol, esperado in (('admin', 403), ('analyst', 200), ('manager', 200)):
+            with self.subTest(rol=rol):
+                bitacora = []
+                conn = mock.MagicMock()
+                fila_usuario = {'role': rol, 'email': 'a@tec.mx', 'mfa_enabled': False, 'demo_off': False,
+                                'password_hash': 'lt1$huella'}
+                conn.execute.return_value.fetchone.side_effect = [fila_usuario, {'required': False}]
+
+                @contextlib.contextmanager
+                def transaccion(org=None):
+                    yield conn
+
+                pendiente = {'user_id': str(uuid.uuid4()), 'org_id': str(uuid.uuid4()), 'email': 'a@tec.mx',
+                             'tag': routes.sessions.password_tag('lt1$huella')}
+                with mock.patch.object(routes.sessions, 'take_link', return_value=pendiente), \
+                        mock.patch.object(routes, 'transaction', transaccion), \
+                        mock.patch.object(routes, 'audit', lambda *a: bitacora.append(a)), \
+                        mock.patch.object(routes, '_clear_fails'), \
+                        mock.patch.object(routes, '_start_session', return_value={'email': 'a@tec.mx'}) as sesion:
+                    if esperado == 403:
+                        with self.assertRaises(HTTPException) as e:
+                            routes.verify_link(routes.LinkVerifyIn(token='x' * 43), self.request(), mock.MagicMock())
+                        self.assertEqual((e.exception.status_code, e.exception.detail),
+                                         (403, routes.ADMIN_MFA_PASSWORD))
+                        sesion.assert_not_called()
+                        self.assertEqual((bitacora[0][2], bitacora[0][-1]),
+                                         ('auth.link_rejected', {'reason': 'admin_mfa_required'}))
+                    else:
+                        r = routes.verify_link(routes.LinkVerifyIn(token='x' * 43), self.request(), mock.MagicMock())
+                        self.assertEqual(r['mfa_required'], False)
+                        sesion.assert_called_once()
 
     def test_16b_canje_de_una_cuenta_de_demo_apagada_401_y_bitacora(self):
         # A1: si la cuenta se apagó después de pedir el enlace, tampoco entra.

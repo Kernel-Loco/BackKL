@@ -397,7 +397,8 @@ class Carreras(unittest.TestCase):
         from cirdan.auth import passwords
         antes = passwords.hash_password(self.CLAVE, self.USER)
         encontrada = {'user_id': self.USER, 'organization_id': self.ORG, 'password_hash': antes, 'mfa_enabled': False}
-        bloqueada = {'role': 'admin', 'password_hash': huella_al_bloquear(antes), 'mfa_enabled': False}
+        # analyst: desde RC-5 un Admin sin TOTP recibe 403 sin sesión, y estas pruebas son de la huella, no del rol.
+        bloqueada = {'role': 'analyst', 'password_hash': huella_al_bloquear(antes), 'mfa_enabled': False}
         with self.base([encontrada, bloqueada, {'required': False}]), \
                 mock.patch.object(routes.captcha, 'verify', return_value=True), \
                 mock.patch.object(routes.sessions, 'take_login_attempt', return_value=[1, 2]), \
