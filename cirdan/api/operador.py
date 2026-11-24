@@ -9,9 +9,9 @@ Cómo se respeta RLS, que no cambia:
   Nunca hay dos empresas en una transacción, ninguna política mira a varias y ninguna función salta RLS.
 - Una empresa que no está delegada, con la delegación revocada, que no existe o que está suspendida o cancelada
   responde 404 con el mismo texto: el operador no sabe si existe.
-- Cada lectura de una empresa cliente queda en la bitácora de esa empresa, con actor 'platform', el id de la cuenta
-  y la empresa integradora (comentario 10270, punto 1). La lectura y su registro van en la misma transacción: sin
-  registro no hay datos.
+- Cada lectura de una empresa cliente queda en la bitácora de esa empresa, con actor 'operator' (no 'platform', que es
+  el superadmin de RC-332), el id de la cuenta y la empresa integradora (comentario 10270, punto 1). La lectura y su
+  registro van en la misma transacción: sin registro no hay datos.
 - Antes de responder se vuelve a leer la delegación: si se revocó mientras se leía, la empresa no sale.
 
 El superadmin de RC-332 (platform_admins, cirdan/api/plataforma.py) es otra cosa y no pasa por aquí.
@@ -20,7 +20,8 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from cirdan.auth.deps import Session, client_ip, current_session
+from cirdan.auth import sessions
+from cirdan.auth.deps import SESION_TERMINADA, Session, client_ip, current_session
 from cirdan.db import audit, transaction
 from cirdan.score import configuracion, criterio
 
@@ -58,15 +59,17 @@ SELECT d.id::text, d.fqdn::text, d.status, s.score, s.computed_at, s.band_medium
 
 def operator(request: Request) -> Session:
     """Sesión de una cuenta operator o 403. Mira el rol de la sesión y luego la base en cada llamada: si se le quitó el
-    rol o el TOTP, se desactivó o se suspendió su empresa, ya no entra. Una llave de API nunca llega aquí (solo cookie).
-    Un superadmin trabajando en una empresa ajena tampoco: ahí su rol es admin."""
+    rol o el TOTP, se desactivó o se suspendió su empresa, la sesión se cierra ahí mismo y responde 401, para que no
+    siga abierta hasta las 8 h. Una llave de API nunca llega aquí (solo cookie). Un superadmin trabajando en una
+    empresa ajena tampoco: ahí su rol es admin."""
     session = current_session(request)
     if session.role != ROL or session.acting_elsewhere:
         raise HTTPException(403, SOLO_OPERADOR)
     with transaction(session.own_org_id) as conn:
         fila = conn.execute(CUENTA, (ROL, session.user_id)).fetchone()
     if not fila or not fila['ok']:
-        raise HTTPException(403, SOLO_OPERADOR)
+        sessions.delete(session.token)
+        raise HTTPException(401, SESION_TERMINADA)
     return session
 
 
@@ -90,8 +93,8 @@ def _leer_cliente(session, cliente, ip, ruta, con_dominios):
             return None
         dominios = conn.execute(DOMINIOS).fetchall()
         audit(conn, cliente, 'operator.client_data_read', ip=ip, entity_type='organization', entity_id=cliente,
-              details={'route': ruta, 'operator_organization_id': session.own_org_id, 'via': 'delegation'},
-              platform={'user_id': session.user_id})
+              details={'route': ruta, 'via': 'delegation'},
+              operator={'user_id': session.user_id, 'organization_id': session.own_org_id})
     # El riesgo de la empresa es el score más alto de sus dominios (DOMINIOS ya sale ordenado por score).
     top = next((d for d in dominios if d['score'] is not None), None)
     out = {'id': org['id'], 'name': org['name'], 'status': org['status'],
