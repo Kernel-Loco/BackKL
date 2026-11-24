@@ -207,6 +207,26 @@ class DominiosParecidos(unittest.TestCase):
         h = self.parecidos['acme-demo-login.com']
         self.assertEqual((h.activo, h.severidad), ('acme-demo.mx', 'medium'))
 
+    def test_3b_ningun_parecido_es_cobertura_completa_con_cero(self):
+        """Punto 5 de RC-226, sin red: crt.sh responde %marca% y todas las variantes, y ninguna trae un parecido de
+        menos de 90 días (solo el viejo, el propio y nombres del dominio). lookalike_domain queda revisado con 0
+        hallazgos, no en sin_cobertura. La corrida queda 'complete': orquestador.cobertura() da 'complete' con estado
+        succeeded, revisados en None y algún código fuera de sin_cobertura (aquí ninguno está). El orquestador no se
+        importa porque pide la base y dnspython, que el runner de 'Pruebas sin base ni red' no trae."""
+        sin_parecidos = [c for c in CONTIENE_MARCA if c['id'] in (23, 24, 25)]
+        t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': sin_parecidos})
+        res = recolectar(t, parecidos=True)
+        consultas = [consulta(u) for u in t.urls]
+        self.assertIn('%acme-demo%', consultas)
+        for variante in crtsh.candidatos_parecidos('acme-demo.mx'):
+            if variante != 'acme-demo.com.mx':  # propio de la empresa (recolectar), no se pregunta
+                self.assertIn(variante, consultas, variante)  # cada variante se preguntó y respondió vacía
+        self.assertEqual((res.estado, res.sin_cobertura, res.omitidos, res.revisados), ('succeeded', [], [], None))
+        self.assertEqual([h for h in res.hallazgos if h.codigo == 'lookalike_domain'], [])
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        # Los de subdominios siguen saliendo: el 0 es solo de parecidos.
+        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
+
     def test_4_variantes(self):
         v = crtsh.candidatos_parecidos('acme-demo.mx')
         self.assertEqual(len(v), crtsh.MAX_CANDIDATOS)
@@ -923,7 +943,8 @@ class FallasYGrabacion(unittest.TestCase):
 
     def test_9_completar_vuelve_a_consultar_lo_de_grabaciones_anteriores(self):
         inicio = datetime(2026, 10, 15, 18, 0, tzinfo=timezone.utc)
-        reloj = lambda: inicio + crtsh.timedelta(minutes=1)
+        def reloj():
+            return inicio + crtsh.timedelta(minutes=1)
 
         class VarianteCaida(CrtshSimulado):
             def __call__(self, url, timeout):
@@ -1739,7 +1760,7 @@ class Resumen(unittest.TestCase):
         self.assertEqual(crtsh._dia(crtsh._fecha('2026-12-31T01:00:00+02:00')), '30 dic 2026')
         self.assertIn('  api.acme-demo.mx · vence 25 oct 2026', lineas)
         self.assertIn('  tienda.acme-demo.mx · vence 30 nov 2026 · comodín', lineas)
-        self.assertFalse([l for l in lineas if '[medium]' in l or '[high]' in l])
+        self.assertFalse([linea for linea in lineas if '[medium]' in linea or '[high]' in linea])
         self.assertEqual(crtsh.codigo_salida(res), 0)
 
     def test_2_reproducir_dice_de_cuando_es_la_grabacion(self):
@@ -1779,11 +1800,11 @@ class Resumen(unittest.TestCase):
             rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d)
             res = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
             lineas = crtsh.resumen(res, rep)
-        faltan = [l for l in lineas if l.startswith('Faltan ')]
+        faltan = [linea for linea in lineas if linea.startswith('Faltan ')]
         self.assertEqual(len(faltan), 1)
         self.assertIn('%acme-demo%', faltan[0])
         self.assertTrue(faltan[0].endswith('Se completan con --grabar --completar.'))
-        self.assertFalse([l for l in lineas if 'saturado' in l or l.startswith('aviso:')])
+        self.assertFalse([linea for linea in lineas if 'saturado' in linea or linea.startswith('aviso:')])
 
     def test_3b_un_solo_faltante_en_singular(self):
         res = crtsh.Resultado('acme-demo.mx', avisos=[crtsh.SIN_GRABACION + '%.acme-demo.mx'])
