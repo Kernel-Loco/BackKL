@@ -308,6 +308,15 @@ class ImagenDeLaApi(unittest.TestCase):
         ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
         self.assertEqual(re.findall(r'^API_DOCS=(.*)$', ejemplo, re.M), ['false'])
 
+    def test_2b_portal_url_sin_valor_en_el_ejemplo(self):
+        # RC-63 punto 8: el .env.example nombra PORTAL_URL sin valor. Vacía, la PC usa el valor por omisión de
+        # docker-compose.yml y el despliegue la deja vacía para que el enlace salga del primer origen permitido.
+        ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^PORTAL_URL=(.*)$', ejemplo, re.M), [''])
+        compose = (RAIZ / 'docker-compose.yml').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^\s*PORTAL_URL:\s*(.+?)\s*$', compose, re.M),
+                         ['${PORTAL_URL:-http://localhost:3000}'])
+
 
 @unittest.skipUnless(shutil.which('docker'), 'sin docker en el PATH')
 class ComposeDeDesarrollo(unittest.TestCase):
