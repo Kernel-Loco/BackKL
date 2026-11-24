@@ -207,6 +207,26 @@ class DominiosParecidos(unittest.TestCase):
         h = self.parecidos['acme-demo-login.com']
         self.assertEqual((h.activo, h.severidad), ('acme-demo.mx', 'medium'))
 
+    def test_3b_ningun_parecido_es_cobertura_completa_con_cero(self):
+        """Punto 5 de RC-226, sin red: crt.sh responde %marca% y todas las variantes, y ninguna trae un parecido de
+        menos de 90 días (solo el viejo, el propio y nombres del dominio). lookalike_domain queda revisado con 0
+        hallazgos, no en sin_cobertura. La corrida queda 'complete': orquestador.cobertura() da 'complete' con estado
+        succeeded, revisados en None y algún código fuera de sin_cobertura (aquí ninguno está). El orquestador no se
+        importa porque pide la base y dnspython, que el runner de 'Pruebas sin base ni red' no trae."""
+        sin_parecidos = [c for c in CONTIENE_MARCA if c['id'] in (23, 24, 25)]
+        t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': sin_parecidos})
+        res = recolectar(t, parecidos=True)
+        consultas = [consulta(u) for u in t.urls]
+        self.assertIn('%acme-demo%', consultas)
+        for variante in crtsh.candidatos_parecidos('acme-demo.mx'):
+            if variante != 'acme-demo.com.mx':  # propio de la empresa (recolectar), no se pregunta
+                self.assertIn(variante, consultas, variante)  # cada variante se preguntó y respondió vacía
+        self.assertEqual((res.estado, res.sin_cobertura, res.omitidos, res.revisados), ('succeeded', [], [], None))
+        self.assertEqual([h for h in res.hallazgos if h.codigo == 'lookalike_domain'], [])
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        # Los de subdominios siguen saliendo: el 0 es solo de parecidos.
+        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
+
     def test_4_variantes(self):
         v = crtsh.candidatos_parecidos('acme-demo.mx')
         self.assertEqual(len(v), crtsh.MAX_CANDIDATOS)
