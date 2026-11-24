@@ -502,7 +502,7 @@ SCORES_SQL = '''
 SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
     ds.model_version, ds.model_fallback_reason, ds.computed_at,
     rs.version AS rule_set_version, rs.category_weights, rs.band_medium_from, rs.band_high_from, rs.band_critical_from,
-    sc.stats, sc.queued_at, sc.finished_at,
+    sc.stats, sc.status AS scan_status, sc.queued_at, sc.finished_at,
        (SELECT count(*) FROM score_contributions x WHERE x.score_id = ds.id AND x.severity = 'critical') AS critical_at_time
   FROM domain_scores ds
   JOIN domains d ON d.id = ds.domain_id

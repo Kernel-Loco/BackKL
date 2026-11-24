@@ -92,5 +92,35 @@ class CambiosSemanales(unittest.TestCase):
         self.assertTrue(changes['alerts']['new_asset'])
 
 
+    def test_un_escaneo_fallido_o_sin_activos_no_sirve_de_base(self):
+        # El fallido de hace 6 días guarda 0 activos y uno sin stats no los contó: la base es el de hace 4 días.
+        escaneos = [
+            {'scan_id': 'scan-fallido', 'scan_status': 'failed', 'finished_at': AHORA - timedelta(days=6),
+             'stats': {'assets': 0}},
+            {'scan_id': 'scan-sin-stats', 'scan_status': 'completed', 'finished_at': AHORA - timedelta(days=5),
+             'stats': None},
+            {'scan_id': 'scan-d4', 'scan_status': 'partial', 'finished_at': AHORA - timedelta(days=4),
+             'stats': {'assets': 10}},
+        ]
+        changes = resumen_semanal(self.actual(assets=13, new_assets=0, new_findings=0), escaneos)
+        self.assertEqual(changes['previous_scan_id'], 'scan-d4')
+        self.assertEqual(changes['assets_before'], 10)
+        self.assertEqual(changes['assets_growth_percent'], 30)
+
+    def test_solo_un_fallido_antes_no_calcula_crecimiento(self):
+        fallido = {'scan_id': 'scan-fallido', 'scan_status': 'failed', 'finished_at': AHORA - timedelta(days=2),
+                   'stats': {'assets': 4}}
+        changes = resumen_semanal(self.actual(assets=13, new_assets=1, new_findings=0), [fallido])
+        self.assertEqual(changes['previous_scan_id'], 'scan-fallido')  # referencia, no base
+        self.assertIsNone(changes['assets_before'])
+        self.assertIsNone(changes['assets_growth_percent'])
+
+    def test_apenas_mas_de_20_por_ciento_si_dispara_aunque_redondee_a_20(self):
+        base = {**self.anterior, 'stats': {'assets': 100000}}
+        changes = resumen_semanal(self.actual(assets=120001, new_assets=0, new_findings=0), [base])
+        self.assertEqual(changes['assets_growth_percent'], 20.0)
+        self.assertTrue(changes['alerts']['assets_growth_over_20_percent'])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

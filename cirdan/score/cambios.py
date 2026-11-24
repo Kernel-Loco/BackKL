@@ -8,15 +8,21 @@ SEMANA = timedelta(days=7)
 TOPE_RESPALDO = timedelta(days=14)
 
 
+def _sirve_de_base(escaneo):
+    return escaneo.get('scan_status') != 'failed' and bool((escaneo['stats'] or {}).get('assets'))
+
+
 def base_de_la_semana(actual, anteriores):
     """El escaneo contra el que se mide el crecimiento de la semana, o None.
 
     Es el más viejo de los que terminaron en los 7 días antes de actual, así varios escaneos de la semana con menos
-    de 20 % cada uno suman. Si no hay ninguno, el más reciente que terminó antes, con 14 días o menos."""
+    de 20 % cada uno suman. Si no hay ninguno, el más reciente que terminó antes, con 14 días o menos. Solo sirve de
+    base un escaneo que no falló y que contó activos: uno 'failed' guarda 0 activos y dejaría la semana sin
+    crecimiento. Uno 'partial' sí cuenta, como en el contrato (completado o parcial)."""
     fin = actual['finished_at']
     if not fin:
         return None
-    con_fecha = [e for e in anteriores if e['finished_at'] and e['finished_at'] <= fin]
+    con_fecha = [e for e in anteriores if e['finished_at'] and e['finished_at'] <= fin and _sirve_de_base(e)]
     en_la_semana = [e for e in con_fecha if fin - e['finished_at'] <= SEMANA]
     if en_la_semana:
         return min(en_la_semana, key=lambda e: e['finished_at'])
@@ -40,15 +46,16 @@ def resumen_semanal(actual, anteriores):
     base = base_de_la_semana(actual, anteriores)
     if base:
         referencia = base
-        activos_anteriores = (base['stats'] or {}).get('assets')
-        if activos_anteriores and activos_actuales is not None:
-            crecimiento = round((activos_actuales - activos_anteriores) * 100 / activos_anteriores, 2)
+        activos_anteriores = base['stats']['assets']
+        if activos_actuales is not None:
+            crecimiento = (activos_actuales - activos_anteriores) * 100 / activos_anteriores
     else:
         referencia = anteriores[-1] if anteriores else None
 
     alertas = {
         'new_asset': nuevos_activos > 0,
         'new_finding': nuevos_hallazgos > 0,
+        # Se compara antes de redondear: 20.001 % sí supera 20 %.
         'assets_growth_over_20_percent': crecimiento is not None and crecimiento > 20,
     }
     if not any(alertas.values()):
@@ -60,7 +67,7 @@ def resumen_semanal(actual, anteriores):
         'assets_before': activos_anteriores,
         'assets_now': activos_actuales,
         'new_assets': nuevos_activos,
-        'assets_growth_percent': crecimiento,
+        'assets_growth_percent': round(crecimiento, 2) if crecimiento is not None else None,
         'new_findings': nuevos_hallazgos,
         'alerts': alertas,
     }
