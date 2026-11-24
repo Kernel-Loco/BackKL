@@ -272,7 +272,10 @@ class Login(unittest.TestCase):
         self._sin_totp(ALEX)
         sesion.reset()
         token = self._token_de_alta(ALEX)
-        enroll = lambda ruta, **extra: Client().post(AUTH + '/mfa/enroll/' + ruta, dict(mfa_setup_token=token, **extra))
+
+        def enroll(ruta, **extra):
+            return Client().post(AUTH + '/mfa/enroll/' + ruta, dict(mfa_setup_token=token, **extra))
+
         code, qr = enroll('setup')
         self.assertEqual(code, 200, qr)
         malo = self._codigo_malo(qr['secret'])
@@ -649,15 +652,15 @@ class Login(unittest.TestCase):
         self.assertEqual(sesion.post_login(Client(), email, 'CIRDAN_FAKE_mala')[0], 429)
 
         def lineas():
-            return [l for l in sesion.api_logs().splitlines() if dominio in l]
+            return [linea for linea in sesion.api_logs().splitlines() if dominio in linea]
         for _ in range(50):
             if len(lineas()) >= MAX_FALLOS + 1:
                 break
             time.sleep(0.1)
         time.sleep(1)
         encontradas = lineas()
-        fallos = [l for l in encontradas if 'auth.login_failed de un correo que no existe' in l]
-        bloqueos = [l for l in encontradas if 'auth.login_locked de un correo que no existe' in l]
+        fallos = [linea for linea in encontradas if 'auth.login_failed de un correo que no existe' in linea]
+        bloqueos = [linea for linea in encontradas if 'auth.login_locked de un correo que no existe' in linea]
         self.assertEqual((len(fallos), len(bloqueos), len(encontradas)), (MAX_FALLOS, 1, MAX_FALLOS + 1), encontradas)
         for linea in encontradas:
             self.assertIn("dominio='%s'" % dominio, linea)

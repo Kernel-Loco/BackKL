@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 import urllib.error
 import uuid
