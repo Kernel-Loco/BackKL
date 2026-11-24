@@ -308,7 +308,9 @@ def login(body: LoginIn, request: Request, response: Response):
         if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
                 {'user_id': user_id, 'org_id': org, 'email': email, 'tag': sessions.password_tag(huella)})}
-        operator_mfa_required = bool(conn.execute(
+        # Una cuenta 'operator' de la consola del integrador (#66, RC-126, migración 033) o un superadmin (027) no entra
+        # con solo la contraseña: primero activa su TOTP (comentario 10270 de RC-126, punto 2).
+        operator_mfa_required = row['role'] == 'operator' or bool(conn.execute(
             'SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required'])
         if operator_mfa_required:
             audit(conn, org, 'auth.operator_mfa_required', user_id, ip, 'user', user_id)
@@ -502,7 +504,8 @@ def verify_link(body: LinkVerifyIn, request: Request, response: Response):
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
                 {'user_id': user_id, 'org_id': org, 'email': row['email'], 'via': 'link_totp',
                  'tag': sessions.password_tag(row['password_hash'])})}
-        elif conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required']:
+        elif row['role'] == 'operator' or conn.execute(
+                'SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required']:
             rejected = 'operator_mfa_required'
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],

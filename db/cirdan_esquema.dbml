@@ -54,7 +54,7 @@ Table users [note: 'Usuarios del portal con rol y MFA (argon2 + TOTP). Las sesio
   organization_id uuid [not null, ref: > organizations.id]
   email citext [not null, unique, note: 'Login. Único global porque se busca antes de conocer el tenant, con login_lookup() (SECURITY DEFINER). Hoy en dev su dueño es postgres (migraciones 002 y 004). Plan: dueño cirdan_definer']
   full_name text [not null]
-  role text [not null, note: 'CHECK IN (\'analyst\',\'manager\',\'admin\'): Analista, Gerente, Admin']
+  role text [not null, note: 'CHECK IN (\'analyst\',\'manager\',\'admin\',\'operator\'): Analista, Gerente, Admin y operador de la consola del integrador (migración 033, RC-126)']
   password_hash text [not null, note: 'argon2id en formato PHC']
   totp_secret_enc bytea [note: 'Semilla TOTP de pyotp cifrada con AES-256-GCM en la app. Hoy en dev guarda nonce + texto cifrado + tag, con el id del usuario como AAD. Plan: versión de llave + nonce + texto cifrado + tag']
   mfa_enabled_at timestamptz [note: 'NULL = sin MFA. Plan (RC-5): si role = \'admin\' el login se rechazará hasta enrolarse']
@@ -125,6 +125,16 @@ Table domain_authorizations [note: 'Autorización firmada por quien tiene facult
   evidence_key text [note: 'RC-211. Llave de cirdan/cartas.py del XML de Mifiel con la constancia NOM-151. Va junto con signature_provider y evidence_sha256']
   evidence_sha256 bytea [note: 'RC-211. Huella del XML, 32 bytes']
   signed_at timestamptz [note: 'RC-211. Cuándo firmó el último firmante, según Mifiel. Solo en el camino B']
+}
+
+Table org_delegations [note: 'Delegaciones de una empresa cliente en una empresa integradora (RC-126, migración 033). organization_id es la integradora, dueña de la fila para RLS (ENABLE, FORCE y tenant_isolation). cirdan_app solo tiene SELECT: se otorga o se revoca como postgres. Una sola vigente por pareja (índice parcial org_delegations_una_vigente).'] {
+  id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.id, note: 'Empresa integradora']
+  client_organization_id uuid [not null, ref: > organizations.id, note: 'Empresa cliente. CHECK distinta de organization_id']
+  granted_by uuid [not null, note: 'Quién la otorgó: FK compuesta (client_organization_id, granted_by) a users']
+  granted_at timestamptz [not null, default: `now()`]
+  revoked_at timestamptz [note: 'NULL mientras está vigente']
+  revoked_by uuid [note: 'FK compuesta (client_organization_id, revoked_by) a users']
 }
 
 Table signature_requests [note: 'Cartas que un Admin manda a firmar con la API de Mifiel desde el portal (RC-211, migración 031, camino B). Guarda fqdn y no domain_id porque el dominio puede nacer al confirmar. Una sola abierta (creating, sent o signed) por empresa y fqdn. RLS ENABLE y FORCE con tenant_isolation. cirdan_app tiene SELECT, INSERT por columnas y UPDATE solo de las columnas de resultado. signature_requests_guard deja insertar solo en creating y cambiar de estado solo así: creating a sent o failed (o se queda en creating con el aviso en last_error), sent a sent, signed, rejected, expired o cancelled, y signed a cancelled o accepted (accepted solo con su fila en domain_authorizations). DELETE y TRUNCATE bloqueados: la solicitud es evidencia de cómo se obtuvo la carta.'] {
