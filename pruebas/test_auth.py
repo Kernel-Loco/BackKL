@@ -781,7 +781,7 @@ class Captcha(unittest.TestCase):
 
         with ThreadPoolExecutor(10) as pool:
             codigos = list(pool.map(intento, range(10)))
-        self.assertEqual((codigos.count(200), codigos.count(400)), (1, 9), codigos)
+        self.assertEqual((codigos.count(200), codigos.count(401)), (1, 9), codigos)
 
     def test_7_el_captcha_malo_no_cuenta_para_el_bloqueo(self):
         # Si contara, cualquiera bloquearía un correo ajeno sin hacer la prueba de trabajo.
