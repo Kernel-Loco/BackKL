@@ -80,7 +80,10 @@ Los resultados son información sensible de seguridad. Solo los ve el equipo. No
 
 - Empresa, para avisos y para suspender el análisis: [nombre], [correo], [teléfono].
 - Equipo: [nombre], [papel en el equipo], [correo].
-- Las peticiones de LowTide salen de la IP [IP de salida] y se identifican con el User-Agent `lowtide-osint/0.1 (+https://github.com/Kernel-Loco)`, para que la empresa las reconozca y no las bloquee ni las reporte como ataque. Si la empresa ve tráfico que no corresponde a esta carta, avisa al contacto del equipo, que detiene el análisis y lo revisa.
+- Las peticiones de LowTide salen de la IP [IP de salida] y se identifican con el User-Agent `lowtide-osint/<versión> (+https://lowtidesec.com/seguridad)`, donde `<versión>` es la versión de LowTide que hace el análisis (hoy `lowtide-osint/1.0-rc (+https://lowtidesec.com/seguridad)`), para que la empresa las reconozca y no las bloquee ni las reporte como ataque. La página de la liga dice qué es LowTide y a quién escribir. Si la empresa ve tráfico que no corresponde a esta carta, avisa al contacto del equipo, que detiene el análisis y lo revisa.
+- Ritmo de las peticiones a los sitios del dominio. LowTide hace una petición a la vez por host, nunca dos al mismo tiempo, y no reintenta una petición que falló.
+  - Visitas web normales (actividad 6): una pausa de 1 segundo antes de cada petición, salvo la primera, hasta 20 nombres del dominio contando la raíz, y por cada nombre hasta 3 redirecciones dentro del dominio. El tope es de 80 peticiones a los sitios del dominio por análisis.
+  - Rutas fijas de documentación de APIs (actividad 9, cuando esté disponible): una pausa de 1 segundo antes de cada petición, salvo la primera, en los mismos 20 nombres como máximo y solo en sus 10 rutas fijas de documentación, sin seguir redirecciones. El tope es de 200 peticiones a los sitios del dominio por análisis.
 - Los hallazgos, incluidos los críticos, se ven en el portal en cuanto termina cada análisis. El servicio es académico y no tiene un horario de atención garantizado.
 
 ## 10. Declaraciones de la empresa

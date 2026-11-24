@@ -254,6 +254,40 @@ class Peticion(unittest.TestCase):
         for modulo in ('crtsh', 'github', 'shodan', 'rdap', 'visita'):
             self.assertEqual(importlib.import_module('cirdan.recolectores.' + modulo).AGENTE, contrato.AGENTE, modulo)
 
+    def test_1b_user_agent_con_la_version_del_build_y_la_pagina_de_lowtide(self):
+        # Comentario 10281 punto 1: la versión real del build y una liga a la página que dice qué es LowTide y a quién
+        # escribir. La consulta del TXT (orquestador/txt.py) usa la misma constante y no tiene copia propia.
+        # El orquestador pide la base al importarse: txt.py se revisa por su texto (test_txt.py prueba la petición).
+        from cirdan import version
+        self.assertEqual(contrato.AGENTE, 'lowtide-osint/%s (+https://lowtidesec.com/seguridad)' % version.VERSION)
+        self.assertRegex(version.VERSION, r'^[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-rc)?$')
+        raiz = Path(__file__).resolve().parent.parent
+        txt = (raiz / 'cirdan' / 'orquestador' / 'txt.py').read_text(encoding='utf-8')
+        self.assertNotIn('AGENTE =', txt)
+        self.assertNotIn('lowtide-osint', txt)
+        self.assertIn("'User-Agent': contrato.AGENTE", txt)
+        self.assertIn('version=VERSION,', (raiz / 'cirdan' / 'api' / 'main.py').read_text(encoding='utf-8'))
+
+    def test_1c_la_seccion_9_de_la_carta_trae_el_user_agent_y_el_ritmo(self):
+        # Comentario 10281 puntos 1 y 2: el User-Agent y el ritmo de las actividades 6 y 9 se escriben en la sección 9.
+        # Los números salen de las constantes: si cambian aquí, la carta tiene que cambiar.
+        from cirdan.recolectores import api_docs
+        raiz = Path(__file__).resolve().parent.parent
+        carta = (raiz / 'docs' / 'plantilla_carta_autorizacion.md').read_text(encoding='utf-8')
+        seccion = carta.split('## 9. ', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('`lowtide-osint/<versión> (+%s)`' % contrato.PAGINA, seccion)
+        self.assertIn('(hoy `%s`)' % contrato.AGENTE, seccion)
+        self.assertIn('una petición a la vez por host', seccion)
+        self.assertEqual((visita.PAUSA_SITIO, api_docs.PAUSA_RUTA), (1, 1))
+        self.assertEqual(seccion.count('una pausa de 1 segundo antes de cada petición, salvo la primera'), 2)
+        self.assertIn('hasta %d nombres del dominio contando la raíz' % visita.MAX_SITIOS, seccion)
+        self.assertIn('hasta %d redirecciones dentro del dominio' % visita.MAX_REDIRECCIONES, seccion)
+        self.assertIn('El tope es de %d peticiones' % (visita.MAX_SITIOS * (1 + visita.MAX_REDIRECCIONES)), seccion)
+        self.assertEqual(api_docs.MAX_SITIOS, visita.MAX_SITIOS)
+        self.assertIn('sus %d rutas fijas de documentación' % len(api_docs.RUTAS), seccion)
+        self.assertIn('El tope es de %d peticiones' % (api_docs.MAX_SITIOS * len(api_docs.RUTAS)), seccion)
+        self.assertNotIn('github.com/Kernel-Loco', carta)
+
     def test_2_un_403_es_una_respuesta_y_el_cuerpo_se_corta(self):
         def abrir(req, plazo, cronometro, *_):
             raise urllib.error.HTTPError(req.full_url, 403, 'Forbidden', email.message.Message(),
