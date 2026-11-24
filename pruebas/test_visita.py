@@ -7,6 +7,7 @@ cambiados: nada sale a la red.
 Uso, desde la raíz del repo:
   python -m unittest pruebas/test_visita.py
 """
+import contextlib
 import email.message
 import importlib
 import json
@@ -269,23 +270,40 @@ class Peticion(unittest.TestCase):
         self.assertIn('version=VERSION,', (raiz / 'cirdan' / 'api' / 'main.py').read_text(encoding='utf-8'))
 
     def test_1c_la_seccion_9_de_la_carta_trae_el_user_agent_y_el_ritmo(self):
-        # Comentario 10281 puntos 1 y 2: el User-Agent y el ritmo de las actividades 6 y 9 se escriben en la sección 9.
-        # Los números salen de las constantes: si cambian aquí, la carta tiene que cambiar.
-        from cirdan.recolectores import api_docs
+        # Comentario 10281 puntos 1 y 2: el User-Agent y el ritmo de las actividades 6, 8 y 9 se escriben en la sección
+        # 9. Los números salen de las constantes: si cambian aquí, la carta tiene que cambiar.
+        from cirdan.recolectores import api_docs, identidad
         raiz = Path(__file__).resolve().parent.parent
         carta = (raiz / 'docs' / 'plantilla_carta_autorizacion.md').read_text(encoding='utf-8')
         seccion = carta.split('## 9. ', 1)[1].split('\n## ', 1)[0]
         self.assertIn('`lowtide-osint/<versión> (+%s)`' % contrato.PAGINA, seccion)
         self.assertIn('(hoy `%s`)' % contrato.AGENTE, seccion)
-        self.assertIn('una petición a la vez por host', seccion)
+        self.assertIn('(actividades 6, 8 y 9). LowTide hace una petición a la vez por host, también entre análisis '
+                      'distintos que corran al mismo tiempo', seccion)
         self.assertEqual((visita.PAUSA_SITIO, api_docs.PAUSA_RUTA), (1, 1))
-        self.assertEqual(seccion.count('una pausa de 1 segundo antes de cada petición, salvo la primera'), 2)
-        self.assertIn('hasta %d nombres del dominio contando la raíz' % visita.MAX_SITIOS, seccion)
-        self.assertIn('hasta %d redirecciones dentro del dominio' % visita.MAX_REDIRECCIONES, seccion)
-        self.assertIn('El tope es de %d peticiones' % (visita.MAX_SITIOS * (1 + visita.MAX_REDIRECCIONES)), seccion)
+        self.assertEqual(seccion.count('una pausa de 1 segundo antes de cada petición, salvo la primera de la '
+                                       'corrida'), 3)
+        # Actividad 6 (web) y actividad 8 (identity, que visita con visita._recorrer): mismos nombres y redirecciones.
+        self.assertEqual((identidad.MAX_SITIOS, identidad.MAX_REDIRECCIONES), (visita.MAX_SITIOS, visita.MAX_REDIRECCIONES))
+        self.assertEqual(seccion.count('hasta %d nombres del dominio contando la raíz, y por cada nombre hasta %d '
+                                       'redirecciones dentro del dominio' % (visita.MAX_SITIOS, visita.MAX_REDIRECCIONES)), 2)
+        por_corrida = visita.MAX_SITIOS * (1 + visita.MAX_REDIRECCIONES)
+        self.assertEqual(seccion.count('El tope es de %d peticiones a los sitios del dominio por corrida' % por_corrida), 2)
         self.assertEqual(api_docs.MAX_SITIOS, visita.MAX_SITIOS)
         self.assertIn('sus %d rutas fijas de documentación' % len(api_docs.RUTAS), seccion)
-        self.assertIn('El tope es de %d peticiones' % (api_docs.MAX_SITIOS * len(api_docs.RUTAS)), seccion)
+        rutas = api_docs.MAX_SITIOS * len(api_docs.RUTAS)
+        self.assertIn('El tope es de %d peticiones a los sitios del dominio por corrida' % rutas, seccion)
+        # Cada fuente que falla entera se vuelve a correr a 1, 5 y 25 minutos (contrato.siguiente_estado): el tope por
+        # análisis es el de una corrida por el número de corridas (RC-46, H3 de la revisión).
+        corridas = contrato.MAX_INTENTO + 1
+        esperas = [int(e.total_seconds() // 60) for e in contrato.ESPERAS_REINTENTO]
+        self.assertEqual((corridas, esperas), (4, [1, 5, 25]))
+        self.assertIn('la vuelve a correr hasta %d veces, a los 1, 5 y 25 minutos' % contrato.MAX_INTENTO, seccion)
+        self.assertIn('el tope por análisis es de %d peticiones en la actividad 6, %d en la 8 y %d en la 9'
+                      % (corridas * por_corrida, corridas * por_corrida, corridas * rutas), seccion)
+        # El 80 solo cuando el 443 no conectó (visita._recorrer y _http), sin seguir sus redirecciones.
+        self.assertIn('pide una vez http://<nombre>/ en el puerto 80 y no sigue sus redirecciones', seccion)
+        self.assertNotIn('no reintenta', seccion)
         self.assertNotIn('github.com/Kernel-Loco', carta)
 
     def test_2_un_403_es_una_respuesta_y_el_cuerpo_se_corta(self):
@@ -1743,6 +1761,117 @@ class Portada(unittest.TestCase):
             with self.subTest(cuerpo=cuerpo[:20]):
                 self.assertEqual(portada.revisar(200, cuerpo), [])
         self.assertEqual(portada.zonas('<svg/><title>Index of /</title>')['titulo'], 'Index of /')
+
+
+class TurnoHost(unittest.TestCase):
+    """Una petición a la vez por host también entre escaneos (comentario 10281.2 de RC-46, turno.py): cada petición a un
+    sitio de las actividades 6 (web), 8 (identity) y 9 (api_docs) va dentro del turno de su host. El candado real es de
+    PostgreSQL (orquestador._turno_host) y se prueba con la base en test_orquestador.py. Aquí va uno simulado."""
+
+    def setUp(self):
+        from cirdan.recolectores import api_docs, identidad, turno
+        self.api_docs, self.identidad, self.turno = api_docs, identidad, turno
+        self.eventos, self.reloj = [], [0.0]
+
+    def visitar(self, url, timeout):
+        self.eventos.append(('pide', url, timeout))
+        return {'rechazada': True}
+
+    @contextlib.contextmanager
+    def candado(self, host, espera):
+        self.eventos.append(('entra', host, espera))
+        try:
+            yield
+        finally:
+            self.eventos.append(('sale', host))
+
+    def clientes(self):
+        comun = dict(modo='vivo', visitar=self.visitar, cronometro=lambda: self.reloj[0], dormir=self.dormir)
+        return {
+            'web': (visita.ClienteWeb(carpeta=visita.carpeta_de(DOMINIO), **comun),
+                    lambda c, host: c.sitio('https://%s/' % host)),
+            'identity': (self.identidad.ClienteIdentidad(carpeta=self.identidad.carpeta_de(DOMINIO), **comun),
+                         lambda c, host: c.sitio('https://%s/' % host)),
+            'api_docs': (self.api_docs.ClienteApiDocs(carpeta=self.api_docs.carpeta_de(DOMINIO), **comun),
+                         lambda c, host: c.ruta(host, self.api_docs.RUTAS[0])),
+        }
+
+    def dormir(self, segundos):
+        self.eventos.append(('pausa', segundos))
+
+    def test_1_sin_candado_la_peticion_sale_sin_esperar(self):
+        # La línea de comandos y las pruebas sin base no ponen candado: turno() no espera nada.
+        self.assertIsNone(self.turno._CANDADO.get())
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente):
+                self.eventos.clear()
+                pedir(cliente, 'www.' + DOMINIO)
+                self.assertEqual([e[0] for e in self.eventos], ['pide'])
+
+    def test_2_cada_peticion_va_dentro_del_turno_de_su_host(self):
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente), self.turno.con_candado(self.candado):
+                self.eventos.clear()
+                pedir(cliente, 'WWW.' + DOMINIO.upper())
+                pedir(cliente, 'blog.' + DOMINIO)
+                host1, host2 = 'www.' + DOMINIO, 'blog.' + DOMINIO
+                self.assertEqual([e[:2] for e in self.eventos],
+                                 [('entra', host1), ('pide', self.eventos[1][1]), ('sale', host1), ('pausa', 1),
+                                  ('entra', host2), ('pide', self.eventos[5][1]), ('sale', host2)])
+                # La pausa del ritmo fijo va fuera del turno: el host no queda apartado mientras duerme.
+                self.assertEqual(urlsplit(self.eventos[1][1]).hostname, host1)
+                # La espera es lo que le queda a la corrida, menos lo que necesita la petición.
+                self.assertEqual(self.eventos[0][2], cliente.restante() - shodan.MIN_INTENTO)
+        self.assertIsNone(self.turno._CANDADO.get(), 'con_candado() no quitó el candado al salir')
+
+    def test_3_sin_turno_no_sale_la_peticion(self):
+        @contextlib.contextmanager
+        def ocupado(host, espera):
+            raise self.turno.SinTurno('otro escaneo tuvo el turno de %s' % host)
+            yield
+        self.assertTrue(issubclass(self.turno.SinTurno, shodan.SinTiempo), 'lo que falta tiene que quedar sin revisar')
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente), self.turno.con_candado(ocupado):
+                self.eventos.clear()
+                with self.assertRaises(shodan.SinTiempo):
+                    pedir(cliente, 'www.' + DOMINIO)
+                self.assertEqual(self.eventos, [])
+                self.assertEqual((cliente.pedidas, cliente.consultas), (0, 0))
+
+    def test_4_el_plazo_de_la_peticion_es_lo_que_queda_tras_esperar_el_turno(self):
+        def tardado(segundos):
+            @contextlib.contextmanager
+            def candado(host, espera):
+                self.reloj[0] += segundos   # otro escaneo tuvo el host todo ese tiempo
+                yield
+            return candado
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente):
+                self.reloj[0], self.eventos[:] = 0.0, []
+                cliente.restante()   # arranca el reloj de la corrida
+                with self.turno.con_candado(tardado(cliente.restante() - 3)):
+                    pedir(cliente, 'www.' + DOMINIO)
+                self.assertEqual([e[0] for e in self.eventos], ['pide'])
+                self.assertAlmostEqual(self.eventos[0][2], 3)
+                # Si la espera se comió la corrida, la petición ya no sale.
+                with self.turno.con_candado(tardado(cliente.restante())), self.assertRaises(shodan.SinTiempo):
+                    pedir(cliente, 'blog.' + DOMINIO)
+                self.assertEqual([e[0] for e in self.eventos], ['pide', 'pausa'])
+
+    def test_5_toda_peticion_a_un_sitio_sale_dentro_del_turno(self):
+        # Por el texto: la única llamada a la función que pide al sitio está dentro de `with turno.turno(`, en el mismo
+        # hilo. identidad.py no pide por su cuenta: pasa por visita.ClienteWeb.sitio.
+        raiz = Path(__file__).resolve().parent.parent / 'cirdan' / 'recolectores'
+        for archivo in ('visita.py', 'api_docs.py'):
+            with self.subTest(archivo=archivo):
+                lineas = (raiz / archivo).read_text(encoding='utf-8').splitlines()
+                llamadas = [i for i, l in enumerate(lineas) if '(self.visitar or _visitar)(' in l]
+                self.assertEqual(len(llamadas), 1)
+                bloque = lineas[llamadas[0] - 6:llamadas[0]]
+                self.assertTrue(any(l.strip().startswith('with turno.turno(') for l in bloque), archivo)
+        identidad = (raiz / 'identidad.py').read_text(encoding='utf-8')
+        self.assertNotIn('self.visitar(', identidad)
+        self.assertNotIn('transporte.visitar(', identidad)
 
 
 if __name__ == '__main__':

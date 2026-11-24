@@ -72,7 +72,7 @@ from datetime import datetime, timezone
 
 from cirdan.ml import caracteristicas as rubrica
 from cirdan.recolectores import (borde, certspotter, contrato, geoip, huellas, nvd, portada, shodan, soporte,
-                                 transporte)
+                                 transporte, turno)
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Hallazgo, Resultado, SinGrabacion,
                                           en_alcance_nombre)
@@ -436,9 +436,16 @@ class ClienteWeb(shodan.ClienteShodan):
         limite = min(timeout, self.restante())
         if limite < shodan.MIN_INTENTO:
             raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de visitar %s' % url)
-        self.pedidas += 1
-        self.consultas += 1
-        datos = self.limpiar((self.visitar or _visitar)(url, limite))
+        # Una petición a la vez por host también entre escaneos (turno.py): espera a que el host quede libre.
+        host = urllib.parse.urlsplit(url).hostname or ''
+        with turno.turno(host, self.restante() - shodan.MIN_INTENTO):
+            limite = min(timeout, self.restante())   # lo que le quedó a la corrida después de esperar el turno
+            if limite < shodan.MIN_INTENTO:
+                raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de visitar %s' % url)
+            self.pedidas += 1
+            self.consultas += 1
+            crudo = (self.visitar or _visitar)(url, limite)
+        datos = self.limpiar(crudo)
         if datos.get('sin_respuesta') == 'tiempo' and limite < timeout:
             # No tuvo sus `timeout` segundos: lo que se acabó fue la corrida, no es que el sitio no responda
             raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida mientras se visitaba %s' % url)

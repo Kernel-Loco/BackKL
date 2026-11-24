@@ -33,11 +33,11 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 from psycopg.types.json import Jsonb
 
-from cirdan import alcance_carta
+from cirdan import alcance_carta, db
 from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan.orquestador import txt as dns_txt
-from cirdan.recolectores import REGISTRO, cargar, certspotter
+from cirdan.recolectores import REGISTRO, cargar, certspotter, turno
 from cirdan.recolectores.contrato import COLUMNAS_CVES, CVE_VALIDA, Resultado, ejecutar, siguiente_estado
 from cirdan.score import configuracion, motor
 
@@ -86,6 +86,12 @@ ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta f
 # solo se saben al final: así dos escaneos a la vez, o la API y la línea de comandos, no pasan el límite.
 # Reproducir no sale a la red: no reserva ni ajusta.
 MODOS_CON_CUPO = ('vivo', 'grabar')
+# Una petición a la vez por host también entre escaneos (cirdan/recolectores/turno.py, comentario 10281.2 de RC-46):
+# cada petición a un sitio del dominio toma antes un candado de PostgreSQL con la llave del host (_turno_host). Lo
+# comparten la API y el programador, que usan la misma base. SEMILLA_TURNO separa estas llaves de las del alta de
+# dominios (hashtextextended(fqdn, 59), migración 029).
+SEMILLA_TURNO = 46
+MIN_ESPERA_TURNO = 0.001  # segundos: con menos ya no se pide el turno
 # Códigos de HIBP cuyo hallazgo lleva su fila en breach_exposures (RC-54): nombre, fecha y clases de datos de la brecha.
 BRECHAS = ('breach_exposure', 'breach_exposure_old', 'breach_exposure_no_passwords')
 # Correos del dominio para el recolector que declara PIDE_CORREOS (HIBP, RC-54), de dos fuentes, cada una solo si la
@@ -663,6 +669,38 @@ def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, pa
     return calculo
 
 
+def _candado_de(modo, conn):
+    """El candado de turno.con_candado() para una corrida: _turno_host en vivo y al grabar, que salen a los sitios.
+    Al reproducir no sale nada, y con la conexión de una prueba tampoco va, como _latiendo: todo va en su transacción."""
+    return _turno_host if conn is None and modo in MODOS_CON_CUPO else None
+
+
+@contextmanager
+def _turno_host(host, espera):
+    """El turno de `host` para una petición de un sitio (turno.con_candado): un candado de sesión de PostgreSQL en una
+    conexión propia, que se cierra al terminar la petición. Cerrarla suelta el candado, también si la petición lanzó
+    o la base dejó de responder en medio. Si otro escaneo tiene el host más de `espera` segundos (lock_timeout) o la
+    base no responde, lanza turno.SinTurno y la petición no sale. El candado no lee tablas: va sin empresa."""
+    if espera < MIN_ESPERA_TURNO:
+        raise turno.SinTurno('no quedó tiempo para esperar el turno de %s' % host)
+    try:
+        conn = psycopg.connect(db.DSN, autocommit=True, connect_timeout=max(2, min(10, int(espera))))
+    except psycopg.Error as e:
+        raise turno.SinTurno('no se pudo pedir el turno de %s (%s)' % (host, type(e).__name__)) from None
+    try:
+        try:
+            conn.execute("SELECT set_config('lock_timeout', %s, false)", ('%dms' % max(1, int(espera * 1000)),))
+            conn.execute('SELECT pg_advisory_lock(hashtextextended(%s, %s))', (host, SEMILLA_TURNO))
+        except psycopg.errors.LockNotAvailable:
+            raise turno.SinTurno('otro escaneo tuvo el turno de %s más tiempo del que le quedaba a la corrida'
+                                 % host) from None
+        except psycopg.Error as e:
+            raise turno.SinTurno('no se pudo tomar el turno de %s (%s)' % (host, type(e).__name__)) from None
+        yield
+    finally:
+        conn.close()
+
+
 @contextmanager
 def _latiendo(org, scan_id, conn):
     """Marca vida cada LATIDO en un hilo aparte mientras corre una fuente, hasta TOPE_CORRIDA.
@@ -884,7 +922,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 status, attempt, next_retry_at = 'failed', intento, None
             else:
                 arranque = time.monotonic()
-                with _latiendo(org, scan_id, conn):
+                with _latiendo(org, scan_id, conn), turno.con_candado(_candado_de(modo, conn)):
                     extras = _extras(org, modulo, codigo, domain['id'], modo, actividades, conn)
                     res = ejecutar(modulo, fqdn, modo, ahora=ahora, propios=propios, codigos=reglas, extras=extras)
                 _marcar_identidad(res, codigo, scan_id, modo)
