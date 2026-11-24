@@ -502,7 +502,7 @@ SCORES_SQL = '''
 SELECT ds.id::text AS score_id, ds.scan_id::text, ds.score, ds.category_scores, ds.method, ds.reason, ds.partial_coverage,
     ds.model_version, ds.model_fallback_reason, ds.computed_at,
     rs.version AS rule_set_version, rs.category_weights, rs.band_medium_from, rs.band_high_from, rs.band_critical_from,
-    sc.stats, sc.queued_at, sc.finished_at,
+    sc.stats, sc.status AS scan_status, sc.queued_at, sc.finished_at,
        (SELECT count(*) FROM score_contributions x WHERE x.score_id = ds.id AND x.severity = 'critical') AS critical_at_time
   FROM domain_scores ds
   JOIN domains d ON d.id = ds.domain_id
@@ -612,7 +612,7 @@ def score_history(fqdn: str, session: Session = Depends(session_or_api_key)):
             ''', (scan_ids,))
         }
     items = []
-    escaneo_anterior = None
+    escaneos_anteriores = []
     for row in rows:
         base, _ = _score_base(row, row['critical_at_time'])
         # Un recálculo no encuentra ni resuelve hallazgos. Un escaneo que no los contó (antes de RC-55) da null, no 0.
@@ -620,8 +620,9 @@ def score_history(fqdn: str, session: Session = Depends(session_or_api_key)):
         cambios_semanales = None
         if row['reason'] == 'scan':
             escaneo = {**row, 'new_assets': nuevos_activos.get(row['scan_id'], 0)}
-            cambios_semanales = cambios.resumen_semanal(escaneo, escaneo_anterior)
-            escaneo_anterior = escaneo
+            # Con todos los escaneos anteriores, el crecimiento se mide contra el de hace una semana (RC-73).
+            cambios_semanales = cambios.resumen_semanal(escaneo, escaneos_anteriores)
+            escaneos_anteriores.append(escaneo)
         items.append({**base, 'categories': row['category_scores'],
                       'new_findings': stats.get('new_findings'), 'resolved_findings': stats.get('resolved_findings'),
                       'weekly_changes': cambios_semanales})

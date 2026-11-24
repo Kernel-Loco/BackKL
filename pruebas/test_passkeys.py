@@ -6,6 +6,7 @@ Las respuestas WebAuthn las arma pruebas/webauthn_falso.py con una llave P-256 d
 http://localhost:3000, que vienen de la lista local de orígenes. Cada prueba borra las passkeys que dejó, y las que dan
 de alta una passkey directo en la base lo hacen como postgres, con la llave pública del autenticador falso.
 """
+import hashlib
 import os
 import subprocess
 import threading
@@ -24,6 +25,9 @@ VALKEY = os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey')
 JORDAN, JORDAN_ID = 'jordan.tate@acme-demo.mx', '30000000-0000-4000-8000-000000000003'
 MAYA_ID = '30000000-0000-4000-8000-000000000002'
 DANA, DANA_ID = 'dana.cruz@beta-corp.mx', '30000000-0000-4000-8000-000000000004'
+ALEX, ALEX_ID = 'alex.morgan@acme-demo.mx', '30000000-0000-4000-8000-000000000001'  # admin de Acme
+ADMIN_MFA_PASSWORD = ('Las cuentas de administrador deben activar la verificación en dos pasos. '
+                      'Entra con tu correo y contraseña para activarla.')
 PASSKEY_INVALID = 'No se pudo entrar con esa passkey. Inténtalo de nuevo o entra con tu correo y contraseña.'
 PASSKEY_EXPIRED = 'La solicitud de la passkey venció. Inténtalo de nuevo.'
 LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
@@ -310,6 +314,31 @@ class Entrar(unittest.TestCase):
     def test_9c_con_passkey_sigue_entrando_con_contrasena_y_totp(self):
         client = sesion.login(JORDAN)
         self.assertEqual(client.get(AUTH + '/me')[0], 200)
+
+    def test_9d_un_admin_sin_totp_no_entra_con_passkey(self):
+        # RC-5: TOTP obligatorio para Admins. Una passkey registrada sin TOTP no lo salta: 403 sin sesión, sin fallo y
+        # sin gastar el contador. Activarlo pide la contraseña, así que el 403 no trae token de alta.
+        admin = Autenticador()
+        passkey = _alta_directa(admin, user_id=ALEX_ID)
+        fecha = scalar("SELECT coalesce(quote_literal(mfa_enabled_at), 'now()') FROM users WHERE id = '%s';" % ALEX_ID,
+                       user='postgres')
+        self.addCleanup(scalar, "UPDATE users SET mfa_enabled_at = %s WHERE id = '%s' RETURNING 1;" % (fecha, ALEX_ID),
+                        user='postgres')
+        scalar("UPDATE users SET mfa_enabled_at = NULL WHERE id = '%s' RETURNING 1;" % ALEX_ID, user='postgres')
+        antes = _bitacora('auth.login_failed', ALEX_ID, "AND details->>'detail' = 'admin_mfa_required'")
+        client, respuesta = _entrar(admin)
+        self.assertEqual(respuesta, (403, {'detail': ADMIN_MFA_PASSWORD}))
+        self.assertIsNone(client.cookie())
+        self.assertEqual(scalar("SELECT sign_count = 0 AND last_used_at IS NULL FROM webauthn_credentials "
+                                "WHERE id = '%s';" % passkey, user='postgres'), 't')
+        self.assertEqual(_valkey('get login:fail:email:%s' % hashlib.sha256(ALEX.encode()).hexdigest()), '')
+        limite = time.monotonic() + 5  # la bitácora se escribe después de responder
+        while _bitacora('auth.login_failed', ALEX_ID, "AND details->>'detail' = 'admin_mfa_required'") == antes:
+            self.assertLess(time.monotonic(), limite, 'falta auth.login_failed con admin_mfa_required')
+            time.sleep(0.05)
+        # Con el TOTP activo, la misma passkey entra.
+        scalar("UPDATE users SET mfa_enabled_at = %s WHERE id = '%s' RETURNING 1;" % (fecha, ALEX_ID), user='postgres')
+        self.assertEqual(_entrar(admin)[1][0], 200)
 
 
 class Registrar(unittest.TestCase):
