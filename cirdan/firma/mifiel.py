@@ -84,7 +84,7 @@ def encabezados(app_id, secreto, metodo, url, cuerpo=b'', content_type='', fecha
     partes = urllib.parse.urlsplit(url)
     ruta = partes.path + ('?' + partes.query if partes.query else '')
     fecha = fecha or email.utils.formatdate(usegmt=True)
-    md5 = base64.b64encode(hashlib.md5(cuerpo or b'').digest()).decode()
+    md5 = base64.b64encode(hashlib.md5(cuerpo or b'', usedforsecurity=False).digest()).decode()
     firma = firma_apiauth(secreto, metodo, content_type, md5, ruta, fecha)
     salida = {'Content-MD5': md5, 'Date': fecha, 'Authorization': 'APIAuth %s:%s' % (app_id, firma)}
     if content_type:

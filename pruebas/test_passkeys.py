@@ -14,6 +14,7 @@ import unittest
 import uuid
 
 from pruebas import sesion
+from pruebas.pila import exigir_desechable
 from pruebas.sesion import AUTH, PASSWORD, Client
 from pruebas.test_aislamiento import ACME, BETA, CONTAINER, psql, scalar
 from pruebas.webauthn_falso import AT, UP, UV, Autenticador, b64url
@@ -33,6 +34,7 @@ PASSKEY_LIMIT = 'Ya tienes 10 passkeys. Borra una para registrar otra.'
 
 
 def _valkey(*args):
+    exigir_desechable()
     return subprocess.run(['docker', 'exec', VALKEY, 'sh', '-c',
                            'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning ' + ' '.join(args)],
                           check=True, capture_output=True, text=True).stdout.strip()
@@ -267,6 +269,7 @@ class Entrar(unittest.TestCase):
         espera ese bloqueo: así llega al FOR NO KEY UPDATE y al UPDATE del contador con la fila ya cambiada."""
         sql = ("BEGIN; SELECT 1 FROM users WHERE id = '%s' FOR UPDATE; SELECT pg_sleep(3); %s; COMMIT;"
                % (JORDAN_ID, cambio))
+        exigir_desechable()
         bloqueo = subprocess.Popen(['docker', 'exec', '-i', CONTAINER, 'psql', '-U', 'postgres', '-d', 'cirdan', '-X',
                                     '-q', '-v', 'ON_ERROR_STOP=1'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.PIPE, text=True)
