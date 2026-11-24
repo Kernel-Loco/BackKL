@@ -1867,8 +1867,13 @@ class TurnoHost(unittest.TestCase):
                 lineas = (raiz / archivo).read_text(encoding='utf-8').splitlines()
                 llamadas = [i for i, l in enumerate(lineas) if '(self.visitar or _visitar)(' in l]
                 self.assertEqual(len(llamadas), 1)
-                bloque = lineas[llamadas[0] - 6:llamadas[0]]
-                self.assertTrue(any(l.strip().startswith('with turno.turno(') for l in bloque), archivo)
+                bloque = lineas[llamadas[0] - 9:llamadas[0]]
+                con = [l for l in bloque if l.strip().startswith('with turno.turno(')]
+                self.assertEqual(len(con), 1, archivo)
+                sangria = lambda l: len(l) - len(l.lstrip())  # noqa: E731
+                # La llamada va más adentro que el with y ninguna línea entre los dos sale del bloque
+                entre = bloque[bloque.index(con[0]) + 1:] + [lineas[llamadas[0]]]
+                self.assertTrue(all(sangria(l) > sangria(con[0]) for l in entre if l.strip()), archivo)
         identidad = (raiz / 'identidad.py').read_text(encoding='utf-8')
         self.assertNotIn('self.visitar(', identidad)
         self.assertNotIn('transporte.visitar(', identidad)

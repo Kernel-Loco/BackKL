@@ -39,10 +39,12 @@ def con_candado(candado):
 
 @contextmanager
 def turno(host, espera):
-    """El turno de `host` para una petición, si hay candado puesto, esperando como mucho `espera` segundos."""
+    """El turno de `host` para una petición, si hay candado puesto, esperando como mucho `espera` segundos. Da True
+    si pasó por el candado (pudo esperar, así que quien llama vuelve a medir lo que le queda a la corrida) y False si
+    no hay candado (no esperó nada y lo medido antes sigue valiendo)."""
     candado = _CANDADO.get()
     if candado is None:
-        yield
+        yield False
         return
     with candado((host or '').strip().lower().rstrip('.'), espera):
-        yield
+        yield True

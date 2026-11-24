@@ -565,14 +565,16 @@ class ClienteApiDocs(shodan.ClienteShodan):
                 raise FuenteNoResponde('api_docs: la grabación de %s no se puede leer' % url) from None
         if self.pedidas:
             self.dormir(PAUSA_RUTA)
-        limite = min(TIMEOUT_RUTA, self.restante())
+        quedan = self.restante()
+        limite = min(TIMEOUT_RUTA, quedan)
         if limite < shodan.MIN_INTENTO:
             raise SinTiempo('api_docs: se acabó el tiempo de la corrida antes de pedir %s' % url)
         # Una petición a la vez por host también entre escaneos (turno.py): espera a que el host quede libre.
-        with turno.turno(host, self.restante() - shodan.MIN_INTENTO):
-            limite = min(TIMEOUT_RUTA, self.restante())   # lo que le quedó a la corrida después de esperar el turno
-            if limite < shodan.MIN_INTENTO:
-                raise SinTiempo('api_docs: se acabó el tiempo de la corrida antes de pedir %s' % url)
+        with turno.turno(host, quedan - shodan.MIN_INTENTO) as espero:
+            if espero:
+                limite = min(TIMEOUT_RUTA, self.restante())   # lo que le quedó a la corrida después de esperar
+                if limite < shodan.MIN_INTENTO:
+                    raise SinTiempo('api_docs: se acabó el tiempo de la corrida antes de pedir %s' % url)
             self.pedidas += 1
             self.consultas += 1
             crudo = (self.visitar or _visitar)(url, limite)

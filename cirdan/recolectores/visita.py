@@ -433,15 +433,17 @@ class ClienteWeb(shodan.ClienteShodan):
             raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % url) from None
         if self.pedidas:
             self.dormir(PAUSA_SITIO)
-        limite = min(timeout, self.restante())
+        quedan = self.restante()
+        limite = min(timeout, quedan)
         if limite < shodan.MIN_INTENTO:
             raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de visitar %s' % url)
         # Una petición a la vez por host también entre escaneos (turno.py): espera a que el host quede libre.
         host = urllib.parse.urlsplit(url).hostname or ''
-        with turno.turno(host, self.restante() - shodan.MIN_INTENTO):
-            limite = min(timeout, self.restante())   # lo que le quedó a la corrida después de esperar el turno
-            if limite < shodan.MIN_INTENTO:
-                raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de visitar %s' % url)
+        with turno.turno(host, quedan - shodan.MIN_INTENTO) as espero:
+            if espero:
+                limite = min(timeout, self.restante())   # lo que le quedó a la corrida después de esperar el turno
+                if limite < shodan.MIN_INTENTO:
+                    raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de visitar %s' % url)
             self.pedidas += 1
             self.consultas += 1
             crudo = (self.visitar or _visitar)(url, limite)
