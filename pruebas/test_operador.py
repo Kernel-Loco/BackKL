@@ -23,6 +23,7 @@ Jordan Tate (Analista de Acme, cuenta de demo) es operator solo durante estas pr
 Beta Corp y Grupo Olmardo le delegan. Lo que escriben como postgres lo deshacen al terminar, salvo la bitácora, que
 es de solo inserción. Ninguna pide un escaneo: los scores de Beta y Olmardo entran directo en la base, sin triggers.
 """
+import re
 import unittest
 import uuid
 
@@ -34,6 +35,7 @@ from pruebas.test_superadmin import CADENA, LOWTIDE, OLMARDO, OLMARDO_DEMO, DANA
 from pruebas.webauthn_falso import Autenticador
 
 JORDAN_ID = '30000000-0000-4000-8000-000000000003'
+ALEX_ID = '30000000-0000-4000-8000-000000000001'
 JORDAN = 'jordan.tate@acme-demo.mx'   # analista de Acme, operator durante estas pruebas
 ALEX = 'alex.morgan@acme-demo.mx'     # admin de Acme
 DANA = 'dana.cruz@beta-corp.mx'       # admin de Beta
@@ -46,8 +48,9 @@ SESION_TERMINADA = {'detail': 'Tu sesión terminó. Vuelve a iniciar sesión.'}
 SIN_PERMISO = {'detail': 'Tu rol no tiene permiso para esta acción.'}
 UUID_RE = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
-# Las dos políticas de la 013 (013_pesos_por_organizacion.sql:27-36), tal como las devuelve pg_get_expr.
-POLITICAS_013 = (
+# Las dos políticas de la 013 (013_pesos_por_organizacion.sql:27-36), tal como las devuelve pg_get_expr, con los
+# espacios y saltos de línea juntos en uno (scalar solo lee la última línea).
+POLITICAS_013 = re.sub(r'\s+', ' ',
     'scoring_rule_sets.scoring_rule_sets_tenant_isolation=((organization_id IS NULL) OR (organization_id ='
     ' app_current_org()))/(organization_id = app_current_org())|'
     'scoring_rules.scoring_rules_tenant_isolation=(EXISTS ( SELECT 1\n   FROM scoring_rule_sets rs\n  WHERE ((rs.id ='
@@ -145,7 +148,7 @@ class Base(unittest.TestCase):
         # sí misma, solo hay una delegación vigente por pareja y revoked_at y revoked_by van juntos.
         casos = (
             (alta % (ACME, OLMARDO, DANA_ID), 'org_delegations_granted_by_fk'),
-            (alta % (ACME, ACME, JORDAN_ID), 'org_delegations_otra_empresa'),
+            (alta % (ACME, ACME, ALEX_ID), 'org_delegations_otra_empresa'),
             (alta % (ACME, BETA, DANA_ID), 'org_delegations_una_vigente'),
             ("UPDATE users SET role = 'analyst' WHERE id = '%s'; " % OLMARDO_DEMO
              + alta % (ACME, OLMARDO, OLMARDO_DEMO), 'org_delegations_quien_firma'),
@@ -219,9 +222,10 @@ class Base(unittest.TestCase):
         self.assertEqual(scalar("SELECT string_agg(polname || '=' || pg_get_expr(polqual, polrelid), ',') FROM"
                                 " pg_policy WHERE polrelid = 'public.platform_admins'::regclass;", user='postgres'),
                          'platform_admins_ninguna=false')
-        self.assertEqual(scalar("SELECT string_agg(c.relname || '.' || p.polname || '=' || pg_get_expr(p.polqual,"
-                                " p.polrelid) || '/' || pg_get_expr(p.polwithcheck, p.polrelid), '|' ORDER BY"
-                                " c.relname) FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid WHERE c.relname"
+        self.assertEqual(scalar("SELECT regexp_replace(string_agg(c.relname || '.' || p.polname || '=' ||"
+                                " pg_get_expr(p.polqual, p.polrelid) || '/' || pg_get_expr(p.polwithcheck,"
+                                " p.polrelid), '|' ORDER BY c.relname), '\\s+', ' ', 'g') FROM pg_policy p"
+                                " JOIN pg_class c ON c.oid = p.polrelid WHERE c.relname"
                                 " IN ('scoring_rule_sets', 'scoring_rules') AND p.polcmd = '*' AND p.polpermissive;",
                                 user='postgres'), POLITICAS_013)
         self.assertEqual(scalar("SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid"
@@ -386,7 +390,8 @@ class Operador(unittest.TestCase):
         # Ni las rutas de un rol (Admin, Admin o Gerente) ni las que solo piden sesión: dominios, hallazgos, score,
         # reportes, plan de acción, exportaciones, activos y escaneos, en v1.py y en main.py.
         for ruta in ('/api/v1/domains/txt', '/api/v1/audit-log', '/api/v1/domains',
-                     '/api/v1/domains/acme-demo.mx/findings', '/api/v1/domains/acme-demo.mx/score', '/api/v1/domains/acme-demo.mx/score/history',
+                     '/api/v1/domains/acme-demo.mx/findings', '/api/v1/domains/acme-demo.mx/score',
+                     '/api/v1/domains/acme-demo.mx/score/history',
                      '/api/v1/domains/acme-demo.mx/report', '/api/v1/domains/acme-demo.mx/action-plan',
                      '/api/v1/domains/acme-demo.mx/action-plan/export', '/api/v1/domains/acme-demo.mx/export/siem',
                      '/api/v1/domains/acme-demo.mx/findings/export', '/api/v1/domains/acme-demo.mx/assets',

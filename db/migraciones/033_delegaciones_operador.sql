@@ -84,20 +84,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS org_delegations_una_vigente
   ON public.org_delegations (organization_id, client_organization_id) WHERE revoked_at IS NULL;
 
 -- Quien otorga (al crearla) o revoca (al poner revoked_by) es un admin activo de la empresa cliente. La FK compuesta
--- ya pide que sea de esa empresa. Corre con los permisos de quien escribe (postgres), no es SECURITY DEFINER.
+-- ya pide que sea de esa empresa: una cuenta de otra empresa se deja pasar aquí para que la rechace la FK con su
+-- nombre. Corre con los permisos de quien escribe (postgres), no es SECURITY DEFINER.
 CREATE OR REPLACE FUNCTION public.org_delegations_quien_firma() RETURNS trigger
   LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
-  IF (TG_OP = 'INSERT' OR NEW.granted_by IS DISTINCT FROM OLD.granted_by) AND NOT EXISTS (
+  IF (TG_OP = 'INSERT' OR NEW.granted_by IS DISTINCT FROM OLD.granted_by) AND EXISTS (
       SELECT 1 FROM public.users u WHERE u.organization_id = NEW.client_organization_id AND u.id = NEW.granted_by
-         AND u.role = 'admin' AND u.is_active) THEN
+         AND NOT (u.role = 'admin' AND u.is_active)) THEN
     RAISE EXCEPTION 'org_delegations_quien_firma: granted_by debe ser un admin activo de la empresa cliente'
       USING ERRCODE = 'check_violation';
   END IF;
   IF NEW.revoked_by IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.revoked_by IS DISTINCT FROM OLD.revoked_by)
-     AND NOT EXISTS (
+     AND EXISTS (
       SELECT 1 FROM public.users u WHERE u.organization_id = NEW.client_organization_id AND u.id = NEW.revoked_by
-         AND u.role = 'admin' AND u.is_active) THEN
+         AND NOT (u.role = 'admin' AND u.is_active)) THEN
     RAISE EXCEPTION 'org_delegations_quien_firma: revoked_by debe ser un admin activo de la empresa cliente'
       USING ERRCODE = 'check_violation';
   END IF;
