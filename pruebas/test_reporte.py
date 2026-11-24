@@ -190,8 +190,9 @@ class Html(unittest.TestCase):
 
     def test_3b_el_pdf_del_portal_sale_de_este_html(self):
         # RC-70 punto 4: el portal imprime este mismo HTML para el PDF (FrontKL src/lib/imprimirReporte.ts), así que la
-        # hoja A4, el nombre de LowTide y la atribución de HIBP del PDF son los de aquí.
+        # hoja A4, el nombre de LowTide, la letra del score y la atribución de HIBP del PDF son los de aquí.
         texto = reporte.html(armar([hallazgo(1)]))
+        self.assertIn('64, letra D', texto)
         self.assertIn('@page { size: A4; margin: 14mm; }', texto)
         self.assertIn('<title>Resumen ejecutivo de riesgo · olmardo.com · LowTide</title>', texto)
         self.assertIn('LowTide · Confidencial', texto)
