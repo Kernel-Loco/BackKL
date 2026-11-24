@@ -262,7 +262,9 @@ class PruebasConUsuarios(unittest.TestCase):
 def _con_resultados(texto, tareas, sus_filas, promedio, hallazgos, s16, perfil='estudiante de otra carrera',
                     estado='3 sesiones el 2026-11-24'):
     """Una copia del documento con las tablas de Resultados llenas, para probar revisar_resultados."""
-    filas = lambda datos: ''.join('| %s |\n' % ' | '.join(f) for f in datos)
+    def filas(datos):
+        return ''.join('| %s |\n' % ' | '.join(f) for f in datos)
+
     participantes = filas([[p, perfil, '2026-11-24'] for p in PERSONAS])
     texto = texto.replace('| Resultados | %s |' % SIN_SESIONES, '| Resultados | %s |' % estado)
     for titulo, extra in (('### Participantes', participantes), ('### Tareas', filas(tareas)),
