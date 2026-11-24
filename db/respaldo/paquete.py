@@ -12,7 +12,9 @@ from pathlib import Path
 
 ARCHIVOS_PAQUETE = ('cirdan.dump.age', 'cartas.tar.age', 'carta.key.age')
 PATRON_CARTA = re.compile(r'[0-9a-f]{32}\.lt1\Z')
-MAX_CARTA = 5 * 1024 * 1024 + 31
+# El archivo más grande que guarda cirdan/cartas.py es el que baja Mifiel (TOPE_ARCHIVO de cirdan/firma/mifiel.py,
+# 25 MiB), por encima de la carta subida (5 MiB) y del XML de evidencia (7 MB). LT1, nonce y etiqueta suman 31 bytes.
+MAX_CARTA = 25 * 1024 * 1024 + 31
 
 
 def _copiar_miembro(archivo, miembro, destino):

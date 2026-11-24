@@ -121,10 +121,27 @@ os.fsync(fd)
 os.close(fd)
 ' "$uid" "$gid" || falla "no se pudieron copiar las cartas al volumen nuevo $volumen"
 
-printf '%s\n' "SELECT organization_id, domain_id, signed_document_key, encode(signed_document_sha256, 'hex') FROM domain_authorizations" \
+# Todas las llaves de cartas que guarda la base, cada una con el id que lleva su AAD (cirdan/cartas.py): el de la
+# solicitud de firma si la carta salió de la API de Mifiel (migración 031) y el domain_id si se subió a mano.
+cat <<'SQL' \
   | MSYS_NO_PATHCONV=1 docker exec -i -e BASE="$base" "$contenedor_base" sh -c \
     'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -F "|" -v ON_ERROR_STOP=1' \
-  > "$trabajo/referencias.tsv"
+  > "$trabajo/referencias.tsv" || falla "no se pudieron leer las referencias de cartas de la base $base"
+SELECT organization_id, coalesce(signature_request_id, domain_id), signed_document_key,
+       encode(signed_document_sha256, 'hex') FROM domain_authorizations
+UNION
+SELECT organization_id, coalesce(signature_request_id, domain_id), evidence_key,
+       encode(evidence_sha256, 'hex') FROM domain_authorizations WHERE evidence_key IS NOT NULL
+UNION
+SELECT organization_id, id, unsigned_document_key, encode(unsigned_sha256, 'hex') FROM signature_requests
+UNION
+SELECT organization_id, id, signed_document_key, encode(signed_sha256, 'hex') FROM signature_requests
+ WHERE signed_document_key IS NOT NULL
+UNION
+SELECT organization_id, id, evidence_key, encode(evidence_sha256, 'hex') FROM signature_requests
+ WHERE evidence_key IS NOT NULL
+ORDER BY 3;
+SQL
 docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE \
   --security-opt no-new-privileges --entrypoint python \
   -v "$volumen:/cartas:ro" -v "$trabajo/carta.key:/run/carta.key:ro" \

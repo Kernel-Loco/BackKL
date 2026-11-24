@@ -96,12 +96,27 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(self.svc['api']['environment']['ALLOWED_ORIGINS'], ORIGEN)
         self.assertEqual(self.svc['demo-accounts']['environment']['ALLOWED_ORIGINS'], ORIGEN)
         self.assertEqual(self.svc['api']['environment']['COOKIE_SECURE'], 'true')
-        self.assertEqual(self.svc['api']['environment']['CARTA_ALTA_ENABLED'], 'true')
         self.assertEqual(self.svc['api']['environment']['CARTA_KEY_VAULT_SECRET_URL'],
                          ENV_FALSO['CARTA_KEY_VAULT_SECRET_URL'])
 
+    def test_3c_el_alta_solo_se_enciende_desde_el_env(self):
+        # RC-339: apagada hasta que el .env la encienda tras una restauración completa validada.
+        self.assertEqual(self.svc['api']['environment']['CARTA_ALTA_ENABLED'], 'false')
+        rc, salida = _config(dict(ENV_FALSO, CARTA_ALTA_ENABLED='true'))
+        self.assertEqual(rc, 0, salida[-500:])
+        self.assertEqual(json.loads(salida)['services']['api']['environment']['CARTA_ALTA_ENABLED'], 'true')
+
+    def test_3d_el_plan_b_va_con_la_llave_directa(self):
+        # Sin IMDS, el plan B no lleva la URL de Key Vault: la llave de cartas va en CARTA_ENCRYPTION_KEY.
+        env = {k: v for k, v in ENV_FALSO.items() if k != 'CARTA_KEY_VAULT_SECRET_URL'}
+        env['CARTA_ENCRYPTION_KEY'] = 'CIRDAN_FAKE_carta'
+        rc, salida = _config(env)
+        self.assertEqual(rc, 0, salida[-500:])
+        api = json.loads(salida)['services']['api']['environment']
+        self.assertEqual((api['CARTA_KEY_VAULT_SECRET_URL'], api['CARTA_ENCRYPTION_KEY']), ('', 'CIRDAN_FAKE_carta'))
+
     def test_4_variables_obligatorias(self):
-        for falta in ('ALLOWED_ORIGINS', 'TUNNEL_TOKEN', 'CARTA_KEY_VAULT_SECRET_URL'):
+        for falta in ('ALLOWED_ORIGINS', 'TUNNEL_TOKEN'):
             env = {k: v for k, v in ENV_FALSO.items() if k != falta}
             rc, salida = _config(env)
             self.assertNotEqual(rc, 0, falta)

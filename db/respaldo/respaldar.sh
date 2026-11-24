@@ -76,15 +76,12 @@ exec 9>"$CARPETA/.candado"
 flock -w 600 9 || falla "otro respaldo sigue corriendo"
 
 PATRON='^cirdan_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}\.(backup|dump)\.age$'
-nombre="cirdan_$(date -u +%Y%m%dT%H%M%SZ)_$(openssl rand -hex 4).backup.age"
-[[ $nombre =~ $PATRON ]] || falla "no se pudo armar el nombre del respaldo"
-final="$CARPETA/$nombre"
-parcial="$CARPETA/.$nombre.parcial"
-[ ! -e "$final" ] || falla "$final ya existe"
+raiz_nombre="cirdan_$(date -u +%Y%m%dT%H%M%SZ)_$(openssl rand -hex 4)"
+parcial=
 
 trabajo=$(mktemp -d "$temporal/lowtide-respaldo.XXXXXX")
 limpiar() {
-  rm -f -- "$parcial"
+  [ -z "$parcial" ] || rm -f -- "$parcial"
   rm -rf -- "$trabajo"
 }
 trap limpiar EXIT
@@ -93,18 +90,55 @@ trap limpiar EXIT
 # contenedor que no existe falla enseguida; uno que existe se espera hasta ESPERA_BASE segundos.
 docker inspect --type container "$CONTENEDOR_BASE" >/dev/null 2>&1 || falla "no existe el contenedor $CONTENEDOR_BASE"
 docker inspect --type container "$CONTENEDOR_CARTAS" >/dev/null 2>&1 || falla "no existe el contenedor $CONTENEDOR_CARTAS"
+# La base que se respalda es la que usa la API (PGDATABASE de su contenedor, docker-compose.yml). Tras una
+# restauración completa apunta a la base nueva: respaldar la vieja junto al volumen actual dejaría un paquete
+# incoherente. Sale de la configuración del contenedor, así que sirve aunque la API esté detenida.
+base_datos=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTENEDOR_CARTAS" \
+  | sed -n 's/^PGDATABASE=//p' | tail -n 1)
+base_datos=${base_datos:-cirdan}
+[[ $base_datos =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || falla "PGDATABASE de $CONTENEDOR_CARTAS no es un nombre de base válido"
 listo=0
 for ((t = 0; t < ESPERA_BASE; t += 5)); do
-  if docker exec "$CONTENEDOR_BASE" sh -c 'exec pg_isready -q -U "$POSTGRES_USER" -d cirdan' 2>/dev/null; then
+  if docker exec -e BASE="$base_datos" "$CONTENEDOR_BASE" sh -c \
+      'exec pg_isready -q -U "$POSTGRES_USER" -d "$BASE"' 2>/dev/null; then
     listo=1; break
   fi
   sleep 5
 done
 [ "$listo" = 1 ] || falla "$CONTENEDOR_BASE no aceptó conexiones en $ESPERA_BASE s"
 
+# Un despliegue que todavía no configura la llave de cartas (alta apagada) y no tiene cartas sigue con el respaldo
+# de solo la base, en el formato antiguo .dump.age: así el respaldo diario no se pierde, pero ese archivo no sirve
+# para habilitar un alta restaurada. Con cartas en el volumen y sin llave, el respaldo falla.
+estado_llave=0
+docker exec "$CONTENEDOR_CARTAS" python -c '
+import os, sys
+from cirdan.config import config
+if config("CARTA_KEY_VAULT_SECRET_URL") or config("CARTA_ENCRYPTION_KEY"):
+    sys.exit(0)
+root = os.environ.get("CARTA_STORAGE_DIR", "")
+sys.exit(4 if os.path.isdir(root) and os.listdir(root) else 3)
+' || estado_llave=$?
+case $estado_llave in
+  0) nombre="$raiz_nombre.backup.age" ;;
+  3) nombre="$raiz_nombre.dump.age"
+     echo "respaldo: AVISO: $CONTENEDOR_CARTAS no tiene llave de cartas; respaldo solo de la base (.dump.age)" >&2 ;;
+  4) falla "hay cartas en el volumen, pero $CONTENEDOR_CARTAS no tiene llave de cartas" ;;
+  *) falla "no se pudo revisar la llave de cartas en $CONTENEDOR_CARTAS" ;;
+esac
+[[ $nombre =~ $PATRON ]] || falla "no se pudo armar el nombre del respaldo"
+final="$CARPETA/$nombre"
+[ ! -e "$final" ] || falla "$final ya existe"
+parcial="$CARPETA/.$nombre.parcial"
+
 # La base se captura primero. Una carta nueva se escribe y sincroniza antes de que la transacción la referencie;
 # por eso la captura posterior del volumen puede incluir huérfanos, pero no dejar referencias sin archivo.
-docker exec "$CONTENEDOR_BASE" sh -c 'exec pg_dump -U "$POSTGRES_USER" -d cirdan -Fc --no-password' \
+if [ "$estado_llave" = 3 ]; then
+  docker exec -e BASE="$base_datos" "$CONTENEDOR_BASE" sh -c \
+    'exec pg_dump -U "$POSTGRES_USER" -d "$BASE" -Fc --no-password' | age -r "$RECEPTOR_AGE" -o "$parcial"
+else
+docker exec -e BASE="$base_datos" "$CONTENEDOR_BASE" sh -c \
+  'exec pg_dump -U "$POSTGRES_USER" -d "$BASE" -Fc --no-password' \
   | age -r "$RECEPTOR_AGE" -o "$trabajo/cirdan.dump.age"
 
 docker exec "$CONTENEDOR_CARTAS" python -c '
@@ -117,7 +151,7 @@ with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
         if not re.fullmatch(r"[0-9a-f]{32}\.lt1", name):
             raise SystemExit("nombre de carta inválido")
         path = os.path.join(root, name)
-        if os.path.islink(path) or not os.path.isfile(path) or not 31 <= os.path.getsize(path) <= 5 * 1024 * 1024 + 31:
+        if os.path.islink(path) or not os.path.isfile(path) or not 31 <= os.path.getsize(path) <= 25 * 1024 * 1024 + 31:
             raise SystemExit("archivo de carta inválido")
         with open(path, "rb") as carta:
             if carta.read(3) != b"LT1":
@@ -131,6 +165,7 @@ docker exec "$CONTENEDOR_CARTAS" python -c \
   | age -r "$RECEPTOR_AGE" -o "$trabajo/carta.key.age"
 
 python3 "$(dirname -- "$0")/paquete.py" crear "$trabajo" | age -r "$RECEPTOR_AGE" -o "$parcial"
+fi
 bytes=$(stat -c %s "$parcial")
 [ "$bytes" -ge 1024 ] || falla "el paquete cifrado mide $bytes bytes"
 chmod 600 "$parcial"
@@ -246,7 +281,7 @@ for n in "${respaldos[@]}"; do
   fi
 done
 # Restos de una corrida que se cortó (apagón o kill -9, que no corren el trap).
-find "$CARPETA" -maxdepth 1 -type f -name '.cirdan_*.backup.age.parcial' -mmin +60 -delete
+find "$CARPETA" -maxdepth 1 -type f -name '.cirdan_*.age.parcial' -mmin +60 -delete
 echo "respaldo: $quedan respaldos locales"
 if [ "$SUBIR" = 1 ] && { [ -z "${en_azure[$nombre]:-}" ] || (( pendientes > 0 )); }; then
   falla "$pendientes respaldos locales sin subir a Azure (se reintentan en la siguiente corrida)"

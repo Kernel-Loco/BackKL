@@ -11,11 +11,13 @@ Una VM equivalente también se crea y se borra desde código con Terraform, en s
 
 ## Antes de levantar
 
-**Alta de dominios:** el compose de despliegue ya la habilita. El respaldo diario incluye, en un solo paquete cifrado,
+**Alta de dominios:** el compose de despliegue la deja apagada mientras el `.env` no traiga `CARTA_ALTA_ENABLED=true`, y
+eso se pone solo después de una restauración completa validada (sección 'Restaurar'). El respaldo diario incluye, en un solo paquete cifrado,
 la base, el volumen con las cartas cifradas y la llave de cartas; la restauración completa verifica la llave y cada
 documento referenciado antes de usar los destinos nuevos. El respaldo usa la retención actual de Azure: inmutabilidad
-de 7 días y borrado entre 30 y 32 días. El acceso al alta en producción requiere además la URL versionada de Key Vault
-en `CARTA_KEY_VAULT_SECRET_URL`; el compose falla si falta. La verificación TXT de dominios ya registrados sigue
+de 7 días y borrado entre 30 y 32 días. En la VM, la llave de cartas va como URL versionada de Key Vault
+en `CARTA_KEY_VAULT_SECRET_URL`. Sin ninguna llave de cartas, el alta da error y el respaldo diario guarda solo la base
+en el formato antiguo `.dump.age`. La verificación TXT de dominios ya registrados sigue
 funcionando para los que estén en `DOMINIOS_EN_VIVO`.
 
 Para pruebas locales sin datos reales: monta el volumen mediante `docker compose`, pon `CARTA_ALTA_ENABLED=true` y
@@ -96,7 +98,7 @@ En producción, crea una llave aleatoria distinta de las del MFA y de las huella
 ```bash
 umask 077
 llave=$(mktemp /dev/shm/carta-key.XXXXXX)
-python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())' > "$llave"
+python3 -c 'import base64,secrets,sys; sys.stdout.write(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())' > "$llave"
 az keyvault secret set --vault-name <boveda> --name carta-encryption-key --file "$llave" --query id -o tsv
 rm -f -- "$llave"
 ```
@@ -322,7 +324,7 @@ AGE_IDENTIDAD=<ruta del archivo de la llave privada> db/respaldo/restaurar_compl
   <blob> cirdan-pg16 cirdan-api cirdan_restaurada lowtide-cartas-restauradas <boveda> carta-encryption-key
 ```
 
-`AGE_IDENTIDAD` es la ruta del archivo de la llave, nunca la llave misma; con `AGE_IDENTIDAD=-` la lee de stdin para no dejarla en un archivo. El script comprueba que la base y el volumen nuevos no existan, nunca sobrescribe datos y solo devuelve la URL versionada de Key Vault, no la llave. Al terminar, pon en el `.env` las tres variables que imprime (`PGDATABASE`, `CARTA_VOLUME_NAME` y `CARTA_KEY_VAULT_SECRET_URL`), detén y recrea la API; el compose de producción conserva `CARTA_ALTA_ENABLED=true`. Si la verificación falla, no apuntes la API a esos destinos. El respaldo crea una base aparte para poder comparar primero con `db/respaldo/conteos.sql`; `db/respaldo/comparar.sh` también compara filas, RLS, FORCE, políticas y permisos. La restauración del plan B se hace en esa misma base nueva, no con `pg_restore --clean` sobre la base que ya está en uso.
+`AGE_IDENTIDAD` es la ruta del archivo de la llave, nunca la llave misma; con `AGE_IDENTIDAD=-` la lee de stdin para no dejarla en un archivo. El script comprueba que la base y el volumen nuevos no existan, nunca sobrescribe datos y solo devuelve la URL versionada de Key Vault, no la llave. Al terminar, pon en el `.env` las tres variables que imprime (`PGDATABASE`, `CARTA_VOLUME_NAME` y `CARTA_KEY_VAULT_SECRET_URL`), detén y recrea la API. Cuando esa verificación pasó, pon `CARTA_ALTA_ENABLED=true` en el `.env` para habilitar el alta. Si la verificación falla, no apuntes la API a esos destinos. El respaldo crea una base aparte para poder comparar primero con `db/respaldo/conteos.sql`; `db/respaldo/comparar.sh` también compara filas, RLS, FORCE, políticas y permisos. La restauración del plan B se hace en esa misma base nueva, no con `pg_restore --clean` sobre la base que ya está en uso.
 
 `pruebas/test_respaldo.py` cubre el cifrado, la restauración de base, la retención y la subida simulada. `pruebas/test_respaldo_cartas.py` cubre el contenido seguro del paquete y, en el CI, la restauración de DB, volumen y llave y la autenticación AES-GCM de la carta. En una PC, las pruebas con Docker solo corren si se indican `RESPALDO_CONTENEDOR` y `RESPALDO_CARTAS_CONTENEDOR` de una pila aislada; nunca usan por omisión los contenedores de desarrollo.
 
@@ -336,7 +338,7 @@ El plan B no usa la base de desarrollo de esa PC: sus datos son de prueba y las 
 
 1. En la carpeta de desarrollo, `docker compose down` (sin `-v`, la base de desarrollo se queda). Hace falta porque `cirdan-pg16`, `cirdan-valkey` y `cirdan-api` tienen nombre fijo y el plan B los volvería a crear.
 2. Un clon aparte de BackKL y FrontKL, por ejemplo en `C:\lowtide-planb\BackKL` y `C:\lowtide-planb\FrontKL`, en el mismo commit que la VM. En la VM, `git -C BackKL rev-parse HEAD` y `git -C FrontKL rev-parse HEAD` dan los dos commits, y en cada clon del plan B `git checkout <commit>` los fija. Con otro commit el portal o la API pueden esperar otra versión de la base que la del respaldo de la VM.
-3. Su `.env` como el de la VM (paso 2 de 'Antes de levantar'), con el `TUNNEL_TOKEN` del plan B, sin `TOTP_KEY_VAULT_SECRET_URL` ni `PASSWORD_HASH_KEY_VAULT_SECRET_URL` (su llave va en `PASSWORD_HASH_ENCRYPTION_KEY`, sección 'Llave de las huellas de contraseña') y además `COMPOSE_PROJECT_NAME=lowtide-planb` (viene comentada en `.env.example`). Esa PC no tiene la identidad de la VM, así que la llave del MFA es la misma de la VM, pero va en `TOTP_ENCRYPTION_KEY`. Se toma del gestor de contraseñas ('LowTide vm-lowtide TOTP_ENCRYPTION_KEY') o de la bóveda con la sesión de `az` de quien la administra (`az keyvault secret show --id <URL con versión del .env de la VM> --query value -o tsv`). Mientras dure el plan B puede ir en ese `.env`, y al terminar se borra de ahí. Con otra llave TOTP los secretos de las cuentas reales no se descifran y nadie pasa la verificación en dos pasos. Sin `COMPOSE_PROJECT_NAME`, el proyecto toma el nombre de la carpeta: `C:\lowtide-planb\BackKL` da `backkl`, el mismo que la carpeta de desarrollo, y los dos usan el mismo volumen de la base, así que el `pg_restore --clean` y el `down -v` de abajo borrarían la base de desarrollo. Las contraseñas de PostgreSQL y Valkey pueden ser otras.
+3. Su `.env` como el de la VM (paso 2 de 'Antes de levantar'), con el `TUNNEL_TOKEN` del plan B, sin `TOTP_KEY_VAULT_SECRET_URL` ni `PASSWORD_HASH_KEY_VAULT_SECRET_URL` (su llave va en `PASSWORD_HASH_ENCRYPTION_KEY`, sección 'Llave de las huellas de contraseña') y además `COMPOSE_PROJECT_NAME=lowtide-planb` (viene comentada en `.env.example`). Tampoco lleva `CARTA_KEY_VAULT_SECRET_URL`: la llave de cartas de la VM va en `CARTA_ENCRYPTION_KEY`, sacada de la bóveda igual que la del MFA, y sin ella el alta queda apagada. Esa PC no tiene la identidad de la VM, así que la llave del MFA es la misma de la VM, pero va en `TOTP_ENCRYPTION_KEY`. Se toma del gestor de contraseñas ('LowTide vm-lowtide TOTP_ENCRYPTION_KEY') o de la bóveda con la sesión de `az` de quien la administra (`az keyvault secret show --id <URL con versión del .env de la VM> --query value -o tsv`). Mientras dure el plan B puede ir en ese `.env`, y al terminar se borra de ahí. Con otra llave TOTP los secretos de las cuentas reales no se descifran y nadie pasa la verificación en dos pasos. Sin `COMPOSE_PROJECT_NAME`, el proyecto toma el nombre de la carpeta: `C:\lowtide-planb\BackKL` da `backkl`, el mismo que la carpeta de desarrollo, y los dos usan el mismo volumen de la base, así que el `pg_restore --clean` y el `down -v` de abajo borrarían la base de desarrollo. Las contraseñas de PostgreSQL y Valkey pueden ser otras.
 4. La primera línea de `docker compose config` tiene que ser `name: lowtide-planb`. Después, `docker compose up -d --build` y la comprobación de `logs demo-accounts`.
 5. `docker volume ls` muestra `lowtide-planb_cirdan-pg16-data`, el volumen nuevo y vacío del plan B, aparte del de desarrollo (`backkl_cirdan-pg16-data` o el nombre de esa carpeta).
 
