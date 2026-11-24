@@ -943,7 +943,8 @@ class FallasYGrabacion(unittest.TestCase):
 
     def test_9_completar_vuelve_a_consultar_lo_de_grabaciones_anteriores(self):
         inicio = datetime(2026, 10, 15, 18, 0, tzinfo=timezone.utc)
-        reloj = lambda: inicio + crtsh.timedelta(minutes=1)
+        def reloj():
+            return inicio + crtsh.timedelta(minutes=1)
 
         class VarianteCaida(CrtshSimulado):
             def __call__(self, url, timeout):
@@ -1759,7 +1760,7 @@ class Resumen(unittest.TestCase):
         self.assertEqual(crtsh._dia(crtsh._fecha('2026-12-31T01:00:00+02:00')), '30 dic 2026')
         self.assertIn('  api.acme-demo.mx · vence 25 oct 2026', lineas)
         self.assertIn('  tienda.acme-demo.mx · vence 30 nov 2026 · comodín', lineas)
-        self.assertFalse([l for l in lineas if '[medium]' in l or '[high]' in l])
+        self.assertFalse([linea for linea in lineas if '[medium]' in linea or '[high]' in linea])
         self.assertEqual(crtsh.codigo_salida(res), 0)
 
     def test_2_reproducir_dice_de_cuando_es_la_grabacion(self):
@@ -1799,11 +1800,11 @@ class Resumen(unittest.TestCase):
             rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d)
             res = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
             lineas = crtsh.resumen(res, rep)
-        faltan = [l for l in lineas if l.startswith('Faltan ')]
+        faltan = [linea for linea in lineas if linea.startswith('Faltan ')]
         self.assertEqual(len(faltan), 1)
         self.assertIn('%acme-demo%', faltan[0])
         self.assertTrue(faltan[0].endswith('Se completan con --grabar --completar.'))
-        self.assertFalse([l for l in lineas if 'saturado' in l or l.startswith('aviso:')])
+        self.assertFalse([linea for linea in lineas if 'saturado' in linea or linea.startswith('aviso:')])
 
     def test_3b_un_solo_faltante_en_singular(self):
         res = crtsh.Resultado('acme-demo.mx', avisos=[crtsh.SIN_GRABACION + '%.acme-demo.mx'])

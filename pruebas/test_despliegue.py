@@ -296,7 +296,7 @@ class ImagenDeLaApi(unittest.TestCase):
         # Comentario 10063: el CMD del Dockerfile manda --no-server-header. pruebas/test_documentacion_api.py arranca la
         # API con este mismo CMD y revisa que no salga el encabezado. No necesita docker.
         texto = re.sub(r'\\\n\s*', '', (RAIZ / 'Dockerfile').read_text(encoding='utf-8'))
-        cmds = [l[len('CMD'):].strip() for l in texto.splitlines() if l.startswith('CMD ')]
+        cmds = [linea[len('CMD'):].strip() for linea in texto.splitlines() if linea.startswith('CMD ')]
         self.assertEqual(json.loads(cmds[-1]), ['python', '-m', 'uvicorn', 'cirdan.api.main:app', '--host', '0.0.0.0',
                                                 '--port', '8000', '--proxy-headers', '--no-server-header'])
 
