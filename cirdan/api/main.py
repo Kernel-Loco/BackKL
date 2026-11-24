@@ -25,12 +25,14 @@ from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.firmas import MAX_SUBIDA_BODY, router as signatures_router
 from cirdan.api.llaves import router as api_keys_router
+from cirdan.api.operador import router as operator_router
 from cirdan.api.plataforma import router as platform_router
 from cirdan.api.v1 import MAX_ALTA_BODY, router as v1_router
 from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import config, origenes_permitidos
 from cirdan.db import audit, transaction
+from cirdan.version import VERSION
 
 
 @asynccontextmanager
@@ -56,7 +58,7 @@ app = FastAPI(
     # Con openapi_url en None, FastAPI tampoco registra /docs ni /redoc.
     openapi_url='/openapi.json' if API_DOCS else None,
     title='LowTide API',
-    version='0.2.0',
+    version=VERSION,   # la misma del User-Agent (cirdan/version.py)
     description='Inicio de sesión con MFA y endpoints de solo lectura sobre la base cirdan (PostgreSQL 16). '
                 'La empresa sale de la sesión y el aislamiento lo aplica Row-Level Security en la base. '
                 'Con DEMO_EXPLORER=true, vista visual de la base en /demo, también con sesión.',
@@ -309,6 +311,7 @@ app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(api_keys_router)
 app.include_router(platform_router)
+app.include_router(operator_router)
 app.include_router(v1_router)
 app.include_router(signatures_router)
 app.include_router(assistant_router)

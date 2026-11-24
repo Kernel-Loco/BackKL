@@ -311,7 +311,7 @@ class ImagenDeLaApi(unittest.TestCase):
         # Comentario 10063: el CMD del Dockerfile manda --no-server-header. pruebas/test_documentacion_api.py arranca la
         # API con este mismo CMD y revisa que no salga el encabezado. No necesita docker.
         texto = re.sub(r'\\\n\s*', '', (RAIZ / 'Dockerfile').read_text(encoding='utf-8'))
-        cmds = [l[len('CMD'):].strip() for l in texto.splitlines() if l.startswith('CMD ')]
+        cmds = [linea[len('CMD'):].strip() for linea in texto.splitlines() if linea.startswith('CMD ')]
         self.assertEqual(json.loads(cmds[-1]), ['python', '-m', 'uvicorn', 'cirdan.api.main:app', '--host', '0.0.0.0',
                                                 '--port', '8000', '--proxy-headers', '--no-server-header'])
 
@@ -322,6 +322,15 @@ class ImagenDeLaApi(unittest.TestCase):
         self.assertEqual(re.findall(r'^\s*API_DOCS:\s*(.+?)\s*$', compose, re.M), ['${API_DOCS:-false}'])
         ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
         self.assertEqual(re.findall(r'^API_DOCS=(.*)$', ejemplo, re.M), ['false'])
+
+    def test_2b_portal_url_sin_valor_en_el_ejemplo(self):
+        # RC-63 punto 8: el .env.example nombra PORTAL_URL sin valor. Vacía, la PC usa el valor por omisión de
+        # docker-compose.yml y el despliegue la deja vacía para que el enlace salga del primer origen permitido.
+        ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^PORTAL_URL=(.*)$', ejemplo, re.M), [''])
+        compose = (RAIZ / 'docker-compose.yml').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^\s*PORTAL_URL:\s*(.+?)\s*$', compose, re.M),
+                         ['${PORTAL_URL:-http://localhost:3000}'])
 
 
 @unittest.skipUnless(shutil.which('docker'), 'sin docker en el PATH')

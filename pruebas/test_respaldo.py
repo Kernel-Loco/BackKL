@@ -26,6 +26,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from pruebas.pila import exigir_contenedor
+
 RAIZ = Path(__file__).resolve().parent.parent
 RESPALDO = RAIZ / 'db' / 'respaldo'
 
@@ -55,6 +57,7 @@ def correr(args, entrada=None, env=None):
 
 
 def psql(sql, base='postgres'):
+    exigir_contenedor(CONTENEDOR)
     proc = subprocess.run(
         ['docker', 'exec', '-i', '-e', 'BASE=' + base, CONTENEDOR, 'sh', '-c',
          'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -v ON_ERROR_STOP=1'],
@@ -100,6 +103,7 @@ class Respaldo(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        exigir_contenedor(CONTENEDOR)   # los .sh de db/respaldo/ también entran a ese contenedor
         if FALTAN:
             raise AssertionError('en el CI no puede faltar: %s' % ', '.join(FALTAN))
         cls.tmp = Path(tempfile.mkdtemp(prefix='respaldo_'))

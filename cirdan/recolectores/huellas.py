@@ -309,7 +309,8 @@ def generar(ruta_tgz):
     ValueError si el tarball no es el de PAQUETE."""
     crudo = Path(ruta_tgz).read_bytes()
     integridad = 'sha512-' + base64.b64encode(hashlib.sha512(crudo).digest()).decode('ascii')
-    if (integridad, hashlib.sha1(crudo).hexdigest(), len(crudo)) != (
+    # El shasum de npm es SHA-1: solo se compara junto al sha512, que es el que da la seguridad.
+    if (integridad, hashlib.sha1(crudo, usedforsecurity=False).hexdigest(), len(crudo)) != (
             PAQUETE['integridad'], PAQUETE['shasum'], PAQUETE['bytes']):
         raise ValueError('el tarball no es el de %s %s de npm' % (PAQUETE['nombre'], PAQUETE['version']))
     tecnologias, categorias, paquete = {}, None, None

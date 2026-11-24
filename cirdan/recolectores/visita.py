@@ -72,7 +72,7 @@ from datetime import datetime, timezone
 
 from cirdan.ml import caracteristicas as rubrica
 from cirdan.recolectores import (borde, certspotter, contrato, geoip, huellas, nvd, portada, shodan, soporte,
-                                 transporte)
+                                 transporte, turno)
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Hallazgo, Resultado, SinGrabacion,
                                           en_alcance_nombre)
@@ -433,12 +433,21 @@ class ClienteWeb(shodan.ClienteShodan):
             raise FuenteNoResponde(self.PREFIJO + 'la grabación de %s no se puede leer' % url) from None
         if self.pedidas:
             self.dormir(PAUSA_SITIO)
-        limite = min(timeout, self.restante())
+        quedan = self.restante()
+        limite = min(timeout, quedan)
         if limite < shodan.MIN_INTENTO:
             raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de visitar %s' % url)
-        self.pedidas += 1
-        self.consultas += 1
-        datos = self.limpiar((self.visitar or _visitar)(url, limite))
+        # Una petición a la vez por host también entre escaneos (turno.py): espera a que el host quede libre.
+        host = urllib.parse.urlsplit(url).hostname or ''
+        with turno.turno(host, quedan - shodan.MIN_INTENTO) as espero:
+            if espero:
+                limite = min(timeout, self.restante())   # lo que le quedó a la corrida después de esperar el turno
+                if limite < shodan.MIN_INTENTO:
+                    raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida antes de visitar %s' % url)
+            self.pedidas += 1
+            self.consultas += 1
+            crudo = (self.visitar or _visitar)(url, limite)
+        datos = self.limpiar(crudo)
         if datos.get('sin_respuesta') == 'tiempo' and limite < timeout:
             # No tuvo sus `timeout` segundos: lo que se acabó fue la corrida, no es que el sitio no responda
             raise SinTiempo(self.PREFIJO + 'se acabó el tiempo de la corrida mientras se visitaba %s' % url)
@@ -588,10 +597,13 @@ def _sin_puerto(visita):
 def _http(cliente, nombre):
     """La visita a http://<nombre>/ en el puerto 80, con TIMEOUT_HTTP, o None si no se pudo pedir: una grabación de
     antes que no trae esa petición (SinGrabacion) o la corrida ya no tenía tiempo (SinTiempo). En los dos casos queda
-    lo que dio el 443, que ya se sabía. Su redirección no se sigue: un 80 que manda al 443 no tiene otra página. Su
-    falla la cuenta _recorrer."""
+    lo que dio el 443, que ya se sabía. Sin el turno del host (turno.SinTurno) el 80 no se pidió por otro escaneo, no
+    porque se acabara la corrida: sale, y el sitio queda sin revisar (sin_tiempo) y no como revisado sin https. Su
+    redirección no se sigue: un 80 que manda al 443 no tiene otra página. Su falla la cuenta _recorrer."""
     try:
         return cliente.sitio('http://%s/' % nombre, contar=False, timeout=TIMEOUT_HTTP)
+    except turno.SinTurno:
+        raise
     except (SinGrabacion, SinTiempo):
         return None
 
@@ -1146,7 +1158,8 @@ def _main(argv=None):
     if elegido != 'reproducir' and not shodan._en_vivo_permitido(dominio):
         print('%s no está en DOMINIOS_EN_VIVO: solo se puede --reproducir' % dominio, file=sys.stderr)
         return 1
-    res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
+    with turno.con_candado(turno.de_la_linea(elegido)):   # el mismo turno por host que los análisis
+        res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
     print(resumen(res))
     return codigo_salida(res)
 

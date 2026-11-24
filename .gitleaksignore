@@ -1,0 +1,80 @@
+# Hallazgos históricos de gitleaks que el job de seguridad ignora (RC-254), todos falsos. Son los que da .gitleaks.toml
+# con --ignore-gitleaks-allow sobre la historia de dev hasta 0a04006 (23 nov): tokens CIRDAN_FAKE_ en pruebas/test_*.py,
+# de antes de la regla que los limita a pruebas/fixtures/, el TOKEN de TXT de 12 hex de pruebas/test_txt.py, las huellas
+# sha256 de pubkey_sha256 de pruebas/test_certspotter.py (con gitleaks:allow, que el job ya no respeta), contraseñas de
+# prueba de test_recuperar_sin_red.py y la clave de ejemplo de test_github.py. Cada línea es commit:ruta:regla:línea,
+# así que solo cubre ese commit: si un commit nuevo mueve o reescribe una de esas líneas, gitleaks la vuelve a marcar.
+# Un token falso nuevo va en pruebas/fixtures/ y una huella sha256 nueva va sin forma de secreto o como fixture,
+# no se agregan aquí.
+1795e028bae906e3e30538cff6a269375595aed9:pruebas/test_txt.py:generic-api-key:40
+23d53837666920aa46857e7cd5b81f07bc63a926:pruebas/test_llave_totp.py:lowtide-token-falso-fuera-de-fixtures:177
+23d53837666920aa46857e7cd5b81f07bc63a926:pruebas/test_llave_totp.py:lowtide-token-falso-fuera-de-fixtures:25
+23d53837666920aa46857e7cd5b81f07bc63a926:pruebas/test_llave_totp.py:lowtide-token-falso-fuera-de-fixtures:26
+5360021d2a962c3bf21a8253ff76797cdb5d455b:pruebas/test_superadmin.py:lowtide-token-falso-fuera-de-fixtures:42
+6998086f34ccc90c11497be9433999273a9f1e62:pruebas/test_api_docs.py:lowtide-token-falso-fuera-de-fixtures:35
+71db98fd10e78c5d3c24109b20daca2acfea1a3d:pruebas/test_llave_huellas.py:lowtide-token-falso-fuera-de-fixtures:29
+71db98fd10e78c5d3c24109b20daca2acfea1a3d:pruebas/test_llave_huellas.py:lowtide-token-falso-fuera-de-fixtures:30
+71db98fd10e78c5d3c24109b20daca2acfea1a3d:pruebas/test_llave_huellas.py:lowtide-token-falso-fuera-de-fixtures:31
+71db98fd10e78c5d3c24109b20daca2acfea1a3d:pruebas/test_llave_totp.py:lowtide-token-falso-fuera-de-fixtures:428
+9da862932ed9b6d58488f88dc6d77d7f7f6f2039:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:140
+9da862932ed9b6d58488f88dc6d77d7f7f6f2039:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:365
+9da862932ed9b6d58488f88dc6d77d7f7f6f2039:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:401
+9da862932ed9b6d58488f88dc6d77d7f7f6f2039:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:417
+9da862932ed9b6d58488f88dc6d77d7f7f6f2039:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:480
+9da862932ed9b6d58488f88dc6d77d7f7f6f2039:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:483
+9da862932ed9b6d58488f88dc6d77d7f7f6f2039:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:487
+9da862932ed9b6d58488f88dc6d77d7f7f6f2039:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:491
+a9509c608d2c4dc21ca5c84b45894acd45f61be9:pruebas/test_rdap.py:lowtide-token-falso-fuera-de-fixtures:157
+a9509c608d2c4dc21ca5c84b45894acd45f61be9:pruebas/test_rdap.py:lowtide-token-falso-fuera-de-fixtures:164
+a9509c608d2c4dc21ca5c84b45894acd45f61be9:pruebas/test_rdap.py:lowtide-token-falso-fuera-de-fixtures:193
+b0e8c84a26a4c6251a9da9b805b9695b53dc5a10:pruebas/test_visita.py:lowtide-token-falso-fuera-de-fixtures:38
+b0e8c84a26a4c6251a9da9b805b9695b53dc5a10:pruebas/test_visita.py:lowtide-token-falso-fuera-de-fixtures:541
+c1d2c9958290b27dbc4262c1735d0040ef7da6cd:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:133
+c1d2c9958290b27dbc4262c1735d0040ef7da6cd:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:297
+c1d2c9958290b27dbc4262c1735d0040ef7da6cd:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:299
+c1d2c9958290b27dbc4262c1735d0040ef7da6cd:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:335
+cd09192e6aed7af3bd79e8a98e3a573353eb2ea2:pruebas/test_passkeys.py:lowtide-token-falso-fuera-de-fixtures:492
+d9ec8d77310d8fde32b6ef36256cc14086a0e652:pruebas/test_registros_dns.py:lowtide-token-falso-fuera-de-fixtures:28
+d9ec8d77310d8fde32b6ef36256cc14086a0e652:pruebas/test_registros_dns.py:lowtide-token-falso-fuera-de-fixtures:375
+dd0bff4336d410ca6b407b83316d47315f530599:pruebas/test_passkeys.py:lowtide-token-falso-fuera-de-fixtures:451
+dd0bff4336d410ca6b407b83316d47315f530599:pruebas/test_passkeys.py:lowtide-token-falso-fuera-de-fixtures:455
+dd0bff4336d410ca6b407b83316d47315f530599:pruebas/test_passkeys.py:lowtide-token-falso-fuera-de-fixtures:472
+dd0bff4336d410ca6b407b83316d47315f530599:pruebas/test_passkeys.py:lowtide-token-falso-fuera-de-fixtures:473
+f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:211
+f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:240
+f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:411
+f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:418
+f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:503
+f8cae4d2d550cf5315a49ed1c60a9165be17190b:pruebas/test_llaves_api.py:lowtide-token-falso-fuera-de-fixtures:517
+6db42472058367c1b6c9a0f7e1ca84947a3edd8d:pruebas/test_hibp.py:lowtide-token-falso-fuera-de-fixtures:41
+6db42472058367c1b6c9a0f7e1ca84947a3edd8d:pruebas/test_llave_fuentes.py:lowtide-token-falso-fuera-de-fixtures:39
+442ce5572334d267610f5ab62998ed083a094a3f:pruebas/test_firma.py:lowtide-token-falso-fuera-de-fixtures:28
+442ce5572334d267610f5ab62998ed083a094a3f:pruebas/test_firma.py:lowtide-token-falso-fuera-de-fixtures:29
+442ce5572334d267610f5ab62998ed083a094a3f:pruebas/test_firma_base.py:lowtide-token-falso-fuera-de-fixtures:35
+442ce5572334d267610f5ab62998ed083a094a3f:pruebas/test_firma_base.py:lowtide-token-falso-fuera-de-fixtures:36
+442ce5572334d267610f5ab62998ed083a094a3f:pruebas/test_firma_base.py:lowtide-token-falso-fuera-de-fixtures:131
+f2924b7d06f5cb9b9e6b2efc2c35b0ae4bc84c00:pruebas/test_recuperar_sin_red.py:generic-api-key:278
+f2924b7d06f5cb9b9e6b2efc2c35b0ae4bc84c00:pruebas/test_recuperar_sin_red.py:generic-api-key:291
+69d8a4cfba2c873d2f495705cab01e242d425431:pruebas/test_alta_dominio_integracion.py:lowtide-token-falso-fuera-de-fixtures:142
+9db8553283b7ebabd88aea9cfab4eeb105dbbaf6:pruebas/test_asistente.py:lowtide-token-falso-fuera-de-fixtures:886
+58b6bc95acc0db9819754b5e4df4d32ee413bebc:pruebas/test_bitacora.py:lowtide-token-falso-fuera-de-fixtures:113
+ad807d8104692ceca53b8d9d4519887891ea38b5:pruebas/test_bitacora.py:lowtide-token-falso-fuera-de-fixtures:113
+cacbd58899d8f31ab23d14b330f1597583246c92:pruebas/test_rotar_huellas.py:lowtide-token-falso-fuera-de-fixtures:32
+543c35502be4e20cc2746b6d407398efa80e2b6c:pruebas/test_contrato.py:lowtide-token-falso-fuera-de-fixtures:434
+543c35502be4e20cc2746b6d407398efa80e2b6c:pruebas/test_certspotter.py:lowtide-token-falso-fuera-de-fixtures:1093
+543c35502be4e20cc2746b6d407398efa80e2b6c:pruebas/test_identidad.py:lowtide-token-falso-fuera-de-fixtures:45
+af0ad7ee153ad7cfc9adb48351246e08a302aec7:pruebas/test_alta_dominio.py:lowtide-token-falso-fuera-de-fixtures:19
+af0ad7ee153ad7cfc9adb48351246e08a302aec7:pruebas/test_alta_dominio_integracion.py:lowtide-token-falso-fuera-de-fixtures:25
+af0ad7ee153ad7cfc9adb48351246e08a302aec7:pruebas/test_alta_dominio_integracion.py:lowtide-token-falso-fuera-de-fixtures:76
+e1fa41f9658f05d1e9724a36f2bcd2b4c0de4083:pruebas/test_tope_cuerpo.py:lowtide-token-falso-fuera-de-fixtures:55
+40aa79fd7ece3985edf3eb30328c49a9e6c32318:pruebas/test_github.py:generic-api-key:581
+037b3b3189d24ba5782929309d3406a9b7073c75:pruebas/test_bitacora_descargas.py:lowtide-token-falso-fuera-de-fixtures:202
+037b3b3189d24ba5782929309d3406a9b7073c75:pruebas/test_bitacora_descargas.py:lowtide-token-falso-fuera-de-fixtures:205
+4d37111f531a2f2a2fc72de1ba120e459a1f4970:pruebas/test_certspotter.py:generic-api-key:46
+4d37111f531a2f2a2fc72de1ba120e459a1f4970:pruebas/test_certspotter.py:generic-api-key:47
+4d37111f531a2f2a2fc72de1ba120e459a1f4970:pruebas/test_certspotter.py:generic-api-key:52
+4d37111f531a2f2a2fc72de1ba120e459a1f4970:pruebas/test_certspotter.py:generic-api-key:53
+4d37111f531a2f2a2fc72de1ba120e459a1f4970:pruebas/test_certspotter.py:generic-api-key:58
+4d37111f531a2f2a2fc72de1ba120e459a1f4970:pruebas/test_certspotter.py:generic-api-key:59
+4d37111f531a2f2a2fc72de1ba120e459a1f4970:pruebas/test_certspotter.py:generic-api-key:64
+4d37111f531a2f2a2fc72de1ba120e459a1f4970:pruebas/test_certspotter.py:generic-api-key:65

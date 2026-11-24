@@ -1,4 +1,5 @@
-"""Endpoints de inicio de sesión: /api/v1/auth/captcha, /login, /mfa/verify, /mfa/setup, /mfa/enable, /logout, /me,
+"""Endpoints de inicio de sesión: /api/v1/auth/captcha, /login, /mfa/verify, /mfa/setup, /mfa/enable, el alta de TOTP
+al entrar del Admin (/mfa/enroll/setup y /mfa/enroll/enable, RC-5), /logout, /me,
 /password, las passkeys (/passkeys, RC-331), el enlace al correo (/link/request y /link/verify, #28, RC-63) y la
 recuperación de la contraseña con un enlace (/password-reset y /password-reset/confirm, RC-335).
 
@@ -31,6 +32,12 @@ LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
 OPERATOR_MFA_REQUIRED = 'Las cuentas de operador deben tener MFA activo antes de iniciar sesión.'
+# RC-5: el Admin entra solo con TOTP. Sin él, /login responde 403 sin sesión y con un token para activarlo ahí mismo.
+ADMIN_MFA_REQUIRED = ('Las cuentas de administrador deben activar la verificación en dos pasos antes de entrar. '
+                      'Escanea el código QR con tu app autenticadora.')
+# Por enlace o passkey no se da el token de alta: activarla pide la contraseña, como /mfa/setup.
+ADMIN_MFA_PASSWORD = ('Las cuentas de administrador deben activar la verificación en dos pasos. '
+                      'Entra con tu correo y contraseña para activarla.')
 CAPTCHA_INVALID = 'No se pudo comprobar que no eres un robot. Espera a que termine la verificación e inténtalo de nuevo.'
 
 
@@ -94,6 +101,16 @@ def _start_session(response, conn, user, ip, via):
     session = Session(token=token, user_id=user['id'], org_id=user['organization_id'], role=user['role'],
                       email=user['email'], home_org_id=user['organization_id'], platform_admin=platform)
     return dict(row, **platform_view(session, row), **sessions.limits())
+
+
+def _mfa_required_kind(conn, user_id, role):
+    """Por qué una cuenta sin TOTP activo no puede entrar: 'operator' si su rol es operator (consola del integrador,
+    #66, RC-126) o si está en platform_admins (027), 'admin' si su rol es admin (Hecho cuando de RC-5) y None si puede
+    entrar sin TOTP. Solo se llama con cuentas sin TOTP."""
+    if role == 'operator' or conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required',
+                                          (user_id,)).fetchone()['required']:
+        return 'operator'
+    return 'admin' if role == 'admin' else None
 
 
 def _clear_fails(email):
@@ -223,8 +240,9 @@ def login(body: LoginIn, request: Request, response: Response):
     # El captcha va antes que todo: sin él no se busca el correo ni se mira el bloqueo, así que la respuesta no dice
     # nada de la cuenta. No cuenta como fallo de contraseña: si contara, cualquiera bloquearía un correo ajeno sin
     # hacer la prueba de trabajo. Se gasta aunque después falle la contraseña.
+    # 401 como la contraseña o el código inválidos (Hecho cuando de RC-5).
     if not captcha.verify(body.captcha):
-        raise HTTPException(400, CAPTCHA_INVALID)
+        raise HTTPException(401, CAPTCHA_INVALID)
     email = body.email.strip().lower()
     ip = client_ip(request)
     # El intento cuenta como fallo del correo y de la IP antes de buscar la cuenta, en un solo paso de Valkey (RC-270).
@@ -261,7 +279,7 @@ def login(body: LoginIn, request: Request, response: Response):
     # La contraseña es correcta: el intento no fue un fallo y se devuelve, al correo y a la IP.
     sessions.refund_login_attempt(email, ip, ticket)
 
-    operator_mfa_required = False
+    mfa_setup_required = None
     # La huella que abrió esta contraseña. Si cambia antes de crear la sesión (un restablecimiento o un /password en
     # paralelo), la sesión no se crea con la contraseña anterior (H7 de la revisión de RC-335).
     huella = found['password_hash']
@@ -308,15 +326,25 @@ def login(body: LoginIn, request: Request, response: Response):
         if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
                 {'user_id': user_id, 'org_id': org, 'email': email, 'tag': sessions.password_tag(huella)})}
-        operator_mfa_required = bool(conn.execute(
-            'SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required'])
-        if operator_mfa_required:
-            audit(conn, org, 'auth.operator_mfa_required', user_id, ip, 'user', user_id)
+        # Sin TOTP no entran el Admin (RC-5), una cuenta 'operator' de la consola del integrador (#66, RC-126, migración
+        # 033) ni el operador de la consola multiempresa (027): 403 sin sesión.
+        mfa_setup_required = _mfa_required_kind(conn, user_id, row['role'])
+        if mfa_setup_required:
+            audit(conn, org, 'auth.%s_mfa_required' % mfa_setup_required, user_id, ip, 'user', user_id)
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
                                                     'email': email}, ip, 'password')
-    if operator_mfa_required:
+    if mfa_setup_required == 'operator':
+        # El operador de la consola multiempresa no se da de alta al entrar: con la contraseña sola abriría una sesión
+        # de superadmin con su propia app (H1 de la revisión de RC-5). Su TOTP se activa por fuera, como en la 027.
         raise HTTPException(403, OPERATOR_MFA_REQUIRED)
+    if mfa_setup_required:
+        # El 403 del Admin trae un token para activar el TOTP sin sesión (/mfa/enroll/*), amarrado a esta contraseña
+        # como el mfa_token: si cambia antes de terminar, ya no sirve. Los fallos del correo se borran hasta que entre.
+        token = sessions.create_mfa_enroll({'user_id': user_id, 'org_id': org, 'email': email,
+                                            'tag': sessions.password_tag(huella)})
+        return JSONResponse({'detail': ADMIN_MFA_REQUIRED, 'mfa_setup_required': True, 'mfa_setup_token': token},
+                            status_code=403, headers=NO_STORE)
     _clear_fails(email)
     return {'mfa_required': False, 'user': user}
 
@@ -502,8 +530,8 @@ def verify_link(body: LinkVerifyIn, request: Request, response: Response):
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
                 {'user_id': user_id, 'org_id': org, 'email': row['email'], 'via': 'link_totp',
                  'tag': sessions.password_tag(row['password_hash'])})}
-        elif conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required']:
-            rejected = 'operator_mfa_required'
+        elif kind := _mfa_required_kind(conn, user_id, row['role']):
+            rejected = kind + '_mfa_required'
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
                                                     'email': row['email']}, ip, 'link')
@@ -512,6 +540,9 @@ def verify_link(body: LinkVerifyIn, request: Request, response: Response):
     # Fuera del with: con raise adentro, la transacción se desharía y la bitácora no quedaría.
     if rejected == 'operator_mfa_required':
         raise HTTPException(403, OPERATOR_MFA_REQUIRED)
+    if rejected == 'admin_mfa_required':
+        # El enlace no da el token de alta: activar el TOTP pide la contraseña (RC-5).
+        raise HTTPException(403, ADMIN_MFA_PASSWORD)
     if rejected:
         raise HTTPException(401, LINK_INVALID)
     _clear_fails(email)
@@ -786,6 +817,111 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
     return {'mfa_enabled': True, 'passkeys_removed': len(removed)}
 
 
+# ------------------------------------------------------------------ alta de TOTP al entrar (RC-5)
+# El Admin sin TOTP recibe en el 403 de /login un mfa_setup_token de 10 min. Con él activa el TOTP sin sesión y, con el
+# primer código válido, entra. La contraseña ya se revisó en /login y el token lleva su marca, como el mfa_token.
+
+class MfaEnrollIn(BaseModel):
+    mfa_setup_token: str = Field(min_length=10, max_length=100)
+
+
+class MfaEnrollEnableIn(MfaEnrollIn):
+    code: str = Field(pattern=totp.CODE_PATTERN)
+
+
+ENROLL_USER_SQL = ('SELECT u.role, u.email::text, u.password_hash, u.mfa_enabled_at IS NOT NULL AND '
+                   'u.totp_secret_enc IS NOT NULL AS mfa_enabled FROM users u JOIN organizations o ON o.id = u.organization_id '
+                   "WHERE u.id = %s AND u.is_active AND o.status IN ('trial', 'active')")
+
+
+def _enroll_row(conn, pending, lock=''):
+    """La cuenta del alta, si todavía puede seguir: activa, en una empresa en trial o active, con la misma contraseña que
+    en /login, sin TOTP, sin el rol operator (RC-126) y fuera de platform_admins (el operador no se da de alta al entrar,
+    H1). Si no, None."""
+    row = conn.execute(ENROLL_USER_SQL + lock, (pending['user_id'],)).fetchone()
+    if not row or row['mfa_enabled'] or sessions.password_tag(row['password_hash']) != pending['tag']:
+        return None
+    if _mfa_required_kind(conn, pending['user_id'], row['role']) == 'operator':
+        return None
+    return row
+
+
+def _enroll_locked(email, ip):
+    # Con el correo o la IP bloqueados, el alta al entrar responde 429 como /login y /mfa/verify (H2, H8 y H15).
+    if sessions.is_locked(email, ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+
+
+@router.post('/mfa/enroll/setup', summary='Alta de TOTP al entrar, paso 1: con el token del 403 de /login, el QR')
+def mfa_enroll_setup(body: MfaEnrollIn, request: Request, response: Response):
+    pending = sessions.get_mfa_enroll(body.mfa_setup_token)
+    if not pending:
+        raise HTTPException(401, MFA_EXPIRED)
+    ip = client_ip(request)
+    org, user_id = pending['org_id'], pending['user_id']
+    _enroll_locked(pending['email'], ip)
+    secret = totp.new_secret()
+    # El secreto pendiente va cifrado dentro del token, con la misma llave y el mismo dato asociado que en la base. Cada
+    # token da a lo sumo MFA_ENROLL_MAX_SETUPS QR, así que la bitácora tampoco crece sin tope (H3 y H7).
+    if not sessions.start_mfa_enroll_setup(body.mfa_setup_token,
+                                           base64.b64encode(totp.encrypt_secret(secret, user_id)).decode()):
+        raise HTTPException(401, MFA_EXPIRED)
+    with transaction(org) as conn:
+        row = _enroll_row(conn, pending)
+        if row:
+            audit(conn, org, 'auth.mfa_setup_started', user_id, ip, 'user', user_id, {'via': 'login'})
+    if not row:
+        sessions.delete_mfa_enroll(body.mfa_setup_token)
+        raise HTTPException(401, MFA_EXPIRED)
+    uri = totp.provisioning_uri(secret, row['email'])
+    response.headers.update(NO_STORE)
+    # start_mfa_enroll_setup renovó el token: el QR dura justo esto.
+    return {'otpauth_uri': uri, 'secret': secret, 'qr_svg': totp.qr_svg_data_uri(uri),
+            'expires_in_seconds': sessions.MFA_SETUP_SECONDS}
+
+
+@router.post('/mfa/enroll/enable', summary='Alta de TOTP al entrar, paso 2: con un código válido guarda el secreto y entra')
+def mfa_enroll_enable(body: MfaEnrollEnableIn, request: Request, response: Response):
+    # El intento se gasta antes de revisar el código, en el token y en el correo, como en /mfa/verify: ni en paralelo
+    # ni pidiendo otro QR pasan de 5 por token.
+    pending = sessions.take_mfa_enroll(body.mfa_setup_token)
+    if not pending:
+        raise HTTPException(401, MFA_EXPIRED)
+    ip = client_ip(request)
+    org, user_id, email = pending['org_id'], pending['user_id'], pending['email']
+    if 'secret_enc' not in pending:  # sin QR pedido no hay código que revisar ni fallo que contar
+        raise HTTPException(401, MFA_SETUP_EXPIRED)
+    if not sessions.take_mfa_attempt(email, ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    secret = totp.decrypt_secret(base64.b64decode(pending['secret_enc']), user_id)
+    with transaction(org) as conn:
+        # FOR UPDATE OF u, como /mfa/enable: dos códigos válidos a la vez no guardan dos secretos ni abren dos sesiones;
+        # el segundo ve la cuenta ya activa.
+        row = _enroll_row(conn, pending, ' FOR UPDATE OF u')
+        step = totp.verify_code(secret, body.code) if row else None
+        if row and step is None:
+            audit(conn, org, 'auth.mfa_enable_failed', user_id, ip, 'user', user_id, {'via': 'login'})
+        elif row:
+            conn.execute('UPDATE users SET totp_secret_enc = %s, mfa_enabled_at = now(), last_totp_step = %s, '
+                         'updated_at = now() WHERE id = %s', (totp.encrypt_secret(secret, user_id), step, user_id))
+            audit(conn, org, 'auth.mfa_enabled', user_id, ip, 'user', user_id, {'via': 'login'})
+            # Como en /mfa/enable: las passkeys registradas sin TOTP se borran y las sesiones que hubiera se cierran.
+            # Va antes del commit: si Valkey falla, el alta no se guarda y se puede repetir.
+            _delete_passkeys_of(conn, user_id, org, ip, 'mfa_enabled')
+            sessions.delete_others(user_id, None)
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
+                                                    'email': row['email']}, ip, 'totp_enroll')
+    if not row:
+        sessions.delete_mfa_enroll(body.mfa_setup_token)
+        raise HTTPException(401, MFA_EXPIRED)
+    if step is None:
+        sessions.register_mfa_fail(ip)
+        raise HTTPException(401, MFA_INVALID)
+    sessions.delete_mfa_enroll(body.mfa_setup_token)
+    _clear_fails(email)
+    return {'mfa_required': False, 'user': user}
+
+
 @router.post('/logout', status_code=204, summary='Cierra la sesión y la borra del servidor')
 def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
@@ -907,11 +1043,14 @@ def change_password(body: PasswordIn, request: Request, session: Session = Depen
 def _delete_passkeys(conn, session, ip, reason):
     """Borra todas las passkeys de la cuenta de la sesión y deja un auth.passkey_deleted por cada una. En la bitácora
     va solo el id: el nombre es texto libre y audit_log no se puede borrar ni anonimizar."""
+    return _delete_passkeys_of(conn, session.user_id, session.own_org_id, ip, reason)
+
+
+def _delete_passkeys_of(conn, user_id, org, ip, reason):
     removed = conn.execute('DELETE FROM webauthn_credentials WHERE user_id = %s RETURNING id::text',
-                           (session.user_id,)).fetchall()
+                           (user_id,)).fetchall()
     for passkey in removed:
-        audit(conn, session.own_org_id, 'auth.passkey_deleted', session.user_id, ip, 'passkey', passkey['id'],
-              {'reason': reason})
+        audit(conn, org, 'auth.passkey_deleted', user_id, ip, 'passkey', passkey['id'], {'reason': reason})
     return removed
 
 
@@ -1150,10 +1289,17 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
         return JSONResponse({'detail': PASSKEY_INVALID}, status_code=401,
                             background=BackgroundTask(_audit_passkey_login_failed, org, user_id, ip, reason))
     with transaction(org) as conn:
-        row = conn.execute('SELECT role, email::text FROM users WHERE id = %s AND is_active FOR NO KEY UPDATE',
-                           (user_id,)).fetchone()
+        row = conn.execute('SELECT role, email::text, %s AS mfa_enabled FROM users WHERE id = %%s AND is_active '
+                           'FOR NO KEY UPDATE' % MFA_ENABLED_SQL, (user_id,)).fetchone()
         if not row:  # se desactivó la cuenta entre la búsqueda y aquí
             reason = 'inactive'
+        elif not row['mfa_enabled'] and (kind := _mfa_required_kind(conn, user_id, row['role'])):
+            # Una passkey registrada sin TOTP no salta el TOTP obligatorio del Admin (RC-5), del operator de la consola
+            # del integrador (#66, RC-126) ni del operador (027). La firma era buena, así que no cuenta como fallo; el
+            # contador de la passkey no se toca y el reto ya se gastó.
+            reason = kind + '_mfa_required'
+            if kind == 'operator':
+                audit(conn, org, 'auth.operator_mfa_required', user_id, ip, 'user', user_id)
         # Solo si nadie la borró ni la usó con otro contador desde la búsqueda: si no, puede ser una respuesta repetida
         # o un autenticador clonado, y queda en la bitácora.
         elif not conn.execute('UPDATE webauthn_credentials SET sign_count = %s, backed_up = %s, last_used_at = now() '
@@ -1163,6 +1309,11 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
                                                    'email': row['email']}, ip, 'passkey')
+    if reason == 'operator_mfa_required':
+        raise HTTPException(403, OPERATOR_MFA_REQUIRED)
+    if reason == 'admin_mfa_required':
+        return JSONResponse({'detail': ADMIN_MFA_PASSWORD}, status_code=403,
+                            background=BackgroundTask(_audit_passkey_login_failed, org, user_id, ip, reason))
     if reason:
         sessions.register_fail(email, ip)
         return JSONResponse({'detail': PASSKEY_INVALID}, status_code=401,

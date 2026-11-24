@@ -189,7 +189,7 @@ class ApiReal(unittest.TestCase):
                 self.captchas.clear()
                 r = llamar(main.app, 'POST', LOGIN, en_pedazos(cuerpo, 1024),
                            headers=[('content-type', 'application/json')] + headers)
-                self.assertEqual(r.status, 400)
+                self.assertEqual(r.status, 401)  # RC-5: captcha inválido da 401
                 self.assertEqual(json.loads(r.body), {'detail': routes.CAPTCHA_INVALID})
                 self.assertEqual(self.captchas, ['CIRDAN_FAKE_' + 'c' * 4000])
 

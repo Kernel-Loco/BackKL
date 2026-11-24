@@ -17,6 +17,7 @@ from pathlib import Path
 
 from cirdan.score import cobertura, criterio, subcategorias
 from pruebas import sesion
+from pruebas.pila import exigir_desechable
 from pruebas.test_aislamiento import psql, scalar
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
@@ -193,6 +194,7 @@ class ApiV1(unittest.TestCase):
         self.assertTrue(ok, err)
         mexico = datetime.strptime(salida.strip(), '%Y-%m-%d %H:%M')
         self.assertEqual(mexico.hour, 20, 'la base no está fijada a las 20:00 de México: %s' % salida)
+        exigir_desechable()
         api = subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api'), 'python',
                               '-c', 'import datetime, time; print(time.tzname[0], datetime.date.today())'],
                              capture_output=True, text=True, timeout=60)
@@ -867,6 +869,63 @@ class ApiV1(unittest.TestCase):
         self.assertEqual(activos['total'], 6)
         escaneos = self.get(self.acme, '/api/v1/scans')
         self.assertIn('acme-demo.mx', [s['domain'] for s in escaneos['items']])
+
+    def test_5a_cambios_de_la_semana_con_dos_escaneos_sembrados(self):
+        # RC-73 punto 4: dos escaneos de la base, no en memoria. acme-semana.mx (solo de esta prueba) tiene un escaneo
+        # con 10 activos y otro, una semana y 5 minutos después, con 13: 3 activos nuevos y +30 %. Con el anterior a más
+        # de 7 días, el crecimiento se mide con el respaldo de 14 días (punto 3). Entran sin triggers, como en test_5b,
+        # y se borran al final.
+        dominio, s1, s2 = ('40000000-0000-4000-8000-000000000073', '60000000-0000-4000-8000-000000073001',
+                           '60000000-0000-4000-8000-000000073002')
+        org, carta, txt = ('20000000-0000-4000-8000-000000000001', '41000000-0000-4000-8000-000000000001',
+                           '42000000-0000-4000-8000-000000000011')
+        self.addCleanup(self.psql_o_falla, "BEGIN; SET LOCAL session_replication_role = replica; "
+                        "DELETE FROM domain_scores WHERE domain_id = '%s'; DELETE FROM assets WHERE domain_id = '%s'; "
+                        "DELETE FROM scans WHERE domain_id = '%s'; DELETE FROM domains WHERE id = '%s'; COMMIT;"
+                        % (dominio, dominio, dominio, dominio), 'quedó acme-semana.mx de RC-73')
+        notas = '\'{"infrastructure": 80, "digital_identity": 55, "configuration": 30, "data_leaks": 90}\''
+        self.psql_o_falla(
+            "BEGIN; SET LOCAL session_replication_role = replica; "
+            "INSERT INTO domains (id, organization_id, fqdn, status, txt_token, verified_at, added_by) VALUES "
+            "('%(d)s', '%(o)s', 'acme-semana.mx', 'verified', 'rc73-semana', now() - interval '30 days', "
+            "'30000000-0000-4000-8000-000000000001'); "
+            "INSERT INTO scans (id, organization_id, domain_id, authorization_id, txt_verification_id, trigger_type, "
+            "status, queued_at, finished_at, stats) VALUES "
+            "('%(s1)s', '%(o)s', '%(d)s', '%(c)s', '%(t)s', 'scheduled', 'completed', "
+            "now() - interval '7 days 10 minutes', now() - interval '7 days 5 minutes', "
+            "'{\"assets\": 10, \"new_findings\": 2, \"resolved_findings\": 0}'), "
+            "('%(s2)s', '%(o)s', '%(d)s', '%(c)s', '%(t)s', 'scheduled', 'completed', "
+            "now() - interval '5 minutes', now(), '{\"assets\": 13, \"new_findings\": 0, \"resolved_findings\": 0}'); "
+            "INSERT INTO assets (organization_id, domain_id, asset_type, value, first_seen_at, last_seen_at) "
+            "SELECT '%(o)s', '%(d)s', 'subdomain', 'h' || g || '.acme-semana.mx', "
+            "CASE WHEN g <= 10 THEN now() - interval '7 days 8 minutes' ELSE now() - interval '2 minutes' END, now() "
+            "FROM generate_series(1, 13) g; "
+            "INSERT INTO domain_scores (id, organization_id, domain_id, scan_id, rule_set_id, score, category_scores, "
+            "reason, method, partial_coverage, computed_at) VALUES "
+            "('a0000000-0000-4000-8000-000000073001', '%(o)s', '%(d)s', '%(s1)s', "
+            "'90000000-0000-4000-8000-000000000001', 68, %(n)s, 'scan', 'rules', false, "
+            "now() - interval '7 days 5 minutes'), "
+            "('a0000000-0000-4000-8000-000000073002', '%(o)s', '%(d)s', '%(s2)s', "
+            "'90000000-0000-4000-8000-000000000001', 68, %(n)s, 'scan', 'rules', false, now()); COMMIT;"
+            % {'d': dominio, 'o': org, 'c': carta, 't': txt, 's1': s1, 's2': s2, 'n': notas},
+            'no entraron los escaneos de prueba de RC-73')
+
+        hist = self.get(self.acme, '/api/v1/domains/acme-semana.mx/score/history')['items']
+        self.assertEqual([p['reason'] for p in hist], ['scan', 'scan'])
+        primero, segundo = (p['weekly_changes'] for p in hist)
+        # El primer escaneo: sus 10 activos son nuevos y no hay anterior con qué medir.
+        self.assertEqual((primero['previous_scan_id'], primero['new_assets'], primero['assets_growth_percent']),
+                         (None, 10, None))
+        self.assertEqual(primero['alerts'], {'new_asset': True, 'new_finding': True,
+                                             'assets_growth_over_20_percent': False})
+        # El segundo se compara con el primero de la base, a una semana y 5 minutos.
+        self.assertEqual((segundo['previous_scan_id'], segundo['assets_before'], segundo['assets_now'],
+                          segundo['new_assets'], segundo['assets_growth_percent'], segundo['new_findings']),
+                         (s1, 10, 13, 3, 30, 0))
+        self.assertEqual(segundo['alerts'], {'new_asset': True, 'new_finding': False,
+                                             'assets_growth_over_20_percent': True})
+        # Otra empresa no ve el histórico del dominio.
+        self.assertEqual(self.beta.get('/api/v1/domains/acme-semana.mx/score/history')[0], 404)
 
     def test_5b_escaneos_por_dominio_y_paginados(self):
         # RC-318. Un escaneo fallido de acme-tienda.mx y 60 de acme-demo.mx más nuevos: sin filtro, la página de 50 ya no

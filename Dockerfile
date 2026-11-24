@@ -2,7 +2,7 @@
 # API de Cirdan. La base y Valkey corren en sus propios contenedores (docker-compose.yml).
 
 # La imagen pide BuildKit: Docker Desktop, o Docker Engine con el plugin buildx. El builder clásico (DOCKER_BUILDKIT=0,
-# o Docker sin buildx) ignora ADD --checksum sin avisar, así que bajaría subfinder y gitleaks sin revisar su sha256, y
+# o Docker sin buildx) ignora ADD --checksum sin avisar, así que bajaría subfinder sin revisar su sha256, y
 # tampoco define TARGETARCH. Ese builder corre todas las etapas en orden y se detiene aquí, antes de bajar nada, con el
 # aviso de Docker de que --chmod pide BuildKit. BuildKit salta esta etapa porque ninguna otra la usa. No agregues
 # ARG TARGETARCH con valor por omisión: le gana a la plataforma que pone BuildKit, y en una Mac con Apple Silicon la
@@ -35,23 +35,24 @@ ADD --checksum=sha256:24913d49dddc1d3a5e99a4a7580da5be980959b9415b96f52c4f7f4124
 FROM subfinder-zip-${TARGETARCH} AS subfinder
 RUN python -c "import os, pathlib, zipfile; z = zipfile.ZipFile('/tmp/subfinder.zip'); d = pathlib.Path('/out/licencia'); d.mkdir(parents=True); pathlib.Path('/out/subfinder').write_bytes(z.read('subfinder')); (d / 'LICENSE.md').write_bytes(z.read('LICENSE.md')); os.chmod(d, 0o755); os.chmod(d / 'LICENSE.md', 0o644)"
 
-# gitleaks 8.21.2 (#16, RC-50), la misma versión del pre-commit (.pre-commit-config.yaml), entra igual que
-# subfinder: el tar.gz del release oficial por arquitectura, con su sha256 de gitleaks_8.21.2_checksums.txt.
-# El release se compila con CGO_ENABLED=0 y corre en python:3.15-slim. El release llama x64 a amd64.
-# Dependabot tampoco vigila esta versión: se sube a mano, con las dos URL, los dos hash y NOTICE, y con la imagen
-# nueva se vuelve a generar cirdan/recolectores/gitleaks_cirdan.toml (ver cirdan/recolectores/gitleaks_reglas.py).
-FROM python:3.15-slim AS gitleaks-tar-amd64
-ADD --checksum=sha256:5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba \
-    https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz /tmp/gitleaks.tar.gz
-
-FROM python:3.15-slim AS gitleaks-tar-arm64
-ADD --checksum=sha256:654c935542c89f565aabe7bf7c6c500830f116c114f0aeb509d2460c1ac2e6da \
-    https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_arm64.tar.gz /tmp/gitleaks.tar.gz
-
-# tarfile con filter='data' no deja escribir fuera de /out ni crear enlaces o archivos especiales. Si al tar le
-# falta el binario o la licencia, extractfile() lanza KeyError y la construcción se detiene.
-FROM gitleaks-tar-${TARGETARCH} AS gitleaks
-RUN python -c "import os, pathlib, tarfile; t = tarfile.open('/tmp/gitleaks.tar.gz'); d = pathlib.Path('/out/licencia'); d.mkdir(parents=True); pathlib.Path('/out/gitleaks').write_bytes(t.extractfile(t.getmember('gitleaks')).read()); (d / 'LICENSE').write_bytes(t.extractfile(t.getmember('LICENSE')).read()); os.chmod(d, 0o755); os.chmod(d / 'LICENSE', 0o644)"
+# gitleaks 8.21.2 (#16, RC-50), la misma versión del pre-commit (.pre-commit-config.yaml), se compila desde su código
+# con Go 1.27.4. Los binarios del release traen la crítica CVE-2025-68121 de crypto/tls: 8.21.2 se armó con Go 1.23.2
+# y 8.30.1, la más nueva, con Go 1.24.11, y el arreglo llegó en Go 1.24.13 y 1.25.7 (RC-117). Trivy frena con
+# cualquier crítica y sin excepciones (.github/workflows/imagenes.yml), así que el binario se arma aquí.
+# - go install con @v8.21.2 baja el módulo de proxy.golang.org y lo revisa contra sum.golang.org (GOSUMDB por
+#   omisión), y sus dependencias contra el go.sum del módulo. Si alguno cambia, la construcción se detiene.
+# - CGO_ENABLED=0 como el release: binario estático que corre en python:3.15-slim.
+# - Mismo código y misma config embebida, así que cirdan/recolectores/gitleaks_cirdan.toml no cambia.
+# - Dependabot vigila el FROM de golang, no la versión de gitleaks. Esa se sube a mano en los tres v8.21.2 de abajo,
+#   en NOTICE y en el pre-commit, y se vuelve a generar gitleaks_cirdan.toml (ver gitleaks_reglas.py).
+FROM golang:1.27.4-trixie AS gitleaks
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-trimpath
+RUN go install -ldflags "-s -w -X github.com/zricethezav/gitleaks/v8/cmd.Version=8.21.2" \
+        github.com/zricethezav/gitleaks/v8@v8.21.2 \
+    && install -D -m 0755 "$(go env GOPATH)/bin/gitleaks" /out/gitleaks \
+    && install -D -m 0644 "$(go env GOMODCACHE)/github.com/zricethezav/gitleaks/v8@v8.21.2/LICENSE" \
+        /out/licencia/LICENSE \
+    && chmod 0755 /out/licencia
 
 FROM python:3.15-slim
 

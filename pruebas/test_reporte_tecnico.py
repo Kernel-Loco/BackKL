@@ -136,6 +136,19 @@ class Html(unittest.TestCase):
         self.assertIn('El dominio no tiene hallazgos abiertos.', texto)
         self.assertIn('El dominio no tiene escaneos todavía.', texto)
 
+    def test_6_marcos_iso_y_cis_en_json_y_html(self):
+        """RC-160: el detalle de cada hallazgo trae su control ISO y su salvaguarda CIS; sin mapeo, sin fila."""
+        from pruebas.test_reporte import MARCOS
+        r = armar([hallazgo(1, frameworks=MARCOS), hallazgo(2)])
+        self.assertEqual(r['findings'][0]['frameworks']['iso_27001_2022']['control_id'], 'A.5.17')
+        self.assertEqual(r['findings'][0]['frameworks']['cis_controls_v8_1']['safeguard_id'], '5.2')
+        self.assertIsNone(r['findings'][1]['frameworks']['iso_27001_2022'])
+        texto = rt.html(r)
+        self.assertIn('<th scope="row">ISO/IEC 27001:2022</th><td>A.5.17 Protección de credenciales</td>', texto)
+        self.assertIn('<th scope="row">CIS Controls v8.1</th><td>5.2 Contraseñas únicas</td>', texto)
+        self.assertEqual(texto.count('<th scope="row">ISO/IEC 27001:2022</th>'), 1)
+        self.assertIn('CC BY-NC-ND 4.0', texto)
+
     def test_5_omitidos_apuntan_a_la_exportacion(self):
         texto = rt.html(armar([hallazgo(i) for i in range(rt.MAX_HALLAZGOS + 3)]))
         self.assertIn('Y 3 hallazgos abiertos más', texto)

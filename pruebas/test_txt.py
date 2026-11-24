@@ -34,7 +34,7 @@ import dns.resolver  # noqa: E402
 import dns.rrset  # noqa: E402
 
 from cirdan.orquestador import txt  # noqa: E402
-from cirdan.recolectores import transporte  # noqa: E402
+from cirdan.recolectores import contrato, transporte  # noqa: E402
 
 FQDN = 'olmardo.com'
 TOKEN = 'c41d7e2a9b06'
@@ -190,7 +190,7 @@ class Respaldo(unittest.TestCase):
                 self.assertAlmostEqual(plazo, 110.4)
                 self.assertEqual((req.get_header('Content-type'), req.get_header('Accept'),
                                   req.get_header('User-agent')),
-                                 ('application/dns-message', 'application/dns-message', txt.AGENTE))
+                                 ('application/dns-message', 'application/dns-message', contrato.AGENTE))
                 pregunta = dns.message.from_wire(req.data)
                 self.assertEqual((pregunta.id, pregunta.flags & dns.flags.QR, bool(pregunta.flags & dns.flags.RD)),
                                  (0, 0, True))

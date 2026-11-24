@@ -4,7 +4,8 @@ Es la segunda plantilla del generador de #45 (cirdan/reporte.py): parte del mism
 dos traen las mismas cifras, el mismo score y la misma atribución de HIBP. A eso le suma, para el equipo técnico:
 - cada hallazgo abierto con su regla, severidad base, CVE, CVSS, EPSS, KEV, evidencia y qué hacer completo;
 - las remediaciones agrupadas por regla, con los activos que toca cada una;
-- la cobertura del último escaneo: qué fuentes respondieron y cuáles no.
+- la cobertura del último escaneo: qué fuentes respondieron y cuáles no;
+- el control ISO 27001 y la salvaguarda CIS de cada hallazgo (RC-160).
 El portal arma el PDF con el JSON de GET /api/v1/domains/{fqdn}/report/technical y el HTML sale de aquí.
 Como el ejecutivo, no lee la base y sale de la plataforma: un correo va solo con su dominio, también en la evidencia.
 """
@@ -56,7 +57,7 @@ def _detalle(h, textos):
         'asset': reporte.activo(h), 'asset_type': h.get('asset_type'), 'source': h['source'],
         'detected_at': h['detected_at'], 'recurrence': h['recurrence'], 'last_scan_id': h.get('last_scan_id'),
         'cve_id': h.get('cve_id'), 'cvss': h.get('cvss'), 'epss': h.get('epss'), 'in_kev': h.get('in_kev'),
-        'evidence': evidencia(h.get('evidence')),
+        'evidence': evidencia(h.get('evidence')), 'frameworks': reporte.marcos(h),
         'meaning': ' '.join((texto.get('meaning') or '').split()),
         'recommendation': ' '.join((texto.get('recommendation') or '').split()),
     }
@@ -116,6 +117,9 @@ def _bloque_hallazgo(i, h):
             h['cve_id'], h['cvss'] if h['cvss'] is not None else '—',
             '%.1f %%' % (h['epss'] * 100) if h['epss'] is not None else '—', kev)))
     campos += [('Evidencia · %s' % p['key'], p['value']) for p in h['evidence']]
+    # El control ISO y la salvaguarda CIS de la regla (RC-160). Sin mapeo no se inventa la fila.
+    campos += [(k, v) for k, v in (('ISO/IEC 27001:2022', reporte.marco_iso(h.get('frameworks'))),
+                                   ('CIS Controls v8.1', reporte.marco_cis(h.get('frameworks')))) if v]
     campos += [('Qué significa', h['meaning'] or '—'), ('Remediación', h['recommendation'] or '—')]
     filas = ''.join('<tr><th scope="row">%s</th><td>%s</td></tr>' % (_e(k), _e(v)) for k, v in campos)
     return '<section class="hallazgo"><h3>%d. %s</h3><table>%s</table></section>' % (i, _e(h['title']), filas)

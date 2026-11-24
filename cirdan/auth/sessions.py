@@ -246,6 +246,73 @@ def delete_mfa_setup(user_id):
     _valkey().delete(_setup_key(user_id))
 
 
+# ------------------------------------------------------------------ alta de TOTP al entrar (RC-5)
+
+def _enroll_key(token):
+    return 'mfa:enroll:' + _digest(token)
+
+
+MFA_ENROLL_MAX_SETUPS = 3
+
+
+def create_mfa_enroll(data):
+    """Token del 403 de /login para que un Admin sin TOTP lo active sin sesión, por MFA_SETUP_SECONDS. El secreto
+    pendiente vive dentro del mismo token, no en mfa:setup:<usuario>: dos tokens de la misma cuenta, o un /mfa/setup
+    desde el perfil, no se pisan el QR (H5 y H9 de la revisión de RC-5). Da MFA_ENROLL_MAX_SETUPS QR y
+    MFA_MAX_ATTEMPTS códigos en total: pedir otro QR no devuelve los intentos (H3 y H7)."""
+    token = secrets.token_urlsafe(32)
+    _valkey().set(_enroll_key(token), json.dumps(dict(data, setups=0, attempts=0)), ex=MFA_SETUP_SECONDS)
+    return token
+
+
+# KEYS[1] es el token; ARGV el secreto cifrado, el tope de QR y los segundos. Sin la clave no la crea. Con el tope ya
+# usado borra el token y devuelve 0. Si no, guarda el secreto y renueva el vencimiento: el QR dura lo que dice
+# expires_in_seconds aunque se pida a los 8 min del /login (H4, H10 y H13).
+_ENROLL_SETUP = '''
+local raw = redis.call('GET', KEYS[1])
+if not raw then return false end
+local data = cjson.decode(raw)
+if data.setups >= tonumber(ARGV[2]) then
+  redis.call('DEL', KEYS[1])
+  return 0
+end
+data.setups = data.setups + 1
+data.secret_enc = ARGV[1]
+redis.call('SET', KEYS[1], cjson.encode(data), 'EX', ARGV[3])
+return raw
+'''
+
+
+def get_mfa_enroll(token):
+    """Los datos del token sin gastar nada; None si no existe o venció."""
+    if not token or len(token) > 100:
+        return None
+    raw = _valkey().get(_enroll_key(token))
+    return json.loads(raw) if raw else None
+
+
+def start_mfa_enroll_setup(token, secret_enc):
+    """Guarda el secreto de un QR nuevo dentro del token. None si el token no existe, venció o ya dio sus
+    MFA_ENROLL_MAX_SETUPS QR (y entonces se borra)."""
+    if not token or len(token) > 100:
+        return None
+    raw = _valkey().eval(_ENROLL_SETUP, 1, _enroll_key(token), secret_enc, MFA_ENROLL_MAX_SETUPS, MFA_SETUP_SECONDS)
+    return json.loads(raw) if raw else None
+
+
+def take_mfa_enroll(token):
+    """Gasta un intento de código del token antes de revisarlo, como take_mfa(), y devuelve sus datos (con secret_enc
+    solo si ya se pidió un QR); None si no existe o venció. Con el quinto se borra."""
+    if not token or len(token) > 100:
+        return None
+    raw = _valkey().eval(_TAKE_MFA, 1, _enroll_key(token), MFA_MAX_ATTEMPTS)
+    return json.loads(raw) if raw else None
+
+
+def delete_mfa_enroll(token):
+    _valkey().delete(_enroll_key(token))
+
+
 # ------------------------------------------------------------------ captcha del login (RC-154)
 
 def captcha_hmac_key(candidate):

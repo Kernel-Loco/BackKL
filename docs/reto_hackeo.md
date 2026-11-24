@@ -84,7 +84,7 @@ reporte (`R-01`, `R-02`…) y lo anota en el registro.
 
 **Datos de quien reporta.** Del correo solo se usan el nombre del equipo y el reporte. La dirección de quien escribe
 y su nombre pasan por Cloudflare Email Routing hasta el buzón del equipo, como los de `arco@`, y no van al
-registro ni al repo. Los correos se borran al cerrar el registro del reto, después de S16.
+registro ni al repo. Los correos del reto se borran al cerrar su registro, después de S16. Los avisos de tráfico que llegan al mismo alias siguen la sección 5.6 de la política de seguridad y privacidad.
 
 ## Clasificación
 
@@ -105,7 +105,7 @@ Un reporte repetido se une al primero que llegó, con el estado `duplicado`.
 2. Revisar en la base que solo cambiaron las organizaciones de pruebas. Si algo más cambió, se revierte solo eso,
    comparando con el `pg_dump` de antes de la ventana. Nunca se restaura la base completa: borraría los cambios
    legítimos de esos días y la cadena de `audit_log`, que es de solo inserción.
-3. Quitar el alias `seguridad@lowtidesec.com` si ya no se usa.
+3. No quitar el alias `seguridad@lowtidesec.com`: el User-Agent de LowTide y la página /seguridad mandan ahí a quien ve su tráfico.
 
 ## Registro
 

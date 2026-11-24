@@ -32,6 +32,16 @@ def hallazgo(i, severidad='high', categoria='configuration', regla='dmarc_missin
             'detected_at': datetime(2026, 11, 3, tzinfo=timezone.utc), 'recurrence': recurrencia}
 
 
+MARCOS = {
+    'mitre_attack': {'version': 'Enterprise v19', 'technique_id': None, 'technique_name': None,
+                     'source_url': 'https://attack.mitre.org/techniques/enterprise/', 'unmapped_reason': 'No aplica.'},
+    'iso_27001_2022': {'version': 'ISO/IEC 27001:2022', 'control_id': 'A.5.17', 'control_name': 'Protección de credenciales',
+                       'source_url': 'https://www.iso.org/standard/27001'},
+    'cis_controls_v8_1': {'version': 'CIS Controls v8.1', 'safeguard_id': '5.2', 'safeguard_name': 'Contraseñas únicas',
+                          'source_url': 'https://www.cisecurity.org/controls/v8-1'},
+}
+
+
 def armar(hallazgos, recomendaciones=None, score=None):
     score = score or {'score': 64, 'band': 'high', 'grade': 'D', 'partial_coverage': False, 'computed_at': AHORA}
     return reporte.armar('olmardo.com', 'Grupo Olmardo', {'valid_from': date(2026, 10, 13), 'valid_until': date(2027, 10, 13)},
@@ -116,6 +126,34 @@ class Armado(unittest.TestCase):
         self.assertFalse(any('aparecieron en el último escaneo' in f for f in frases))
 
 
+class Marcos(unittest.TestCase):
+    """RC-160: cada hallazgo del reporte trae su control ISO 27001 y su salvaguarda CIS, sin MITRE ni textos copiados."""
+
+    def test_1_json_trae_iso_y_cis_por_hallazgo(self):
+        r = armar([dict(hallazgo(1), frameworks=MARCOS)])
+        self.assertEqual(r['findings'][0]['frameworks'], {
+            'iso_27001_2022': {'control_id': 'A.5.17', 'control_name': 'Protección de credenciales'},
+            'cis_controls_v8_1': {'safeguard_id': '5.2', 'safeguard_name': 'Contraseñas únicas'},
+        })
+
+    def test_2_sin_mapeo_no_inventa(self):
+        r = armar([hallazgo(1)])
+        self.assertEqual(r['findings'][0]['frameworks'], {'iso_27001_2022': None, 'cis_controls_v8_1': None})
+        self.assertNotIn('ISO 27001:', reporte.html(r))
+
+    def test_3_html_trae_la_linea_y_la_atribucion_de_cis(self):
+        texto = reporte.html(armar([dict(hallazgo(1), frameworks=MARCOS)]))
+        self.assertIn('ISO 27001: A.5.17 Protección de credenciales · CIS: 5.2 Contraseñas únicas', texto)
+        self.assertIn('CC BY-NC-ND 4.0', texto)
+        self.assertIn('<a href="https://creativecommons.org/licenses/by-nc-nd/4.0/">', texto)
+
+    def test_4_escapa_el_nombre_del_control(self):
+        malo = dict(MARCOS, iso_27001_2022=dict(MARCOS['iso_27001_2022'], control_name='<script>x</script>'))
+        texto = reporte.html(armar([dict(hallazgo(1), frameworks=malo)]))
+        self.assertNotIn('<script>x', texto)
+        self.assertIn('&lt;script&gt;x', texto)
+
+
 class Html(unittest.TestCase):
 
     def test_1_escapa_todo_lo_que_viene_de_la_base(self):
@@ -149,6 +187,17 @@ class Html(unittest.TestCase):
         self.assertIsNone(re.search(r'\b(src)=', texto))
         self.assertIn("default-src 'none'", reporte.CSP_HTML)
         self.assertIn("frame-ancestors 'none'", reporte.CSP_HTML)
+
+    def test_3b_el_pdf_del_portal_sale_de_este_html(self):
+        # RC-70 punto 4: el portal imprime este mismo HTML para el PDF (FrontKL src/lib/imprimirReporte.ts), así que la
+        # hoja A4, el nombre de LowTide, la letra del score y la atribución de HIBP del PDF son los de aquí.
+        texto = reporte.html(armar([hallazgo(1)]))
+        self.assertIn('64, letra D', texto)
+        self.assertIn('@page { size: A4; margin: 14mm; }', texto)
+        self.assertIn('<title>Resumen ejecutivo de riesgo · olmardo.com · LowTide</title>', texto)
+        self.assertIn('LowTide · Confidencial', texto)
+        self.assertIn('Have I Been Pwned', texto)
+        self.assertIn('break-inside: avoid', texto)
 
     def test_4_cobertura_parcial_lleva_el_aviso(self):
         r = armar([], score={'score': 30, 'band': 'low', 'grade': 'B', 'partial_coverage': True, 'computed_at': AHORA})

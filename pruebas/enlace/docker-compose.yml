@@ -48,6 +48,7 @@ services:
       - ./pruebas:/app/pruebas:ro
       - ./cirdan/auth/demo.py:/app/cirdan/auth/demo.py:ro
     environment:
+      CIRDAN_TEST_DB_ISOLATED: "true"   # pila aislada: pruebas/pila.py la exige dentro de un contenedor
       CIRDAN_TEST_BASE: http://api:8000
       ENLACE_CORREO_FALSO: http://correo-falso:8025
       PGHOST: db
