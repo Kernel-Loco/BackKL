@@ -7,7 +7,9 @@ Ernesto del 4 nov). Cada tarea que alguien no completa queda en una tarjeta con 
 reporte y se presenta en S16 (#54, 27 nov).
 
 `pruebas/test_pruebas_usuarios.py` revisa el guion, que no haya datos personales y, cuando ya hay resultados, que cada
-SUS, el promedio y el resumen salgan de las respuestas.
+SUS, el promedio y el resumen salgan de las respuestas. También revisa que la fila Resultados de Estado y las tablas
+digan lo mismo: si Estado dice que hubo sesiones, las tablas no pueden ir vacías. La prueba pasa antes de las sesiones,
+pero RC-93 no pasa a Done mientras Resultados esté vacío.
 
 ## Estado
 
@@ -25,14 +27,23 @@ Tres personas que no son del equipo y nunca han usado LowTide. No necesitan sabe
 quien dirige TI en una pyme, y la prueba busca lo que alguien nuevo no entiende.
 
 Aquí solo aparecen como **P1, P2 y P3**, con un perfil general («estudiante de otra carrera», «trabaja en TI»). Nunca
-su nombre, correo, teléfono, edad exacta ni escuela o empresa.
+su nombre, correo, teléfono, edad exacta ni escuela o empresa. El perfil va en minúsculas, sin cifras y en 60
+caracteres o menos (solo «TI» puede ir en mayúsculas), para que no quepa un nombre propio ni una edad.
 
 ## Lo que pone Ernesto antes de las sesiones
 
 1. **Tres cuentas de rol `admin` en Grupo Olmardo**, la empresa ficticia del equipo, que ya tiene olmardo.com
    escaneado: `pruebas-p1@lowtidesec.com`, `pruebas-p2@lowtidesec.com` y `pruebas-p3@lowtidesec.com`.
-   - Sin MFA: la tarea 1 es correo, contraseña y captcha.
-   - Cada contraseña va en una tarjeta de papel que se le da a la persona al empezar.
+   - Con MFA activado antes por Ernesto. El backend exige TOTP a todo `admin` sin MFA
+     (`cirdan/auth/routes.py:106-115`) y dar de alta un dominio pide `admin` (`cirdan/api/v1.py:362-363`). Si la
+     cuenta llegara sin MFA, la tarea 1 mostraría el QR de alta: si alguien ayuda no cuenta, y si la persona lo
+     escanea se lleva el secreto TOTP.
+   - Ernesto activa el TOTP de las 3 cuentas en una app de autenticación de un dispositivo del equipo que solo trae
+     esas 3 cuentas. El dispositivo se queda en la mesa: el secreto TOTP nunca sale de él ni del equipo, y la persona
+     solo lee ahí el código de 6 dígitos de su cuenta. Sacar el código es parte de la tarea 1.
+   - Antes de la primera sesión, Ernesto entra una vez con cada cuenta para confirmar que pide el código y no el QR.
+   - Cada contraseña va en una tarjeta de papel que se le da a la persona al empezar. La tarjeta no trae el código ni
+     el secreto TOTP.
    - Los correos son del equipo a propósito: `audit_log` es de solo inserción y guarda quién entró. Así no queda
      ningún dato de los participantes en la base.
 2. **olmardo.com con un escaneo reciente y su carta vigente.** Sin carta vigente, el reporte de la tarea 5 da 403.
@@ -78,7 +89,8 @@ de la sección 5.6 de [`politica_seguridad_privacidad.md`](politica_seguridad_pr
 3. Cada tarea se lee tal cual, se le da a la persona en una tarjeta y el cronómetro empieza al terminar de leerla.
 4. Lo que sí se contesta: repetir la tarea, «Haz lo que harías tú» y «¿Qué esperabas ver?». Lo que no: dónde está algo,
    qué botón usar o si va bien.
-5. **Una tarea se da por no completada** si la persona pide ayuda y se le da, se rinde o pasa su tiempo límite. Se le
+5. **Una tarea se da por no completada** si se le da ayuda (la pida o no, como en T2 al señalarle la tarjeta), se
+   rinde o pasa su tiempo límite. Se le
    dice «Gracias, pasemos a la siguiente» y se deja el sitio donde la siguiente tarea pueda empezar.
 6. Quien anota escribe, por tarea, si se completó, el tiempo (`mm:ss`) y **dónde se atoró**: la pantalla y lo que
    buscaba o dijo. Una tarea completada también puede tener dónde se atoró.
@@ -89,7 +101,12 @@ de la sección 5.6 de [`politica_seguridad_privacidad.md`](politica_seguridad_pr
 
 ### T1 · Entrar
 
-**Se lee:** «Entra a LowTide con la cuenta de la tarjeta.»
+**Se lee:** «Entra a LowTide con la cuenta de la tarjeta. El código de verificación sale del dispositivo del equipo
+que está en la mesa.»
+
+**La tarjeta trae:** el correo y la contraseña de la cuenta. El código lo busca la persona sola en la app de
+autenticación del dispositivo, que ya trae su cuenta `pruebas-p*`. Si el sitio muestra un QR de alta en vez de pedir
+el código, quien modera para la sesión: la cuenta no tenía MFA y nadie escanea ese QR.
 
 **Éxito:** ve el tablero de Grupo Olmardo.
 
@@ -101,7 +118,8 @@ de la sección 5.6 de [`politica_seguridad_privacidad.md`](politica_seguridad_pr
 está en el escritorio. Los datos de quien firma vienen en la tarjeta.»
 
 **La tarjeta trae:** el dominio (`prueba-p1.example`…) y los datos ficticios de quien firma. Si la persona empieza a
-escribir datos suyos, quien modera la detiene y le señala la tarjeta: eso no cuenta como ayuda.
+escribir datos suyos, quien modera la detiene antes de que envíe el formulario y le señala la tarjeta. Proteger sus
+datos va primero, pero es ayuda: T2 se anota como no completada, con dónde se atoró (punto 5 del protocolo).
 
 **Éxito:** el dominio aparece en la lista de dominios, aunque falte verificar su TXT.
 
@@ -155,7 +173,8 @@ suma se multiplica por 2.5. Da de 0 a 100. Como referencia, 68 es el promedio de
 
 ## Al cerrar
 
-1. Desactivar las cuentas `pruebas-p1`, `pruebas-p2` y `pruebas-p3`.
+1. Desactivar las cuentas `pruebas-p1`, `pruebas-p2` y `pruebas-p3`, quitar sus 3 entradas de la app de
+   autenticación del dispositivo del equipo y destruir las tarjetas con las contraseñas.
 2. Dar de baja los dominios `prueba-p*.example` de Grupo Olmardo: `status = 'removed'` en `domains` y `revoked_at` en
    su fila de `domain_authorizations`. No se borran: `domain_authorizations` solo deja fijar `revoked_at`.
 3. Revisar en la base que solo cambió lo esperado. Lo que queda, y está bien que quede porque no trae datos de los

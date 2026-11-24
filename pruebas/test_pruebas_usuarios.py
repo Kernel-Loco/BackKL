@@ -21,6 +21,16 @@ TAREAS = {'T1': 'Entrar', 'T2': 'Dar de alta un dominio', 'T3': 'Ver el score y 
           'T4': 'Revisar el plan de acción', 'T5': 'Descargar un reporte'}
 PERSONAS = ('P1', 'P2', 'P3')
 TIEMPO = re.compile(r'^(\d{1,2}):([0-5]\d)$')
+SIN_SESIONES = 'Sin sesiones todavía'
+# Solo estas palabras pueden ir con mayúscula en un perfil: un nombre, una escuela o una empresa casi siempre la llevan.
+MAYUSCULAS_PERMITIDAS = {'TI'}
+
+
+def perfil_general(perfil):
+    """Si `perfil` es general: 60 caracteres o menos, sin cifras (edad) y en minúsculas salvo «TI»."""
+    if len(perfil) > 60 or re.search(r'\d', perfil):
+        return False
+    return all(p in MAYUSCULAS_PERMITIDAS or p.lower() == p for p in re.findall(r'\w+', perfil))
 
 
 def seccion(texto, titulo, nivel='##'):
@@ -75,17 +85,25 @@ def revisar_resultados(texto):
     hallazgos = tabla(seccion(resultados, 'Hallazgos y tarjetas', '###'))
     s16 = tabla(seccion(resultados, 'Para S16', '###'))
     promedio = re.search(r'^SUS promedio: (.+)$', seccion(resultados, 'SUS', '###'), re.M)
+    estado = [f[1] for f in tabla(seccion(texto, 'Estado')) if len(f) == 2 and f[0] == 'Resultados']
+    sin_sesiones = estado == [SIN_SESIONES]
 
     if not (participantes or tareas or filas_sus or hallazgos or s16):
         if not promedio or promedio.group(1) != 'pendiente':
             errores.append('sin resultados, el SUS promedio debe decir «pendiente»')
+        if not sin_sesiones:
+            errores.append('Estado: sin resultados, la fila Resultados debe decir «%s»' % SIN_SESIONES)
         return errores
+    if sin_sesiones:
+        errores.append('Estado: hay resultados y la fila Resultados sigue diciendo «%s»' % SIN_SESIONES)
 
     if [p[0] for p in participantes] != list(PERSONAS):
         errores.append('Participantes: deben ser P1, P2 y P3, en orden')
     for p in participantes:
         if len(p) != 3 or not p[1] or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', p[2]):
             errores.append('Participantes: %s sin perfil o con una fecha que no es AAAA-MM-DD' % p[0])
+        elif not perfil_general(p[1]):
+            errores.append('Participantes: %s con un perfil que no es general (nombre, escuela, empresa o edad)' % p[0])
 
     tope = limites(texto)
     esperadas = [(p, t) for p in PERSONAS for t in TAREAS]
@@ -163,7 +181,15 @@ def revisar_resultados(texto):
 
 
 CORREO = re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')
-TELEFONO = re.compile(r'\b\d{2,4}[ -]?\d{3,4}[ -]?\d{4}\b')
+# 8 cifras o más seguidas, con espacios, guiones o puntos sueltos entre ellas: un teléfono de 8 (8123 4567) o de 10
+# (81 2345 6789). Las fechas AAAA-MM-DD de Participantes también tienen 8 cifras y no cuentan.
+CIFRAS = re.compile(r'(?<![\w-])(?<!\d\.)\+?\d(?:[ .-]?\d){7,}(?![\w-])(?!\.\d)')
+FECHA = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+
+def telefonos(texto):
+    """Las cadenas de `texto` que parecen teléfonos (8 cifras o más), sin las fechas AAAA-MM-DD."""
+    return [c for c in CIFRAS.findall(texto) if not FECHA.fullmatch(c)]
 
 
 class PruebasConUsuarios(unittest.TestCase):
@@ -206,25 +232,39 @@ class PruebasConUsuarios(unittest.TestCase):
         for correo in CORREO.findall(self.texto):
             with self.subTest(correo=correo):
                 self.assertTrue(correo.endswith('@lowtidesec.com'), 'solo correos del equipo')
-        self.assertIsNone(TELEFONO.search(self.texto), 'un teléfono')
+        self.assertEqual(telefonos(self.texto), [], 'un teléfono')
         resultados = seccion(self.texto, 'Resultados')
         for persona in re.findall(r'\bP\d+\b', resultados):
             self.assertIn(persona, PERSONAS)
+        # Los perfiles de Participantes los revisa revisar_resultados (perfil_general) en test_6.
         consentimiento = seccion(self.texto, 'Consentimiento')
         for frase in ('no grabamos', 'Puedes parar cuando quieras', 'sin tu nombre', 'se destruye'):
             self.assertIn(frase, consentimiento)
 
     def test_6_los_resultados_cuadran(self):
+        # Antes de las sesiones las tablas van vacías y Estado dice «Sin sesiones todavía»; si Estado dice que hubo
+        # sesiones, las tablas no pueden ir vacías. Que pase no basta para Done: RC-93 pide los resultados.
         self.assertEqual(revisar_resultados(self.texto), [])
+
+    def test_8_el_detector_de_telefonos(self):
+        for numero in ('8123 4567', '81234567', '81 2345 6789', '+52 81 2345 6789', '81-2345-6789'):
+            with self.subTest(numero=numero):
+                self.assertEqual(telefonos('llamar al %s hoy' % numero), [numero])
+                self.assertEqual(telefonos('me pidió llamar al %s.' % numero), [numero])
+        for otro in ('2026-11-24', 'RC-93', '1996', 'S16', '01:30', '2.5'):
+            with self.subTest(otro=otro):
+                self.assertEqual(telefonos('el %s del documento' % otro), [])
 
     def test_7_lo_enlaza_el_indice_de_docs(self):
         self.assertIn('pruebas_usuarios.md', (RAIZ / 'docs' / 'README.md').read_text(encoding='utf-8'))
 
 
-def _con_resultados(texto, tareas, sus_filas, promedio, hallazgos, s16):
+def _con_resultados(texto, tareas, sus_filas, promedio, hallazgos, s16, perfil='estudiante de otra carrera',
+                    estado='3 sesiones el 2026-11-24'):
     """Una copia del documento con las tablas de Resultados llenas, para probar revisar_resultados."""
     filas = lambda datos: ''.join('| %s |\n' % ' | '.join(f) for f in datos)
-    participantes = filas([[p, 'estudiante de otra carrera', '2026-11-24'] for p in PERSONAS])
+    participantes = filas([[p, perfil, '2026-11-24'] for p in PERSONAS])
+    texto = texto.replace('| Resultados | %s |' % SIN_SESIONES, '| Resultados | %s |' % estado)
     for titulo, extra in (('### Participantes', participantes), ('### Tareas', filas(tareas)),
                           ('### SUS', filas(sus_filas)), ('### Hallazgos y tarjetas', filas(hallazgos)),
                           ('### Para S16', filas(s16))):
@@ -290,6 +330,23 @@ class RevisionDeResultados(unittest.TestCase):
 
     def test_9_mediana_con_medio_segundo_sube(self):
         self.assertEqual(mmss(statistics.median([90, 91])), '01:31')
+
+    def test_10_estado_y_tablas_dicen_lo_mismo(self):
+        # Con resultados, Estado no puede seguir sin sesiones.
+        errores = self.revisar(estado=SIN_SESIONES)
+        self.assertTrue(any('sigue diciendo' in e for e in errores))
+        # Sin resultados, Estado no puede decir que ya hubo sesiones.
+        vacio = self.base.replace('| Resultados | %s |' % SIN_SESIONES, '| Resultados | 3 sesiones hechas |')
+        self.assertTrue(any('la fila Resultados debe decir' in e for e in revisar_resultados(vacio)))
+
+    def test_11_un_perfil_con_nombre_escuela_o_edad(self):
+        for perfil in ('estudiante del Tec de Monterrey', 'Ana, trabaja en TI', 'estudiante de 21 años',
+                       'trabaja en TI en Grupo Bimbo', 'Estudiante de otra carrera'):
+            with self.subTest(perfil=perfil):
+                self.assertTrue(any('no es general' in e for e in self.revisar(perfil=perfil)))
+        for perfil in ('trabaja en TI', 'estudiante de otra carrera', 'dirige una pyme de comercio'):
+            with self.subTest(perfil=perfil):
+                self.assertEqual(self.revisar(perfil=perfil), [])
 
     def test_6_falta_una_tarea_o_el_resumen_no_cuadra(self):
         self.assertTrue(any('en orden (P1 T1' in e for e in self.revisar(tareas=self.tareas[1:])))
