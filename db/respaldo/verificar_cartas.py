@@ -6,8 +6,8 @@ cirdan/cartas.py al cifrar: el domain_id en las cartas subidas a mano (RC-59 y c
 solicitud en las que salieron de la API de Mifiel (signature_requests, RC-211). Una misma llave puede venir de
 signature_requests y de domain_authorizations: vale si las dos filas dicen lo mismo.
 
-Las llaves de las semillas (authorizations/...pdf) son de antes del alta y nunca tuvieron archivo en el volumen:
-se cuentan y se reportan, sin abortar. Cualquier otra llave que no sea <32 hex>.lt1 aborta.
+Las llaves de las semillas (authorizations/..., también las que cambian las pruebas) son de antes del alta y
+nunca tuvieron archivo en el volumen: se cuentan y se reportan, sin abortar. Cualquier otra llave que no sea <32 hex>.lt1 aborta.
 """
 import base64
 import binascii
@@ -21,7 +21,7 @@ from cryptography.exceptions import InvalidTag
 
 PATRON = re.compile(r'[0-9a-f]{32}\.lt1\Z')
 PATRON_UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z')
-PATRON_ANTERIOR = re.compile(r'authorizations/[A-Za-z0-9._/-]+\.pdf\Z')
+PATRON_ANTERIOR = re.compile(r'authorizations/[A-Za-z0-9._/-]+\Z')
 
 
 def main():

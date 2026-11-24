@@ -189,6 +189,11 @@ class VerificarCartas(unittest.TestCase):
         self.assertNotEqual(distintas.returncode, 0)
         self.assertIn('datos distintos', distintas.stderr)
 
+        # test_5 de test_escaneos_api.py deja la llave de una semilla con el sufijo .prueba: sigue sin archivo.
+        semilla = 'authorizations/acme-demo/acme-demo.mx_2026.pdf.prueba'
+        sin_archivo = self._verificar(['%s|%s|%s|' % (ORG_ID, DOMINIO_MANO, semilla)])
+        self.assertEqual(sin_archivo.returncode, 0, sin_archivo.stderr)
+
         for llave in ('CIRDAN_FAKE_carta', 'authorizations/../fuera.pdf'):
             with self.subTest(llave=llave):
                 mala = self._verificar(['%s|%s|%s|%s' % (ORG_ID, DOMINIO_MANO, llave, h_mano)])

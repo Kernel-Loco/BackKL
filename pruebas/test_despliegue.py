@@ -50,7 +50,8 @@ def _config(env, proyecto='prueba-despliegue', archivos=ARCHIVOS, perfiles=()):
         # Sin las variables del compose que traiga la terminal: le ganarían al archivo de valores falsos.
         base = {k: v for k, v in os.environ.items()
                 if k.upper() not in ENV_FALSO and not k.upper().startswith(('COMPOSE_', 'PG', 'POSTGRES_', 'VALKEY_',
-                                                                          'PORTAL_', 'DOMINIOS_', 'ORGS_', 'TOTP_'))}
+                                                                          'PORTAL_', 'DOMINIOS_', 'ORGS_', 'TOTP_',
+                                                                          'CARTA_'))}
         cmd = ['docker', 'compose', '--project-directory', str(RAIZ)] + (['-p', proyecto] if proyecto else []) + [
             '--env-file', str(archivo)]
         for a in archivos:
