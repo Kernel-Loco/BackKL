@@ -20,6 +20,7 @@ import unittest
 
 from cirdan import bitacora
 from pruebas import sesion
+from pruebas.pila import exigir_desechable
 from pruebas.sesion import Client
 from pruebas.test_aislamiento import ACME, BETA, CONTAINER, scalar
 from pruebas.test_llaves_api import borrar_llaves
@@ -55,6 +56,7 @@ def verificar_en_base(org, base='cirdan', antes=''):
 
 
 def postgres_en(base, sql):
+    exigir_desechable()
     proc = subprocess.run(['docker', 'exec', '-i', CONTAINER, 'psql', '-U', 'postgres', '-d', base,
                            '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1'],
                           input=sql, capture_output=True, text=True, encoding='utf-8')

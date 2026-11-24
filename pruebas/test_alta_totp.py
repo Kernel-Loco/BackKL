@@ -13,6 +13,7 @@ import unittest
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from pruebas import sesion
+from pruebas.pila import exigir_desechable
 from pruebas.sesion import AUTH, PASSWORD, Client
 from pruebas.test_aislamiento import scalar
 
@@ -35,6 +36,7 @@ def _bitacora(accion):
 
 def _sin_alta_pendiente():
     """Borra el QR pendiente que haya dejado otra prueba: cada prueba empieza sin alta en curso."""
+    exigir_desechable()
     subprocess.run(['docker', 'exec', VALKEY, 'sh', '-c',
                     'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "mfa:setup:*" '
                     '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del'], check=True, capture_output=True)
@@ -153,6 +155,7 @@ class AltaTotp(unittest.TestCase):
 
     def test_9_en_valkey_el_secreto_pendiente_va_cifrado(self):
         body = self._setup()
+        exigir_desechable()
         valores = subprocess.run(
             ['docker', 'exec', VALKEY, 'sh', '-c',
              'for k in $(valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "mfa:setup:*"); do '
@@ -181,6 +184,7 @@ class AltaTotp(unittest.TestCase):
         # En el índice de la cuenta solo queda la que activó, para que un cierre después tampoco se salte a esa.
         user_id = scalar("SELECT id FROM users WHERE email = '%s';" % MAYA, user='postgres')
         indice = 'sess-user:' + hashlib.sha256(user_id.encode()).hexdigest()
+        exigir_desechable()
         miembros = subprocess.run(['docker', 'exec', VALKEY, 'sh', '-c',
                                    'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning scard ' + indice],
                                   check=True, capture_output=True, text=True).stdout.strip()

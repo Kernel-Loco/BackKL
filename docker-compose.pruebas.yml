@@ -1,0 +1,23 @@
+# Compose desechable para las pruebas de base y API (RC-254): otros nombres, otros puertos y su propio volumen, así
+# nunca tocan cirdan-pg16, cirdan-valkey ni cirdan-api. Se usa junto al docker-compose.yml con el proyecto
+# backkl-pruebas, como dice el paso 5 del README, y `down -v` lo borra entero.
+services:
+  db:
+    container_name: backkl-pruebas-pg16
+    ports: !override
+      - "127.0.0.1:5434:5432"
+  valkey:
+    container_name: backkl-pruebas-valkey
+    ports: !override
+      - "127.0.0.1:6380:6379"
+  api:
+    container_name: backkl-pruebas-api
+    ports: !override
+      - "127.0.0.1:8001:8000"
+    environment:
+      # Dentro de un contenedor, las pruebas que pasan por pruebas/pila.py (sesion.py, test_aislamiento.py y las que
+      # hacen docker exec) solo corren con esta marca. La pila de desarrollo no la trae, así que ahí frenan.
+      CIRDAN_TEST_DB_ISOLATED: "true"
+  # El programador nunca se enciende aquí, aunque el .env traiga COMPOSE_PROFILES=programador: escanearía en vivo.
+  programador:
+    profiles: !override ["nunca-en-pruebas"]
