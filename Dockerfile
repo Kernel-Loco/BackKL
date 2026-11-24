@@ -43,8 +43,8 @@ RUN python -c "import os, pathlib, zipfile; z = zipfile.ZipFile('/tmp/subfinder.
 #   omisión), y sus dependencias contra el go.sum del módulo. Si alguno cambia, la construcción se detiene.
 # - CGO_ENABLED=0 como el release: binario estático que corre en python:3.15-slim.
 # - Mismo código y misma config embebida, así que cirdan/recolectores/gitleaks_cirdan.toml no cambia.
-# - Dependabot no vigila esta versión ni la de Go: se suben a mano, con NOTICE, y al subir gitleaks se vuelve a
-#   generar gitleaks_cirdan.toml (ver cirdan/recolectores/gitleaks_reglas.py).
+# - Dependabot vigila el FROM de golang, no la versión de gitleaks. Esa se sube a mano en los tres v8.21.2 de abajo,
+#   en NOTICE y en el pre-commit, y se vuelve a generar gitleaks_cirdan.toml (ver gitleaks_reglas.py).
 FROM golang:1.27.4-trixie AS gitleaks
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-trimpath
 RUN go install -ldflags "-s -w -X github.com/zricethezav/gitleaks/v8/cmd.Version=8.21.2" \

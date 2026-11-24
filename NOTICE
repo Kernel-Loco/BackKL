@@ -109,7 +109,8 @@ gitleaks 8.21.2
   El texto completo de su licencia va dentro de la imagen, en
   /usr/share/licenses/gitleaks/LICENSE.
   Se compila desde su código, el módulo github.com/zricethezav/gitleaks/v8
-  en v8.21.2, con Go 1.27.4 para linux amd64 o arm64 (RC-117). Incluye sus
+  en v8.21.2, con el Go del FROM golang del Dockerfile, para linux amd64 o
+  arm64 (RC-117). Incluye sus
   dependencias de Go, cada una con su propia licencia, que no se listan
   aquí. Sus reglas sí están en el repositorio: cirdan/recolectores/
   gitleaks_cirdan.toml copia las de su config por omisión y trae al inicio el

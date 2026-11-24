@@ -76,7 +76,8 @@ El script:
 
 `docker-compose.imagenes.yml` cambia `image` y quita `build` de la API, el programador, demo-accounts y el portal.
 La imagen del CI no trae las bases de DB-IP (`datos/geo/` no va en git), así que la API y el programador las montan
-de solo lectura desde `datos/geo/` de la VM. Todo lo demás del despliegue (redes, IP fija de la API, sin puertos)
+de solo lectura desde `datos/geo/` de la VM. Con bases nuevas no se reconstruye nada: se dejan ahí y se corre
+`docker compose restart api programador`, porque la API las lee al arrancar. Todo lo demás del despliegue (redes, IP fija de la API, sin puertos)
 sigue igual. Sin `LOWTIDE_API_IMAGEN` o
 `LOWTIDE_PORTAL_IMAGEN`, la pila no arranca.
 

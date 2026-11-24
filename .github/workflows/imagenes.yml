@@ -122,8 +122,13 @@ jobs:
           imagenes=$(grep -hE '^\s+image:\s' docker-compose.yml docker-compose.despliegue.yml | awk '{print $2}' | sort -u)
           test -n "$imagenes"
           for imagen in $imagenes; do
-            docker run --rm "$TRIVY" image --scanners vuln --severity CRITICAL --exit-code 0 --no-progress -q \
-              --format json "$imagen" > trivy.json
+            echo | tee -a "$GITHUB_STEP_SUMMARY"
+            # Informativo también si Trivy no puede correr (red, límite de ghcr.io): lo dice y sigue con la siguiente.
+            if ! docker run --rm "$TRIVY" image --scanners vuln --severity CRITICAL --exit-code 0 --no-progress -q \
+              --format json "$imagen" > trivy.json; then
+              echo "$imagen: Trivy no pudo revisarla" | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
             n=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy.json)
             echo "$imagen: $n críticas" | tee -a "$GITHUB_STEP_SUMMARY"
             jq -r '.Results[]? | .Target as $t | .Vulnerabilities[]? |
