@@ -307,7 +307,7 @@ journalctl -u lowtide-respaldo -n 20 --no-pager
 
 ### Restaurar
 
-Para recuperar el conjunto completo se usa `restaurar_completo.sh`. Siempre crea una base y un volumen Docker nuevos; nunca borra ni reemplaza los existentes. Desencripta en `/run` (o `/run/lock` si `/run` no es escribible), siempre en tmpfs, recrea una nueva versión de la llave en Key Vault, y valida con AES-GCM y las huellas de la base cada carta referenciada antes de terminar. La cuenta que ejecuta la restauración necesita `az login`, permisos para crear una versión del secreto y acceso al contenedor de Postgres. El contenedor de la API aporta la imagen Python usada para poblar y verificar el volumen restaurado.
+Para recuperar el conjunto completo se usa `restaurar_completo.sh`. Siempre crea una base y un volumen Docker nuevos; nunca borra ni reemplaza los existentes. Desencripta en `/run` (o `/run/lock` si `/run` no es escribible), siempre en tmpfs, recrea una nueva versión de la llave en Key Vault, y valida con AES-GCM y las huellas de la base cada carta referenciada antes de terminar. La cuenta que ejecuta la restauración necesita `az login`, permisos para crear una versión del secreto y acceso al contenedor de Postgres. El contenedor de la API aporta la imagen Python usada para poblar y verificar el volumen restaurado. Los contenedores temporales corren como root sin red y con capacidades limitadas para leer los temporales privados; el volumen y sus archivos quedan a nombre del usuario de la API.
 
 ```bash
 az storage blob download --auth-mode login --account-name stlowtiderespaldo -c respaldos -n <blob> -f <blob>

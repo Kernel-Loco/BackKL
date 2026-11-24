@@ -95,28 +95,38 @@ fi
 
 docker volume create "$volumen" >/dev/null
 imagen=$(docker inspect --format '{{.Config.Image}}' "$contenedor_api")
-docker run --rm --network none --entrypoint python \
+uid=$(docker exec "$contenedor_api" id -u)
+gid=$(docker exec "$contenedor_api" id -g)
+[[ $uid =~ ^[0-9]+$ && $gid =~ ^[0-9]+$ ]] || falla "no se pudo identificar al usuario de la API"
+docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN \
+  --security-opt no-new-privileges --entrypoint python \
   -v "$volumen:/restore" -v "$trabajo/cartas:/source:ro" "$imagen" -c '
 import os, shutil
+import sys
+uid, gid = map(int, sys.argv[1:])
+os.chmod("/restore", 0o700)
+os.chown("/restore", uid, gid)
 for nombre in sorted(os.listdir("/source")):
     origen = os.path.join("/source", nombre)
     destino = os.path.join("/restore", nombre)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(destino, flags, 0o600)
     with os.fdopen(fd, "wb") as salida, open(origen, "rb") as entrada:
+        os.fchown(salida.fileno(), uid, gid)
         shutil.copyfileobj(entrada, salida)
         salida.flush()
         os.fsync(salida.fileno())
 fd = os.open("/restore", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
 os.fsync(fd)
 os.close(fd)
-' || falla "no se pudieron copiar las cartas al volumen nuevo $volumen"
+' "$uid" "$gid" || falla "no se pudieron copiar las cartas al volumen nuevo $volumen"
 
 printf '%s\n' "SELECT organization_id, domain_id, signed_document_key, encode(signed_document_sha256, 'hex') FROM domain_authorizations" \
   | MSYS_NO_PATHCONV=1 docker exec -i -e BASE="$base" "$contenedor_base" sh -c \
     'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -F "|" -v ON_ERROR_STOP=1' \
   > "$trabajo/referencias.tsv"
-docker run --rm --network none --entrypoint python \
+docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE \
+  --security-opt no-new-privileges --entrypoint python \
   -v "$volumen:/cartas:ro" -v "$trabajo/carta.key:/run/carta.key:ro" \
   -v "$trabajo/referencias.tsv:/run/referencias.tsv:ro" \
   -v "$directorio_script/verificar_cartas.py:/run/verificar_cartas.py:ro" \

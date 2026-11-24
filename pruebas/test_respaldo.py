@@ -296,6 +296,7 @@ class Respaldo(unittest.TestCase):
                 texto = texto.replace(viejo, nuevo)
             script = self.tmp / 'respaldar_falso.sh'
             script.write_text(texto, encoding='utf-8')
+            shutil.copyfile(RESPALDO / 'paquete.py', self.tmp / 'paquete.py')
 
             def subir(caso, modo, rol=True):
                 falso.blobs.clear()

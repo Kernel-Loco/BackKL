@@ -249,7 +249,9 @@ class RespaldoCartas(unittest.TestCase):
         imagen = subprocess.run(['docker', 'inspect', '--format', '{{.Config.Image}}', CONTENEDOR_CARTAS],
                                 check=True, capture_output=True, text=True, encoding='utf-8').stdout.strip()
         verificada = correr([
-            'docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'python',
+            'docker', 'run', '--rm', '--network', 'none', '--user', '0:0',
+            '--cap-drop', 'ALL', '--cap-add', 'DAC_OVERRIDE', '--security-opt', 'no-new-privileges',
+            '--entrypoint', 'python',
             '-v', self.volumen + ':/cartas:ro',
             '-v', str(llave_restaurada) + ':/run/carta.key:ro',
             '-v', str(referencias) + ':/run/referencias.tsv:ro',
@@ -258,6 +260,14 @@ class RespaldoCartas(unittest.TestCase):
         ])
         self.assertEqual(verificada.returncode, 0, verificada.stderr)
         self.assertIn('1 cartas referenciadas verificadas', verificada.stdout)
+
+        accesible = correr([
+            'docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'python',
+            '-v', self.volumen + ':/cartas', imagen, '-c',
+            'import os, sys; assert os.access("/cartas", os.W_OK); '
+            'assert open("/cartas/" + sys.argv[1], "rb").read(3) == b"LT1"', nombre,
+        ])
+        self.assertEqual(accesible.returncode, 0, accesible.stderr)
 
         self.assertEqual(self._conteos(self.db), antes)
 
