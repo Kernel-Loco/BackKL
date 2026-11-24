@@ -40,25 +40,27 @@ class Flujo(unittest.TestCase):
     def setUpClass(cls):
         cls.texto = FLUJO.read_text(encoding='utf-8')
 
-    def test_1_trivy_frena_con_criticas_en_la_api_y_en_las_de_terceros(self):
+    def test_1_trivy_frena_con_criticas_en_la_api(self):
         frena = paso(self.texto, 'Trivy frena con vulnerabilidades críticas')
         for opcion in ('--severity CRITICAL', '--exit-code 1', 'lowtide-api:ci'):
             self.assertIn(opcion, frena)
-        terceros = paso(self.texto, 'Trivy frena con críticas en las imágenes de terceros')
-        self.assertIn('--exit-code 1', terceros)
-        self.assertIn('docker-compose.yml docker-compose.despliegue.yml', terceros)
-        self.assertIn('exit "$falla"', terceros)
 
-    def test_1b_cada_excepcion_de_trivy_vence_y_dice_por_que(self):
-        excepciones = (RAIZ / '.trivyignore.yaml').read_text(encoding='utf-8').split('\n  - id: ')[1:]
-        self.assertTrue(excepciones)
-        for e in excepciones:
-            self.assertRegex(e, r'\n    statement: \S', e[:40])
-            vence = re.search(r'\n    expired_at: (\d{4}-\d{2}-\d{2})', e)
-            self.assertIsNotNone(vence, e[:40])
-            self.assertLessEqual(vence.group(1), '2027-01-31', 'una excepción no dura más que el reto')
-        for nombre in ('Trivy frena con vulnerabilidades críticas', 'Trivy frena con críticas en las imágenes de terceros'):
-            self.assertIn('--ignorefile /trivyignore.yaml', paso(self.texto, nombre), nombre)
+    def test_1b_trivy_no_exceptua_ninguna_critica(self):
+        # RC-117: cualquier crítica frena la imagen de la API, tenga arreglo o no.
+        frena = paso(self.texto, 'Trivy frena con vulnerabilidades críticas')
+        for opcion in ('--ignore-unfixed', '--ignorefile', '--skip-files', '--skip-dirs', '--vex', 'trivyignore'):
+            self.assertNotIn(opcion, frena, opcion)
+        for archivo in ('.trivyignore', '.trivyignore.yaml', 'trivy.yaml'):
+            self.assertFalse((RAIZ / archivo).exists(), archivo)
+
+    def test_1c_terceros_se_escanean_sin_excepciones_y_sin_frenar(self):
+        # Decisión de Ernesto del 23 nov: las de terceros no son nuestras y no siempre hay versión sin críticas.
+        terceros = paso(self.texto, 'Trivy, críticas en las imágenes de terceros del compose (no frena)')
+        self.assertIn('docker-compose.yml docker-compose.despliegue.yml', terceros)
+        self.assertIn('--severity CRITICAL', terceros)
+        self.assertIn('GITHUB_STEP_SUMMARY', terceros)
+        for opcion in ('--ignore-unfixed', '--ignorefile', 'trivyignore'):
+            self.assertNotIn(opcion, terceros, opcion)
 
     def test_2_sbom_con_syft_en_spdx(self):
         sbom = paso(self.texto, 'SBOM con Syft')
@@ -166,6 +168,14 @@ class ComposeConImagenes(unittest.TestCase):
         # Lo demás del despliegue sigue igual.
         self.assertEqual(svc['api']['networks']['default']['ipv4_address'], '10.249.93.20')
         self.assertEqual(svc['api'].get('ports', []), [])
+        # Las bases de DB-IP no van en la imagen del CI: la API y el programador las montan de la VM, sin escribir.
+        for nombre in ('api', 'programador'):
+            geo = [v for v in svc[nombre].get('volumes', []) if v.get('target') == '/app/datos/geo']
+            self.assertEqual(len(geo), 1, nombre)
+            self.assertTrue(geo[0].get('read_only'), nombre)
+            self.assertTrue(Path(geo[0]['source']).as_posix().endswith('/datos/geo'), nombre)
+        # La API conserva el volumen de las cartas.
+        self.assertIn('/var/lib/cirdan/cartas', [v.get('target') for v in svc['api']['volumes']])
 
     def test_2_sin_las_imagenes_no_arranca(self):
         # Compose nombra solo la primera variable que le falta y el orden no es fijo, así que cada subprueba pone una

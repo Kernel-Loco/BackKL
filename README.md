@@ -382,7 +382,7 @@ docker compose run --rm -e INTEGRACION_GITHUB=1 -v "$(pwd -W)/pruebas:/app/prueb
 
 Código de salida: 0 bien, 1 si queda en `failed` y 2 si quedan avisos. Desde un escaneo, lo que encuentra se guarda en `assets` y `findings` (ver Orquestador de escaneos).
 
-**Versión.** El `Dockerfile` baja el tar.gz del release de gitleaks 8.21.2 para cada arquitectura (el release llama x64 a amd64) con su sha256 de `gitleaks_8.21.2_checksums.txt`, y deja la licencia en `/usr/share/licenses/gitleaks/LICENSE` (ver `NOTICE`). Es la misma versión del pre-commit. Dependabot no la vigila: para subirla se cambian las dos URL y los dos hash del `Dockerfile`, la versión en `NOTICE` y la de `.pre-commit-config.yaml`, y se vuelve a generar `cirdan/recolectores/gitleaks_cirdan.toml` con la imagen nueva (ver `cirdan/recolectores/gitleaks_reglas.py`).
+**Versión.** El `Dockerfile` compila gitleaks 8.21.2 desde su código (`go install` del módulo, revisado contra sum.golang.org) con la versión de Go de su `FROM golang`, y deja la licencia en `/usr/share/licenses/gitleaks/LICENSE` (ver `NOTICE`). No usa el binario del release: hasta 8.30.1 se arman con un Go que trae la crítica CVE-2025-68121 y Trivy frenaría el PR (RC-117). Es la misma versión del pre-commit. Dependabot no vigila la de gitleaks: para subirla se cambia la versión en la línea de `go install` del `Dockerfile`, en `NOTICE` y en `.pre-commit-config.yaml`, y se vuelve a generar `cirdan/recolectores/gitleaks_cirdan.toml` con la imagen nueva (ver `cirdan/recolectores/gitleaks_reglas.py`).
 
 ## Recolector de Shodan / InternetDB (#17)
 
@@ -477,7 +477,7 @@ Código de salida: 0 si la corrida fue completa, 1 si queda en `failed`, 2 si la
 
 1. Descomprime las dos con `gzip -d dbip-asn-lite-AAAA-MM.mmdb.gz dbip-country-lite-AAAA-MM.mmdb.gz`, sin cambiarles el nombre: solo se toman archivos que se llamen `dbip-asn-lite-AAAA-MM.mmdb` y `dbip-country-lite-AAAA-MM.mmdb`. Se usan tal como las publica DB-IP.
 2. Déjalas en `datos/geo/`. `.gitignore` deja fuera todo lo de esa carpeta menos `.gitkeep`, así que un `git add` no las sube. Si hay varios meses, se toma el más nuevo. A la imagen solo entran `.gitkeep` y los archivos `dbip-asn-lite-*.mmdb` y `dbip-country-lite-*.mmdb` (`.dockerignore`): los `.gz`, City Lite y lo demás se quedan fuera. Los meses viejos sí entrarían sin usarse, así que conviene borrarlos al poner los nuevos.
-3. Reconstruye la imagen, que copia `datos/geo/` en `/app/datos/geo` (con `docker compose --dry-run up -d --build api` antes): `docker compose up -d --build api`. `maxminddb` ya está en `requirements.txt` y en la imagen.
+3. Reconstruye la imagen, que copia `datos/geo/` en `/app/datos/geo` (con `docker compose --dry-run up -d --build api` antes): `docker compose up -d --build api`. `maxminddb` ya está en `requirements.txt` y en la imagen. Si la VM levanta las imágenes firmadas (`docker-compose.imagenes.yml`, ver `docs/cadena_de_suministro.md`), las bases van montadas y no se reconstruye nada: se ponen en `datos/geo/` y se corre `docker compose restart api programador`, porque la API las lee al arrancar.
 
 Para revisar una IP sin descargar nada: `docker compose exec api python -m cirdan.recolectores.geoip 40.65.94.253`. Imprime lo que da cada IP más su CDN por ASN, y sale con código 1 si falta una base.
 
