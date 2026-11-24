@@ -16,12 +16,15 @@ exportada antes en la terminal (sin escribir su valor en el comando).
 import contextlib
 import io
 import tempfile
+import threading
 import time
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from urllib.parse import urlsplit
 
 import psycopg
 from psycopg.conninfo import make_conninfo
@@ -1580,6 +1583,24 @@ class Orquestador(unittest.TestCase):
             self.en_vivo(s, [responder], lambda segundos: None)
         self.assertEqual(dentro, [True, False])
 
+    def test_3m2_cada_corrida_de_una_fuente_va_con_el_candado_de_turno_de_su_modo(self):
+        # Si se quita turno.con_candado(_candado_de(...)) de correr(), producción deja de tomar el turno (RC-46).
+        from cirdan.recolectores import turno
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        puesto, pedidos = object(), []
+
+        def candado_de(modo, conn):
+            pedidos.append((modo, conn))
+            return puesto
+
+        def responder():
+            self.assertIs(turno._CANDADO.get(), puesto)   # ejecutar corre con el candado puesto
+            return BIEN
+        with mock.patch.object(orquestador, '_candado_de', candado_de):
+            self.en_vivo(s, [responder], lambda segundos: None)
+        self.assertEqual(pedidos, [('vivo', self.conn)])
+        self.assertIsNone(turno._CANDADO.get(), 'el candado quedó puesto al terminar la fuente')
+
     # ------------------------------------------------------- límite diario por fuente (#13b, RC-184)
 
     def test_3n_sin_cupo_la_fuente_falla_sin_llamar_al_recolector_ni_reintentar(self):
@@ -1868,7 +1889,7 @@ class Orquestador(unittest.TestCase):
                 self.assertEqual(cli.main(['acme-demo.mx', '--org', 'ACME']), 0)
             return salida.getvalue().splitlines()
         lineas = terminal(resumen)
-        avisos = [l for l in lineas if l.startswith('    aviso: ')]
+        avisos = [linea for linea in lineas if linea.startswith('    aviso: ')]
         self.assertEqual(len(avisos), 1, lineas)
         self.assertTrue(avisos[0].endswith(certspotter.SIN_COMPLEMENTO), avisos[0])
         # La corrida guarda solo 10 avisos: la terminal dice cuántos más hubo
@@ -1887,6 +1908,161 @@ class Orquestador(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 cli.main(['acme-demo.mx', '--org', 'ACME'])
         self.assertEqual(cerrados, [(s.scan_id, KeyboardInterrupt)])
+
+
+class TurnoHost(unittest.TestCase):
+    """Una petición a la vez por host entre escaneos (comentario 10281.2 de RC-46): el candado de PostgreSQL de
+    orquestador._turno_host, con la base real. Cada prueba usa hosts propios, así no choca con otro escaneo ni con otra
+    prueba. Nada sale a la red: los sitios los simula `visitar`."""
+
+    def setUp(self):
+        from cirdan.recolectores import turno, visita
+        self.turno, self.visita = turno, visita
+        self.host = 'turno-%s.acme-demo.mx' % uuid.uuid4().hex[:12]
+
+    def sostener(self, host, dentro, soltar, espera=5):
+        """Un hilo con el turno de `host` hasta que `soltar` se active. `dentro` se activa al tenerlo."""
+        def correr():
+            with orquestador._turno_host(host, espera):
+                dentro.set()
+                soltar.wait(10)
+        hilo = threading.Thread(target=correr, daemon=True)
+        hilo.start()
+        self.assertTrue(dentro.wait(10), 'el primer hilo no tomó el turno')
+        return hilo
+
+    def test_1_el_mismo_host_espera_a_que_termine_la_otra_peticion(self):
+        dentro, soltar, eventos = threading.Event(), threading.Event(), []
+        hilo = self.sostener(self.host, dentro, soltar)
+
+        def segundo():
+            with orquestador._turno_host(self.host, 10):
+                eventos.append('segundo dentro')
+        otro = threading.Thread(target=segundo, daemon=True)
+        otro.start()
+        otro.join(1.0)
+        self.assertEqual(eventos, [], 'entró al host mientras el otro escaneo tenía su petición abierta')
+        eventos.append('primero suelta')
+        soltar.set()
+        otro.join(10)
+        hilo.join(10)
+        self.assertEqual(eventos, ['primero suelta', 'segundo dentro'])
+
+    def test_2_otro_host_no_espera(self):
+        dentro, soltar = threading.Event(), threading.Event()
+        hilo = self.sostener(self.host, dentro, soltar)
+        try:
+            inicio = time.monotonic()
+            with orquestador._turno_host('otro-' + self.host, 5):
+                self.assertLess(time.monotonic() - inicio, 3)
+        finally:
+            soltar.set()
+            hilo.join(10)
+
+    def test_3_si_la_espera_no_alcanza_lanza_sin_turno_y_no_entra(self):
+        dentro, soltar = threading.Event(), threading.Event()
+        hilo = self.sostener(self.host, dentro, soltar)
+        try:
+            inicio = time.monotonic()
+            with self.assertRaises(self.turno.SinTurno) as error:
+                with orquestador._turno_host(self.host, 0.3):
+                    self.fail('entró sin turno')
+            self.assertLess(time.monotonic() - inicio, 5)
+            self.assertIn(self.host, str(error.exception))
+            with self.assertRaises(self.turno.SinTurno):
+                with orquestador._turno_host(self.host, 0):
+                    self.fail('entró sin tiempo para esperar')
+        finally:
+            soltar.set()
+            hilo.join(10)
+
+    def test_4_una_peticion_que_lanza_suelta_el_turno(self):
+        with self.assertRaises(RuntimeError):
+            with orquestador._turno_host(self.host, 5):
+                raise RuntimeError('la petición falló')
+        inicio = time.monotonic()
+        with orquestador._turno_host(self.host, 5):
+            self.assertLess(time.monotonic() - inicio, 3)
+
+    def test_5_sin_base_no_sale_la_peticion_y_no_es_falta_de_tiempo(self):
+        # Una base que no conecta no corta la corrida como si se acabara el tiempo: SinBase deja la fuente en 'failed'.
+        self.assertFalse(issubclass(self.turno.SinBase, shodan.SinTiempo))
+        malo = make_conninfo(DSN, port='1')
+        with mock.patch.object(orquestador.db, 'DSN', malo), self.assertRaises(self.turno.SinBase) as error:
+            with orquestador._turno_host(self.host, 3):
+                self.fail('entró sin poder tomar el candado')
+        self.assertIn(self.host, str(error.exception))
+
+    def test_6_el_candado_va_en_vivo_y_al_grabar(self):
+        self.assertIs(orquestador._candado_de('vivo', None), orquestador._turno_host)
+        self.assertIs(orquestador._candado_de('grabar', None), orquestador._turno_host)
+        self.assertIsNone(orquestador._candado_de('reproducir', None))
+        self.assertIsNone(orquestador._candado_de('vivo', object()))
+
+    def test_7_dos_escaneos_que_piden_el_mismo_host_no_se_enciman(self):
+        # Dos hilos como dos escaneos (de olmardo.com y de tienda.olmardo.com, por ejemplo), cada uno con su cliente y
+        # el candado real, piden las mismas páginas. Nunca hay dos peticiones abiertas al mismo host, y cada escaneo
+        # hizo todas las suyas: si uno se cae (SinTurno, SinBase), el máximo de 1 no probaría que se turnan.
+        abiertas, maximo, pedidas, errores, candado = {}, {}, {}, [], threading.Lock()
+
+        def visitar(url, timeout):
+            host = urlsplit(url).hostname
+            with candado:
+                abiertas[host] = abiertas.get(host, 0) + 1
+                maximo[host] = max(maximo.get(host, 0), abiertas[host])
+            time.sleep(0.2)
+            with candado:
+                abiertas[host] -= 1
+            return {'rechazada': True}
+
+        def escaneo(n, hosts):
+            try:
+                cliente = self.visita.ClienteWeb(modo='vivo', carpeta=self.visita.carpeta_de('acme-demo.mx'),
+                                                 visitar=visitar, dormir=lambda s: None)
+                with self.turno.con_candado(orquestador._candado_de('vivo', None)):
+                    for host in hosts:
+                        cliente.sitio('https://%s/' % host)
+                pedidas[n] = cliente.pedidas
+            except BaseException as e:   # un hilo que lanza no lo ve unittest: se revisa abajo
+                errores.append((n, repr(e)))
+
+        compartidos = ['a-' + self.host, 'b-' + self.host, 'c-' + self.host]
+        hilos = [threading.Thread(target=escaneo, args=(n, compartidos), daemon=True) for n in range(2)]
+        hilos.append(threading.Thread(target=escaneo, args=(2, ['solo-' + self.host]), daemon=True))
+        for hilo in hilos:
+            hilo.start()
+        for hilo in hilos:
+            hilo.join(30)
+        self.assertFalse([h for h in hilos if h.is_alive()], 'un escaneo no terminó en 30 s')
+        self.assertEqual(errores, [])
+        self.assertEqual(pedidas, {0: 3, 1: 3, 2: 1})
+        self.assertEqual({h: maximo.get(h) for h in compartidos}, {h: 1 for h in compartidos})
+        self.assertEqual(maximo.get('solo-' + self.host), 1)
+
+    def test_8_el_connect_cuenta_en_la_espera_y_la_conexion_lleva_keepalives(self):
+        real, vistos = psycopg.connect, []
+
+        def lento(*a, **k):
+            vistos.append(k)
+            time.sleep(0.5)
+            return real(*a, **k)
+        with mock.patch.object(orquestador.psycopg, 'connect', lento):
+            with self.assertRaises(self.turno.SinTurno) as error:
+                with orquestador._turno_host(self.host, 0.3):   # el connect se comió la espera
+                    self.fail('entró sin tiempo para esperar el turno')
+            self.assertIn('no quedó tiempo', str(error.exception))
+            inicio = time.monotonic()
+            with orquestador._turno_host(self.host, 5):
+                self.assertLess(time.monotonic() - inicio, 3)
+        self.assertEqual(len(vistos), 2)
+        for k in vistos:
+            self.assertEqual({n: k[n] for n in ('keepalives', 'keepalives_idle', 'tcp_user_timeout')},
+                             {'keepalives': 1, 'keepalives_idle': 5, 'tcp_user_timeout': 10000})
+            self.assertIn('-c tcp_keepalives_idle=5', k['options'])
+        # El servidor acepta los keepalives de la sesión (son de usuario): así suelta el candado si el cliente se cae.
+        with psycopg.connect(DSN, **orquestador.RED_TURNO) as conn:
+            self.assertEqual(conn.execute('SHOW tcp_user_timeout').fetchone()[0], '10000')   # SHOW da los ms sin unidad
+            self.assertEqual(conn.execute('SHOW tcp_keepalives_idle').fetchone()[0], '5')
 
 
 if __name__ == '__main__':
