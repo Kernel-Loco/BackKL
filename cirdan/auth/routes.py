@@ -331,13 +331,16 @@ def login(body: LoginIn, request: Request, response: Response):
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
                                                     'email': email}, ip, 'password')
+    if mfa_setup_required == 'operator':
+        # El operador de la consola multiempresa no se da de alta al entrar: con la contraseña sola abriría una sesión
+        # de superadmin con su propia app (H1 de la revisión de RC-5). Su TOTP se activa por fuera, como en la 027.
+        raise HTTPException(403, OPERATOR_MFA_REQUIRED)
     if mfa_setup_required:
-        # El 403 trae un token para activar el TOTP sin sesión (/mfa/enroll/*), amarrado a esta contraseña como el
-        # mfa_token: si cambia antes de terminar, ya no sirve. Los fallos del correo se borran hasta que entre.
+        # El 403 del Admin trae un token para activar el TOTP sin sesión (/mfa/enroll/*), amarrado a esta contraseña
+        # como el mfa_token: si cambia antes de terminar, ya no sirve. Los fallos del correo se borran hasta que entre.
         token = sessions.create_mfa_enroll({'user_id': user_id, 'org_id': org, 'email': email,
                                             'tag': sessions.password_tag(huella)})
-        detail = OPERATOR_MFA_REQUIRED if mfa_setup_required == 'operator' else ADMIN_MFA_REQUIRED
-        return JSONResponse({'detail': detail, 'mfa_setup_required': True, 'mfa_setup_token': token},
+        return JSONResponse({'detail': ADMIN_MFA_REQUIRED, 'mfa_setup_required': True, 'mfa_setup_token': token},
                             status_code=403, headers=NO_STORE)
     _clear_fails(email)
     return {'mfa_required': False, 'user': user}
@@ -830,11 +833,20 @@ ENROLL_USER_SQL = ('SELECT u.role, u.email::text, u.password_hash, u.mfa_enabled
 
 def _enroll_row(conn, pending, lock=''):
     """La cuenta del alta, si todavía puede seguir: activa, en una empresa en trial o active, con la misma contraseña que
-    en /login y sin TOTP. Si no, None."""
+    en /login, sin TOTP y fuera de platform_admins (el operador no se da de alta al entrar, H1). Si no, None."""
     row = conn.execute(ENROLL_USER_SQL + lock, (pending['user_id'],)).fetchone()
     if not row or row['mfa_enabled'] or sessions.password_tag(row['password_hash']) != pending['tag']:
         return None
+    if conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required',
+                    (pending['user_id'],)).fetchone()['required']:
+        return None
     return row
+
+
+def _enroll_locked(email, ip):
+    # Con el correo o la IP bloqueados, el alta al entrar responde 429 como /login y /mfa/verify (H2, H8 y H15).
+    if sessions.is_locked(email, ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
 
 
 @router.post('/mfa/enroll/setup', summary='Alta de TOTP al entrar, paso 1: con el token del 403 de /login, el QR')
@@ -844,6 +856,13 @@ def mfa_enroll_setup(body: MfaEnrollIn, request: Request, response: Response):
         raise HTTPException(401, MFA_EXPIRED)
     ip = client_ip(request)
     org, user_id = pending['org_id'], pending['user_id']
+    _enroll_locked(pending['email'], ip)
+    secret = totp.new_secret()
+    # El secreto pendiente va cifrado dentro del token, con la misma llave y el mismo dato asociado que en la base. Cada
+    # token da a lo sumo MFA_ENROLL_MAX_SETUPS QR, así que la bitácora tampoco crece sin tope (H3 y H7).
+    if not sessions.start_mfa_enroll_setup(body.mfa_setup_token,
+                                           base64.b64encode(totp.encrypt_secret(secret, user_id)).decode()):
+        raise HTTPException(401, MFA_EXPIRED)
     with transaction(org) as conn:
         row = _enroll_row(conn, pending)
         if row:
@@ -851,27 +870,27 @@ def mfa_enroll_setup(body: MfaEnrollIn, request: Request, response: Response):
     if not row:
         sessions.delete_mfa_enroll(body.mfa_setup_token)
         raise HTTPException(401, MFA_EXPIRED)
-    secret = totp.new_secret()
-    # El mismo alta pendiente que /mfa/setup: cifrado en Valkey, 10 min y 5 códigos. Pedir otro QR reemplaza al anterior.
-    sessions.create_mfa_setup(user_id, base64.b64encode(totp.encrypt_secret(secret, user_id)).decode())
     uri = totp.provisioning_uri(secret, row['email'])
     response.headers.update(NO_STORE)
+    # start_mfa_enroll_setup renovó el token: el QR dura justo esto.
     return {'otpauth_uri': uri, 'secret': secret, 'qr_svg': totp.qr_svg_data_uri(uri),
             'expires_in_seconds': sessions.MFA_SETUP_SECONDS}
 
 
 @router.post('/mfa/enroll/enable', summary='Alta de TOTP al entrar, paso 2: con un código válido guarda el secreto y entra')
 def mfa_enroll_enable(body: MfaEnrollEnableIn, request: Request, response: Response):
-    pending = sessions.get_mfa_enroll(body.mfa_setup_token)
+    # El intento se gasta antes de revisar el código, en el token y en el correo, como en /mfa/verify: ni en paralelo
+    # ni pidiendo otro QR pasan de 5 por token.
+    pending = sessions.take_mfa_enroll(body.mfa_setup_token)
     if not pending:
         raise HTTPException(401, MFA_EXPIRED)
     ip = client_ip(request)
     org, user_id, email = pending['org_id'], pending['user_id'], pending['email']
-    # El intento se gasta antes de revisar el código, como en /mfa/enable: en paralelo tampoco pasan de 5.
-    setup = sessions.take_mfa_setup(user_id)
-    if not setup:
+    if 'secret_enc' not in pending:  # sin QR pedido no hay código que revisar ni fallo que contar
         raise HTTPException(401, MFA_SETUP_EXPIRED)
-    secret = totp.decrypt_secret(base64.b64decode(setup['secret_enc']), user_id)
+    if not sessions.take_mfa_attempt(email, ip):
+        raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
+    secret = totp.decrypt_secret(base64.b64decode(pending['secret_enc']), user_id)
     with transaction(org) as conn:
         # FOR UPDATE OF u, como /mfa/enable: dos códigos válidos a la vez no guardan dos secretos ni abren dos sesiones;
         # el segundo ve la cuenta ya activa.
@@ -890,13 +909,11 @@ def mfa_enroll_enable(body: MfaEnrollEnableIn, request: Request, response: Respo
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
                                                     'email': row['email']}, ip, 'totp_enroll')
     if not row:
-        sessions.delete_mfa_setup(user_id)
         sessions.delete_mfa_enroll(body.mfa_setup_token)
         raise HTTPException(401, MFA_EXPIRED)
     if step is None:
         sessions.register_mfa_fail(ip)
         raise HTTPException(401, MFA_INVALID)
-    sessions.delete_mfa_setup(user_id)
     sessions.delete_mfa_enroll(body.mfa_setup_token)
     _clear_fails(email)
     return {'mfa_required': False, 'user': user}

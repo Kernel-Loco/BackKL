@@ -215,6 +215,13 @@ Nunca se crea otra versión del secreto `password-hash-key` sin seguir estos pas
 
 En desarrollo y en el plan B es lo mismo con `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, sin Key Vault, y `docker compose exec api` como en la VM.
 
+## TOTP obligatorio para el Admin (RC-5)
+
+El TOTP del Admin se revisa al crear la sesión, no en cada petición. Las sesiones de un Admin sin TOTP abiertas antes de desplegar RC-5 seguirían vivas hasta 8 h, así que se cierran al desplegar (H6 de la revisión de RC-5):
+
+1. (VM) Después del `up -d --build`, listar los Admins activos sin TOTP: `docker exec cirdan-pg16 psql -U postgres -d cirdan -Atc "SELECT id FROM users WHERE role = 'admin' AND is_active AND (mfa_enabled_at IS NULL OR totp_secret_enc IS NULL)"`.
+2. (VM) Por cada id, cerrar sus sesiones: `docker compose exec api python -c "from cirdan.auth import sessions; sessions.delete_others('<id>', None)"`. Sin filas en el paso 1 no hay nada que cerrar. En su siguiente `/login` reciben el 403 con el QR.
+
 ## Escaneos programados (RC-52)
 
 El servicio `programador` vuelve a escanear cada dominio autorizado según el plan de su empresa (`plans.scan_interval`: Starter cada 7 días, Business y Enterprise cada día). Usa la misma imagen y el mismo rol de la base que la API, sin puertos y sin llegar a IMDS. Va con profile: sin `COMPOSE_PROFILES`, `docker compose up -d` no lo enciende. Al encenderlo salen en el acto los dominios con `next_scan_at` vacío o vencido, así que se enciende con el OK de quien administra la VM.

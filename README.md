@@ -91,8 +91,8 @@ Correo, contraseña y captcha, y después el código de 6 dígitos de una app au
 | Endpoint | Qué hace |
 |---|---|
 | `GET /api/v1/auth/captcha` | Reto ALTCHA firmado para el siguiente login (vence en 10 min, `Cache-Control: no-store`) |
-| `POST /api/v1/auth/login` | Correo, contraseña y `captcha` (el reto resuelto). Con MFA activo responde `{mfa_required: true, mfa_token}` (válido 5 min y 5 intentos). Contraseña o captcha inválidos dan 401 sin sesión. Un Admin o un operador sin TOTP recibe 403 sin sesión con `{mfa_setup_required: true, mfa_setup_token}` (10 min) para activarlo ahí mismo (RC-5) |
-| `POST /api/v1/auth/mfa/enroll/setup` | Alta de TOTP al entrar, paso 1 (RC-5): con el `mfa_setup_token` del 403 da un secreto nuevo con su QR, igual que `/mfa/setup` |
+| `POST /api/v1/auth/login` | Correo, contraseña y `captcha` (el reto resuelto). Con MFA activo responde `{mfa_required: true, mfa_token}` (válido 5 min y 5 intentos). Contraseña o captcha inválidos dan 401 sin sesión. Un Admin sin TOTP recibe 403 sin sesión con `{mfa_setup_required: true, mfa_setup_token}` (10 min) para activarlo ahí mismo (RC-5). Un operador de la consola multiempresa sin TOTP recibe 403 sin token: su TOTP se activa por fuera (027) |
+| `POST /api/v1/auth/mfa/enroll/setup` | Alta de TOTP al entrar, paso 1 (RC-5): con el `mfa_setup_token` del 403 da un secreto nuevo con su QR, guardado dentro del token. Renueva sus 10 min y da 3 QR por token. Con el correo o la IP bloqueados, 429 |
 | `POST /api/v1/auth/mfa/enroll/enable` | Alta de TOTP al entrar, paso 2: `mfa_setup_token` y `code`. Con un código válido guarda el secreto, borra las passkeys, cierra las demás sesiones y crea la sesión. Código malo, 401 |
 | `POST /api/v1/auth/mfa/verify` | `mfa_token` y código. Crea la sesión y pone la cookie |
 | `POST /api/v1/auth/logout` | Borra la sesión en Valkey y la cookie |

@@ -262,6 +262,73 @@ class Login(unittest.TestCase):
         self.assertEqual(sorted(r[0] for r in respuestas), [200, 401, 401, 401], respuestas)
         self.assertEqual(sum(c.cookie() is not None for c in clientes), 1)
 
+    def _codigo_malo(self, secreto):
+        paso = int(time.time() // sesion.STEP)
+        validos = {sesion.totp(secreto, s) for s in range(paso - 2, paso + 3)}
+        return next(c for c in ('%06d' % i for i in range(20)) if c not in validos)
+
+    def test_9f_el_token_da_3_qr_y_5_codigos_en_total(self):
+        # H3, H7 y H8 de la revisión de RC-5: pedir otro QR no devuelve los intentos ni escribe la bitácora sin tope.
+        self._sin_totp(ALEX)
+        sesion.reset()
+        token = self._token_de_alta(ALEX)
+        enroll = lambda ruta, **extra: Client().post(AUTH + '/mfa/enroll/' + ruta, dict(mfa_setup_token=token, **extra))
+        code, qr = enroll('setup')
+        self.assertEqual(code, 200, qr)
+        malo = self._codigo_malo(qr['secret'])
+        for _ in range(4):
+            self.assertEqual(enroll('enable', code=malo), (401, {'detail': MFA_INVALID}))
+        code, qr = enroll('setup')
+        self.assertEqual(code, 200, qr)
+        self.assertEqual(enroll('enable', code=self._codigo_malo(qr['secret'])), (401, {'detail': MFA_INVALID}),
+                         'el quinto código se revisa')
+        bueno = sesion.totp(qr['secret'], int(time.time() // sesion.STEP))
+        self.assertEqual(enroll('enable', code=bueno), (401, {'detail': MFA_EXPIRED}),
+                         'con 5 códigos el token se gasta aunque se haya pedido otro QR')
+        self.assertEqual(scalar("SELECT totp_secret_enc IS NULL FROM users WHERE email = '%s';" % ALEX,
+                                user='postgres'), 't')
+        sesion.reset()
+        token = self._token_de_alta(ALEX)
+        for _ in range(3):
+            self.assertEqual(enroll('setup')[0], 200)
+        self.assertEqual(enroll('setup'), (401, {'detail': MFA_EXPIRED}), 'el cuarto QR ya no sale')
+        self.assertEqual(enroll('enable', code=bueno), (401, {'detail': MFA_EXPIRED}), 'y el token quedó gastado')
+
+    def test_9g_dos_tokens_de_la_misma_cuenta_no_se_pisan_el_qr(self):
+        # H5 y H9: el secreto pendiente vive en cada token, no en mfa:setup:<usuario>.
+        self._sin_totp(ALEX)
+        sesion.reset()
+        token_a, token_b = self._token_de_alta(ALEX), self._token_de_alta(ALEX)
+        code, qr_a = Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token_a})
+        self.assertEqual(code, 200, qr_a)
+        code, qr_b = Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token_b})
+        self.assertEqual(code, 200, qr_b)
+        self.assertNotEqual(qr_a['secret'], qr_b['secret'])
+        client = Client()
+        code, body = client.post(AUTH + '/mfa/enroll/enable', {
+            'mfa_setup_token': token_a, 'code': sesion.totp(qr_a['secret'], int(time.time() // sesion.STEP))})
+        self.assertEqual(code, 200, body)
+        self.assertIsNotNone(client.cookie())
+
+    def test_9h_con_el_correo_bloqueado_el_alta_al_entrar_da_429(self):
+        # H2, H8 y H15: el alta al entrar respeta el bloqueo del correo y de la IP, como /login y /mfa/verify.
+        self._sin_totp(ALEX)
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        token = self._token_de_alta(ALEX)
+        code, qr = Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token})
+        self.assertEqual(code, 200, qr)
+        for _ in range(MAX_FALLOS):
+            self.assertEqual(sesion.post_login(Client(), ALEX, 'no-es-la-contrasena')[0], 401)
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token}), (429, {'detail': LOCKED}))
+        client = Client()
+        code, body = client.post(AUTH + '/mfa/enroll/enable', {
+            'mfa_setup_token': token, 'code': sesion.totp(qr['secret'], int(time.time() // sesion.STEP))})
+        self.assertEqual((code, body), (429, {'detail': LOCKED}), 'ni con el código bueno')
+        self.assertIsNone(client.cookie())
+        self.assertEqual(scalar("SELECT totp_secret_enc IS NULL FROM users WHERE email = '%s';" % ALEX,
+                                user='postgres'), 't')
+
     def test_10_la_contrasena_mala_queda_en_la_bitacora(self):
         # La API escribe el fallo después de mandar el 401, para que el tiempo no delate que el correo
         # existe. Con raise HTTPException esa tarea no correría y el fallo no quedaría en la bitácora.
