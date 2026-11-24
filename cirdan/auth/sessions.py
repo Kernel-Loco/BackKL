@@ -246,6 +246,31 @@ def delete_mfa_setup(user_id):
     _valkey().delete(_setup_key(user_id))
 
 
+# ------------------------------------------------------------------ alta de TOTP al entrar (RC-5)
+
+def _enroll_key(token):
+    return 'mfa:enroll:' + _digest(token)
+
+
+def create_mfa_enroll(data):
+    """Token del 403 de /login para que un Admin sin TOTP lo active sin sesión. Dura lo mismo que el QR del alta. Los
+    intentos de código los cuenta el alta pendiente (create_mfa_setup), no este token."""
+    token = secrets.token_urlsafe(32)
+    _valkey().set(_enroll_key(token), json.dumps(data), ex=MFA_SETUP_SECONDS)
+    return token
+
+
+def get_mfa_enroll(token):
+    if not token or len(token) > 100:
+        return None
+    raw = _valkey().get(_enroll_key(token))
+    return json.loads(raw) if raw else None
+
+
+def delete_mfa_enroll(token):
+    _valkey().delete(_enroll_key(token))
+
+
 # ------------------------------------------------------------------ captcha del login (RC-154)
 
 def captcha_hmac_key(candidate):

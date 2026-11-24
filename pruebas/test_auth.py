@@ -30,6 +30,14 @@ MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MAX_FALLOS = 5  # MAX_FAILS_EMAIL de cirdan/auth/sessions.py
 MAX_FALLOS_IP = 20  # MAX_FAILS_IP de cirdan/auth/sessions.py
 CAPTCHA_INVALID = 'No se pudo comprobar que no eres un robot. Espera a que termine la verificación e inténtalo de nuevo.'
+ADMIN_MFA_REQUIRED = ('Las cuentas de administrador deben activar la verificación en dos pasos antes de entrar. '
+                      'Escanea el código QR con tu app autenticadora.')
+MFA_SETUP_EXPIRED = 'El código QR venció o ya se usaron sus 5 intentos. Empieza de nuevo.'
+
+
+def _bitacora(email, accion, extra=''):
+    return int(scalar("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                      "AND a.action = '%s' %s;" % (email, accion, extra), user='postgres'))
 
 
 def codigos_malos(email, n):
@@ -137,23 +145,122 @@ class Login(unittest.TestCase):
                         user='postgres')
         scalar("UPDATE users SET mfa_enabled_at = NULL WHERE email = '%s' RETURNING 1;" % email, user='postgres')
 
+    def _sin_totp(self, email):
+        """Quita el TOTP completo (secreto, fecha y paso) solo durante la prueba y al final lo devuelve igual."""
+        antes = scalar("SELECT coalesce(quote_literal(totp_secret_enc::text), 'NULL') || '|' || "
+                       "coalesce(quote_literal(mfa_enabled_at), 'now()') || '|' || coalesce(last_totp_step::text, 'NULL') "
+                       "FROM users WHERE email = '%s';" % email, user='postgres')
+        secreto, fecha, paso = antes.split('|')
+        self.addCleanup(scalar, "UPDATE users SET totp_secret_enc = %s, mfa_enabled_at = %s, last_totp_step = %s "
+                                "WHERE email = '%s' RETURNING 1;" % (secreto, fecha, paso, email), user='postgres')
+        scalar("UPDATE users SET totp_secret_enc = NULL, mfa_enabled_at = NULL, last_totp_step = NULL "
+               "WHERE email = '%s' RETURNING 1;" % email, user='postgres')
+
+    def _token_de_alta(self, email, client=None):
+        """El 403 de /login de un Admin sin TOTP: devuelve su mfa_setup_token."""
+        client = client or Client()
+        code, body = sesion.post_login(client, email, PASSWORD)
+        self.assertEqual((code, body.get('detail'), body.get('mfa_setup_required')), (403, ADMIN_MFA_REQUIRED, True), body)
+        return body['mfa_setup_token']
+
     def test_9_sin_mfa_la_sesion_lleva_el_rol_de_la_base(self):
         # login_lookup() ya no devuelve el rol (migración 004): sin MFA, la API lo lee con RLS.
         # El rol de la sesión se ve en lo que deja hacer: solo admin lee los TXT y el gerente no pide
-        # escaneos. Un dominio que no existe responde 404 sin escribir nada.
-        for email, role, txt, scan in ((JORDAN, 'analyst', 403, 404), (ALEX, 'admin', 200, 404)):
-            with self.subTest(email=email):
-                self._sin_mfa(email)
-                client = Client()
-                code, body = sesion.post_login(client, email, PASSWORD)
-                self.assertEqual(code, 200)
-                self.assertFalse(body['mfa_required'])
-                self.assertEqual((body['user']['email'], body['user']['role']), (email, role))
-                self.assertIsNotNone(client.cookie())
-                self.assertEqual(client.get(AUTH + '/me')[0], 200)
-                self.assertEqual(client.get('/api/v1/domains/txt')[0], txt, 'solo admin lee los TXT')
-                self.assertEqual(client.post('/api/v1/domains/no-existe.acme-demo.mx/scans')[0], scan,
-                                 'el gerente no puede pedir escaneos')
+        # escaneos. Un dominio que no existe responde 404 sin escribir nada. Un Admin sin MFA ya no entra (test_9b) y su
+        # rol se revisa después de activar el TOTP (test_9c).
+        self._sin_mfa(JORDAN)
+        client = Client()
+        code, body = sesion.post_login(client, JORDAN, PASSWORD)
+        self.assertEqual(code, 200)
+        self.assertFalse(body['mfa_required'])
+        self.assertEqual((body['user']['email'], body['user']['role']), (JORDAN, 'analyst'))
+        self.assertIsNotNone(client.cookie())
+        self.assertEqual(client.get(AUTH + '/me')[0], 200)
+        self.assertEqual(client.get('/api/v1/domains/txt')[0], 403, 'solo admin lee los TXT')
+        self.assertEqual(client.post('/api/v1/domains/no-existe.acme-demo.mx/scans')[0], 404)
+
+    def test_9b_un_admin_sin_mfa_recibe_403_sin_sesion(self):
+        # Hecho cuando de RC-5: TOTP obligatorio para Admins. La contraseña buena no basta: 403, sin cookie ni sesión.
+        self._sin_mfa(ALEX)
+        antes = _bitacora(ALEX, 'auth.admin_mfa_required')
+        client = Client()
+        code, body = sesion.post_login(client, ALEX, PASSWORD)
+        self.assertEqual((code, body['detail'], body['mfa_setup_required']), (403, ADMIN_MFA_REQUIRED, True))
+        self.assertGreaterEqual(len(body['mfa_setup_token']), 40)
+        self.assertNotIn('user', body)
+        self.assertNotIn('mfa_token', body)
+        self.assertIsNone(client.cookie())
+        self.assertEqual(client.get(AUTH + '/me')[0], 401)
+        self.assertEqual(client.get('/api/v1/domains/txt')[0], 401)
+        self.assertEqual(_bitacora(ALEX, 'auth.admin_mfa_required'), antes + 1)
+        # El token de alta no es un mfa_token: no abre sesión por /mfa/verify.
+        self.assertEqual(client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_setup_token'],
+                                                            'code': '123456'}), (401, {'detail': MFA_EXPIRED}))
+        # Con la contraseña mala sigue siendo el 401 de siempre, sin token.
+        self.assertEqual(sesion.post_login(Client(), ALEX, 'no-es-la-contrasena'), (401, {'detail': INVALID}))
+
+    def test_9c_el_admin_activa_el_totp_al_entrar_y_entonces_entra(self):
+        self._sin_totp(ALEX)
+        sesion.reset()
+        client = Client()
+        token = self._token_de_alta(ALEX, client)
+        code, qr = client.post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token})
+        self.assertEqual(code, 200, qr)
+        self.assertTrue(qr['qr_svg'].startswith('data:image/svg+xml'))
+        self.assertEqual(qr['expires_in_seconds'], 600)
+        self.assertIsNone(client.cookie())
+        self.assertEqual(scalar("SELECT totp_secret_enc IS NULL FROM users WHERE email = '%s';" % ALEX,
+                                user='postgres'), 't', 'sin un código válido la base no guarda nada')
+        paso = int(time.time() // sesion.STEP)
+        validos = {sesion.totp(qr['secret'], s) for s in range(paso - 2, paso + 3)}
+        malo = next(c for c in ('%06d' % i for i in range(20)) if c not in validos)
+        self.assertEqual(client.post(AUTH + '/mfa/enroll/enable', {'mfa_setup_token': token, 'code': malo}),
+                         (401, {'detail': MFA_INVALID}))
+        self.assertIsNone(client.cookie(), 'un código malo no crea sesión')
+        antes = _bitacora(ALEX, 'auth.login_succeeded', "AND a.details->>'via' = 'totp_enroll'")
+        code, body = client.post(AUTH + '/mfa/enroll/enable',
+                                 {'mfa_setup_token': token, 'code': sesion.totp(qr['secret'], paso)})
+        self.assertEqual(code, 200, body)
+        self.assertEqual((body['mfa_required'], body['user']['role'], body['user']['mfa_enabled']), (False, 'admin', True))
+        self.assertIsNotNone(client.cookie())
+        self.assertEqual(client.get(AUTH + '/me')[1]['mfa_enabled'], True)
+        self.assertEqual(client.get('/api/v1/domains/txt')[0], 200, 'la sesión lleva el rol admin de la base')
+        self.assertEqual(_bitacora(ALEX, 'auth.login_succeeded', "AND a.details->>'via' = 'totp_enroll'"), antes + 1)
+        # El token ya no sirve, y el siguiente inicio de sesión pide el código.
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token}),
+                         (401, {'detail': MFA_EXPIRED}))
+        code, body = sesion.post_login(Client(), ALEX, PASSWORD)
+        self.assertEqual((code, body['mfa_required']), (200, True))
+
+    def test_9d_el_token_de_alta_no_sirve_si_cambia_la_contrasena_o_sin_qr(self):
+        self._sin_totp(ALEX)
+        sesion.reset()
+        token = self._token_de_alta(ALEX)
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/enable', {'mfa_setup_token': token, 'code': '123456'}),
+                         (401, {'detail': MFA_SETUP_EXPIRED}), 'sin QR pedido no hay alta')
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': 'x' * 43}),
+                         (401, {'detail': MFA_EXPIRED}), 'un token inventado no da QR')
+        huella = scalar("SELECT quote_literal(password_hash) FROM users WHERE email = '%s';" % ALEX, user='postgres')
+        self.addCleanup(scalar, "UPDATE users SET password_hash = %s WHERE email = '%s' RETURNING 1;" % (huella, ALEX),
+                        user='postgres')
+        scalar("UPDATE users SET password_hash = password_hash || 'x' WHERE email = '%s' RETURNING 1;" % ALEX,
+               user='postgres')
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token}),
+                         (401, {'detail': MFA_EXPIRED}), 'con otra contraseña el token ya no sirve')
+
+    def test_9e_dos_codigos_buenos_a_la_vez_abren_una_sola_sesion(self):
+        self._sin_totp(ALEX)
+        sesion.reset()
+        token = self._token_de_alta(ALEX)
+        code, qr = Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token})
+        self.assertEqual(code, 200, qr)
+        bueno = sesion.totp(qr['secret'], int(time.time() // sesion.STEP))
+        clientes = [Client() for _ in range(4)]
+        with ThreadPoolExecutor(4) as pool:
+            respuestas = list(pool.map(lambda c: c.post(AUTH + '/mfa/enroll/enable',
+                                                        {'mfa_setup_token': token, 'code': bueno}), clientes))
+        self.assertEqual(sorted(r[0] for r in respuestas), [200, 401, 401, 401], respuestas)
+        self.assertEqual(sum(c.cookie() is not None for c in clientes), 1)
 
     def test_10_la_contrasena_mala_queda_en_la_bitacora(self):
         # La API escribe el fallo después de mandar el 401, para que el tiempo no delate que el correo
@@ -604,7 +711,8 @@ class Captcha(unittest.TestCase):
 
     def assertRechazado(self, client, respuesta, motivo):
         code, body = respuesta
-        self.assertEqual((code, body['detail']), (400, CAPTCHA_INVALID), motivo)
+        # 401 como la contraseña o el código inválidos (Hecho cuando de RC-5), sin sesión ni mfa_token.
+        self.assertEqual((code, body['detail']), (401, CAPTCHA_INVALID), motivo)
         self.assertNotIn('mfa_token', body, motivo)
         self.assertIsNone(client.cookie(), motivo)
 

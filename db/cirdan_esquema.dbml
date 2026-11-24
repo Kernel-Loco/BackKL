@@ -57,7 +57,7 @@ Table users [note: 'Usuarios del portal con rol y MFA (argon2 + TOTP). Las sesio
   role text [not null, note: 'CHECK IN (\'analyst\',\'manager\',\'admin\'): Analista, Gerente, Admin']
   password_hash text [not null, note: 'argon2id en formato PHC']
   totp_secret_enc bytea [note: 'Semilla TOTP de pyotp cifrada con AES-256-GCM en la app. Hoy en dev guarda nonce + texto cifrado + tag, con el id del usuario como AAD. Plan: versión de llave + nonce + texto cifrado + tag']
-  mfa_enabled_at timestamptz [note: 'NULL = sin MFA. Plan (RC-5): si role = \'admin\' el login se rechazará hasta enrolarse']
+  mfa_enabled_at timestamptz [note: 'NULL = sin MFA. Si role = \'admin\' el login responde 403 sin sesión hasta activarlo con /mfa/enroll (RC-5)']
   last_totp_step bigint [note: 'Último paso TOTP aceptado, impide reusar un código']
   is_active boolean [not null, note: 'Baja lógica']
   last_login_at timestamptz

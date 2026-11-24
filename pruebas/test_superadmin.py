@@ -191,9 +191,10 @@ class Superadmin(unittest.TestCase):
             postgres("UPDATE users SET totp_secret_enc = NULL, mfa_enabled_at = NULL WHERE id = '%s';" % DANA_ID)
             cliente = Client()
             code, body = sesion.post_login(cliente, DANA, sesion.PASSWORD)
-            self.assertEqual((code, body), (403, {
-                'detail': 'Las cuentas de operador deben tener MFA activo antes de iniciar sesión.'
-            }))
+            # Desde RC-5 el 403 también trae el token para activar el TOTP ahí mismo (/mfa/enroll/*).
+            self.assertEqual((code, body['detail'], body['mfa_setup_required']), (
+                403, 'Las cuentas de operador deben tener MFA activo antes de iniciar sesión.', True))
+            self.assertNotIn('user', body)
             self.assertIsNone(cliente.cookie())
         finally:
             postgres("UPDATE users SET totp_secret_enc = decode('%s', 'hex'), mfa_enabled_at = '%s'::timestamptz"
