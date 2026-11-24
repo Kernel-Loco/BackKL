@@ -7,8 +7,9 @@ también usa identidad.py, y api_docs.ClienteApiDocs.ruta) va dentro de turno(ho
 petición abierta a ese host, espera a que termine.
 
 El candado lo pone el orquestador con con_candado() mientras corre una fuente en vivo o al grabar: es
-orquestador._turno_host, un candado de PostgreSQL que vale entre la API y el programador. Sin candado puesto (la
-línea de comandos, las pruebas sin base o al reproducir) turno() no espera nada.
+orquestador._turno_host, un candado de PostgreSQL que vale entre la API y el programador. La línea de comandos pone el
+mismo en vivo y al grabar (de_la_linea), así una corrida del equipo también espera su turno. Sin candado puesto (las
+pruebas sin base o al reproducir) turno() no espera nada.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -20,9 +21,16 @@ _CANDADO = ContextVar('turno_host', default=None)
 
 
 class SinTurno(SinTiempo):
-    """No se pudo tomar el turno del host: otro escaneo lo tuvo más tiempo del que le queda a la corrida, o la base
-    no respondió. Es un SinTiempo: la petición no sale y lo que falta queda sin revisar, como cuando se acaba la
-    corrida. Nunca se pide al sitio sin el turno."""
+    """No se pudo tomar el turno del host a tiempo: otro escaneo lo tuvo más tiempo del que le queda a la corrida. Es
+    un SinTiempo: la petición no sale y lo que falta queda sin revisar, como cuando se acaba la corrida. Nunca se pide
+    al sitio sin el turno."""
+
+
+class SinBase(Exception):
+    """No se pudo pedir el turno porque la base no respondió (no conecta, 'too many clients', un reinicio). No es un
+    SinTiempo: no corta la corrida como si se hubiera acabado el tiempo, sale del recolector y su fuente queda en
+    'failed' con este texto, así que el orquestador la vuelve a correr a 1, 5 y 25 minutos. Nunca se pide al sitio
+    sin el turno."""
 
 
 @contextmanager
@@ -48,3 +56,18 @@ def turno(host, espera):
         return
     with candado((host or '').strip().lower().rstrip('.'), espera):
         yield True
+
+
+@contextmanager
+def _de_la_base(host, espera):
+    """orquestador._turno_host, importado al pedir el turno: el orquestador importa los recolectores."""
+    from cirdan.orquestador import _turno_host
+    with _turno_host(host, espera):
+        yield
+
+
+def de_la_linea(modo):
+    """El candado de una corrida de la línea de comandos: el de los análisis en vivo y al grabar, que salen a los
+    sitios, y ninguno al reproducir. Así la sección 9 de la carta (una petición a la vez por host) vale también para
+    las corridas del equipo. Sin base, la fuente queda en 'failed' (SinBase) y no sale nada."""
+    return None if modo == 'reproducir' else _de_la_base

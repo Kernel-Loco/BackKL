@@ -933,7 +933,8 @@ def _main(argv=None, hoy=None):
     if motivo:
         print(motivo + ': solo se puede --reproducir', file=sys.stderr)
         return 1
-    res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
+    with turno.con_candado(turno.de_la_linea(elegido)):   # el mismo turno por host que los análisis
+        res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
     print(resumen(res))
     return codigo_salida(res)
 

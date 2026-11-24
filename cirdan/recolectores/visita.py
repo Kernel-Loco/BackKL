@@ -597,10 +597,13 @@ def _sin_puerto(visita):
 def _http(cliente, nombre):
     """La visita a http://<nombre>/ en el puerto 80, con TIMEOUT_HTTP, o None si no se pudo pedir: una grabación de
     antes que no trae esa petición (SinGrabacion) o la corrida ya no tenía tiempo (SinTiempo). En los dos casos queda
-    lo que dio el 443, que ya se sabía. Su redirección no se sigue: un 80 que manda al 443 no tiene otra página. Su
-    falla la cuenta _recorrer."""
+    lo que dio el 443, que ya se sabía. Sin el turno del host (turno.SinTurno) el 80 no se pidió por otro escaneo, no
+    porque se acabara la corrida: sale, y el sitio queda sin revisar (sin_tiempo) y no como revisado sin https. Su
+    redirección no se sigue: un 80 que manda al 443 no tiene otra página. Su falla la cuenta _recorrer."""
     try:
         return cliente.sitio('http://%s/' % nombre, contar=False, timeout=TIMEOUT_HTTP)
+    except turno.SinTurno:
+        raise
     except (SinGrabacion, SinTiempo):
         return None
 
@@ -1155,7 +1158,8 @@ def _main(argv=None):
     if elegido != 'reproducir' and not shodan._en_vivo_permitido(dominio):
         print('%s no está en DOMINIOS_EN_VIVO: solo se puede --reproducir' % dominio, file=sys.stderr)
         return 1
-    res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
+    with turno.con_candado(turno.de_la_linea(elegido)):   # el mismo turno por host que los análisis
+        res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
     print(resumen(res))
     return codigo_salida(res)
 

@@ -552,7 +552,8 @@ class Http(unittest.TestCase):
                                                                                          'vulnerabilities': []}))
         otra = dict(pagina_reservas(), cabeceras=[['Server', 'nginx/1.26.2'], ['Content-Type', 'text/html']])
         dos, _, _ = correr({self.RAIZ_HTTPS: otra}, apis=Apis(eol=404, nvd={'totalResults': 0, 'vulnerabilities': []}))
-        huella = lambda r: [h.huella for h in r.hallazgos if h.codigo == 'server_version_disclosed']
+        def huella(r):
+            return [h.huella for h in r.hallazgos if h.codigo == 'server_version_disclosed']
         self.assertEqual(huella(uno), huella(dos))
         self.assertEqual(len(huella(uno)), 1)
 
@@ -807,7 +808,7 @@ class Base(unittest.TestCase):
         texto = MIGRACION.read_text(encoding='utf-8')
         columnas = [c for c in contrato.COLUMNAS_CVES if c != 'cve_id']
         self.assertIn('GRANT INSERT (%s) ON cves TO cirdan_app;' % ', '.join(columnas), texto)
-        sin_comentarios = '\n'.join(l.split('--', 1)[0] for l in texto.splitlines())
+        sin_comentarios = '\n'.join(linea.split('--', 1)[0] for linea in texto.splitlines())
         self.assertNotIn('UPDATE', sin_comentarios.upper().replace('ACTUALIZA', ''))
         self.assertIn("SET client_encoding = 'UTF8';", texto)
         numeros = sorted(int(p.name[:3]) for p in MIGRACION.parent.glob('[0-9][0-9][0-9]_*.sql'))
@@ -970,7 +971,8 @@ class Arreglos(unittest.TestCase):
                 if self.falla:
                     raise contrato.FuenteNoResponde('caída')
                 return {}
-        armar = lambda e: (e, 'https://x/' + e, None, False)
+        def armar(e):
+            return (e, 'https://x/' + e, None, False)
         res, parcial = contrato.Resultado(DOMINIO, 'web'), []
         caida = Cliente(1000, True)
         self.assertEqual(visita._consultar_api(res, caida, ['a', 'b', 'c'], parcial, 6, 'x', armar), {})
@@ -1865,18 +1867,90 @@ class TurnoHost(unittest.TestCase):
         for archivo in ('visita.py', 'api_docs.py'):
             with self.subTest(archivo=archivo):
                 lineas = (raiz / archivo).read_text(encoding='utf-8').splitlines()
-                llamadas = [i for i, l in enumerate(lineas) if '(self.visitar or _visitar)(' in l]
+                llamadas = [i for i, linea in enumerate(lineas) if '(self.visitar or _visitar)(' in linea]
                 self.assertEqual(len(llamadas), 1)
                 bloque = lineas[llamadas[0] - 9:llamadas[0]]
-                con = [l for l in bloque if l.strip().startswith('with turno.turno(')]
+                con = [linea for linea in bloque if linea.strip().startswith('with turno.turno(')]
                 self.assertEqual(len(con), 1, archivo)
-                sangria = lambda l: len(l) - len(l.lstrip())  # noqa: E731
+                def sangria(linea):
+                    return len(linea) - len(linea.lstrip())
                 # La llamada va más adentro que el with y ninguna línea entre los dos sale del bloque
                 entre = bloque[bloque.index(con[0]) + 1:] + [lineas[llamadas[0]]]
-                self.assertTrue(all(sangria(l) > sangria(con[0]) for l in entre if l.strip()), archivo)
+                self.assertTrue(all(sangria(linea) > sangria(con[0]) for linea in entre if linea.strip()), archivo)
         identidad = (raiz / 'identidad.py').read_text(encoding='utf-8')
         self.assertNotIn('self.visitar(', identidad)
         self.assertNotIn('transporte.visitar(', identidad)
+
+    def entradas(self, falla):
+        """Un candado que deja pasar la primera petición y a la segunda lanza `falla`."""
+        vistas = []
+
+        @contextlib.contextmanager
+        def candado(host, espera):
+            vistas.append(host)
+            if len(vistas) > 1:
+                raise falla
+            yield
+        return candado
+
+    def test_6_sin_turno_para_el_80_el_sitio_queda_sin_revisar_y_no_como_sin_https(self):
+        # El 443 rechaza y el 80 no consigue su turno: no se pidió, así que el sitio no se da por revisado (tiempos-1).
+        for falla in (self.turno.SinTurno('otro escaneo tuvo el turno'), self.turno.SinBase('la base no respondió')):
+            with self.subTest(falla=type(falla).__name__):
+                self.eventos.clear()
+                cliente = visita.ClienteWeb(modo='vivo', carpeta=visita.carpeta_de(DOMINIO), visitar=self.visitar,
+                                            cronometro=lambda: self.reloj[0], dormir=self.dormir)
+                with self.turno.con_candado(self.entradas(falla)), self.assertRaises(type(falla)):
+                    visita._recorrer(cliente, DOMINIO, 'www.' + DOMINIO)
+                self.assertEqual([e[1] for e in self.eventos if e[0] == 'pide'], ['https://www.%s/' % DOMINIO])
+
+    def test_7_sin_base_la_fuente_falla_y_no_se_toma_por_falta_de_tiempo(self):
+        # SinBase no es un SinTiempo: sale del recolector y ejecutar() deja la fuente en 'failed', que se reintenta.
+        self.assertFalse(issubclass(self.turno.SinBase, shodan.SinTiempo))
+
+        @contextlib.contextmanager
+        def sin_base(host, espera):
+            raise self.turno.SinBase('la base no respondió al pedir el turno de %s (OperationalError)' % host)
+            yield
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente), self.turno.con_candado(sin_base):
+                self.eventos.clear()
+                with self.assertRaises(self.turno.SinBase):
+                    pedir(cliente, 'www.' + DOMINIO)
+                self.assertEqual(self.eventos, [])
+        # identity lo vuelve FuenteNoResponde con su texto, que solo trae el host y el tipo de error
+        cliente = self.identidad.ClienteIdentidad(carpeta=self.identidad.carpeta_de(DOMINIO), modo='vivo',
+                                                  visitar=self.visitar, cronometro=lambda: self.reloj[0],
+                                                  dormir=self.dormir)
+        falla = self.turno.SinBase('la base no respondió al pedir el turno de www.%s (OperationalError)' % DOMINIO)
+        with mock.patch.object(self.identidad, '_revisar', side_effect=falla), \
+                self.assertRaises(contrato.FuenteNoResponde) as error:
+            self.identidad.recolectar(DOMINIO, cliente)
+        self.assertEqual(str(error.exception), 'identity: ' + str(falla))
+
+    def test_8_la_linea_de_comandos_pone_el_turno_en_vivo_y_al_grabar(self):
+        # La sección 9 de la carta vale también para una corrida del equipo (tiempos-6): mismo candado que los análisis.
+        vistos = []
+
+        def corre(*a, **k):
+            vistos.append(self.turno._CANDADO.get())
+            return contrato.Resultado(DOMINIO, 'x', estado='failed', error='simulado')
+        with mock.patch.dict('os.environ', {'DOMINIOS_EN_VIVO': DOMINIO}), mock.patch('sys.stdout'), \
+                mock.patch('sys.stderr'), mock.patch.object(visita.contrato, 'ejecutar', corre), \
+                mock.patch.object(self.api_docs.contrato, 'ejecutar', corre), \
+                mock.patch.object(self.api_docs, '_fuente_cerrada', return_value=None), \
+                mock.patch.object(self.identidad, 'recolectar', corre), \
+                mock.patch.object(self.identidad, 'crear_cliente', lambda *a: mock.Mock(consultas=0)), \
+                mock.patch.object(self.identidad.github, '_en_vivo_permitido', lambda d: True):
+            for nombre, main, extra in (('web', visita._main, {}), ('identity', self.identidad._main, {}),
+                                        ('api_docs', self.api_docs._main, {'hoy': self.api_docs.VIGENTE_DESDE})):
+                for argv, candado in (([DOMINIO], self.turno._de_la_base), ([DOMINIO, '--grabar'], self.turno._de_la_base),
+                                      ([DOMINIO, '--reproducir'], None)):
+                    with self.subTest(fuente=nombre, argv=argv):
+                        vistos.clear()
+                        main(argv, **extra)
+                        self.assertEqual(vistos, [candado])
+                        self.assertIsNone(self.turno._CANDADO.get())
 
 
 if __name__ == '__main__':

@@ -92,6 +92,12 @@ MODOS_CON_CUPO = ('vivo', 'grabar')
 # dominios (hashtextextended(fqdn, 59), migración 029).
 SEMILLA_TURNO = 46
 MIN_ESPERA_TURNO = 0.001  # segundos: con menos ya no se pide el turno
+# La conexión del turno no tiene que quedar viva sin que nadie se entere: keepalives de los dos lados y tcp_user_timeout
+# (ms) para datos sin confirmar. Si el cliente se cae, el servidor suelta el candado en unos 11 s y no en las 2 h que
+# da Linux por omisión. Si la red o el servidor se caen, el cliente lo nota igual y la consulta falla (SinBase).
+RED_TURNO = dict(keepalives=1, keepalives_idle=5, keepalives_interval=2, keepalives_count=3, tcp_user_timeout=10000,
+                 options='-c tcp_keepalives_idle=5 -c tcp_keepalives_interval=2 -c tcp_keepalives_count=3 '
+                         '-c tcp_user_timeout=10000')
 # Códigos de HIBP cuyo hallazgo lleva su fila en breach_exposures (RC-54): nombre, fecha y clases de datos de la brecha.
 BRECHAS = ('breach_exposure', 'breach_exposure_old', 'breach_exposure_no_passwords')
 # Correos del dominio para el recolector que declara PIDE_CORREOS (HIBP, RC-54), de dos fuentes, cada una solo si la
@@ -678,24 +684,35 @@ def _candado_de(modo, conn):
 @contextmanager
 def _turno_host(host, espera):
     """El turno de `host` para una petición de un sitio (turno.con_candado): un candado de sesión de PostgreSQL en una
-    conexión propia, que se cierra al terminar la petición. Cerrarla suelta el candado, también si la petición lanzó
-    o la base dejó de responder en medio. Si otro escaneo tiene el host más de `espera` segundos (lock_timeout) o la
-    base no responde, lanza turno.SinTurno y la petición no sale. El candado no lee tablas: va sin empresa."""
+    conexión propia, que se cierra al terminar la petición. Cerrarla suelta el candado, también si la petición lanzó.
+    Si otro escaneo tiene el host más de `espera` segundos, contando lo que tardó en conectar (lock_timeout), lanza
+    turno.SinTurno y la petición no sale. Si la base no conecta o falla al pedir el candado, lanza turno.SinBase: no
+    es falta de tiempo, la fuente queda en 'failed' y se reintenta. Con RED_TURNO, una red o un servidor que se caen
+    también dan SinBase, y un cliente que se cae suelta el candado en unos segundos. Una base que acepta la conexión
+    pero no contesta, como un contenedor en pausa, no tiene plazo aquí, igual que el latido y las transacciones del
+    escaneo.
+    Si la sesión del candado se cae a media petición (la base se reinicia o alguien termina su backend), el servidor
+    lo suelta y otro escaneo puede pedir al mismo host antes de que termine esa petición. Es la excepción que anota la
+    sección 9 de la carta. El candado no lee tablas: va sin empresa."""
     if espera < MIN_ESPERA_TURNO:
         raise turno.SinTurno('no quedó tiempo para esperar el turno de %s' % host)
+    inicio = time.monotonic()
     try:
-        conn = psycopg.connect(db.DSN, autocommit=True, connect_timeout=max(2, min(10, int(espera))))
+        conn = psycopg.connect(db.DSN, autocommit=True, connect_timeout=max(2, min(10, int(espera))), **RED_TURNO)
     except psycopg.Error as e:
-        raise turno.SinTurno('no se pudo pedir el turno de %s (%s)' % (host, type(e).__name__)) from None
+        raise turno.SinBase('la base no respondió al pedir el turno de %s (%s)' % (host, type(e).__name__)) from None
     try:
+        queda = espera - (time.monotonic() - inicio)   # el connect ya se comió parte de la espera
+        if queda < MIN_ESPERA_TURNO:
+            raise turno.SinTurno('no quedó tiempo para esperar el turno de %s' % host)
         try:
-            conn.execute("SELECT set_config('lock_timeout', %s, false)", ('%dms' % max(1, int(espera * 1000)),))
+            conn.execute("SELECT set_config('lock_timeout', %s, false)", ('%dms' % max(1, int(queda * 1000)),))
             conn.execute('SELECT pg_advisory_lock(hashtextextended(%s, %s))', (host, SEMILLA_TURNO))
         except psycopg.errors.LockNotAvailable:
             raise turno.SinTurno('otro escaneo tuvo el turno de %s más tiempo del que le quedaba a la corrida'
                                  % host) from None
         except psycopg.Error as e:
-            raise turno.SinTurno('no se pudo tomar el turno de %s (%s)' % (host, type(e).__name__)) from None
+            raise turno.SinBase('la base falló al tomar el turno de %s (%s)' % (host, type(e).__name__)) from None
         yield
     finally:
         conn.close()
