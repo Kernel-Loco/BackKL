@@ -2061,7 +2061,7 @@ class TurnoHost(unittest.TestCase):
             self.assertIn('-c tcp_keepalives_idle=5', k['options'])
         # El servidor acepta los keepalives de la sesión (son de usuario): así suelta el candado si el cliente se cae.
         with psycopg.connect(DSN, **orquestador.RED_TURNO) as conn:
-            self.assertEqual(conn.execute('SHOW tcp_user_timeout').fetchone()[0], '10s')
+            self.assertEqual(conn.execute('SHOW tcp_user_timeout').fetchone()[0], '10000')   # SHOW da los ms sin unidad
             self.assertEqual(conn.execute('SHOW tcp_keepalives_idle').fetchone()[0], '5')
 
 
