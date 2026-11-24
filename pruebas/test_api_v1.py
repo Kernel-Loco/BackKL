@@ -17,6 +17,7 @@ from pathlib import Path
 
 from cirdan.score import cobertura, criterio, subcategorias
 from pruebas import sesion
+from pruebas.pila import exigir_desechable
 from pruebas.test_aislamiento import psql, scalar
 
 EJEMPLOS = Path(__file__).resolve().parents[1] / 'docs' / 'api_v1'
@@ -193,6 +194,7 @@ class ApiV1(unittest.TestCase):
         self.assertTrue(ok, err)
         mexico = datetime.strptime(salida.strip(), '%Y-%m-%d %H:%M')
         self.assertEqual(mexico.hour, 20, 'la base no está fijada a las 20:00 de México: %s' % salida)
+        exigir_desechable()
         api = subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api'), 'python',
                               '-c', 'import datetime, time; print(time.tzname[0], datetime.date.today())'],
                              capture_output=True, text=True, timeout=60)

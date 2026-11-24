@@ -1,10 +1,10 @@
 # Cadena de suministro de la imagen de la API (#82, RC-117). Guía: docs/cadena_de_suministro.md.
 #
-# En cada PR a dev o main: compila la imagen, Trivy la revisa y frena con una vulnerabilidad crítica que ya tenga
-# arreglo, y Syft saca su SBOM (artefacto de la corrida). Con un push a dev o main (el merge del PR), además la sube a
-# ghcr.io/kernel-loco/backkl, la firma con cosign sin llaves (OIDC de GitHub) y le pega el SBOM como atestación
-# firmada. El despliegue verifica esa firma antes de levantarla (infra/verificar_imagenes.sh).
-# Las imágenes de terceros del compose (PostgreSQL, Valkey, cloudflared) también pasan por Trivy.
+# En cada PR a dev o main: compila la imagen, Trivy la revisa y frena con cualquier vulnerabilidad crítica, sin
+# excepciones, y Syft saca su SBOM (artefacto de la corrida). Con un push a dev o main (el merge del PR), además la
+# sube a ghcr.io/kernel-loco/backkl, la firma con cosign sin llaves (OIDC de GitHub) y le pega el SBOM como
+# atestación firmada. El despliegue verifica esa firma antes de levantarla (infra/verificar_imagenes.sh).
+# Las imágenes de terceros del compose (PostgreSQL, Valkey, cloudflared) también pasan por Trivy, sin frenar.
 # Herramientas en imágenes con versión fija: ninguna acción de terceros recibe el token.
 name: Imágenes
 
@@ -43,13 +43,12 @@ jobs:
       - name: Compilar la imagen
         run: docker build --pull -t lowtide-api:ci .
 
-      # --ignore-unfixed: una crítica sin arreglo publicado no tiene versión a la cual subir. Sale en la tabla, no frena.
-      # .trivyignore.yaml: excepciones con razón y fecha de vencimiento.
+      # Sin excepciones: cualquier crítica frena, tenga arreglo o no (sin --ignore-unfixed ni archivo de excepciones).
+      # Si una no tiene arreglo, se cambia la base o se quita el paquete de la imagen (RC-117).
       - name: Trivy frena con vulnerabilidades críticas
         run: >-
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/.trivyignore.yaml:/trivyignore.yaml:ro" "$TRIVY"
-          image --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 --no-progress
-          --ignorefile /trivyignore.yaml lowtide-api:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY"
+          image --scanners vuln --severity CRITICAL --exit-code 1 --no-progress lowtide-api:ci
 
       - name: Trivy, resumen de altas y críticas (no frena)
         run: >-
@@ -113,18 +112,26 @@ jobs:
         with:
           persist-credentials: false
 
-      # Las mismas versiones que levantan docker-compose.yml y docker-compose.despliegue.yml.
-      - name: Trivy frena con críticas en las imágenes de terceros del compose
+      # Las mismas versiones que levantan docker-compose.yml y docker-compose.despliegue.yml. Informativo: no son
+      # imágenes nuestras, el CI no las arma, no las firma ni les saca SBOM, y no siempre hay versión sin críticas
+      # (postgres:16 de Debian trae libxml2 CVE-2026-6653 sin arreglo y gosu compilado con un Go viejo). Las críticas
+      # salen completas, sin excepciones, en la corrida y en su resumen. Decisión de Ernesto, 23 nov (RC-117).
+      - name: Trivy, críticas en las imágenes de terceros del compose (no frena)
         run: |
           set -euo pipefail
           imagenes=$(grep -hE '^\s+image:\s' docker-compose.yml docker-compose.despliegue.yml | awk '{print $2}' | sort -u)
           test -n "$imagenes"
-          falla=0
           for imagen in $imagenes; do
-            echo "::group::$imagen"
-            docker run --rm -v "$PWD/.trivyignore.yaml:/trivyignore.yaml:ro" "$TRIVY" image --scanners vuln \
-              --severity CRITICAL --ignore-unfixed --exit-code 1 --no-progress --ignorefile /trivyignore.yaml \
-              "$imagen" || falla=1
-            echo "::endgroup::"
+            echo | tee -a "$GITHUB_STEP_SUMMARY"
+            # Informativo también si Trivy no puede correr (red, límite de ghcr.io): lo dice y sigue con la siguiente.
+            if ! docker run --rm "$TRIVY" image --scanners vuln --severity CRITICAL --exit-code 0 --no-progress -q \
+              --format json "$imagen" > trivy.json; then
+              echo "$imagen: Trivy no pudo revisarla" | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            n=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy.json)
+            echo "$imagen: $n críticas" | tee -a "$GITHUB_STEP_SUMMARY"
+            jq -r '.Results[]? | .Target as $t | .Vulnerabilities[]? |
+              "- \(.VulnerabilityID) (\(.Status)) \(.PkgName) \(.InstalledVersion) en \($t)"' trivy.json |
+              tee -a "$GITHUB_STEP_SUMMARY"
           done
-          exit "$falla"

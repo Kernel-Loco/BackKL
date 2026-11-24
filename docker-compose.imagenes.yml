@@ -10,12 +10,19 @@ services:
     image: ${LOWTIDE_API_IMAGEN:?Falta LOWTIDE_API_IMAGEN en .env, ver docs/cadena_de_suministro.md}
     build: !reset null
     pull_policy: missing
+    # La imagen del CI no trae las bases de DB-IP (datos/geo/ no va en git ni en ghcr.io): van montadas desde la carpeta
+    # de la VM, en el mismo lugar donde las copia el Dockerfile (cirdan/recolectores/geoip.py). Sin ellas las IP
+    # salen 'No disponible'.
+    volumes:
+      - ./datos/geo:/app/datos/geo:ro
 
   # Escaneos programados (RC-52): la misma imagen firmada que la API, solo con su profile.
   programador:
     image: ${LOWTIDE_API_IMAGEN:?Falta LOWTIDE_API_IMAGEN en .env, ver docs/cadena_de_suministro.md}
     build: !reset null
     pull_policy: missing
+    volumes:
+      - ./datos/geo:/app/datos/geo:ro
 
   demo-accounts:
     image: ${LOWTIDE_API_IMAGEN:?Falta LOWTIDE_API_IMAGEN en .env, ver docs/cadena_de_suministro.md}

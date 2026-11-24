@@ -104,9 +104,11 @@ def _start_session(response, conn, user, ip, via):
 
 
 def _mfa_required_kind(conn, user_id, role):
-    """Por qué una cuenta sin TOTP activo no puede entrar: 'operator' si está en platform_admins (027), 'admin' si su
-    rol es admin (Hecho cuando de RC-5) y None si puede entrar sin TOTP. Solo se llama con cuentas sin TOTP."""
-    if conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required', (user_id,)).fetchone()['required']:
+    """Por qué una cuenta sin TOTP activo no puede entrar: 'operator' si su rol es operator (consola del integrador,
+    #66, RC-126) o si está en platform_admins (027), 'admin' si su rol es admin (Hecho cuando de RC-5) y None si puede
+    entrar sin TOTP. Solo se llama con cuentas sin TOTP."""
+    if role == 'operator' or conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required',
+                                          (user_id,)).fetchone()['required']:
         return 'operator'
     return 'admin' if role == 'admin' else None
 
@@ -324,7 +326,8 @@ def login(body: LoginIn, request: Request, response: Response):
         if row['mfa_enabled']:  # se activó entre la búsqueda y aquí
             return {'mfa_required': True, 'mfa_token': sessions.create_mfa(
                 {'user_id': user_id, 'org_id': org, 'email': email, 'tag': sessions.password_tag(huella)})}
-        # Sin TOTP no entran el Admin (RC-5) ni el operador de la consola multiempresa (027): 403 sin sesión.
+        # Sin TOTP no entran el Admin (RC-5), una cuenta 'operator' de la consola del integrador (#66, RC-126, migración
+        # 033) ni el operador de la consola multiempresa (027): 403 sin sesión.
         mfa_setup_required = _mfa_required_kind(conn, user_id, row['role'])
         if mfa_setup_required:
             audit(conn, org, 'auth.%s_mfa_required' % mfa_setup_required, user_id, ip, 'user', user_id)
@@ -833,12 +836,12 @@ ENROLL_USER_SQL = ('SELECT u.role, u.email::text, u.password_hash, u.mfa_enabled
 
 def _enroll_row(conn, pending, lock=''):
     """La cuenta del alta, si todavía puede seguir: activa, en una empresa en trial o active, con la misma contraseña que
-    en /login, sin TOTP y fuera de platform_admins (el operador no se da de alta al entrar, H1). Si no, None."""
+    en /login, sin TOTP, sin el rol operator (RC-126) y fuera de platform_admins (el operador no se da de alta al entrar,
+    H1). Si no, None."""
     row = conn.execute(ENROLL_USER_SQL + lock, (pending['user_id'],)).fetchone()
     if not row or row['mfa_enabled'] or sessions.password_tag(row['password_hash']) != pending['tag']:
         return None
-    if conn.execute('SELECT public.platform_operator_requires_mfa(%s) AS required',
-                    (pending['user_id'],)).fetchone()['required']:
+    if _mfa_required_kind(conn, pending['user_id'], row['role']) == 'operator':
         return None
     return row
 
@@ -1291,9 +1294,12 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
         if not row:  # se desactivó la cuenta entre la búsqueda y aquí
             reason = 'inactive'
         elif not row['mfa_enabled'] and (kind := _mfa_required_kind(conn, user_id, row['role'])):
-            # Una passkey registrada sin TOTP no salta el TOTP obligatorio del Admin (RC-5) ni del operador (027). La
-            # firma era buena, así que no cuenta como fallo; el contador de la passkey no se toca.
+            # Una passkey registrada sin TOTP no salta el TOTP obligatorio del Admin (RC-5), del operator de la consola
+            # del integrador (#66, RC-126) ni del operador (027). La firma era buena, así que no cuenta como fallo; el
+            # contador de la passkey no se toca y el reto ya se gastó.
             reason = kind + '_mfa_required'
+            if kind == 'operator':
+                audit(conn, org, 'auth.operator_mfa_required', user_id, ip, 'user', user_id)
         # Solo si nadie la borró ni la usó con otro contador desde la búsqueda: si no, puede ser una respuesta repetida
         # o un autenticador clonado, y queda en la bitácora.
         elif not conn.execute('UPDATE webauthn_credentials SET sign_count = %s, backed_up = %s, last_used_at = now() '
@@ -1303,9 +1309,10 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
                                                    'email': row['email']}, ip, 'passkey')
-    if reason in ('admin_mfa_required', 'operator_mfa_required'):
-        detail = OPERATOR_MFA_REQUIRED if reason == 'operator_mfa_required' else ADMIN_MFA_PASSWORD
-        return JSONResponse({'detail': detail}, status_code=403,
+    if reason == 'operator_mfa_required':
+        raise HTTPException(403, OPERATOR_MFA_REQUIRED)
+    if reason == 'admin_mfa_required':
+        return JSONResponse({'detail': ADMIN_MFA_PASSWORD}, status_code=403,
                             background=BackgroundTask(_audit_passkey_login_failed, org, user_id, ip, reason))
     if reason:
         sessions.register_fail(email, ip)

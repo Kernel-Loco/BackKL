@@ -1,6 +1,7 @@
 """Pruebas automáticas de aislamiento por cliente y de la bitácora de Cirdan.
 
-Corren contra la base `cirdan` del contenedor `cirdan-pg16`, entrando como el rol
+Corren contra la base `cirdan` del compose desechable del paso 5 del README, nunca contra `cirdan-pg16`
+(pruebas/pila.py), entrando como el rol
 de la aplicación (`cirdan_app`, sin superusuario ni BYPASSRLS). Solo usan la
 biblioteca estándar de Python:
 
@@ -15,6 +16,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from pruebas.pila import exigir_desechable
+
 CONTAINER = os.environ.get('CIRDAN_TEST_DB_CONTAINER', 'cirdan-pg16')
 ACME = '20000000-0000-4000-8000-000000000001'
 BETA = '20000000-0000-4000-8000-000000000002'
@@ -22,6 +25,7 @@ BETA = '20000000-0000-4000-8000-000000000002'
 
 def psql(sql, user='cirdan_app', org=None):
     """Run SQL in the container; return (ok, stdout, stderr)."""
+    exigir_desechable()
     prefix = "SET app.current_org = '%s';\n" % org if org else ''
     proc = subprocess.run(
         ['docker', 'exec', '-i', CONTAINER, 'psql', '-U', user, '-d', 'cirdan',
@@ -403,7 +407,7 @@ class MapeoMarcos(unittest.TestCase):
         # 022 corre otra vez y el ROLLBACK lo deshace todo.
         semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '022_reglas_tls_sitio.sql').read_text(
             encoding='utf-8')
-        cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
+        cuerpo = '\n'.join(fila for fila in semilla.splitlines() if fila.strip() not in ('BEGIN;', 'COMMIT;'))
         tls = "('tls_certificate_invalid', 'tls_legacy_only')"
         juego = """
 UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
@@ -440,7 +444,7 @@ ROLLBACK;""" % (ACME, BETA, tls, tls))
         # ROLLBACK lo deshace todo.
         semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '023_regla_enlaces_nube_repos.sql'
                    ).read_text(encoding='utf-8')
-        cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
+        cuerpo = '\n'.join(fila for fila in semilla.splitlines() if fila.strip() not in ('BEGIN;', 'COMMIT;'))
         enlace ="('file_share_link_in_repo')"
         juego = """
 UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
@@ -475,7 +479,7 @@ ROLLBACK;""" % (ACME, BETA, enlace, enlace))
         # vez y el ROLLBACK lo deshace todo.
         semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas' / '024_regla_ia.sql').read_text(
             encoding='utf-8')
-        cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
+        cuerpo = '\n'.join(fila for fila in semilla.splitlines() if fila.strip() not in ('BEGIN;', 'COMMIT;'))
         juego = """
 UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
 WITH j AS (
@@ -516,7 +520,7 @@ ROLLBACK;""" % (ACME, BETA))
         # corre otra vez y el ROLLBACK lo deshace.
         semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas'
                    / '025_reglas_higiene_certificados.sql').read_text(encoding='utf-8')
-        cuerpo = '\n'.join(l for l in semilla.splitlines() if l.strip() not in ('BEGIN;', 'COMMIT;'))
+        cuerpo = '\n'.join(fila for fila in semilla.splitlines() if fila.strip() not in ('BEGIN;', 'COMMIT;'))
         codigos = "('cert_internal_name', 'cert_broad_wildcard', 'cert_new_issuer')"
         juego = """
 UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
