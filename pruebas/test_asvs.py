@@ -132,14 +132,25 @@ class ReporteAsvs(unittest.TestCase):
         self.assertEqual(en_pendientes, abiertos)
 
     def test_7_las_rutas_citadas_existen(self):
+        # Las de FrontKL solo se revisan con una copia de FrontKL en una rama que ya trae la página: el CI de BackKL no
+        # tiene ese repo, y una copia local puede estar en cualquier rama (RC-93 la encontró en una sin la página). La
+        # señal no es una de las rutas citadas: es que algún archivo de src/ traiga HUELLA_PUBLICA (hoy
+        # src/config/asvs.test.mjs). Así, si asvs.ts se mueve, su ruta citada falla en vez de apagar la revisión de
+        # las demás. Cuando no se revisan, cada ruta sale como omitida, no en verde. Si la huella de aquí cambia antes
+        # de copiarla a FrontKL, la copia local deja de dar la señal y las rutas salen omitidas hasta copiarla.
         frontkl = RAIZ.parent / 'FrontKL'
+        con_pagina = (frontkl / 'src').is_dir() and any(
+            HUELLA_PUBLICA in p.read_text(encoding='utf-8', errors='ignore')
+            for p in (frontkl / 'src').rglob('*') if p.is_file() and p.suffix in ('.ts', '.tsx', '.mjs', '.js'))
         for ruta in sorted(set(RUTA.findall(self.texto))):
-            with self.subTest(ruta=ruta):
-                if ruta.startswith('FrontKL/'):
-                    if not frontkl.is_dir():
-                        continue  # en el CI de BackKL no está el otro repo
+            if ruta.startswith('FrontKL/'):
+                with self.subTest(ruta=ruta):
+                    if not con_pagina:
+                        self.skipTest('sin una copia de FrontKL con la página ASVS junto a BackKL')
                     self.assertTrue((RAIZ.parent / ruta).exists(), ruta)
-                elif ruta.startswith(('asvs/', 'api_v1/', 'zap/')) or ruta == 'pruebas_zap.md':
+                continue
+            with self.subTest(ruta=ruta):
+                if ruta.startswith(('asvs/', 'api_v1/', 'zap/')) or ruta == 'pruebas_zap.md':
                     self.assertTrue((RAIZ / 'docs' / ruta).exists(), ruta)
                 else:
                     self.assertTrue((RAIZ / ruta).exists(), ruta)
