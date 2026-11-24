@@ -86,6 +86,65 @@ class PaqueteSeguro(unittest.TestCase):
             self.assertNotEqual(mal.returncode, 0)
 
 
+@unittest.skipUnless(os.name != 'nt' and shutil.which('bash') and shutil.which('findmnt'),
+                     'necesita bash y findmnt')
+class TemporalEnTmpfs(unittest.TestCase):
+    def test_respaldar_y_restaurar_usan_el_tmpfs_escribible(self):
+        temporal = '/run' if os.access('/run', os.W_OK) else '/run/lock'
+        if not os.access(temporal, os.W_OK):
+            self.skipTest('no hay carpeta temporal escribible en /run')
+        tipo = subprocess.run(['findmnt', '-n', '-o', 'FSTYPE', '--target', temporal],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        if tipo != 'tmpfs':
+            self.skipTest('la carpeta temporal no está en tmpfs')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raiz = Path(tmp)
+            binarios = raiz / 'bin'
+            binarios.mkdir()
+            for nombre in ('age', 'az', 'docker'):
+                (binarios / nombre).symlink_to('/bin/false')
+            registro = raiz / 'mktemp'
+            mktemp = binarios / 'mktemp'
+            mktemp.write_text('#!/bin/sh\nprintf "%s" "$2" > "$REGISTRO_MKTEMP"\nexit 1\n', encoding='ascii')
+            mktemp.chmod(0o755)
+            conf = raiz / 'respaldo.conf'
+            conf.write_text('CARPETA=%s\nRECEPTOR_AGE=age1%s\nSUBIR=0\n' % (raiz / 'salida', 'q' * 58),
+                            encoding='ascii')
+            conf.chmod(0o600)
+            identidad = raiz / 'identidad'
+            identidad.touch()
+            paquete = raiz / 'prueba.backup.age'
+            paquete.touch()
+            env = {'PATH': str(binarios) + os.pathsep + os.environ.get('PATH', ''),
+                   'REGISTRO_MKTEMP': str(registro), 'RESPALDO_CONF': str(conf),
+                   'AGE_IDENTIDAD': str(identidad)}
+            comandos = (
+                ['bash', str(RESPALDO / 'respaldar.sh')],
+                ['bash', str(RESPALDO / 'restaurar.sh'), str(paquete), 'db', 'nueva'],
+                ['bash', str(RESPALDO / 'restaurar_completo.sh'), str(paquete), 'db', 'api',
+                 'nueva', 'volumen', 'boveda', 'secreto'],
+            )
+            for comando in comandos:
+                with self.subTest(script=comando[1]):
+                    registro.unlink(missing_ok=True)
+                    resultado = correr(comando, env=env)
+                    self.assertNotEqual(resultado.returncode, 0)
+                    self.assertTrue(registro.exists(), resultado.stderr)
+                    self.assertTrue(registro.read_text().startswith(temporal + '/lowtide-'))
+
+            findmnt = binarios / 'findmnt'
+            findmnt.write_text('#!/bin/sh\nprintf "ext4\\n"\n', encoding='ascii')
+            findmnt.chmod(0o755)
+            for comando in comandos:
+                with self.subTest(script=comando[1], sistema='ext4'):
+                    registro.unlink(missing_ok=True)
+                    resultado = correr(comando, env=env)
+                    self.assertNotEqual(resultado.returncode, 0)
+                    self.assertIn('debe ser tmpfs', resultado.stderr)
+                    self.assertFalse(registro.exists())
+
+
 @unittest.skipUnless(shutil.which('bash') and shutil.which('age') and shutil.which('docker'),
                      'faltan bash, age o docker')
 @unittest.skipUnless(CONTENEDOR_BASE and CONTENEDOR_CARTAS,

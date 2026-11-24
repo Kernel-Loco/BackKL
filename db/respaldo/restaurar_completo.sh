@@ -30,17 +30,20 @@ case $base in cirdan|postgres|template0|template1) falla "no se restaura sobre $
 [[ $volumen =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] || falla "nombre de volumen inválido"
 [[ $boveda =~ ^[a-z0-9-]{3,24}$ ]] || falla "nombre de Key Vault inválido"
 [[ $secreto =~ ^[A-Za-z0-9-]{1,127}$ ]] || falla "nombre de secreto inválido"
-[ "$(findmnt -n -o FSTYPE --target /run 2>/dev/null)" = tmpfs ] || falla "/run debe ser tmpfs para proteger los temporales"
+temporal=/run
+[ -w "$temporal" ] || temporal=/run/lock
+[ "$(findmnt -n -o FSTYPE --target "$temporal" 2>/dev/null)" = tmpfs ] || falla "$temporal debe ser tmpfs para proteger los temporales"
 for herramienta in age python3 docker az; do command -v "$herramienta" >/dev/null || falla "falta $herramienta"; done
-python3 - "$respaldo" <<'PY' || falla "no hay espacio temporal suficiente en /run"
+python3 - "$respaldo" "$temporal" <<'PY' || falla "no hay espacio temporal suficiente en $temporal"
 import os
 import sys
-if os.path.getsize(sys.argv[1]) > os.statvfs('/run').f_bavail * os.statvfs('/run').f_frsize:
+espacio = os.statvfs(sys.argv[2])
+if os.path.getsize(sys.argv[1]) > espacio.f_bavail * espacio.f_frsize:
     raise SystemExit(1)
 PY
 
 directorio_script=$(cd -- "$(dirname -- "$0")" && pwd)
-trabajo=$(mktemp -d /run/lowtide-restaurar.XXXXXX)
+trabajo=$(mktemp -d "$temporal/lowtide-restaurar.XXXXXX")
 limpiar() { rm -rf -- "$trabajo"; }
 trap limpiar EXIT
 

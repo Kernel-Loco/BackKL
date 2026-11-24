@@ -61,7 +61,9 @@ if [ "$SUBIR" = 1 ]; then
 fi
 command -v age >/dev/null || falla "falta age (apt-get install age)"
 command -v python3 >/dev/null || falla "falta python3"
-[[ $(findmnt -n -o FSTYPE --target /run 2>/dev/null) == tmpfs ]] || falla "/run debe ser tmpfs para proteger los temporales"
+temporal=/run
+[ -w "$temporal" ] || temporal=/run/lock
+[[ $(findmnt -n -o FSTYPE --target "$temporal" 2>/dev/null) == tmpfs ]] || falla "$temporal debe ser tmpfs para proteger los temporales"
 # Archivos locales como máximo, aunque Azure lleve semanas sin recibir nada: 31, o 4 por día de retención.
 TOPE_LOCAL=$(( RETENCION * 4 > 31 ? RETENCION * 4 : 31 ))
 
@@ -80,7 +82,7 @@ final="$CARPETA/$nombre"
 parcial="$CARPETA/.$nombre.parcial"
 [ ! -e "$final" ] || falla "$final ya existe"
 
-trabajo=$(mktemp -d /run/lowtide-respaldo.XXXXXX)
+trabajo=$(mktemp -d "$temporal/lowtide-respaldo.XXXXXX")
 limpiar() {
   rm -f -- "$parcial"
   rm -rf -- "$trabajo"

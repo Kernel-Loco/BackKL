@@ -56,9 +56,11 @@ directorio_script=$(cd -- "$(dirname -- "$0")" && pwd)
 limpiar() { [ -z "$trabajo" ] || rm -rf -- "$trabajo"; }
 trap limpiar EXIT
 if [[ $respaldo == *.backup.age ]]; then
-  [ "$(findmnt -n -o FSTYPE --target /run 2>/dev/null)" = tmpfs ] || falla "/run debe ser tmpfs para proteger los temporales"
+  temporal=/run
+  [ -w "$temporal" ] || temporal=/run/lock
+  [ "$(findmnt -n -o FSTYPE --target "$temporal" 2>/dev/null)" = tmpfs ] || falla "$temporal debe ser tmpfs para proteger los temporales"
   command -v python3 >/dev/null || falla "falta python3"
-  trabajo=$(mktemp -d /run/lowtide-restaurar.XXXXXX)
+  trabajo=$(mktemp -d "$temporal/lowtide-restaurar.XXXXXX")
   descifrar "$respaldo" > "$trabajo/paquete.tar" || falla "no se pudo descifrar el paquete"
   mkdir -m 700 "$trabajo/cifrado"
   python3 "$directorio_script/paquete.py" extraer "$trabajo/paquete.tar" "$trabajo/cifrado" \

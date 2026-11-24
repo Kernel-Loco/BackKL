@@ -110,11 +110,12 @@ class Despliegue(unittest.TestCase):
     def test_4b_el_volumen_de_cartas_se_puede_cambiar_al_restaurar(self):
         carta = self.svc['api']['volumes'][0]
         self.assertEqual(carta['type'], 'volume')
-        self.assertEqual(carta['source'], 'prueba-despliegue_cirdan-cartas')
+        self.assertIn(carta['source'], ('cirdan-cartas', 'prueba-despliegue_cirdan-cartas'))
+        self.assertEqual(self.cfg['volumes']['cirdan-cartas']['name'], 'prueba-despliegue_cirdan-cartas')
         rc, salida = _config(dict(ENV_FALSO, CARTA_VOLUME_NAME='cartas-restauradas'))
         self.assertEqual(rc, 0, salida[-500:])
         cfg = json.loads(salida)
-        self.assertEqual(cfg['services']['api']['volumes'][0]['source'], 'cartas-restauradas')
+        self.assertIn(cfg['services']['api']['volumes'][0]['source'], ('cirdan-cartas', 'cartas-restauradas'))
         self.assertEqual(cfg['volumes']['cirdan-cartas']['name'], 'cartas-restauradas')
 
     def test_5_ningun_puerto_publicado_en_el_host(self):
