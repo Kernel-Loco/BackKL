@@ -65,16 +65,24 @@ TOTAL_SQL = 'SELECT count(*) AS total FROM audit_log WHERE organization_id = app
 
 MOTIVOS = ('chain_seq', 'prev_hash', 'row_hash')
 
+OPERADOR = 'Operador del integrador'
+
 
 def actor(r):
     """Quién lo hizo, como texto (AuditEntry.actor del portal): el correo del usuario o el nombre de la llave.
 
     El superadmin en una empresa ajena ('platform') no lleva correo (RC-332): el portal lo muestra como superadmin de
-    LowTide y su id está en details.platform_user_id. El sistema tampoco lleva actor."""
+    LowTide y su id está en details.platform_user_id. El sistema tampoco lleva actor.
+
+    El operador de la empresa integradora ('operator', RC-126) tampoco lleva correo: sale como 'Operador del
+    integrador' (el portal muestra "LowTide" cuando no hay actor, y no fue LowTide) y sus ids están en
+    details.operator_user_id y details.operator_organization_id."""
     if r['actor_type'] == 'user':
         return r['user_email']
     if r['actor_type'] == 'api_key':
         return r['key_name']
+    if r['actor_type'] == 'operator':
+        return OPERADOR
     return None
 
 

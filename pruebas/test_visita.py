@@ -7,6 +7,7 @@ cambiados: nada sale a la red.
 Uso, desde la raíz del repo:
   python -m unittest pruebas/test_visita.py
 """
+import contextlib
 import email.message
 import importlib
 import json
@@ -254,6 +255,57 @@ class Peticion(unittest.TestCase):
         for modulo in ('crtsh', 'github', 'shodan', 'rdap', 'visita'):
             self.assertEqual(importlib.import_module('cirdan.recolectores.' + modulo).AGENTE, contrato.AGENTE, modulo)
 
+    def test_1b_user_agent_con_la_version_del_build_y_la_pagina_de_lowtide(self):
+        # Comentario 10281 punto 1: la versión real del build y una liga a la página que dice qué es LowTide y a quién
+        # escribir. La consulta del TXT (orquestador/txt.py) usa la misma constante y no tiene copia propia.
+        # El orquestador pide la base al importarse: txt.py se revisa por su texto (test_txt.py prueba la petición).
+        from cirdan import version
+        self.assertEqual(contrato.AGENTE, 'lowtide-osint/%s (+https://lowtidesec.com/seguridad)' % version.VERSION)
+        self.assertRegex(version.VERSION, r'^[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-rc)?$')
+        raiz = Path(__file__).resolve().parent.parent
+        txt = (raiz / 'cirdan' / 'orquestador' / 'txt.py').read_text(encoding='utf-8')
+        self.assertNotIn('AGENTE =', txt)
+        self.assertNotIn('lowtide-osint', txt)
+        self.assertIn("'User-Agent': contrato.AGENTE", txt)
+        self.assertIn('version=VERSION,', (raiz / 'cirdan' / 'api' / 'main.py').read_text(encoding='utf-8'))
+
+    def test_1c_la_seccion_9_de_la_carta_trae_el_user_agent_y_el_ritmo(self):
+        # Comentario 10281 puntos 1 y 2: el User-Agent y el ritmo de las actividades 6, 8 y 9 se escriben en la sección
+        # 9. Los números salen de las constantes: si cambian aquí, la carta tiene que cambiar.
+        from cirdan.recolectores import api_docs, identidad
+        raiz = Path(__file__).resolve().parent.parent
+        carta = (raiz / 'docs' / 'plantilla_carta_autorizacion.md').read_text(encoding='utf-8')
+        seccion = carta.split('## 9. ', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('`lowtide-osint/<versión> (+%s)`' % contrato.PAGINA, seccion)
+        self.assertIn('(hoy `%s`)' % contrato.AGENTE, seccion)
+        self.assertIn('(actividades 6, 8 y 9). LowTide hace una petición a la vez por host, también entre análisis '
+                      'distintos que corran al mismo tiempo', seccion)
+        self.assertEqual((visita.PAUSA_SITIO, api_docs.PAUSA_RUTA), (1, 1))
+        self.assertEqual(seccion.count('una pausa de 1 segundo antes de cada petición, salvo la primera de la '
+                                       'corrida'), 3)
+        # Actividad 6 (web) y actividad 8 (identity, que visita con visita._recorrer): mismos nombres y redirecciones.
+        self.assertEqual((identidad.MAX_SITIOS, identidad.MAX_REDIRECCIONES), (visita.MAX_SITIOS, visita.MAX_REDIRECCIONES))
+        self.assertEqual(seccion.count('hasta %d nombres del dominio contando la raíz, y por cada nombre hasta %d '
+                                       'redirecciones dentro del dominio' % (visita.MAX_SITIOS, visita.MAX_REDIRECCIONES)), 2)
+        por_corrida = visita.MAX_SITIOS * (1 + visita.MAX_REDIRECCIONES)
+        self.assertEqual(seccion.count('El tope es de %d peticiones a los sitios del dominio por corrida' % por_corrida), 2)
+        self.assertEqual(api_docs.MAX_SITIOS, visita.MAX_SITIOS)
+        self.assertIn('sus %d rutas fijas de documentación' % len(api_docs.RUTAS), seccion)
+        rutas = api_docs.MAX_SITIOS * len(api_docs.RUTAS)
+        self.assertIn('El tope es de %d peticiones a los sitios del dominio por corrida' % rutas, seccion)
+        # Cada fuente que falla entera se vuelve a correr a 1, 5 y 25 minutos (contrato.siguiente_estado): el tope por
+        # análisis es el de una corrida por el número de corridas (RC-46, H3 de la revisión).
+        corridas = contrato.MAX_INTENTO + 1
+        esperas = [int(e.total_seconds() // 60) for e in contrato.ESPERAS_REINTENTO]
+        self.assertEqual((corridas, esperas), (4, [1, 5, 25]))
+        self.assertIn('la vuelve a correr hasta %d veces, a los 1, 5 y 25 minutos' % contrato.MAX_INTENTO, seccion)
+        self.assertIn('el tope por análisis es de %d peticiones en la actividad 6, %d en la 8 y %d en la 9'
+                      % (corridas * por_corrida, corridas * por_corrida, corridas * rutas), seccion)
+        # El 80 solo cuando el 443 no conectó (visita._recorrer y _http), sin seguir sus redirecciones.
+        self.assertIn('pide una vez http://<nombre>/ en el puerto 80 y no sigue sus redirecciones', seccion)
+        self.assertNotIn('no reintenta', seccion)
+        self.assertNotIn('github.com/Kernel-Loco', carta)
+
     def test_2_un_403_es_una_respuesta_y_el_cuerpo_se_corta(self):
         def abrir(req, plazo, cronometro, *_):
             raise urllib.error.HTTPError(req.full_url, 403, 'Forbidden', email.message.Message(),
@@ -500,7 +552,8 @@ class Http(unittest.TestCase):
                                                                                          'vulnerabilities': []}))
         otra = dict(pagina_reservas(), cabeceras=[['Server', 'nginx/1.26.2'], ['Content-Type', 'text/html']])
         dos, _, _ = correr({self.RAIZ_HTTPS: otra}, apis=Apis(eol=404, nvd={'totalResults': 0, 'vulnerabilities': []}))
-        huella = lambda r: [h.huella for h in r.hallazgos if h.codigo == 'server_version_disclosed']
+        def huella(r):
+            return [h.huella for h in r.hallazgos if h.codigo == 'server_version_disclosed']
         self.assertEqual(huella(uno), huella(dos))
         self.assertEqual(len(huella(uno)), 1)
 
@@ -755,7 +808,7 @@ class Base(unittest.TestCase):
         texto = MIGRACION.read_text(encoding='utf-8')
         columnas = [c for c in contrato.COLUMNAS_CVES if c != 'cve_id']
         self.assertIn('GRANT INSERT (%s) ON cves TO cirdan_app;' % ', '.join(columnas), texto)
-        sin_comentarios = '\n'.join(l.split('--', 1)[0] for l in texto.splitlines())
+        sin_comentarios = '\n'.join(linea.split('--', 1)[0] for linea in texto.splitlines())
         self.assertNotIn('UPDATE', sin_comentarios.upper().replace('ACTUALIZA', ''))
         self.assertIn("SET client_encoding = 'UTF8';", texto)
         numeros = sorted(int(p.name[:3]) for p in MIGRACION.parent.glob('[0-9][0-9][0-9]_*.sql'))
@@ -918,7 +971,8 @@ class Arreglos(unittest.TestCase):
                 if self.falla:
                     raise contrato.FuenteNoResponde('caída')
                 return {}
-        armar = lambda e: (e, 'https://x/' + e, None, False)
+        def armar(e):
+            return (e, 'https://x/' + e, None, False)
         res, parcial = contrato.Resultado(DOMINIO, 'web'), []
         caida = Cliente(1000, True)
         self.assertEqual(visita._consultar_api(res, caida, ['a', 'b', 'c'], parcial, 6, 'x', armar), {})
@@ -1709,6 +1763,194 @@ class Portada(unittest.TestCase):
             with self.subTest(cuerpo=cuerpo[:20]):
                 self.assertEqual(portada.revisar(200, cuerpo), [])
         self.assertEqual(portada.zonas('<svg/><title>Index of /</title>')['titulo'], 'Index of /')
+
+
+class TurnoHost(unittest.TestCase):
+    """Una petición a la vez por host también entre escaneos (comentario 10281.2 de RC-46, turno.py): cada petición a un
+    sitio de las actividades 6 (web), 8 (identity) y 9 (api_docs) va dentro del turno de su host. El candado real es de
+    PostgreSQL (orquestador._turno_host) y se prueba con la base en test_orquestador.py. Aquí va uno simulado."""
+
+    def setUp(self):
+        from cirdan.recolectores import api_docs, identidad, turno
+        self.api_docs, self.identidad, self.turno = api_docs, identidad, turno
+        self.eventos, self.reloj = [], [0.0]
+
+    def visitar(self, url, timeout):
+        self.eventos.append(('pide', url, timeout))
+        return {'rechazada': True}
+
+    @contextlib.contextmanager
+    def candado(self, host, espera):
+        self.eventos.append(('entra', host, espera))
+        try:
+            yield
+        finally:
+            self.eventos.append(('sale', host))
+
+    def clientes(self):
+        comun = dict(modo='vivo', visitar=self.visitar, cronometro=lambda: self.reloj[0], dormir=self.dormir)
+        return {
+            'web': (visita.ClienteWeb(carpeta=visita.carpeta_de(DOMINIO), **comun),
+                    lambda c, host: c.sitio('https://%s/' % host)),
+            'identity': (self.identidad.ClienteIdentidad(carpeta=self.identidad.carpeta_de(DOMINIO), **comun),
+                         lambda c, host: c.sitio('https://%s/' % host)),
+            'api_docs': (self.api_docs.ClienteApiDocs(carpeta=self.api_docs.carpeta_de(DOMINIO), **comun),
+                         lambda c, host: c.ruta(host, self.api_docs.RUTAS[0])),
+        }
+
+    def dormir(self, segundos):
+        self.eventos.append(('pausa', segundos))
+
+    def test_1_sin_candado_la_peticion_sale_sin_esperar(self):
+        # La línea de comandos y las pruebas sin base no ponen candado: turno() no espera nada.
+        self.assertIsNone(self.turno._CANDADO.get())
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente):
+                self.eventos.clear()
+                pedir(cliente, 'www.' + DOMINIO)
+                self.assertEqual([e[0] for e in self.eventos], ['pide'])
+
+    def test_2_cada_peticion_va_dentro_del_turno_de_su_host(self):
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente), self.turno.con_candado(self.candado):
+                self.eventos.clear()
+                pedir(cliente, 'WWW.' + DOMINIO.upper())
+                pedir(cliente, 'blog.' + DOMINIO)
+                host1, host2 = 'www.' + DOMINIO, 'blog.' + DOMINIO
+                self.assertEqual([e[:2] for e in self.eventos],
+                                 [('entra', host1), ('pide', self.eventos[1][1]), ('sale', host1), ('pausa', 1),
+                                  ('entra', host2), ('pide', self.eventos[5][1]), ('sale', host2)])
+                # La pausa del ritmo fijo va fuera del turno: el host no queda apartado mientras duerme.
+                self.assertEqual(urlsplit(self.eventos[1][1]).hostname, host1)
+                # La espera es lo que le queda a la corrida, menos lo que necesita la petición.
+                self.assertEqual(self.eventos[0][2], cliente.restante() - shodan.MIN_INTENTO)
+        self.assertIsNone(self.turno._CANDADO.get(), 'con_candado() no quitó el candado al salir')
+
+    def test_3_sin_turno_no_sale_la_peticion(self):
+        @contextlib.contextmanager
+        def ocupado(host, espera):
+            raise self.turno.SinTurno('otro escaneo tuvo el turno de %s' % host)
+            yield
+        self.assertTrue(issubclass(self.turno.SinTurno, shodan.SinTiempo), 'lo que falta tiene que quedar sin revisar')
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente), self.turno.con_candado(ocupado):
+                self.eventos.clear()
+                with self.assertRaises(shodan.SinTiempo):
+                    pedir(cliente, 'www.' + DOMINIO)
+                self.assertEqual(self.eventos, [])
+                self.assertEqual((cliente.pedidas, cliente.consultas), (0, 0))
+
+    def test_4_el_plazo_de_la_peticion_es_lo_que_queda_tras_esperar_el_turno(self):
+        def tardado(segundos):
+            @contextlib.contextmanager
+            def candado(host, espera):
+                self.reloj[0] += segundos   # otro escaneo tuvo el host todo ese tiempo
+                yield
+            return candado
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente):
+                self.reloj[0], self.eventos[:] = 0.0, []
+                cliente.restante()   # arranca el reloj de la corrida
+                with self.turno.con_candado(tardado(cliente.restante() - 3)):
+                    pedir(cliente, 'www.' + DOMINIO)
+                self.assertEqual([e[0] for e in self.eventos], ['pide'])
+                self.assertAlmostEqual(self.eventos[0][2], 3)
+                # Si la espera se comió la corrida, la petición ya no sale.
+                with self.turno.con_candado(tardado(cliente.restante())), self.assertRaises(shodan.SinTiempo):
+                    pedir(cliente, 'blog.' + DOMINIO)
+                self.assertEqual([e[0] for e in self.eventos], ['pide', 'pausa'])
+
+    def test_5_toda_peticion_a_un_sitio_sale_dentro_del_turno(self):
+        # Por el texto: la única llamada a la función que pide al sitio está dentro de `with turno.turno(`, en el mismo
+        # hilo. identidad.py no pide por su cuenta: pasa por visita.ClienteWeb.sitio.
+        raiz = Path(__file__).resolve().parent.parent / 'cirdan' / 'recolectores'
+        for archivo in ('visita.py', 'api_docs.py'):
+            with self.subTest(archivo=archivo):
+                lineas = (raiz / archivo).read_text(encoding='utf-8').splitlines()
+                llamadas = [i for i, linea in enumerate(lineas) if '(self.visitar or _visitar)(' in linea]
+                self.assertEqual(len(llamadas), 1)
+                bloque = lineas[llamadas[0] - 9:llamadas[0]]
+                con = [linea for linea in bloque if linea.strip().startswith('with turno.turno(')]
+                self.assertEqual(len(con), 1, archivo)
+                def sangria(linea):
+                    return len(linea) - len(linea.lstrip())
+                # La llamada va más adentro que el with y ninguna línea entre los dos sale del bloque
+                entre = bloque[bloque.index(con[0]) + 1:] + [lineas[llamadas[0]]]
+                self.assertTrue(all(sangria(linea) > sangria(con[0]) for linea in entre if linea.strip()), archivo)
+        identidad = (raiz / 'identidad.py').read_text(encoding='utf-8')
+        self.assertNotIn('self.visitar(', identidad)
+        self.assertNotIn('transporte.visitar(', identidad)
+
+    def entradas(self, falla):
+        """Un candado que deja pasar la primera petición y a la segunda lanza `falla`."""
+        vistas = []
+
+        @contextlib.contextmanager
+        def candado(host, espera):
+            vistas.append(host)
+            if len(vistas) > 1:
+                raise falla
+            yield
+        return candado
+
+    def test_6_sin_turno_para_el_80_el_sitio_queda_sin_revisar_y_no_como_sin_https(self):
+        # El 443 rechaza y el 80 no consigue su turno: no se pidió, así que el sitio no se da por revisado (tiempos-1).
+        for falla in (self.turno.SinTurno('otro escaneo tuvo el turno'), self.turno.SinBase('la base no respondió')):
+            with self.subTest(falla=type(falla).__name__):
+                self.eventos.clear()
+                cliente = visita.ClienteWeb(modo='vivo', carpeta=visita.carpeta_de(DOMINIO), visitar=self.visitar,
+                                            cronometro=lambda: self.reloj[0], dormir=self.dormir)
+                with self.turno.con_candado(self.entradas(falla)), self.assertRaises(type(falla)):
+                    visita._recorrer(cliente, DOMINIO, 'www.' + DOMINIO)
+                self.assertEqual([e[1] for e in self.eventos if e[0] == 'pide'], ['https://www.%s/' % DOMINIO])
+
+    def test_7_sin_base_la_fuente_falla_y_no_se_toma_por_falta_de_tiempo(self):
+        # SinBase no es un SinTiempo: sale del recolector y ejecutar() deja la fuente en 'failed', que se reintenta.
+        self.assertFalse(issubclass(self.turno.SinBase, shodan.SinTiempo))
+
+        @contextlib.contextmanager
+        def sin_base(host, espera):
+            raise self.turno.SinBase('la base no respondió al pedir el turno de %s (OperationalError)' % host)
+            yield
+        for fuente, (cliente, pedir) in self.clientes().items():
+            with self.subTest(fuente=fuente), self.turno.con_candado(sin_base):
+                self.eventos.clear()
+                with self.assertRaises(self.turno.SinBase):
+                    pedir(cliente, 'www.' + DOMINIO)
+                self.assertEqual(self.eventos, [])
+        # identity lo vuelve FuenteNoResponde con su texto, que solo trae el host y el tipo de error
+        cliente = self.identidad.ClienteIdentidad(carpeta=self.identidad.carpeta_de(DOMINIO), modo='vivo',
+                                                  visitar=self.visitar, cronometro=lambda: self.reloj[0],
+                                                  dormir=self.dormir)
+        falla = self.turno.SinBase('la base no respondió al pedir el turno de www.%s (OperationalError)' % DOMINIO)
+        with mock.patch.object(self.identidad, '_revisar', side_effect=falla), \
+                self.assertRaises(contrato.FuenteNoResponde) as error:
+            self.identidad.recolectar(DOMINIO, cliente)
+        self.assertEqual(str(error.exception), 'identity: ' + str(falla))
+
+    def test_8_la_linea_de_comandos_pone_el_turno_en_vivo_y_al_grabar(self):
+        # La sección 9 de la carta vale también para una corrida del equipo (tiempos-6): mismo candado que los análisis.
+        vistos = []
+
+        def corre(*a, **k):
+            vistos.append(self.turno._CANDADO.get())
+            return contrato.Resultado(DOMINIO, 'x', estado='failed', error='simulado')
+        with mock.patch.dict('os.environ', {'DOMINIOS_EN_VIVO': DOMINIO}), mock.patch('sys.stdout'), \
+                mock.patch('sys.stderr'), mock.patch.object(visita.contrato, 'ejecutar', corre), \
+                mock.patch.object(self.api_docs.contrato, 'ejecutar', corre), \
+                mock.patch.object(self.api_docs, '_fuente_cerrada', return_value=None), \
+                mock.patch.object(self.identidad, 'recolectar', corre), \
+                mock.patch.object(self.identidad, 'crear_cliente', lambda *a: mock.Mock(consultas=0)), \
+                mock.patch.object(self.identidad.github, '_en_vivo_permitido', lambda d: True):
+            for nombre, main, extra in (('web', visita._main, {}), ('identity', self.identidad._main, {}),
+                                        ('api_docs', self.api_docs._main, {'hoy': self.api_docs.VIGENTE_DESDE})):
+                for argv, candado in (([DOMINIO], self.turno._de_la_base), ([DOMINIO, '--grabar'], self.turno._de_la_base),
+                                      ([DOMINIO, '--reproducir'], None)):
+                    with self.subTest(fuente=nombre, argv=argv):
+                        vistos.clear()
+                        main(argv, **extra)
+                        self.assertEqual(vistos, [candado])
+                        self.assertIsNone(self.turno._CANDADO.get())
 
 
 if __name__ == '__main__':

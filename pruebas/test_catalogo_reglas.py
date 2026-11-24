@@ -156,6 +156,7 @@ HUELLAS_DB = {
     'db/migraciones/030_escaneos_programados.sql': '86e4b335aee76b37c919219791c2bd21fbbaa1d2452b802efd5d382e4fd6a911',
     'db/migraciones/031_solicitudes_de_firma.sql': '5297baf5048d8e85774677e2030b0c5bd927813aebca8d2073c95bff9e411a4b',
     'db/migraciones/032_llave_fuentes.sql': '3b8cbb759b3023c7a2d98b972eb8959a970e805f5b8fbfcb3aa33c8b5150a6be',
+    'db/migraciones/033_delegaciones_operador.sql': '7c0f88eed859feba24107b269f39026b7ef499068e92fc6c25eaad504ca2663c',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',

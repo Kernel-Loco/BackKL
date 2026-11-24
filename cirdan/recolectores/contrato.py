@@ -31,6 +31,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from cirdan.version import VERSION
+
 CARPETA_GRABADAS = Path(__file__).resolve().parent / 'respuestas_grabadas'   # dentro del paquete, viaja con el código
 MODOS = ('vivo', 'grabar', 'reproducir')
 ESTADOS = ('succeeded', 'failed')                                                    # scan_source_runs.status final de una corrida
@@ -44,8 +46,11 @@ ESPERAS_REINTENTO = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minut
 SIN_GRABACION = 'no hay respuesta grabada para '
 MARCA = '.grabacion'                      # inicio de la grabación en curso, dentro de la carpeta del dominio
 # El User-Agent de toda petición de LowTide, el que nombra la sección 9 de la carta (docs/plantilla_carta_autorizacion.md)
-# para que el cliente lo reconozca en sus registros. Uno solo para todas las fuentes y la visita web (#18, RC-46).
-AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'
+# para que el cliente lo reconozca en sus registros. Uno solo para todas las fuentes, la visita web y la consulta del
+# TXT (cirdan/orquestador/txt.py) (#18, RC-46). Lleva la versión del build (cirdan/version.py) y la liga a la página
+# de LowTide que dice qué es y a quién escribir (sección 'Tráfico de LowTide' de /seguridad en FrontKL).
+PAGINA = 'https://lowtidesec.com/seguridad'
+AGENTE = 'lowtide-osint/%s (+%s)' % (VERSION, PAGINA)
 NOMBRE_VALIDO = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
 CODIGO_VALIDO = re.compile(r'^[a-z][a-z0-9_]{1,62}$')
 HUELLA_VALIDA = re.compile(r'^[0-9a-f]{64}$')

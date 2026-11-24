@@ -64,7 +64,7 @@ from datetime import datetime, timezone
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import borde, certspotter, github, shodan, transporte, visita
+from cirdan.recolectores import borde, certspotter, github, shodan, transporte, turno, visita
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Hallazgo, Resultado, SinGrabacion,
                                           en_alcance_nombre)
@@ -851,6 +851,8 @@ def recolectar(dominio, cliente=None, ahora=None, propios=()):
         _revisar(res, cliente, dominio, ahora or datetime.now(timezone.utc))
     except FuenteNoResponde:
         raise
+    except turno.SinBase as e:   # su texto solo trae el host y el tipo de error: la fuente queda en 'failed'
+        raise FuenteNoResponde(PREFIJO + str(e)) from None
     except Exception as e:   # nunca el texto de la excepción: puede traer un correo o un pedazo de la fuente
         raise FuenteNoResponde(PREFIJO + 'falla inesperada (%s)' % type(e).__name__) from None
     finally:
@@ -1311,7 +1313,8 @@ def _main(argv=None):
                 'dominio. Usa --reproducir' % dominio)
     cliente = crear_cliente(modo, dominio)
     try:
-        res = recolectar(dominio, cliente)
+        with turno.con_candado(turno.de_la_linea(modo)):   # el mismo turno por host que los análisis
+            res = recolectar(dominio, cliente)
     except FuenteNoResponde as e:
         res = Resultado(dominio, FUENTE, estado='failed', consultas=cliente.consultas, error=str(e))
     if a.json:

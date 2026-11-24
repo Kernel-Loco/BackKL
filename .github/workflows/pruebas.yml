@@ -106,7 +106,7 @@ jobs:
         run: >-
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
           pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_bitacora.py pruebas/test_bitacora_descargas.py pruebas/test_inventario_activos.py pruebas/test_llaves_api.py
-          pruebas/test_superadmin.py
+          pruebas/test_superadmin.py pruebas/test_operador.py
           pruebas/test_respaldo.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
@@ -141,6 +141,7 @@ jobs:
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
           pruebas/test_contrasenas_comunes.py pruebas/test_identidad.py pruebas/test_hibp.py
           pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_plan_zap.py pruebas/test_reto_hackeo.py pruebas/test_pruebas_usuarios.py pruebas/test_asvs.py pruebas/test_siem.py pruebas/test_despliegue.py
+          pruebas/test_reporte_tecnico.py
           pruebas/test_ci.py pruebas/test_cadena_suministro.py pruebas/test_terraform.py pruebas/test_alcance_carta.py
 
       # #28 (RC-63): el enlace al correo de punta a punta en otro compose, aislado y sin red, con Resend simulado,

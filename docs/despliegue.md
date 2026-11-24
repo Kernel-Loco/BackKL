@@ -215,6 +215,13 @@ Nunca se crea otra versión del secreto `password-hash-key` sin seguir estos pas
 
 En desarrollo y en el plan B es lo mismo con `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, sin Key Vault, y `docker compose exec api` como en la VM.
 
+## TOTP obligatorio para el Admin (RC-5)
+
+El TOTP del Admin se revisa al crear la sesión, no en cada petición. Las sesiones de un Admin sin TOTP abiertas antes de desplegar RC-5 seguirían vivas hasta 8 h, así que se cierran al desplegar (H6 de la revisión de RC-5):
+
+1. (VM) Después del `up -d --build`, listar los Admins activos sin TOTP: `docker exec cirdan-pg16 psql -U postgres -d cirdan -Atc "SELECT id FROM users WHERE role = 'admin' AND is_active AND (mfa_enabled_at IS NULL OR totp_secret_enc IS NULL)"`.
+2. (VM) Por cada id, cerrar sus sesiones: `docker compose exec api python -c "from cirdan.auth import sessions; sessions.delete_others('<id>', None)"`. Sin filas en el paso 1 no hay nada que cerrar. En su siguiente `/login` reciben el 403 con el QR.
+
 ## Escaneos programados (RC-52)
 
 El servicio `programador` vuelve a escanear cada dominio autorizado según el plan de su empresa (`plans.scan_interval`: Starter cada 7 días, Business y Enterprise cada día). Usa la misma imagen y el mismo rol de la base que la API, sin puertos y sin llegar a IMDS. Va con profile: sin `COMPOSE_PROFILES`, `docker compose up -d` no lo enciende. Al encenderlo salen en el acto los dominios con `next_scan_at` vacío o vencido, así que se enciende con el OK de quien administra la VM.
@@ -376,7 +383,7 @@ En cada ventana de prueba:
 
 - Al abrir, `docker compose up -d`. Se anotan la hora y los minutos hasta que `https://pruebas.lowtidesec.com/login` respondió 200.
 - La prueba de punta a punta: login con MFA, ver un dominio y cerrar sesión, sin 403. La respuesta del login trae `Set-Cookie: lt_session` con `Secure` (RC-286). Un login con una X-Forwarded-For inventada cuenta el fallo con la IP real, y 20 fallos desde una IP no bloquean el login desde otra.
-- Esas dos pruebas de fallos van desde un navegador, con correos inventados, no con curl. El captcha se revisa antes de contar el fallo (`cirdan/auth/routes.py:221`): sin resolverlo, curl recibe 400 y el contador no sube. La X-Forwarded-For inventada se agrega a cada `POST /auth/login` que manda la página. El contador de cada IP es `login:fail:ip:<ip>` en Valkey (una IPv6 cuenta por su /64) y vence 15 min después del primer fallo (`LOCK_SECONDS`, `cirdan/auth/sessions.py:37`), así que los fallos van seguidos y se lee en seguida: `docker compose exec valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "login:fail:ip:*"'` lista las IP que contaron. El mismo comando con `get login:fail:ip:<ip>` en lugar de `--scan --pattern ...` da cuántos fallos lleva esa IP.
+- Esas dos pruebas de fallos van desde un navegador, con correos inventados, no con curl. El captcha se revisa antes de contar el fallo (`cirdan/auth/routes.py:221`): sin resolverlo, curl recibe 401 y el contador no sube. La X-Forwarded-For inventada se agrega a cada `POST /auth/login` que manda la página. El contador de cada IP es `login:fail:ip:<ip>` en Valkey (una IPv6 cuenta por su /64) y vence 15 min después del primer fallo (`LOCK_SECONDS`, `cirdan/auth/sessions.py:37`), así que los fallos van seguidos y se lee en seguida: `docker compose exec valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "login:fail:ip:*"'` lista las IP que contaron. El mismo comando con `get login:fail:ip:<ip>` en lugar de `--scan --pattern ...` da cuántos fallos lleva esa IP.
 - Por este túnel no va ninguna prueba activa. ZAP activo, ASVS y el pentest van contra la VM por `lowtidesec.com`, con una cuenta de prueba que da de alta Ernesto. Cómo se le abre paso al escáner en Cloudflare durante la ventana y cómo se cierra después va en RC-89.
 - Al cerrar, `docker compose stop` (la base se queda) y se anota la hora. `docker inspect -f '{{.State.StartedAt}} {{.State.FinishedAt}}' lowtide-pruebas-cloudflared-1` da las dos horas del túnel en UTC. Con `restart: unless-stopped`, un contenedor detenido a mano no vuelve a arrancar al reiniciar la PC. Uno que no se detuvo sí: si la PC se apaga o se reinicia a mitad de una ventana, Docker Desktop vuelve a levantar el túnel. Por eso el `stop` va antes de apagar, y al prender la PC fuera de una ventana se revisa `docker compose ps`. Si cloudflared quedó arriba, se detiene y se anota el rato que estuvo publicado.
 - Las horas de cada ventana van en un comentario de RC-277.
