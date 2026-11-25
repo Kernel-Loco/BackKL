@@ -167,7 +167,7 @@ SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
   FROM domains d
   LEFT JOIN LATERAL (SELECT * FROM domain_authorizations x WHERE x.domain_id = d.id
                       ORDER BY (x.revoked_at IS NULL AND current_date BETWEEN x.valid_from AND x.valid_until) DESC,
-                               x.valid_until DESC LIMIT 1) a ON true
+                               x.created_at DESC, x.valid_until DESC LIMIT 1) a ON true
   LEFT JOIN LATERAL (SELECT v.result, v.checked_at FROM dns_txt_verifications v
                       WHERE v.domain_id = d.id ORDER BY v.checked_at DESC LIMIT 1) t ON true
   LEFT JOIN LATERAL (SELECT ds.score, rs.band_medium_from, rs.band_high_from, rs.band_critical_from FROM domain_scores ds

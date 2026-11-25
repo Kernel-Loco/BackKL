@@ -217,13 +217,15 @@ def _motivos_previos(conn, domain):
         motivos.append('domain_removed')
     vigente = conn.execute(
         'SELECT id FROM domain_authorizations WHERE domain_id = %s AND revoked_at IS NULL '
-        'AND current_date BETWEEN valid_from AND valid_until ORDER BY valid_until DESC LIMIT 1',
+        'AND current_date BETWEEN valid_from AND valid_until ORDER BY created_at DESC, valid_until DESC LIMIT 1',
         (domain['id'],)).fetchone()
     if vigente:
         return motivos, vigente['id']
+    # La última carta que se cargó (RC-272): una carta nueva revoca las anteriores, así que si vence antes que la que
+    # reemplazó, el motivo es authorization_expired y no el authorization_revoked de la reemplazada.
     ultima = conn.execute(
         'SELECT revoked_at, valid_from > current_date AS futura FROM domain_authorizations '
-        'WHERE domain_id = %s ORDER BY valid_until DESC LIMIT 1', (domain['id'],)).fetchone()
+        'WHERE domain_id = %s ORDER BY created_at DESC, valid_until DESC LIMIT 1', (domain['id'],)).fetchone()
     if not ultima:
         motivos.append('authorization_missing')
     elif ultima['revoked_at']:

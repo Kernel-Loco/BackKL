@@ -148,6 +148,16 @@ class Bitacora(unittest.TestCase):
               "UPDATE audit_log SET ip_address = '203.0.113.9' WHERE id = '%s';\n"
               "ALTER TABLE audit_log ENABLE TRIGGER audit_log_block_ud;" % uno)
         self.assertEqual(self.verificar(self.evento(uno) + '\n' + a_v1 + '\n' + ip), ('intacta', ''))
+        # /verify dice cuántas filas son de la versión 1, y la lista trae la versión de cada fila.
+        v1s = 'SELECT r.checked_v1 FROM (' + bitacora.VERIFICAR_SQL + ') r;'
+        lista = "SELECT chain_version FROM (" + bitacora.LISTA_SQL % (1, 0) + ") l;"
+        ok, antes, err = psql(rollback(self.evento(uno) + '\n' + v1s + '\n' + lista), user='postgres', org=ACME)
+        self.assertTrue(ok, err)
+        ok, despues, err = psql(rollback(self.evento(uno) + '\n' + a_v1 + '\n' + v1s + '\n' + lista), user='postgres',
+                                org=ACME)
+        self.assertTrue(ok, err)
+        self.assertEqual(int(despues.splitlines()[-2]), int(antes.splitlines()[-2]) + 1)
+        self.assertEqual((antes.splitlines()[-1], despues.splitlines()[-1]), ('2', '1'))
 
     def test_9_una_hora_fuera_de_orden_no_rompe_la_cadena(self):
         dos = (self.evento('c0000000-0000-4000-8000-0000000294f3', hora="now()") + '\n' +
@@ -211,12 +221,40 @@ SELECT string_agg(actor_type || ',' || entity_type || ',' || entity_id || ',' ||
         self.assertTrue(ok, err)
         self.assertEqual(out.splitlines()[-1], 'true')
 
+    def test_13b_una_carta_vencida_no_revoca_la_vigente(self):
+        """Una carta que ya venció al cargarse (a mano: la API da 422) no deja al dominio sin su carta vigente."""
+        ok, out, err = psql(rollback(carta('current_date - 30', 'current_date - 1') +
+                                     "\nSELECT (revoked_at IS NULL)::text FROM domain_authorizations WHERE id = '%s';"
+                                     "\nSELECT count(*) FROM audit_log WHERE action = 'authorization.superseded'"
+                                     " AND details->>'replaced_by' = '%s';" % (CARTA, NUEVA)), org=ACME)
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-2:], ['true', '0'])
+
+    def test_13c_dos_cartas_del_mismo_dominio_en_una_sentencia_se_rechazan(self):
+        """Si no, cada una revocaría a la otra para siempre. En dos sentencias, la segunda revoca a la primera."""
+        otra = '41000000-0000-4000-8000-0000000285fe'
+        dos = carta('current_date', 'current_date + 30').rstrip(';') + carta(
+            'current_date', 'current_date + 60', id_=otra).split(' VALUES', 1)[1].replace(' (', ', (', 1)
+        for usuario in ('cirdan_app', 'postgres'):
+            with self.subTest(usuario=usuario):
+                ok, _, err = psql(rollback(dos), user=usuario, org=ACME)
+                self.assertFalse(ok)
+                self.assertIn('se cargan una por una', err)
+        ok, out, err = psql(rollback(carta('current_date', 'current_date + 30') + '\n' +
+                                     carta('current_date', 'current_date + 60', id_=otra) +
+                                     "\nSELECT string_agg(id::text || ':' || (revoked_at IS NOT NULL), ',' ORDER BY id)"
+                                     " FROM domain_authorizations WHERE id IN ('%s', '%s');" % (otra, NUEVA)), org=ACME)
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-1], '%s:false,%s:true' % (otra, NUEVA))
+
     def test_14_hoy_es_el_de_la_ciudad_de_mexico(self):
         """El trigger compara con la fecha de la Ciudad de México aunque la sesión esté en otra zona: a las 20:00 de
         Monterrey ya es mañana en UTC."""
-        self.assertEqual(scalar("SELECT array_to_string(proconfig, ',') FROM pg_proc"
-                                " WHERE oid = 'domain_authorizations_una_vigente'::regproc;", user='postgres'),
-                         'TimeZone=America/Mexico_City')
+        for funcion in ('domain_authorizations_una_vigente', 'domain_authorizations_reemplaza'):
+            with self.subTest(funcion=funcion):
+                self.assertEqual(scalar("SELECT array_to_string(proconfig, ',') FROM pg_proc"
+                                        " WHERE oid = '%s'::regproc;" % funcion, user='postgres'),
+                                 'TimeZone=America/Mexico_City')
 
 
 class Txt(unittest.TestCase):

@@ -530,6 +530,8 @@ class FirmaBase(unittest.TestCase):
         self.assertEqual(sorted(Path(self.dir.name).rglob('*')), archivos)
 
         enviada = self.enviar(self.body(body['fqdn'], valid_from=manana))
+        # Se puede mandar a firmar, y la solicitud dice desde cuándo se confirma (concurrencia-api-2).
+        self.assertEqual(enviada['accept_from'], manana)
         self.mifiel.firmar(self.fila(enviada['id'])['provider_document_id'])
         pedir(self.app, 'POST', '/api/v1/signature-requests/%s/refresh' % enviada['id'])
         archivos = sorted(Path(self.dir.name).rglob('*'))
@@ -537,6 +539,8 @@ class FirmaBase(unittest.TestCase):
         self.assertEqual((r.status_code, r.json()['detail']), (409, v1.CARTA_FUTURA))
         self.assertEqual(self.fila(enviada['id'])['status'], 'signed')
         self.assertEqual(sorted(Path(self.dir.name).rglob('*')), archivos)
+        lista = pedir(self.app, 'GET', '/api/v1/signature-requests').json()
+        self.assertEqual(next(s['accept_from'] for s in lista['items'] if s['id'] == enviada['id']), manana)
         with transaction(ORG) as conn:
             self.assertEqual(conn.execute('SELECT count(*) AS n FROM domain_authorizations WHERE domain_id = %s AND '
                                           'revoked_at IS NULL', (domain_id,)).fetchone()['n'], 1)

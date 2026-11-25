@@ -31,7 +31,7 @@ LISTA = '/api/v1/audit-log'
 VERIFICAR = '/api/v1/audit-log/verify'
 SIN_PERMISO = 'Tu rol no tiene permiso para esta acción.'
 CAMPOS_PORTAL = {'id', 'occurred_at', 'actor_type', 'actor', 'action', 'entity_type', 'details'}  # AuditEntry
-CAMPOS = CAMPOS_PORTAL | {'chain_seq', 'entity_id', 'ip_address'}
+CAMPOS = CAMPOS_PORTAL | {'chain_seq', 'entity_id', 'ip_address', 'chain_version'}
 COPIA = 'cirdan_copia_86'
 
 
@@ -130,7 +130,9 @@ class Bitacora(unittest.TestCase):
         antes = contar(ACME)
         code, body = self.alex.get(VERIFICAR)
         self.assertEqual(code, 200, body)
-        self.assertEqual(set(body), {'status', 'checked', 'last_chain_seq', 'first_broken', 'verified_at'})
+        self.assertEqual(set(body), {'status', 'checked', 'checked_v1', 'last_chain_seq', 'first_broken',
+                                     'verified_at'})
+        self.assertTrue(0 <= body['checked_v1'] <= body['checked'], body)
         self.assertEqual((body['status'], body['first_broken']), ('intact', None))
         self.assertEqual((body['checked'], body['last_chain_seq']), antes)
         self.assertEqual(contar(ACME), antes)  # verificar es una lectura

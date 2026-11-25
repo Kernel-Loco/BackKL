@@ -114,7 +114,7 @@ Es la declaración de aplicabilidad de LowTide. Estado: Existe, En parte, Falta 
 | 5.29 y 5.30 Continuidad | Plan B: el mismo compose en una PC del equipo con Cloudflare Tunnel. Respaldo de la demo con respuestas grabadas | En parte. Sin prueba de recuperación escrita |
 | 5.31 Requisitos legales | LFPDPPP y artículos 211 bis del Código Penal Federal (sección 6) | Existe |
 | 5.32 Propiedad intelectual | `LICENSE` y `NOTICE` con las atribuciones de MITRE y CIS. De ISO solo se usan identificadores y nombres breves, sin copiar el texto de la norma | Existe |
-| 5.33 Protección de registros | `audit_log` de solo inserción con cadena de hashes SHA-256, que incluye la IP de cada evento. La hora y los campos de la cadena los pone la base, no la aplicación. Las cartas no se editan y su revocación no se deshace | Existe. Falta revisar la cadena (#86) |
+| 5.33 Protección de registros | `audit_log` de solo inserción con cadena de hashes SHA-256, que incluye la IP de cada evento desde la migración 035. En los eventos de antes (`chain_version` 1) la IP no entra en la cadena: la bitácora y su verificación dicen cuántos son. La hora y los campos de la cadena los pone la base, no la aplicación. Las cartas no se editan y su revocación no se deshace | Existe. Falta revisar la cadena (#86) |
 | 5.34 Privacidad y datos personales | La sección 5 de esta política | En parte. Existe en el documento, y el código todavía no cumple todo lo que promete (sección 9) |
 | 5.36 Cumplimiento de políticas | El CI de pruebas, CodeQL y las pruebas de las reglas de #6 que corren sin red | Existe |
 | 5.37 Procedimientos documentados | README de BackKL y FrontKL, `db/README.md` y la guía de cuentas de prueba | Existe |

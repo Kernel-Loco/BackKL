@@ -15,14 +15,17 @@
 --    carga el día que empieza (decisión 1 de Ernesto, 24 nov). Hoy es la
 --    fecha de la Ciudad de México, la misma que usan la API, el
 --    orquestador y el trigger de scans.
--- 3. domain_authorizations_reemplaza() (AFTER INSERT): revoca, con la hora
---    de la carga, las cartas sin revocar del mismo dominio y deja por cada
---    una un evento authorization.superseded en audit_log, con actor
---    system y en details la carta que la reemplaza (replaced_by). Esa
---    revocación no es la de la sección 8 de la carta: no dispara el
---    borrado de su sección 6. Quien borre al revocar (RC-258) se salta las
---    cartas con ese evento. Corre como quien inserta y con RLS, así que
---    solo toca cartas de su empresa.
+-- 3. domain_authorizations_reemplaza() (AFTER INSERT, una vez por
+--    sentencia): revoca, con la hora de la carga, las cartas sin revocar del
+--    mismo dominio y deja por cada una un evento authorization.superseded en
+--    audit_log, con actor system y en details la carta que la reemplaza
+--    (replaced_by). Esa revocación no es la de la sección 8 de la carta: no
+--    dispara el borrado de su sección 6. Quien borre al revocar (RC-258) se
+--    salta las cartas con ese evento. Una carta que ya venció al cargarse
+--    (hoy de la Ciudad de México) no revoca nada. Dos cartas sin revocar del
+--    mismo dominio en una sola sentencia se rechazan: si no, cada una
+--    revocaría a la otra y el dominio se quedaría sin carta. Corre como
+--    quien inserta y con RLS, así que solo toca cartas de su empresa.
 -- 4. dns_txt_verifications.observed_values solo guarda valores
 --    cirdan-verification=<token en hex> y, de cualquier otro TXT, su huella
 --    sha256:<64 hex> del texto en UTF-8. Un CHECK con
@@ -90,31 +93,38 @@ CREATE TRIGGER domain_authorizations_una_vigente_bi BEFORE INSERT ON public.doma
 
 -- 3. La carta nueva revoca las anteriores ---------------------------------
 
+-- Va por sentencia, con las cartas nuevas en `nuevas`: un trigger por fila ve las demás filas de la misma sentencia y
+-- dos cartas del mismo dominio en un solo INSERT se revocarían una a otra.
 CREATE OR REPLACE FUNCTION public.domain_authorizations_reemplaza() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET TimeZone = 'America/Mexico_City' AS $$
 BEGIN
-  IF NEW.revoked_at IS NOT NULL THEN
-    RETURN NULL;
+  IF EXISTS (SELECT 1 FROM nuevas WHERE revoked_at IS NULL
+              GROUP BY organization_id, domain_id HAVING count(*) > 1) THEN
+    RAISE EXCEPTION 'domain_authorizations: dos cartas del mismo dominio en una sola sentencia; se cargan una por una'
+      USING ERRCODE = 'check_violation';
   END IF;
   WITH revocadas AS (
-    UPDATE public.domain_authorizations
+    UPDATE public.domain_authorizations a
        SET revoked_at = now()
-     WHERE organization_id = NEW.organization_id AND domain_id = NEW.domain_id
-       AND id <> NEW.id AND revoked_at IS NULL
-    RETURNING id)
+      FROM nuevas n
+     WHERE n.revoked_at IS NULL AND n.valid_until >= current_date
+       AND a.organization_id = n.organization_id AND a.domain_id = n.domain_id
+       AND a.id <> n.id AND a.revoked_at IS NULL
+    RETURNING a.id, a.organization_id, n.id AS replaced_by)
   INSERT INTO public.audit_log (organization_id, actor_type, action, entity_type, entity_id, details)
-  SELECT NEW.organization_id, 'system', 'authorization.superseded', 'domain_authorization', r.id,
-         jsonb_build_object('replaced_by', NEW.id::text)
+  SELECT r.organization_id, 'system', 'authorization.superseded', 'domain_authorization', r.id,
+         jsonb_build_object('replaced_by', r.replaced_by::text)
     FROM revocadas r ORDER BY r.id;
   RETURN NULL;
 END $$;
 
 COMMENT ON FUNCTION public.domain_authorizations_reemplaza() IS
-  'RC-272: al cargar una carta sin revocar, revoca con now() las demás sin revocar del mismo dominio y deja authorization.superseded en audit_log con replaced_by. No dispara el borrado de la sección 6 de la carta. Corre como invocador y con RLS.';
+  'RC-272: una vez por sentencia. Cada carta nueva sin revocar y no vencida (hoy de la Ciudad de México) revoca con now() las demás sin revocar del mismo dominio y deja authorization.superseded en audit_log con replaced_by. Dos cartas sin revocar del mismo dominio en una sentencia se rechazan. No dispara el borrado de la sección 6 de la carta. Corre como invocador y con RLS.';
 
 DROP TRIGGER IF EXISTS domain_authorizations_reemplaza_ai ON public.domain_authorizations;
 CREATE TRIGGER domain_authorizations_reemplaza_ai AFTER INSERT ON public.domain_authorizations
-  FOR EACH ROW EXECUTE FUNCTION public.domain_authorizations_reemplaza();
+  REFERENCING NEW TABLE AS nuevas
+  FOR EACH STATEMENT EXECUTE FUNCTION public.domain_authorizations_reemplaza();
 
 -- 4. observed_values sin datos de más -------------------------------------
 

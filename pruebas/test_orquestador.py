@@ -581,16 +581,6 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.conteos(s.scan_id), (1, 0))  # estaba resuelto y se reabre
         self.assertEqual(self.estado(f['id'])['status'], 'open')
 
-    def fechar(self, sql, params):
-        """Cambia queued_at de un escaneo de la prueba. Desde la 034 (RC-285) scans_guard_bu lo rechaza para todos
-        los roles, así que la prueba, como postgres y dentro de su transacción que se deshace, apaga los triggers
-        solo para esta sentencia."""
-        self.conn.execute('SET LOCAL session_replication_role = replica')
-        try:
-            self.conn.execute(sql, params)
-        finally:
-            self.conn.execute('SET LOCAL session_replication_role = origin')
-
     def test_2h2_la_salida_a_siem_da_por_recurrente_solo_lo_que_aporto_a_los_dos_ultimos_scores(self):
         """recurrence de la salida a SIEM (#98, RC-212). Cada score de escaneo guarda un aporte por hallazgo vigente:
         recurring si el hallazgo está en los dos últimos scores de escaneo del dominio y new si no, como uno resuelto
@@ -647,10 +637,10 @@ class Orquestador(unittest.TestCase):
             self.assertTrue(s.aceptada, s.detalle)
             return s.scan_id
         # Un escaneo caído (sin score) pedido antes del más viejo de los dos scores y que terminó después: cuenta por
-        # finished_at. queued_at es de antes de la consulta TXT y puede quedar antes del score del escaneo anterior.
+        # finished_at. queued_at (hoy, antes de los scores de 2098 y 2099) no cuenta, y desde la 034 (RC-285) no cambia.
         caido = solicitar()
-        self.fechar("UPDATE scans SET status = 'failed', queued_at = '2098-12-31T23:00:00+00:00', "
-                    "finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s", (caido,))
+        self.conn.execute("UPDATE scans SET status = 'failed', finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s",
+                          (caido,))
         corrida = ('INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status) VALUES (%s, %s, %s, %s) '
                    'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status')
         self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'failed'))
@@ -662,14 +652,12 @@ class Orquestador(unittest.TestCase):
         self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'succeeded'))
         self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
         # Terminó antes del más viejo de los dos scores: ya no cuenta, ese score es posterior y tiene la foto
-        self.fechar("UPDATE scans SET queued_at = '2098-12-31T12:00:00+00:00', "
-                    "finished_at = '2098-12-31T13:00:00+00:00' WHERE id = %s", (caido,))
+        self.conn.execute("UPDATE scans SET finished_at = '2098-12-31T13:00:00+00:00' WHERE id = %s", (caido,))
         self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
         # Un escaneo posterior en el que no respondió ninguna fuente guarda score sin 'uno', pero no cuenta
         vacio = solicitar()
-        self.fechar("UPDATE scans SET status = 'failed', queued_at = '2099-01-04T00:00:00+00:00', "
-                    "finished_at = '2099-01-04T01:00:00+00:00', "
-                    "stats = '{\"sources_ok\": 0, \"sources_failed\": 1}' WHERE id = %s", (vacio,))
+        self.conn.execute("UPDATE scans SET status = 'failed', finished_at = '2099-01-04T01:00:00+00:00', "
+                          "stats = '{\"sources_ok\": 0, \"sources_failed\": 1}' WHERE id = %s", (vacio,))
         score('2099-01-04T01:00:00+00:00', 'scan', [], scan_id=vacio)
         self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
         # Con una fuente que respondió sí cuenta, y 'uno', que no aportó a ese score, sale new
