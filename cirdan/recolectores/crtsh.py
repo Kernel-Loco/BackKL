@@ -510,21 +510,26 @@ class ClienteCrtsh:
             inicio = self.cronometro()
             try:
                 cuerpo = self.transporte(url, espera)
-                datos = json.loads(cuerpo or b'[]')
+                datos = transporte.json_de(cuerpo or b'[]')
                 if not isinstance(datos, list):
                     raise ValueError('respuesta inesperada')
                 if valida and not valida(datos):
                     ultimo = 'ValueError: respuesta que no se puede leer'
                     break  # la fuente sí respondió y otro intento daría lo mismo
-            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, transporte.PlazoVencido,
-                    transporte.Redirigida) as e:
-                ultimo = '%s: %s' % (type(e).__name__, e)
+            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError,
+                    transporte.PlazoVencido, transporte.Redirigida) as e:
+                # De un HTTPError solo el código: la frase la escribe el servidor (RC-300). Un JSON de más de
+                # transporte.MAX_NIVELES_JSON niveles da JsonProfundo, que es un ValueError.
+                ultimo = ('HTTPError: HTTP %d' % e.code if isinstance(e, urllib.error.HTTPError)
+                          else '%s: %s' % (type(e).__name__, e))
                 if isinstance(e, (RespuestaGrande, transporte.Redirigida)):
                     break  # otro intento bajaría lo mismo o volvería a redirigir
                 if isinstance(e, urllib.error.HTTPError) and e.code in sin_reintento:
                     if e.code == 429:
+                        # El Retry-After solo como número de segundos, leído como transporte.retry_after (RC-300)
+                        segundos = transporte.retry_after(e.headers)
                         ultimo = 'llegó a su límite de consultas, Retry-After %s s' % (
-                            (e.headers or {}).get('Retry-After') or '?')
+                            '?' if segundos is None else segundos)
                     break  # otro intento solo gastaría cupo
                 if isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code not in (408, 429):
                     break  # la fuente sí respondió y otro intento daría lo mismo

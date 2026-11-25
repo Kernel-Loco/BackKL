@@ -55,6 +55,7 @@ import email.utils
 import functools
 import http.client
 import ipaddress
+import json
 import re
 import socket
 import ssl
@@ -75,6 +76,12 @@ IPV4_COMPATIBLE = ipaddress.ip_network('::/96')
 IPV6_INTERNAS = (ipaddress.ip_network('fec0::/10'), ipaddress.ip_network('::ffff:0:0:0/96'))
 PUERTOS = frozenset({443})   # los únicos puertos a los que se conecta _conectar por https (#181, RC-299)
 PUERTOS_HTTP = frozenset({80})   # los únicos por http, solo en visitar() (RC-46 y RC-165)
+# Niveles de anidación que json_de acepta en la respuesta de una fuente (RC-300). crt.sh y Cert Spotter mandan 2 y
+# Shodan menos de 10. Desde Python 3.14 json.loads lee 10 000 niveles sin RecursionError (el tope es la pila de C),
+# así que el tope no se deja a la recursión.
+MAX_NIVELES_JSON = 64
+_CADENA_JSON = re.compile(rb'"(?:[^"\\]|\\.)*"')
+_NO_LLAVES = bytes(b for b in range(256) if b not in b'[]{}')
 
 
 class PlazoVencido(Exception):
@@ -420,6 +427,30 @@ def visitar(req, plazo, tope, cronometro=None):
         raise
     cuerpo = b''.join(partes)
     return estado, cabeceras, cuerpo[:tope], len(cuerpo) > tope
+
+
+class JsonProfundo(ValueError):
+    """La respuesta trae más niveles de anidación de los que se leen (json_de)."""
+
+
+def json_de(cuerpo, tope=MAX_NIVELES_JSON):
+    """json.loads de la respuesta de una fuente, con a lo más `tope` niveles de anidación (RC-300). Con más, o si
+    json.loads se queda sin pila (RecursionError), JsonProfundo, que es un ValueError: 'respuesta que no se puede leer'.
+    Un cuerpo que no es JSON da el JSONDecodeError de siempre.
+    Los niveles se cuentan sin leer el JSON: fuera las cadenas, quedan solo corchetes y llaves, y cada pasada borra los
+    pares vacíos. Un JSON válido se vacía en a lo más tantas pasadas como niveles tiene."""
+    datos = cuerpo.encode('utf-8', 'surrogatepass') if isinstance(cuerpo, str) else bytes(cuerpo)
+    llaves = _CADENA_JSON.sub(b'', datos).translate(None, _NO_LLAVES)
+    for _ in range(tope):
+        if not llaves:
+            break
+        llaves = llaves.replace(b'[]', b'').replace(b'{}', b'')
+    if llaves:
+        raise JsonProfundo('respuesta que no se puede leer: más de %d niveles de anidación' % tope)
+    try:
+        return json.loads(cuerpo)
+    except RecursionError:
+        raise JsonProfundo('respuesta que no se puede leer: más niveles de anidación de los que caben') from None
 
 
 def retry_after(cabeceras, ahora=None):

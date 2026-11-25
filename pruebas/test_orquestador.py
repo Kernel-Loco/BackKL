@@ -239,7 +239,7 @@ class Orquestador(unittest.TestCase):
         run = self.uno('SELECT r.status, r.attempt, r.next_retry_at, r.error FROM scan_source_runs r '
                        "JOIN data_sources d ON d.id = r.source_id WHERE r.scan_id = %s AND d.code = 'ct_logs'", s.scan_id)
         self.assertEqual((run['status'], run['attempt'], run['next_retry_at']), ('failed', 0, None))
-        self.assertIn('no autorizada por la carta (actividad 1', run['error'])
+        self.assertEqual(run['error'], 'no autorizada por la carta')  # un motivo fijo (RC-300); el detalle va en avisos
 
     def test_2c_carta_sin_alcance_no_corre_ninguna_fuente(self):
         self.carta_con_alcance(None)   # carta de antes de la 029 que nadie llenó: falla cerrado
@@ -1466,14 +1466,14 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['status'], 'failed')
         run = self.corrida(s.scan_id)
         # sigue como la dejó el abandono, que conserva el error del primer intento: no 'succeeded' sin error
-        self.assertEqual((run['status'], run['attempt'], run['error']), ('failed', 1, FALLA.error))
+        self.assertEqual((run['status'], run['attempt'], run['error']), ('failed', 1, 'no respondió'))  # motivo (RC-300)
 
     def test_3i_la_fila_suma_las_consultas_de_sus_intentos_y_guarda_los_errores_anteriores(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         resumen = self.en_vivo(s, [FALLA, FALLA, BIEN], lambda segundos: None)
         fuente = resumen['sources'][0]
         self.assertEqual((fuente['status'], fuente['consultas']), ('succeeded', 3))
-        self.assertEqual(fuente['avisos'], ['Intento 1: crt.sh no respondió', 'Intento 2: crt.sh no respondió'])
+        self.assertEqual(fuente['avisos'], ['Intento 1: no respondió', 'Intento 2: no respondió'])  # motivos (RC-300)
         guardado = self.uno('SELECT raw_payload FROM scan_source_runs WHERE scan_id = %s', s.scan_id)['raw_payload']
         self.assertEqual((guardado['consultas'], guardado['avisos']), (3, fuente['avisos']))  # `ejemplo` guarda raw_payload
 
@@ -1620,10 +1620,10 @@ class Orquestador(unittest.TestCase):
         # puede quedar cupo, pero no el máximo de una corrida completa
         self.assertEqual(texto, 'Sin cupo diario: ct_logs no tiene cupo para una corrida completa hoy (día UTC).')
         run = self.corrida_de(s.scan_id, 'ct_logs')
-        self.assertEqual((run['status'], run['attempt'], run['next_retry_at'], run['error']), ('failed', 0, None, texto))
+        self.assertEqual((run['status'], run['attempt'], run['next_retry_at'], run['error']), ('failed', 0, None, 'sin cupo'))
         self.assertEqual((run['raw_payload']['consultas'], run['raw_payload']['avisos']), (0, [texto]))  # ct_logs guarda raw_payload
         fuente = resumen['sources'][1]
-        self.assertEqual((fuente['source'], fuente['status'], fuente['error']), ('ct_logs', 'failed', texto))
+        self.assertEqual((fuente['source'], fuente['status'], fuente['error']), ('ct_logs', 'failed', 'sin cupo'))
         self.assertEqual((resumen['status'], resumen['stats']['sources_failed']), ('partial', 1))  # `ejemplo` sí respondió
         self.assertEqual(self.cupo('ct_logs')[1], usadas)  # la reserva que no cupo no dejó nada
 
@@ -1853,14 +1853,30 @@ class Orquestador(unittest.TestCase):
         with mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(self.conn)):
             orquestador.marcar_fallido(ACME, s.scan_id, KeyboardInterrupt())  # Ctrl+C no trae texto
         run = self.corrida(s.scan_id)
-        self.assertEqual((run['status'], run['next_retry_at'], run['error']), ('failed', None, 'KeyboardInterrupt'))
+        self.assertEqual((run['status'], run['next_retry_at'], run['error']), ('failed', None, 'error interno'))  # RC-300
 
     def test_9e_marcar_fallido_con_ctrl_c_deja_el_motivo_en_el_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         with mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(self.conn)):
             orquestador.marcar_fallido(ACME, s.scan_id, KeyboardInterrupt())
         scan = self.uno('SELECT status, stats FROM scans WHERE id = %s', s.scan_id)
-        self.assertEqual((scan['status'], scan['stats']['error']), ('failed', 'KeyboardInterrupt'))
+        self.assertEqual((scan['status'], scan['stats']['error']), ('failed', 'error interno'))  # RC-300: el texto, al log
+
+    def test_9f_un_error_de_la_base_no_se_guarda_y_va_al_log_con_el_id(self):
+        """RC-300: el texto de una excepción de psycopg (tabla, restricción y valores) no queda en scan_source_runs.error,
+        ni en los avisos de los intentos ni en el resumen. Queda 'error interno' y el texto va al log con el escaneo."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        texto = ('UniqueViolation: duplicate key value violates unique constraint "assets_organization_id_kind_value_key"'
+                 '\nDETAIL:  Key (organization_id, kind, value)=(%s, subdomain, secreto.acme-demo.mx) already exists.' % ACME)
+        roto = SimpleNamespace(**dict(vars(FALLA), error=texto))
+        with self.assertLogs('cirdan.orquestador', 'WARNING') as logs:
+            resumen = self.en_vivo(s, [roto] * (contrato.MAX_INTENTO + 1), lambda segundos: None)
+        run = self.corrida_de(s.scan_id, 'ejemplo')
+        self.assertEqual((run['status'], run['error']), ('failed', 'error interno'))
+        self.assertEqual(resumen['sources'][0]['error'], 'error interno')
+        self.assertNotIn('secreto', repr((run, resumen)))
+        self.assertTrue(all(aviso.endswith('error interno') for aviso in run['raw_payload']['avisos']))
+        self.assertTrue(any(s.scan_id in linea and 'secreto.acme-demo.mx' in linea for linea in logs.output))
 
     def test_10_un_dominio_de_otra_empresa_no_existe_para_mi(self):
         s = self.solicitar('olmardo.com', responde('cirdan-verification=ab439d2b39a7'))
