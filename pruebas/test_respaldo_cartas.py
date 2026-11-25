@@ -13,6 +13,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+from pruebas.pila import exigir_contenedor
+
 RAIZ = Path(__file__).resolve().parents[1]
 RESPALDO = RAIZ / 'db' / 'respaldo'
 PDF = b'%PDF-1.4\nCIRDAN_TEST_CARTA\n%%EOF\n'
@@ -267,6 +269,8 @@ class TemporalEnTmpfs(unittest.TestCase):
 class RespaldoCartas(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        exigir_contenedor(CONTENEDOR_BASE)
+        exigir_contenedor(CONTENEDOR_CARTAS)
         cls.temporal = Path(tempfile.mkdtemp(prefix='respaldo_cartas_'))
         cls.db = 'cirdan_prueba_cartas_%d' % os.getpid()
         cls.volumen = 'prueba-cartas-%d' % os.getpid()
@@ -282,15 +286,18 @@ class RespaldoCartas(unittest.TestCase):
             subprocess.run(['docker', 'volume', 'rm', cls.volumen], capture_output=True, check=False)
         shutil.rmtree(cls.temporal, ignore_errors=True)
         if hasattr(cls, 'db') and CONTENEDOR_BASE:
+            exigir_contenedor(CONTENEDOR_BASE)
             subprocess.run(
                 ['docker', 'exec', CONTENEDOR_BASE, 'sh', '-c',
                  'psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c \'DROP DATABASE IF EXISTS "%s"\'' % cls.db],
                 capture_output=True, check=False)
 
     def _carta_en_api(self, codigo):
+        exigir_contenedor(CONTENEDOR_CARTAS)
         return correr(['docker', 'exec', CONTENEDOR_CARTAS, 'python', '-c', codigo])
 
     def _conteos(self, base):
+        exigir_contenedor(CONTENEDOR_BASE)
         return subprocess.run(
             ['docker', 'exec', '-i', '-e', 'BASE=' + base, CONTENEDOR_BASE, 'sh', '-c',
              'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -v ON_ERROR_STOP=1'],
@@ -298,6 +305,7 @@ class RespaldoCartas(unittest.TestCase):
             capture_output=True, text=True, encoding='utf-8', check=True).stdout.strip()
 
     def _sql(self, base, texto):
+        exigir_contenedor(CONTENEDOR_BASE)
         return subprocess.run(
             ['docker', 'exec', '-i', '-e', 'BASE=' + base, CONTENEDOR_BASE, 'sh', '-c',
              'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -v ON_ERROR_STOP=1'],
