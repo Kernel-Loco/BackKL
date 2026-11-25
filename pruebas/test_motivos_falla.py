@@ -209,5 +209,48 @@ class JsonDe(unittest.TestCase):
             transporte.json_de(b'<html>')
 
 
+    def test_11_una_cadena_sin_cerrar_llena_de_comillas_escapadas_no_congela_la_api(self):
+        # Revisión de riesgo de RC-300 (D1): contar los niveles con una expresión regular antes de leer tardaba 8 s
+        # con 40 KB así, en forma cuadrática, con el GIL tomado. Ahora es lo que tarda json.loads en rechazarlo.
+        import time
+        cuerpo = b'"' + b'\\"' * 500_000  # 1 MB
+        inicio = time.perf_counter()
+        with self.assertRaises(ValueError):
+            transporte.json_de(cuerpo)
+        self.assertLess(time.perf_counter() - inicio, 1.0)
+
+    def test_12_el_tope_de_niveles_vale_tambien_en_utf16_y_utf32(self):
+        # D2: el conteo sobre los bytes se desfasaba con UTF-16 y dejaba pasar 10 000 niveles.
+        profundo = '["\\"",' + '[' * 10_000 + ']' * 10_000 + ',"x"]'
+        normal = '[{"id": 1, "name_value": "a.acme-demo.mx"}]'
+        for codificacion in ('utf-8', 'utf-16-le', 'utf-16', 'utf-32'):
+            with self.subTest(codificacion=codificacion):
+                with self.assertRaises(transporte.JsonProfundo):
+                    transporte.json_de(profundo.encode(codificacion))
+                self.assertEqual(transporte.json_de(normal.encode(codificacion))[0]['id'], 1)
+
+    def test_13_al_apagar_y_al_dejar_de_correr_queda_escaneo_interrumpido(self):
+        # T3 y T5: también estos cierres guardan un motivo de la lista.
+        sql = []
+        conn = SimpleNamespace(execute=lambda q, p=None: sql.append((q, p)))
+        with mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(conn)),                 self.assertLogs('cirdan.orquestador', 'ERROR'):
+            orquestador.marcar_fallido('11111111-1111-4111-8111-111111111111', SCAN, RuntimeError('x'),
+                                       motivos.INTERRUMPIDO)
+            orquestador.marcar_fallido('11111111-1111-4111-8111-111111111111', SCAN, RuntimeError('x'), 'texto suelto')
+        self.assertEqual([sql[0][1][0].obj, sql[1][1][0]], [{'error': 'escaneo interrumpido'}, 'escaneo interrumpido'])
+        self.assertEqual([sql[2][1][0].obj, sql[3][1][0]], [{'error': 'error interno'}, 'error interno'])
+        from cirdan import programador
+        vivo = SimpleNamespace(is_alive=lambda: True)
+        with mock.patch.dict(programador._hilos, {SCAN: ('org', vivo)}, clear=True),                 mock.patch.object(orquestador, 'marcar_fallido') as marcar:
+            programador.detener()
+        self.assertEqual(marcar.call_args.args[3], motivos.INTERRUMPIDO)
+        cerradas = []
+        fila = SimpleNamespace(fetchone=lambda: {'status': 'failed', 'stats': None})
+        c = SimpleNamespace(execute=lambda q, p=None: fila)
+        with mock.patch.object(orquestador, '_tx', lambda org, conn: contextlib.nullcontext(c)),                 mock.patch.object(orquestador, '_cerrar_corridas', lambda c, ids, texto: cerradas.append(texto)):
+            orquestador._ya_no_corre('org', SCAN, None, [])
+        self.assertEqual(cerradas, [motivos.INTERRUMPIDO])
+        self.assertIn(motivos.INTERRUMPIDO, motivos.MOTIVOS)
+
 if __name__ == '__main__':
     unittest.main()

@@ -79,7 +79,6 @@ ABANDONO = timedelta(minutes=30)      # sin marca en ese tiempo, el escaneo se d
 ERROR_ABANDONO = motivos.INTERRUMPIDO  # pasaron más de 30 minutos sin marca de vida (RC-300: un motivo fijo)
 ACCION_HALLAZGO_RESUELTO = 'finding.resolved'
 MOTIVO_SECRETO_ROTADO = 'secret_rotated'
-ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta fuente'
 
 # Límite diario por fuente (#13b, RC-184): vive en data_sources (daily_limit, daily_used, daily_used_on) y solo
 # lo mueven reserve_source_quota() y adjust_source_quota() de la migración 008, con el día en UTC. Se reserva
@@ -789,7 +788,7 @@ def _ajustar(org, codigo, dia, delta, conn):
 def _ya_no_corre(org, scan_id, conn, corridas):
     """El escaneo dejó de estar en 'running' a mitad: no se toca su estado, solo se cierran sus fuentes."""
     with _tx(org, conn) as c:
-        _cerrar_corridas(c, [scan_id], ERROR_YA_NO_CORRE)
+        _cerrar_corridas(c, [scan_id], motivos.INTERRUMPIDO)  # dejó de estar en curso (RC-300)
         scan = c.execute('SELECT status, stats FROM scans WHERE id = %s', (scan_id,)).fetchone()
     return {'scan_id': scan_id, 'status': scan['status'], 'stats': scan['stats'] or {}, 'sources': corridas}
 
@@ -967,7 +966,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             # (motivos.MOTIVOS). El texto completo de la falla va al log con el id del escaneo, en una línea (%r).
             error = motivos.motivo(res.error)
             if res.error and res.error != error:
-                log.warning('Escaneo %s, fuente %s, intento %d: %r', scan_id, codigo, intento, res.error)
+                log.warning('Escaneo %s, fuente %s, intento %d: %r', scan_id, codigo, intento + 1, res.error)
             gastadas += res.consultas
             avisos = previos + res.avisos
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
@@ -1074,17 +1073,18 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     return {'scan_id': scan_id, 'status': estado, 'stats': stats, 'sources': corridas}
 
 
-def marcar_fallido(org, scan_id, error):
+def marcar_fallido(org, scan_id, error, motivo=motivos.INTERNO):
     """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando.
 
-    En la base solo queda 'error interno' (RC-300): el texto de la excepción puede traer tabla, restricción y valores
-    de una fila. El texto completo va al log con el id del escaneo."""
+    En la base solo queda `motivo`, de motivos.MOTIVOS (RC-300): 'error interno' por omisión, porque el texto de la
+    excepción puede traer tabla, restricción y valores de una fila, y 'escaneo interrumpido' al apagar el servicio
+    (programador.detener). El texto completo va al log con el id del escaneo."""
     try:
         detalle = '%s: %s' % (type(error).__name__, error)
     except Exception:  # una excepción cuyo texto también falla
         detalle = type(error).__name__
     log.error('El escaneo %s falló: %r', scan_id, detalle)
-    texto = motivos.INTERNO
+    texto = motivo if motivo in motivos.MOTIVOS else motivos.INTERNO
     with transaction(org) as c:
         c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
                   "WHERE id = %s AND status = 'running'", (Jsonb({'error': texto}), scan_id))
