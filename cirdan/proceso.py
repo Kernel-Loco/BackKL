@@ -16,6 +16,13 @@ import sys
 
 PR_SET_DUMPABLE = 4
 PR_GET_DUMPABLE = 3
+PR_SET_CHILD_SUBREAPER = 36
+
+
+def _prctl():
+    libc = ctypes.CDLL(ctypes.util.find_library('c') or 'libc.so.6', use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    return libc.prctl
 
 
 def no_volcable():
@@ -24,10 +31,18 @@ def no_volcable():
     Si prctl falla o el proceso sigue volcable, lanza RuntimeError: la API y el programador no arrancan."""
     if not sys.platform.startswith('linux'):
         return False
-    libc = ctypes.CDLL(ctypes.util.find_library('c') or 'libc.so.6', use_errno=True)
-    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
-    if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+    prctl = _prctl()
+    if prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
         raise RuntimeError('prctl(PR_SET_DUMPABLE, 0) falló con errno %d' % ctypes.get_errno())
-    if libc.prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0:
+    if prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0:
         raise RuntimeError('el proceso sigue volcable después de prctl(PR_SET_DUMPABLE, 0)')
+    return True
+
+
+def recoge_huerfanos():
+    """Los huérfanos de los hijos le llegan a este proceso aunque no sea el PID 1, como `tini -s` (cirdan/init.py)."""
+    if not sys.platform.startswith('linux'):
+        return False
+    if _prctl()(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        raise RuntimeError('prctl(PR_SET_CHILD_SUBREAPER, 1) falló con errno %d' % ctypes.get_errno())
     return True
