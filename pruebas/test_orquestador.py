@@ -563,6 +563,16 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.conteos(s.scan_id), (1, 0))  # estaba resuelto y se reabre
         self.assertEqual(self.estado(f['id'])['status'], 'open')
 
+    def fechar(self, sql, params):
+        """Cambia queued_at de un escaneo de la prueba. Desde la 034 (RC-285) scans_guard_bu lo rechaza para todos
+        los roles, así que la prueba, como postgres y dentro de su transacción que se deshace, apaga los triggers
+        solo para esta sentencia."""
+        self.conn.execute('SET LOCAL session_replication_role = replica')
+        try:
+            self.conn.execute(sql, params)
+        finally:
+            self.conn.execute('SET LOCAL session_replication_role = origin')
+
     def test_2h2_la_salida_a_siem_da_por_recurrente_solo_lo_que_aporto_a_los_dos_ultimos_scores(self):
         """recurrence de la salida a SIEM (#98, RC-212). Cada score de escaneo guarda un aporte por hallazgo vigente:
         recurring si el hallazgo está en los dos últimos scores de escaneo del dominio y new si no, como uno resuelto
@@ -621,8 +631,8 @@ class Orquestador(unittest.TestCase):
         # Un escaneo caído (sin score) pedido antes del más viejo de los dos scores y que terminó después: cuenta por
         # finished_at. queued_at es de antes de la consulta TXT y puede quedar antes del score del escaneo anterior.
         caido = solicitar()
-        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2098-12-31T23:00:00+00:00', "
-                          "finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s", (caido,))
+        self.fechar("UPDATE scans SET status = 'failed', queued_at = '2098-12-31T23:00:00+00:00', "
+                    "finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s", (caido,))
         corrida = ('INSERT INTO scan_source_runs (organization_id, scan_id, source_id, status) VALUES (%s, %s, %s, %s) '
                    'ON CONFLICT (scan_id, source_id) DO UPDATE SET status = EXCLUDED.status')
         self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'failed'))
@@ -634,14 +644,14 @@ class Orquestador(unittest.TestCase):
         self.conn.execute(corrida, (ACME, caido, uno['source_id'], 'succeeded'))
         self.assertEqual(recurrencia(), ['new', 'new', 'new', 'new'])
         # Terminó antes del más viejo de los dos scores: ya no cuenta, ese score es posterior y tiene la foto
-        self.conn.execute("UPDATE scans SET queued_at = '2098-12-31T12:00:00+00:00', "
-                          "finished_at = '2098-12-31T13:00:00+00:00' WHERE id = %s", (caido,))
+        self.fechar("UPDATE scans SET queued_at = '2098-12-31T12:00:00+00:00', "
+                    "finished_at = '2098-12-31T13:00:00+00:00' WHERE id = %s", (caido,))
         self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
         # Un escaneo posterior en el que no respondió ninguna fuente guarda score sin 'uno', pero no cuenta
         vacio = solicitar()
-        self.conn.execute("UPDATE scans SET status = 'failed', queued_at = '2099-01-04T00:00:00+00:00', "
-                          "finished_at = '2099-01-04T01:00:00+00:00', "
-                          "stats = '{\"sources_ok\": 0, \"sources_failed\": 1}' WHERE id = %s", (vacio,))
+        self.fechar("UPDATE scans SET status = 'failed', queued_at = '2099-01-04T00:00:00+00:00', "
+                    "finished_at = '2099-01-04T01:00:00+00:00', "
+                    "stats = '{\"sources_ok\": 0, \"sources_failed\": 1}' WHERE id = %s", (vacio,))
         score('2099-01-04T01:00:00+00:00', 'scan', [], scan_id=vacio)
         self.assertEqual(recurrencia(), ['new', 'recurring', 'new', 'new'])
         # Con una fuente que respondió sí cuenta, y 'uno', que no aportó a ese score, sale new
@@ -1701,6 +1711,11 @@ class Orquestador(unittest.TestCase):
 
     def test_3r_el_cupo_de_un_dia_viejo_se_reinicia(self):
         """Como postgres deja ct_logs lleno ayer. Después corre como cirdan_app en la misma transacción, que se deshace."""
+        # Deshace la carta de setUp: desde la 036 (RC-272) dos cartas sin confirmar del mismo dominio en dos conexiones
+        # se esperan una a otra (candado del dominio y la revocación de la anterior), y esta prueba quedaría colgada.
+        self.tx.__exit__(None, None, None)
+        self.tx = self.conn.transaction(force_rollback=True)
+        self.tx.__enter__()
         pg = conexion_postgres()
         tx = pg.transaction(force_rollback=True)
         tx.__enter__()
@@ -1710,7 +1725,7 @@ class Orquestador(unittest.TestCase):
                        "WHERE code = 'ct_logs'", (ayer,))
             pg.execute('SET LOCAL ROLE cirdan_app')  # desde aquí, con los permisos de la API
             pg.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
-            renovar_carta(pg)  # la de setUp está en otra transacción que esta conexión no ve
+            renovar_carta(pg)  # la de setUp ya se deshizo
             s = self.solicitar('acme-demo.mx', responde(TXT_ACME), conn=pg)
             resumen = self.en_vivo(s, [BIEN], lambda segundos: None, fuentes=('ct_logs',), conn=pg)
             self.assertEqual(resumen['sources'][0]['status'], 'succeeded')  # lo de ayer no cuenta hoy
