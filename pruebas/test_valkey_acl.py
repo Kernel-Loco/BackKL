@@ -21,7 +21,7 @@ PROHIBIDOS = {'config', 'module', 'flushall', 'flushdb', 'keys', 'scan', 'debug'
               'replicaof', 'slaveof', 'monitor', 'script', 'function', 'publish', 'subscribe', 'migrate', 'restore'}
 # Llamadas de redis-py en sessions.py y el comando de Valkey que mandan.
 METODOS = {'get': {'get'}, 'set': {'set'}, 'mget': {'mget'}, 'getdel': {'getdel'}, 'delete': {'del'},
-           'expire': {'expire'}, 'eval': {'eval'}, 'incr': {'incr'}, 'sadd': {'sadd'}, 'pipeline': {'multi', 'exec'},
+           'expire': {'expire'}, 'eval': {'eval'}, 'incr': {'incrby'}, 'sadd': {'sadd'}, 'pipeline': {'multi', 'exec'},
            'execute': set()}
 
 
@@ -114,7 +114,8 @@ class EnVivo(unittest.TestCase):
         self.assertEqual(self.cli('SET', 'sess:rc292-prueba', 'x', 'EX', '5'), 'OK')
         self.assertEqual(self.cli('DEL', 'sess:rc292-prueba'), '1')
         self.assertIn('NOPERM', self.cli('SET', 'rc292:fuera', 'x'))
-        self.assertIn('NOPERM', self.cli('EVAL', "return redis.call('CONFIG', 'GET', 'maxmemory')", '0'))
+        # KEYS sí se deja llamar desde un script (CONFIG no: daría 'not allowed from script' antes de la ACL).
+        self.assertIn('NOPERM', self.cli('EVAL', "return redis.call('KEYS', '*')", '0'))
         self.assertIn('NOPERM', self.cli('EVAL', "return redis.call('SET', KEYS[1], 'x')", '1', 'rc292:fuera'))
 
     def test_3_default_no_entra_ni_con_la_contrasena_de_la_api(self):

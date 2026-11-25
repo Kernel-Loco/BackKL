@@ -68,6 +68,8 @@ services:
       - +exists
       - +expire
       - +incr
+      # redis-py manda pipe.incr(k) como INCRBY k 1.
+      - +incrby
       - +decr
       - +hset
       - +hsetnx
