@@ -36,6 +36,7 @@ from psycopg.types.json import Jsonb
 from cirdan import alcance_carta, db
 from cirdan.config import config
 from cirdan.db import audit, transaction
+from cirdan import planes
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar, certspotter, turno
 from cirdan.recolectores.contrato import COLUMNAS_CVES, CVE_VALIDA, Resultado, ejecutar, siguiente_estado
@@ -56,6 +57,7 @@ MOTIVOS = {
     'txt_not_verified': 'Falta verificar el registro TXT',
     'scan_in_progress': 'Ya hay un escaneo en curso para este dominio',
     'live_scan_not_allowed': 'Este dominio es de la demo y no se consulta en vivo',
+    **planes.MOTIVOS,  # tope de escaneos a mano (RC-297): la API responde 429 con Retry-After
 }
 TXT_DETALLE = {
     'missing': 'no tiene registro TXT',
@@ -189,6 +191,7 @@ class Solicitud:
     scan_id: str | None = None
     domain_id: str | None = None
     txt: str | None = None  # resultado de la consulta TXT, si se hizo
+    retry_after: int | None = None  # segundos, si lo frenó el tope de escaneos a mano (RC-297)
 
 
 @contextmanager
@@ -283,6 +286,13 @@ def abandonar_vencidos(conn, org, domain_id=None, scan_id=None):
     return ids
 
 
+def _en_curso(conn, org, domain_id):
+    """¿Hay un escaneo del dominio en curso? Antes da por caídos los que no tienen marca de vida (abandonar_vencidos)."""
+    abandonar_vencidos(conn, org, domain_id=domain_id)
+    return conn.execute("SELECT 1 FROM scans WHERE domain_id = %s AND status IN ('queued', 'running') LIMIT 1",
+                        (domain_id,)).fetchone() is not None
+
+
 def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None, platform=None):
     """Revisa autorización y TXT y, si todo cumple, crea el escaneo. Nunca escanea sin los dos.
 
@@ -303,6 +313,16 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
             motivos.append('txt_not_verified')  # el alta (#26) todavía no verifica el TXT
         if not motivos and consultar is None and not en_vivo_permitido(fqdn):
             motivos.append('live_scan_not_allowed')
+        # Tope de escaneos a mano por empresa, por dominio y enfriamiento (RC-297), antes del DNS: si se pasa, ni
+        # consulta TXT ni fila en dns_txt_verifications. Toma el candado de la empresa hasta el final de esta
+        # transacción, que es la que inserta el escaneo. Los programados (RC-52) no pasan por aquí.
+        limite = None
+        if not motivos and trigger != 'scheduled' and _en_curso(c, org, domain['id']):
+            motivos.append('scan_in_progress')  # 409 como antes, no el 429 del enfriamiento, y sin consulta DNS
+        if not motivos and trigger != 'scheduled':
+            limite = planes.check_plan_limits(org, 'on_demand_scan', c, domain_id=domain['id'])
+            if limite:
+                motivos.extend(limite.motivos)
 
         txt_resultado = None
         verification_id = None
@@ -338,9 +358,12 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
 
         if motivos:
             detalle = _texto(motivos, txt_resultado)
-            audit(c, org, 'scan.rejected', user_id, ip, 'domain', domain['id'],
-                  {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado}, platform=platform)
-            return Solicitud(fqdn, False, motivos, detalle, domain_id=domain['id'], txt=txt_resultado)
+            detalles = {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado}
+            if limite:
+                detalles['retry_after'] = limite.retry_after
+            audit(c, org, 'scan.rejected', user_id, ip, 'domain', domain['id'], detalles, platform=platform)
+            return Solicitud(fqdn, False, motivos, detalle, domain_id=domain['id'], txt=txt_resultado,
+                             retry_after=limite.retry_after if limite else None)
 
         audit(c, org, 'scan.requested', user_id, ip, 'scan', scan_id, {'fqdn': fqdn, 'trigger': trigger},
               platform=platform)
