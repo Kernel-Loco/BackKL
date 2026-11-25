@@ -1645,7 +1645,7 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(sum(esperas), 60)  # solo la espera del primer reintento
         run = self.corrida_de(s.scan_id, 'ct_logs')
         self.assertEqual((run['status'], run['attempt'], run['next_retry_at']), ('failed', 1, None))
-        self.assertEqual(run['raw_payload']['avisos'], ['Intento 1: crt.sh no respondió', orquestador.SIN_CUPO % 'ct_logs'])
+        self.assertEqual(run['raw_payload']['avisos'], ['Intento 1: no respondió', orquestador.SIN_CUPO % 'ct_logs'])
         self.assertEqual(resumen['status'], 'failed')  # su única fuente falló
         self.assertEqual(self.cupo('ct_logs')[1], usadas + FALLA.consultas)  # lo gastado de más se registra igual
 
