@@ -1,0 +1,15 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de IIS directoryBrowse, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 200,
+ "cabeceras": [
+  [
+   "Server",
+   "Microsoft-IIS/10.0"
+  ],
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<html><head><title>www.acme-demo.mx - /</title></head><body><H1>www.acme-demo.mx - /</H1><hr>\n\n<pre> 11/2/2026 10:14 AM        &lt;dir&gt; <A HREF=\"/respaldo/\">respaldo</A><br>10/30/2026  6:02 PM         2150 <A HREF=\"/web.config.bak\">web.config.bak</A><br></pre><hr></body></html>"
+}

@@ -6,10 +6,10 @@ import contextlib
 import io
 import json
 import functools
+import importlib.util
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -67,11 +67,13 @@ class CrtshSimulado:
     """Transporte falso: responde según la consulta y puede fallar las primeras veces. Las consultas a Cert Spotter (#14b)
     van aparte, en `cert_spotter`, y por defecto no suman certificados."""
 
-    def __init__(self, fallas=0, respuestas=None, sin_dns=(), emisiones=()):
+    def __init__(self, fallas=0, respuestas=None, sin_dns=(), emisiones=(), san=None):
+        """`san`: respuestas del respaldo de las variantes (dNSName=X y dNSName=%.X, RC-337). Sin él, ese respaldo da
+        502: una variante caída en q= sigue caída, como en las pruebas de antes del respaldo."""
         self.fallas, self.urls, self.sin_dns, self.dns = fallas, [], set(sin_dns), []
         self.respuestas = respuestas if respuestas is not None else {
             '%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': CONTIENE_MARCA, 'acme-dem0.mx': CANDIDATO}
-        self.emisiones, self.cert_spotter = list(emisiones), []
+        self.emisiones, self.cert_spotter, self.san = list(emisiones), [], san
 
     def __call__(self, url, timeout):
         partes = crtsh.urllib.parse.urlparse(url)
@@ -82,7 +84,12 @@ class CrtshSimulado:
             raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
         if cert_spotter:  # una página con las emisiones y la vacía que cierra
             return json.dumps([] if 'after' in crtsh.urllib.parse.parse_qs(partes.query) else self.emisiones).encode()
-        q = crtsh.urllib.parse.parse_qs(partes.query)['q'][0]
+        parametros = crtsh.urllib.parse.parse_qs(partes.query)
+        if 'dNSName' in parametros:
+            if self.san is None:
+                raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+            return json.dumps(self.san.get(parametros['dNSName'][0], [])).encode()
+        q = parametros['q'][0]
         return json.dumps(self.respuestas.get(q, [])).encode()
 
     def resolver(self, nombre):
@@ -120,6 +127,35 @@ class Subdominios(unittest.TestCase):
     def test_2_certificado_renovado_no_es_hallazgo(self):
         self.assertNotIn(('cert_expired', 'www.acme-demo.mx'), self.hallazgos)
         self.assertEqual(self.activos['www.acme-demo.mx'].atributos['certificados'], 2)
+
+    def test_2b_emitido_es_el_not_before_del_certificado_mas_reciente(self):
+        """RC-219: www y el dominio raíz tienen el certificado 1 (abr) y el 2 (sep). 'emitido' es el del 2."""
+        for nombre in ('www.acme-demo.mx', 'acme-demo.mx'):
+            a = self.activos[nombre].atributos
+            self.assertEqual((a['emitido'], a['primer_certificado']),
+                             ('2026-09-20T00:00:00+00:00', '2026-04-01T00:00:00+00:00'), nombre)
+        self.assertEqual(self.activos['api.acme-demo.mx'].atributos['emitido'], '2026-07-27T00:00:00+00:00')
+
+    def test_2d_emitido_es_el_emitido_mas_tarde_aunque_venza_antes(self):
+        """RC-219: uno de un año (mar) y uno de 90 días emitido después (oct) que vence antes. Gana el de oct."""
+        certs = [cert(1, ['www.acme-demo.mx'], '2026-03-01T00:00:00', '2027-03-01T00:00:00',
+                      emisor='C=US, O=DigiCert Inc'),
+                 cert(2, ['www.acme-demo.mx'], '2026-10-10T00:00:00', '2027-01-08T00:00:00')]
+        a = crtsh._subdominios('acme-demo.mx', certs, AHORA)[0][0].atributos
+        self.assertEqual((a['emitido'], a['vence']), ('2026-10-10T00:00:00+00:00', '2027-03-01T00:00:00+00:00'))
+
+    def test_2e_emitido_tambien_con_un_certificado_de_cert_spotter(self):
+        """RC-219: un certificado que solo trae Cert Spotter pasa por el mismo camino y deja 'emitido'."""
+        c = dict(cert(9, ['cs.acme-demo.mx'], '2026-10-01T00:00:00', '2026-12-30T00:00:00'), origen='certspotter')
+        a = crtsh._subdominios('acme-demo.mx', [c], AHORA)[0][0].atributos
+        self.assertEqual(a['emitido'], '2026-10-01T00:00:00+00:00')
+
+    def test_2c_emitido_no_toma_un_revocado_aunque_sea_mas_nuevo(self):
+        """RC-219: un revocado no cuenta para 'emitido' mientras haya otro sin revocar."""
+        certs = [cert(1, ['www.acme-demo.mx'], '2026-09-01T00:00:00', '2026-11-30T00:00:00'),
+                 dict(cert(2, ['www.acme-demo.mx'], '2026-10-10T00:00:00', '2027-01-08T00:00:00'), revocado=True)]
+        activos, _ = crtsh._subdominios('acme-demo.mx', certs, AHORA)
+        self.assertEqual(activos[0].atributos['emitido'], '2026-09-01T00:00:00+00:00')
 
     def test_3_vence_en_menos_de_30_dias(self):
         h = self.hallazgos[('cert_expiring_soon', 'api.acme-demo.mx')]
@@ -170,6 +206,26 @@ class DominiosParecidos(unittest.TestCase):
     def test_3_el_hallazgo_es_del_dominio_de_la_empresa(self):
         h = self.parecidos['acme-demo-login.com']
         self.assertEqual((h.activo, h.severidad), ('acme-demo.mx', 'medium'))
+
+    def test_3b_ningun_parecido_es_cobertura_completa_con_cero(self):
+        """Punto 5 de RC-226, sin red: crt.sh responde %marca% y todas las variantes, y ninguna trae un parecido de
+        menos de 90 días (solo el viejo, el propio y nombres del dominio). lookalike_domain queda revisado con 0
+        hallazgos, no en sin_cobertura. La corrida queda 'complete': orquestador.cobertura() da 'complete' con estado
+        succeeded, revisados en None y algún código fuera de sin_cobertura (aquí ninguno está). El orquestador no se
+        importa porque pide la base y dnspython, que el runner de 'Pruebas sin base ni red' no trae."""
+        sin_parecidos = [c for c in CONTIENE_MARCA if c['id'] in (23, 24, 25)]
+        t = CrtshSimulado(respuestas={'%.acme-demo.mx': SUBDOMINIOS, '%acme-demo%': sin_parecidos})
+        res = recolectar(t, parecidos=True)
+        consultas = [consulta(u) for u in t.urls]
+        self.assertIn('%acme-demo%', consultas)
+        for variante in crtsh.candidatos_parecidos('acme-demo.mx'):
+            if variante != 'acme-demo.com.mx':  # propio de la empresa (recolectar), no se pregunta
+                self.assertIn(variante, consultas, variante)  # cada variante se preguntó y respondió vacía
+        self.assertEqual((res.estado, res.sin_cobertura, res.omitidos, res.revisados), ('succeeded', [], [], None))
+        self.assertEqual([h for h in res.hallazgos if h.codigo == 'lookalike_domain'], [])
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        # Los de subdominios siguen saliendo: el 0 es solo de parecidos.
+        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
 
     def test_4_variantes(self):
         v = crtsh.candidatos_parecidos('acme-demo.mx')
@@ -590,9 +646,13 @@ class FallasYGrabacion(unittest.TestCase):
         caidas = variantes[-3:-1]
         res, pedidas, duro = self._con_cronometro(lambda v, n: 1000 if v in caidas + [ultima] or n == 1 else 20)
         self.assertEqual([t for v, t in pedidas if v == ultima], [20])
+        # Con los 22 s que quedan, el respaldo de la primera caída (RC-337) hace su pausa y su dNSName da 502 al
+        # momento. Al de la segunda ya no le cabe una petición (20 s < pausa + MINIMO_VARIANTE).
         self.assertEqual(duro, (len(variantes) - 3) * (cada_una + 20) + 2 * (cada_una + 45)
-                         + crtsh.PAUSA_PARECIDOS + 20)
-        self.assertEqual(crtsh.PRESUPUESTO_VARIANTES - duro, 22)
+                         + crtsh.PAUSA_PARECIDOS + 20 + crtsh.PAUSA_PARECIDOS)
+        self.assertEqual(crtsh.PRESUPUESTO_VARIANTES - duro, 20)
+        self.assertEqual([u for u in self.cliente.transporte.urls if 'dNSName' in u],
+                         ['https://crt.sh/?dNSName=%s&output=json' % caidas[0]])
         self.assertEqual(res.avisos[-1], crtsh.SIN_REINTENTO % (crtsh.PRESUPUESTO_VARIANTES, '1 variante', ultima))
         self.assertFalse([a for a in res.avisos if 'saturado' in a])
 
@@ -747,19 +807,22 @@ class FallasYGrabacion(unittest.TestCase):
 
     def test_4f_el_peor_caso_de_tiempo_documentado(self):
         """El peor caso de una corrida, que citan el orquestador y docs/contrato_plugin.md, sale de las constantes:
-        1055 s, debajo de TOPE_CORRIDA. Si cambia un timeout o el presupuesto, cambian los textos y se revisa el tope."""
+        865 s, debajo de TOPE_CORRIDA. Si cambia un timeout o el presupuesto, cambian los textos y se revisa el tope.
+        Las dos búsquedas de subdominios tienen juntas PLAZO_PRINCIPAL (RC-218)."""
         from cirdan.recolectores import certspotter
         general = crtsh.ClienteCrtsh(transporte=CrtshSimulado()).timeout
-        busqueda = crtsh.INTENTOS * general + sum(crtsh.ESPERAS[:crtsh.INTENTOS - 1])
+        busquedas = crtsh.PLAZO_PRINCIPAL
         pagina = (certspotter.COMPLEMENTO['intentos'] * certspotter.COMPLEMENTO['timeout']
                   + sum(crtsh.ESPERAS[:certspotter.COMPLEMENTO['intentos'] - 1]))
         marca = crtsh.INTENTOS_PARECIDOS * general + sum(crtsh.ESPERAS[:crtsh.INTENTOS_PARECIDOS - 1])
-        peor = 2 * busqueda + certspotter.MAX_PAGINAS * pagina + marca + crtsh.PRESUPUESTO_VARIANTES
-        self.assertEqual((busqueda, pagina, marca, crtsh.PRESUPUESTO_VARIANTES, peor), (155, 45, 95, 470, 1055))
+        peor = busquedas + certspotter.MAX_PAGINAS * pagina + marca + crtsh.PRESUPUESTO_VARIANTES
+        self.assertEqual((busquedas, pagina, marca, crtsh.PRESUPUESTO_VARIANTES, peor), (120, 45, 95, 470, 865))
         raiz = Path(crtsh.__file__).resolve().parents[2]
         orquestador = (raiz / 'cirdan' / 'orquestador' / '__init__.py').read_text(encoding='utf-8')
         tope = int(re.search(r'^TOPE_CORRIDA = timedelta\(minutes=(\d+)\)', orquestador, re.M).group(1)) * 60
         self.assertLess(peor, tope)
+        self.assertLessEqual(peor + crtsh.PLAZO_DNS, tope)   # el DNS de los vencidos también cabe (RC-288)
+        self.assertIn('PLAZO_DNS (%d s de crtsh.py' % crtsh.PLAZO_DNS, orquestador)
         self.assertIn('%d s en el peor' % peor, orquestador)
         self.assertIn('Quedan %d s antes de TOPE_CORRIDA' % (tope - peor), orquestador)
         doc = (raiz / 'docs' / 'contrato_plugin.md').read_text(encoding='utf-8')
@@ -772,7 +835,7 @@ class FallasYGrabacion(unittest.TestCase):
         self.assertEqual(crtsh._timeouts_variante(crtsh.LENTO),
                          (crtsh.TIMEOUTS_VARIANTE[1],) * crtsh.INTENTOS_PARECIDOS)
         self.assertIn('tienen %d segundos (`PRESUPUESTO_VARIANTES`)' % crtsh.PRESUPUESTO_VARIANTES, doc)
-        self.assertIn('sigue en %d segundos' % peor, doc)
+        self.assertIn('queda en %d segundos' % peor, doc)
 
     def test_4c_las_variantes_sin_respuesta_van_en_omitidos_tambien_las_del_corte(self):
         """B4 de RC-226. Si %marca% responde y las variantes no, hay cobertura y van en omitidos las huellas de las 3
@@ -804,7 +867,9 @@ class FallasYGrabacion(unittest.TestCase):
         sin_certificados = recolectar(CrtshSimulado(), parecidos=False)
         partes = {p for h in sin_certificados.hallazgos for p in h.partes}
         self.assertTrue(partes and partes <= set(res.revisados))
-        de_parecidos = [p for p in res.revisados if '@' not in p]
+        de_parecidos = [p for p in res.revisados if '@' not in p and not p.startswith(crtsh.EMISOR)]
+        # llegaron todos los certificados: también se revisaron sus emisores para cert_new_issuer (RC-218)
+        self.assertEqual([p for p in res.revisados if p.startswith(crtsh.EMISOR)], ["emisor:let's encrypt"])
         self.assertEqual(de_parecidos, ['acme-demo-login.com', 'acme-demo-pagos.com', 'acme-demo-viejo.com',
                                         'acme-demo.com.mx', 'cuenta-segura.net'])  # el viejo y el propio también
         self.assertFalse(set(variantes) & set(res.revisados))
@@ -878,7 +943,8 @@ class FallasYGrabacion(unittest.TestCase):
 
     def test_9_completar_vuelve_a_consultar_lo_de_grabaciones_anteriores(self):
         inicio = datetime(2026, 10, 15, 18, 0, tzinfo=timezone.utc)
-        reloj = lambda: inicio + crtsh.timedelta(minutes=1)
+        def reloj():
+            return inicio + crtsh.timedelta(minutes=1)
 
         class VarianteCaida(CrtshSimulado):
             def __call__(self, url, timeout):
@@ -1055,6 +1121,218 @@ class FallasYGrabacion(unittest.TestCase):
                 self.assertFalse(ignorado(ruta), ruta)
 
 
+class QCaido(CrtshSimulado):
+    """crt.sh como desde vm-lowtide el 17 nov (RC-337): q= de las variantes de `caidas` da `codigo` y lo demás
+    responde."""
+
+    def __init__(self, caidas=('acme-dem0.mx',), codigo=404, **kw):
+        kw.setdefault('san', {'acme-dem0.mx': CANDIDATO, '%.acme-dem0.mx': CANDIDATO})  # el mismo id en las dos
+        super().__init__(**kw)
+        self.caidas, self.codigo = set(caidas), codigo
+
+    def __call__(self, url, timeout):
+        q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query).get('q', [''])[0]
+        if q in self.caidas:
+            self.urls.append(url)
+            raise urllib.error.HTTPError(url, self.codigo, 'Not Found', None, None)
+        return super().__call__(url, timeout)
+
+
+def sin_red(url, timeout):
+    raise AssertionError('consultó la red: %s' % url)
+
+
+def huellas(res):
+    return sorted(h.huella for h in res.hallazgos)
+
+
+class RespaldoDeVariantes(unittest.TestCase):
+    """RC-337: si q= de una variante no responde, al final se piden dNSName=X y dNSName=%.X."""
+
+    def test_1_q_caido_y_dnsname_responde_deja_la_corrida_completa(self):
+        sano = recolectar(CrtshSimulado(), parecidos=True)
+        t = QCaido()
+        res = recolectar(t, parecidos=True)
+        self.assertEqual(huellas(res), huellas(sano))
+        self.assertIn('acme-dem0.mx', {h.evidencia.get('dominio_parecido') for h in res.hallazgos})
+        self.assertIsNone(res.revisados)  # nada quedó sin revisar: el escaneo no termina 'partial'
+        self.assertEqual((res.omitidos, res.sin_cobertura, res.avisos), ([], [], []))
+        self.assertEqual(crtsh.codigo_salida(res), 0)
+        self.assertEqual([u for u in t.urls if 'dNSName' in u], [
+            'https://crt.sh/?dNSName=acme-dem0.mx&output=json', 'https://crt.sh/?dNSName=%25.acme-dem0.mx&output=json'])
+        self.assertEqual(res.consultas, len(t.urls) + len(t.cert_spotter))  # un 404 de q= es 1 intento y el respaldo 2
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        self.assertEqual(crtsh.MAX_CONSULTAS, 36)  # el respaldo cabe en el cupo de antes: la semilla 014 no cambia
+
+    def test_2_si_el_respaldo_tampoco_responde_sigue_parcial(self):
+        class SinSubdominios(QCaido):  # dNSName=X responde y dNSName=%.X no: tampoco basta
+            def __call__(self, url, timeout):
+                if 'dNSName=%25.' in url:
+                    self.urls.append(url)
+                    raise TimeoutError('timed out')
+                return super().__call__(url, timeout)
+
+        for t in (QCaido(codigo=502, san=None), SinSubdominios(codigo=502)):
+            with self.subTest(t=type(t).__name__):
+                res = recolectar(t, parecidos=True)
+                self.assertIsNotNone(res.revisados)  # el escaneo termina 'partial', como antes del respaldo
+                self.assertIn(crtsh._huella('lookalike_domain', 'acme-demo.mx', 'acme-dem0.mx'), res.omitidos)
+                self.assertNotIn('acme-dem0.mx', {h.evidencia.get('dominio_parecido') for h in res.hallazgos})
+                [aviso] = [a for a in res.avisos if 'acme-dem0.mx' in a]
+                self.assertIn('no respondió a acme-dem0.mx después de 2 intentos', aviso)
+                self.assertIn('Tampoco respondió su respaldo: crt.sh no respondió a dNSName=', aviso)
+                self.assertEqual(crtsh.codigo_salida(res), 2)
+
+    def test_3_una_fila_sin_fechas_en_el_respaldo_no_da_cero_parecidos(self):
+        bien = {'id': 30, 'name_value': 'acme-dem0.mx', 'not_before': '2026-10-01T00:00:00',
+                'not_after': '2026-12-30T00:00:00'}
+        malas = [{'id': 30, 'name_value': 'acme-dem0.mx'},  # sin las llaves de las fechas
+                 dict(bien, not_before=None), dict(bien, not_after=''), dict(bien, not_before='1 oct 2026'),
+                 dict(bien, name_value=None), dict(bien, name_value=' ')]
+        for fila in malas:
+            with self.subTest(fila=fila):
+                t = QCaido(san={'acme-dem0.mx': [fila], '%.acme-dem0.mx': []})
+                res = recolectar(t, parecidos=True)
+                self.assertIsNotNone(res.revisados)
+                self.assertIn(crtsh._huella('lookalike_domain', 'acme-demo.mx', 'acme-dem0.mx'), res.omitidos)
+                self.assertIn('respuesta que no se puede leer', ' '.join(res.avisos))
+                self.assertEqual(len([u for u in t.urls if 'dNSName' in u]), 1)  # no se reintenta ni pide la segunda
+        res = recolectar(QCaido(san={'acme-dem0.mx': [bien], '%.acme-dem0.mx': []}), parecidos=True)
+        self.assertEqual((res.revisados, res.omitidos), (None, []))  # la misma fila con todo bien sí cuenta
+
+    def test_4_con_crtsh_saturado_no_se_pide_el_respaldo(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        t = QCaido(caidas=variantes[:crtsh.FALLAS_SEGUIDAS], codigo=502)
+        res = recolectar(t, parecidos=True)
+        self.assertFalse([u for u in t.urls if 'dNSName' in u])
+        self.assertIn('crt.sh saturado', res.avisos[-1])  # después de los avisos de cada variante, como antes
+        self.assertIsNotNone(res.revisados)
+
+    def test_5_el_respaldo_no_pasa_del_tope_de_consultas_de_parecidos(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[::2]  # una sí y una no: nunca 3 seguidas, así que no hay saturación
+        t = QCaido(caidas=caidas, codigo=502, san={})
+
+        def de_parecidos(url):
+            parametros = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(url).query)
+            return 'dNSName' in parametros or parametros['q'][0] in variantes + ['%acme-demo%']
+        res = recolectar(t, parecidos=True)
+        # 9 variantes (sin acme-demo.com.mx, que es propio). %marca% 1, 4 sanas 4 y 5 caídas con 2 intentos 10: de las
+        # 22 quedan 7, para 3 respaldos de 2 consultas. Un 4.º llegaría a 23
+        self.assertEqual((len(variantes), len(caidas)), (9, 5))
+        self.assertEqual(len([u for u in t.urls if 'dNSName' in u]), 2 * 3)
+        self.assertEqual(len([u for u in t.urls if de_parecidos(u)]), 1 + 4 + 10 + 6)
+        self.assertLess(crtsh.TOPE_PARECIDOS - (1 + 4 + 10 + 6), 2 * crtsh.INTENTOS_RESPALDO)
+        self.assertLessEqual(res.consultas, crtsh.MAX_CONSULTAS)
+        self.assertEqual(sorted(res.omitidos), sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v)
+                                                      for v in caidas[3:]))
+        sin_respaldo = [a for a in res.avisos if 'después de 2 intentos' in a and 'respaldo' not in a]
+        self.assertEqual(len(sin_respaldo), len(caidas) - 3)
+
+    def test_5b_el_respaldo_que_llega_justo_al_tope_si_se_pide(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[1::2]  # 4 caídas alternadas: %marca% 1, 5 sanas 5 y 4 caídas con 2 intentos 8, 14
+        t = QCaido(caidas=caidas, codigo=502, san={})
+        res = recolectar(t, parecidos=True)
+        # los respaldos empiezan en 14, 16, 18 y 20: el 4.º deja la cuenta justo en TOPE_PARECIDOS y sí se pide
+        self.assertEqual(1 + (len(variantes) - len(caidas)) + 2 * len(caidas) + 2 * 3, crtsh.TOPE_PARECIDOS - 2)
+        self.assertEqual(len([u for u in t.urls if 'dNSName' in u]), 2 * len(caidas))
+        self.assertEqual((res.revisados, res.omitidos, res.avisos), (None, [], []))
+
+    def test_6_grabar_y_reproducir_repiten_el_respaldo_sin_red(self):
+        sano = recolectar(CrtshSimulado(), parecidos=True)
+        with tempfile.TemporaryDirectory() as d:
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=QCaido(), dormir=lambda s: None)
+            res = crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            self.assertEqual(huellas(res), huellas(sano))
+            nombres = {f.name for f in Path(d).iterdir()}
+            self.assertTrue({'san_acme-dem0.mx.json', 'san_subdominios_acme-dem0.mx.json'} <= nombres, nombres)
+            self.assertNotIn('acme-dem0.mx.json', nombres)
+
+            rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d, transporte=sin_red, dormir=lambda s: None)
+            res = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+        self.assertEqual(huellas(res), huellas(sano))
+        self.assertEqual((res.revisados, res.omitidos, res.avisos), (None, [], []))
+
+    def test_7_reproducir_sin_q_ni_respaldo_grabados_deja_el_aviso_de_siempre(self):
+        with tempfile.TemporaryDirectory() as d:
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=QCaido(san=None), dormir=lambda s: None)
+            crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            self.assertFalse([f.name for f in Path(d).iterdir() if f.name.startswith('san_')])
+            rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d, transporte=sin_red, dormir=lambda s: None)
+            res = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+        self.assertEqual([a for a in res.avisos if 'acme-dem0.mx' in a], [contrato.SIN_GRABACION + 'acme-dem0.mx'])
+        self.assertIn('Falta 1 respuesta grabada: acme-dem0.mx.', '\n'.join(crtsh.resumen(res)))
+
+    def test_8_tres_fallas_seguidas_al_final_tambien_son_saturacion(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[-crtsh.FALLAS_SEGUIDAS:]
+        t = QCaido(caidas=caidas, codigo=502, san={})
+        res = recolectar(t, parecidos=True)
+        self.assertFalse([u for u in t.urls if 'dNSName' in u])  # el bucle terminó con crt.sh ya saturado
+        self.assertEqual(sorted(res.omitidos), sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v)
+                                                      for v in caidas))
+        self.assertFalse([a for a in res.avisos if 'respaldo' in a])
+
+    def test_9_si_un_respaldo_no_responde_no_se_piden_los_demas(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[::2]  # nunca 3 seguidas: sin el corte se pedirían 3 respaldos (test_5)
+        t = QCaido(caidas=caidas, codigo=502, san=None)
+        res = recolectar(t, parecidos=True)
+        self.assertEqual([u for u in t.urls if 'dNSName' in u],
+                         ['https://crt.sh/?dNSName=%s&output=json' % caidas[0]])  # dNSName=X falló: ni %.X
+        self.assertEqual(len([a for a in res.avisos if 'Tampoco respondió su respaldo' in a]), 1)
+        self.assertEqual(sorted(res.omitidos), sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v)
+                                                      for v in caidas))
+
+    def test_10_sin_tiempo_o_con_el_archivo_danado_el_aviso_no_culpa_a_crtsh(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        caidas = variantes[:2]
+        casos = [(crtsh.SinTiempo('no quedó tiempo para consultar dNSName=x'), False, True),
+                 (crtsh.GrabacionDanada('san_x.json'), False, True),
+                 (crtsh.SinTiempo('crt.sh no respondió a dNSName=x después de 1 intento', 1), True, False)]
+        for error, culpa, sigue in casos:
+            with self.subTest(error=str(error)):
+                cliente = crtsh.ClienteCrtsh(transporte=QCaido(caidas=caidas, codigo=502, san={}),
+                                             dormir=lambda s: None)
+                original = cliente.consultar_san
+
+                def respaldo(nombre, error=error, original=original, **kw):
+                    if nombre == caidas[0]:
+                        raise error
+                    return original(nombre, **kw)
+                with mock.patch.object(cliente, 'consultar_san', side_effect=respaldo):
+                    res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, propios=['acme-demo.com.mx'],
+                                           parecidos=True)
+                [aviso] = [a for a in res.avisos if caidas[0] in a]
+                self.assertTrue(aviso.startswith('crt.sh no respondió a %s después de 2 intentos' % caidas[0]))
+                self.assertEqual('Tampoco respondió su respaldo' in aviso, culpa)
+                # ni el tiempo ni el disco dicen que crt.sh esté caído: el respaldo de la 2.ª se pide igual
+                self.assertEqual(crtsh._huella('lookalike_domain', 'acme-demo.mx', caidas[1]) not in res.omitidos,
+                                 sigue)
+
+    def test_11_completar_lee_el_respaldo_grabado_aunque_crtsh_quede_saturado(self):
+        variantes = [v for v in crtsh.candidatos_parecidos('acme-demo.mx') if v != 'acme-demo.com.mx']
+        x, *otras = variantes[-crtsh.FALLAS_SEGUIDAS:]
+        with tempfile.TemporaryDirectory() as d:
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=QCaido(caidas=[x], san={}),
+                                      dormir=lambda s: None, nueva=True)
+            crtsh.recolectar('acme-demo.mx', grab, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            self.assertTrue((Path(d) / ('san_%s.json' % x)).exists())
+            for v in otras:  # una grabación que se cortó antes de estas dos
+                (Path(d) / ('%s.json' % v)).unlink()
+            t = QCaido(caidas=[x] + otras, codigo=502, san=None)
+            comp = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=t, dormir=lambda s: None, completar=True,
+                                      desde=contrato.Grabadora.inicio(d))
+            completada = crtsh.recolectar('acme-demo.mx', comp, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+            self.assertFalse([u for u in t.urls if 'dNSName' in u])  # el de x salió del disco y crt.sh quedó saturado
+            rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d, transporte=sin_red, dormir=lambda s: None)
+            reproducida = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
+        omitidos = sorted(crtsh._huella('lookalike_domain', 'acme-demo.mx', v) for v in otras)
+        self.assertEqual((sorted(completada.omitidos), sorted(reproducida.omitidos)), (omitidos, omitidos))
+        self.assertEqual(huellas(completada), huellas(reproducida))
+
+
 class ErroresQueNoSonDeCrtsh(unittest.TestCase):
 
     def test_1_un_4xx_no_se_reintenta(self):
@@ -1096,6 +1374,226 @@ class ErroresQueNoSonDeCrtsh(unittest.TestCase):
 
 def iso(delta_dias):
     return (AHORA + timedelta(days=delta_dias)).strftime('%Y-%m-%dT%H:%M:%S')
+
+
+class TopeDeBytes(unittest.TestCase):
+    """RC-288: crt.sh baja con transporte.descargar() y a lo más TOPE_BYTES. Sin red: transporte.abrir, la conexión, se
+    cambia por un servidor simulado que manda 60 MiB a %.acme-demo.mx. Se deja de leer al pasar el tope, no se
+    reintenta, el aviso dice el tope y entra la búsqueda por nombre."""
+
+    class Respuesta:
+        def __init__(self, cuerpo=None, total=0):
+            self.cuerpo, self.total, self.leidos = cuerpo, total, 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read1(self, n):
+            if self.cuerpo is not None:
+                parte, self.cuerpo = self.cuerpo[:n], self.cuerpo[n:]
+            else:
+                parte = b' ' * min(n, self.total - self.leidos)
+            self.leidos += len(parte)
+            return parte
+
+    def test_1_mas_del_tope_se_corta_sin_leer_todo_y_sin_reintentar(self):
+        pedidas = []
+
+        def abrir(req, plazo, cronometro):
+            q = crtsh.urllib.parse.parse_qs(crtsh.urllib.parse.urlparse(req.full_url).query).get('q', [''])[0]
+            if req.host == 'crt.sh' and q == '%.acme-demo.mx':
+                r = self.Respuesta(total=60 * 1024 * 1024)
+            else:
+                r = self.Respuesta(cuerpo=json.dumps(SUBDOMINIOS if q == 'acme-demo.mx' else []).encode())
+            pedidas.append((req.host, q, r))
+            return r
+        with mock.patch.object(crtsh.transporte, 'abrir', abrir):
+            cliente = crtsh.ClienteCrtsh(dormir=lambda s: None, resolver=lambda n: True)
+            res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, parecidos=False)
+        grandes = [r for h, q, r in pedidas if q == '%.acme-demo.mx']
+        self.assertEqual(len(grandes), 1)   # un solo intento
+        self.assertEqual(grandes[0].leidos, crtsh.TOPE_BYTES + 1)   # no lee los 60 MiB
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertEqual(res.avisos[0], crtsh.POR_NOMBRE_GRANDE % ('acme-demo.mx', crtsh.TOPE_BYTES))
+        self.assertIn('52428800 bytes', res.avisos[0])
+        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+
+    @unittest.skipUnless(os.environ.get('TRANSPORTE_TLS') == '1' or importlib.util.find_spec('cryptography'),
+                         'pide cryptography para el certificado: corre dentro del contenedor')
+    def test_2_un_servidor_tls_local_que_manda_mas_del_tope_se_corta(self):
+        """El servidor local que pide el Hecho cuando: TLS de verdad sobre socket.socketpair() (sin red), con el
+        certificado y el extremo de test_rdap. Con TOPE_BYTES en 256 KiB el servidor intenta mandar 16 MiB sin
+        Content-Length: _descargar corta con RespuestaGrande y el servidor no alcanza a mandarlo todo."""
+        import socket
+        import ssl
+        import threading
+        from pruebas.test_rdap import Extremo, certificado
+        carpeta = tempfile.TemporaryDirectory()
+        self.addCleanup(carpeta.cleanup)
+        ruta_cert, ruta_llave = certificado(carpeta.name, 'crt.sh')
+        servidor_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        servidor_ctx.load_cert_chain(ruta_cert, ruta_llave)
+        cliente_ctx = ssl.create_default_context(cafile=ruta_cert)   # como transporte._contexto, con esta CA
+        cliente_ctx.sslsocket_class = crtsh.transporte._SocketTls
+        total, tope, enviados, pedidos = 16 * 1024 * 1024, 256 * 1024, [], []
+        a, b = socket.socketpair()
+        extremo = Extremo(fileno=a.detach())
+
+        def atender():
+            b.settimeout(10)
+            try:
+                with servidor_ctx.wrap_socket(b, server_side=True) as tls:
+                    pedido = b''
+                    while b'\r\n\r\n' not in pedido:
+                        parte = tls.recv(4096)
+                        if not parte:
+                            return
+                        pedido += parte
+                    pedidos.append(pedido)
+                    tls.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n')
+                    bloque = b' ' * 65536
+                    for _ in range(total // len(bloque)):
+                        tls.sendall(bloque)
+                        enviados.append(len(bloque))
+            except OSError:
+                pass
+            finally:
+                b.close()
+        hilo = threading.Thread(target=atender, daemon=True)
+        hilo.start()
+
+        def conectar(conexion, direccion, *_):
+            self.assertEqual(direccion, ('crt.sh', 443))
+            extremo.settimeout(conexion.queda())   # como _conectar antes del handshake
+            return extremo
+        try:
+            with mock.patch.object(crtsh, 'TOPE_BYTES', tope), \
+                    mock.patch.object(crtsh.transporte, '_contexto', lambda: cliente_ctx), \
+                    mock.patch.object(crtsh.transporte._Conexion, '_conectar', conectar), \
+                    self.assertRaises(crtsh.RespuestaGrande):
+                crtsh._descargar('https://crt.sh/?q=%25.acme-demo.mx&output=json', 10)
+        finally:
+            extremo.close()
+            hilo.join(15)
+        self.assertFalse(hilo.is_alive())
+        [pedido] = pedidos
+        self.assertTrue(pedido.startswith(b'GET /?q=%25.acme-demo.mx&output=json HTTP/1.1\r\n'), pedido)
+        self.assertLess(sum(enviados), total // 2)   # dejó de leer: el servidor no alcanzó a mandar los 16 MiB
+
+
+class TopeDelDns(unittest.TestCase):
+    """RC-288, comentario 10394: toda la corrida de DNS cabe en PLAZO_DNS. Con un resolvedor lento (cada pregunta se
+    come COSTO_DNS segundos de un reloj falso) la corrida no se estira: lo que ya no cabe no se pregunta y queda como
+    'no se pudo saber', nunca como hallazgo, con su huella en omitidos."""
+
+    def correr(self, n, respuesta):
+        reloj, preguntas = {'t': 0.0}, []
+
+        def resolver(nombre):
+            preguntas.append((nombre, reloj['t']))
+            reloj['t'] += crtsh.COSTO_DNS
+            return respuesta
+        vencidos = [cert(500 + i, ['v%02d.acme-demo.mx' % i], iso(-90), iso(-10)) for i in range(n)]
+        cliente = crtsh.ClienteCrtsh(transporte=CrtshSimulado(respuestas={'%.acme-demo.mx': vencidos}),
+                                     dormir=lambda s: None, resolver=resolver, cronometro=lambda: reloj['t'])
+        res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, parecidos=False)
+        return res, preguntas, reloj['t']
+
+    def test_1_un_resolvedor_que_no_responde_no_pasa_del_tope_ni_da_hallazgos(self):
+        res, preguntas, fin = self.correr(40, None)
+        cabe = int(crtsh.PLAZO_DNS // crtsh.COSTO_DNS)
+        self.assertLessEqual(fin, crtsh.PLAZO_DNS)
+        self.assertEqual(len(preguntas), cabe)
+        self.assertNotIn('cert_expired', {h.codigo for h in res.hallazgos})
+        self.assertEqual(len(res.omitidos), 40)
+        preguntados = [n for n, _ in preguntas]
+        cortados = ['v%02d.acme-demo.mx' % i for i in range(40) if 'v%02d.acme-demo.mx' % i not in preguntados]
+        self.assertEqual(len(cortados), 40 - cabe)
+        self.assertEqual([a for a in res.avisos if a.startswith('No se pudo comprobar')],
+                         [crtsh.SIN_DNS % crtsh._lista(preguntados)])   # uno solo, con a lo más 10 nombres
+        self.assertTrue(crtsh._lista(preguntados).endswith(' y %d más' % (cabe - crtsh.MAX_NOMBRES_AVISO)))
+        self.assertIn(crtsh.DNS_SIN_TIEMPO % (crtsh.PLAZO_DNS, crtsh._lista(cortados)), res.avisos)
+        self.assertIsNotNone(res.revisados)   # la corrida queda parcial
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+
+    def test_2_lo_que_si_respondio_dentro_del_tope_se_reporta(self):
+        res, preguntas, fin = self.correr(40, True)
+        cabe = int(crtsh.PLAZO_DNS // crtsh.COSTO_DNS)
+        self.assertLessEqual(fin, crtsh.PLAZO_DNS)
+        self.assertEqual(len([h for h in res.hallazgos if h.codigo == 'cert_expired']), cabe)
+        self.assertEqual(len(res.omitidos), 40 - cabe)
+        self.assertFalse([a for a in res.avisos if a.startswith('No se pudo comprobar')])
+        self.assertEqual(len([a for a in res.avisos if a.startswith('El DNS de los nombres vencidos')]), 1)
+        self.assertIsNotNone(res.revisados)
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+
+    def test_3_un_no_existe_sin_tiempo_para_el_control_no_se_cree(self):
+        """El último nombre que cabe dice que no existe, pero ya no queda tiempo para preguntar por el dominio: no se
+        graba como False y su vencido va en omitidos."""
+        reloj, preguntas = {'t': 0.0}, []
+
+        def resolver(nombre):
+            preguntas.append(nombre)
+            reloj['t'] += crtsh.COSTO_DNS
+            return False
+        cliente = crtsh.ClienteCrtsh(transporte=CrtshSimulado(), dormir=lambda s: None, resolver=resolver,
+                                     cronometro=lambda: reloj['t'])
+        cliente._fin_dns = crtsh.COSTO_DNS   # solo cabe una pregunta
+        self.assertIsNone(cliente.resuelve('dev.acme-demo.mx', control='acme-demo.mx'))
+        self.assertEqual((preguntas, cliente.dns_sin_tiempo, cliente.dns_sin_respuesta),
+                         (['dev.acme-demo.mx'], ['dev.acme-demo.mx'], []))
+        self.assertNotIn('acme-demo.mx', cliente._dns_funciona)   # sin tiempo no dice nada del DNS
+
+    def test_4_un_dominio_sin_a_en_la_raiz_si_cuenta_como_dns_que_responde(self):
+        """Con el resolvedor de omisión el control pregunta si el dominio existe: con solo MX o TXT en la raíz (A vacía)
+        el NXDOMAIN de un nombre se cree. Un NXDOMAIN del propio dominio no: ese resolvedor miente."""
+        for raiz, esperado in ((('vacio', []), False), (('ok', ['198.51.100.1']), False), (('nxdomain', []), None)):
+            pedidos = []
+
+            def consultar(nombre, tipo, raiz=raiz, pedidos=pedidos):
+                pedidos.append((nombre, tipo))
+                return raiz if nombre == 'acme-demo.mx' else ('nxdomain', [])
+            with self.subTest(raiz=raiz), mock.patch.object(crtsh.registros_dns, '_consultar', consultar), \
+                    mock.patch('socket.getaddrinfo', side_effect=AssertionError('DNS del sistema')):
+                cliente = crtsh.ClienteCrtsh(dormir=lambda s: None)
+                self.assertIs(cliente.resolver, crtsh._resolver_dns)
+                self.assertIs(cliente.resuelve('dev.acme-demo.mx', control='acme-demo.mx'), esperado)
+                self.assertEqual(pedidos, [('dev.acme-demo.mx', 'A'), ('acme-demo.mx', 'A')])
+                self.assertEqual(cliente.dns_sin_respuesta, [] if esperado is False else ['dev.acme-demo.mx'])
+
+    def test_5_un_control_sin_respuesta_no_se_guarda_para_toda_la_corrida(self):
+        """Un tiempo agotado pasajero en el control deja ese nombre como 'no se pudo saber', pero el siguiente
+        NXDOMAIN vuelve a preguntar por el dominio y, si responde, sí se cree."""
+        respuestas = {'a.acme-demo.mx': [False], 'b.acme-demo.mx': [False], 'acme-demo.mx': [None, True]}
+        preguntas = []
+
+        def resolver(nombre):
+            preguntas.append(nombre)
+            return respuestas[nombre].pop(0)
+        cliente = crtsh.ClienteCrtsh(transporte=CrtshSimulado(), dormir=lambda s: None, resolver=resolver)
+        self.assertIsNone(cliente.resuelve('a.acme-demo.mx', control='acme-demo.mx'))
+        self.assertIs(cliente.resuelve('b.acme-demo.mx', control='acme-demo.mx'), False)
+        self.assertEqual(preguntas, ['a.acme-demo.mx', 'acme-demo.mx', 'b.acme-demo.mx', 'acme-demo.mx'])
+        self.assertEqual((cliente.dns_sin_respuesta, cliente._dns_funciona),
+                         (['a.acme-demo.mx'], {'acme-demo.mx': True}))
+
+    def test_6_sin_dnspython_el_aviso_lo_dice(self):
+        cliente = crtsh.ClienteCrtsh(transporte=CrtshSimulado(), dormir=lambda s: None, resolver=crtsh._resolver_dns)
+        with mock.patch.object(crtsh.registros_dns, '_consultar', side_effect=ImportError('sin dnspython')), \
+                mock.patch.object(crtsh, '_hay_dnspython', return_value=False):
+            res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, parecidos=False)
+        [aviso] = [a for a in res.avisos if 'dnspython' in a]
+        self.assertEqual(aviso, crtsh.SIN_DNSPYTHON % crtsh._lista(cliente.dns_sin_respuesta))
+        self.assertIn('dev.acme-demo.mx', aviso)
+        self.assertFalse([a for a in res.avisos if a.startswith('No se pudo comprobar')])
+        self.assertNotIn('cert_expired', {h.codigo for h in res.hallazgos})
+        self.assertIsNotNone(res.revisados)
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+
 
 
 class VigenciaReal(unittest.TestCase):
@@ -1151,11 +1649,22 @@ class VigenciaReal(unittest.TestCase):
         self.assertTrue(any('No se pudo comprobar en DNS si dev.acme-demo.mx' in a for a in res.avisos))
         self.assertFalse([a for a in res.avisos if a.startswith(crtsh.SIN_GRABACION)])  # no pide completar la grabación
 
-    def test_6_si_el_dns_no_responde_reporta_el_vencido_y_avisa(self):
+    def test_6_si_el_dns_no_responde_no_reporta_el_vencido_ni_lo_cierra(self):
+        """RC-288, comentario 10394: no se sabe si resuelve. Ni hallazgo ni cierre: la huella del vencido va en
+        omitidos, la misma que tendría el hallazgo, así el orquestador deja abierto el de un escaneo anterior."""
+        si = crtsh.ClienteCrtsh(transporte=CrtshSimulado(), dormir=lambda s: None, resolver=lambda n: True)
+        esperadas = [h.huella for h in crtsh.recolectar('acme-demo.mx', si, AHORA, parecidos=False).hallazgos
+                     if h.codigo == 'cert_expired']
         cliente = crtsh.ClienteCrtsh(transporte=CrtshSimulado(), dormir=lambda s: None, resolver=lambda n: None)
         res = crtsh.recolectar('acme-demo.mx', cliente, AHORA, parecidos=False)
-        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
-        self.assertTrue(any('No se pudo comprobar en DNS si dev.acme-demo.mx' in a for a in res.avisos))
+        self.assertNotIn('cert_expired', {h.codigo for h in res.hallazgos})
+        self.assertTrue(esperadas)
+        self.assertEqual(res.omitidos, esperadas)
+        self.assertIn(crtsh.SIN_DNS % 'dev.acme-demo.mx', res.avisos)
+        self.assertIsNotNone(res.revisados)   # parcial: el escaneo no termina completo con 0 vencidos
+        self.assertFalse([a for a in res.avisos if 'Se reporta su certificado vencido' in a])
+        self.assertNotIn('resuelve', {a.valor: a for a in res.activos}['dev.acme-demo.mx'].atributos)
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
 
     def test_8_un_comodin_vencido_cuenta_aunque_el_padre_tenga_uno_vigente_o_el_nombre_base_no_resuelva(self):
         comodin_vencido = cert(100, ['*.dev.acme-demo.mx'], '2026-06-01T00:00:00', '2026-08-30T00:00:00')
@@ -1176,15 +1685,19 @@ class VigenciaReal(unittest.TestCase):
         self.assertIn(('cert_expired', 'api.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
         self.assertEqual(res.avisos, [])
 
-    def test_10_sin_servidor_dns_no_se_descarta_ni_se_graba(self):
+    def test_10_sin_servidor_dns_no_se_descarta_ni_se_graba_ni_se_reporta(self):
+        """El control tampoco resuelve: un «no existe» no se cree (no se graba ni queda resuelve False) y, como no se
+        sabe, el vencido tampoco se reporta (RC-288): va en omitidos, con aviso."""
         todos = {'acme-demo.mx', 'www.acme-demo.mx', 'api.acme-demo.mx', 'dev.acme-demo.mx', 'tienda.acme-demo.mx'}
         with tempfile.TemporaryDirectory() as d:
             grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=CrtshSimulado(sin_dns=todos),
                                       dormir=lambda s: None, nueva=True)
             res = crtsh.recolectar('acme-demo.mx', grab, AHORA, parecidos=False)
             self.assertEqual(sorted(p.name for p in Path(d).glob('dns_*.json')), [])
-        self.assertIn(('cert_expired', 'dev.acme-demo.mx'), {(h.codigo, h.activo) for h in res.hallazgos})
-        self.assertTrue(any('No se pudo comprobar en DNS si dev.acme-demo.mx' in a for a in res.avisos))
+        self.assertNotIn('cert_expired', {h.codigo for h in res.hallazgos})
+        self.assertIn(crtsh.SIN_DNS % 'dev.acme-demo.mx', res.avisos)
+        self.assertTrue(res.omitidos)
+        self.assertNotIn('resuelve', {a.valor: a for a in res.activos}['dev.acme-demo.mx'].atributos)
 
     def test_11_titulo_de_por_vencer_en_singular_y_con_menos_de_un_dia(self):
         certs = [cert(53, ['horas.acme-demo.mx'], iso(-9), iso(0.5)),
@@ -1202,14 +1715,33 @@ class VigenciaReal(unittest.TestCase):
             'justo1.acme-demo.mx': ('El certificado de justo1.acme-demo.mx vence en 1 día', 1),
             'justo0.acme-demo.mx': ('El certificado de justo0.acme-demo.mx vence en menos de un día', 0)})
 
-    def test_7_resolvedor_del_sistema(self):
-        casos = [(None, True), (socket.gaierror(socket.EAI_NONAME, 'no existe'), False),
-                 (socket.gaierror(socket.EAI_AGAIN, 'temporal'), None), (OSError('red'), None)]
-        for error, esperado in casos:
-            efecto = error if error else [('familia', 'tipo', 'proto', '', ('198.51.100.10', 0))]
-            with mock.patch.object(crtsh.socket, 'getaddrinfo', side_effect=efecto if error else None,
-                                   return_value=None if error else efecto):
-                self.assertIs(crtsh._resolver_dns('www.acme-demo.mx'), esperado, error)
+    def test_7_el_resolvedor_pregunta_a_los_publicos_con_plazo_y_nunca_al_del_sistema(self):
+        """RC-288: A y, si no la tiene, AAAA a registros_dns.RESOLVEDORES (_consultar, con TIMEOUT_S cada una). Nunca
+        getaddrinfo, que pregunta al DNS del sistema y no tiene plazo."""
+        falla = crtsh.registros_dns.ConsultaFallida('LifetimeTimeout: 5 s')
+        casos = [({'A': ('ok', ['198.51.100.10'])}, True, ['A']),
+                 ({'A': ('nxdomain', [])}, False, ['A']),
+                 ({'A': ('vacio', []), 'AAAA': ('ok', ['2001:db8::10'])}, True, ['A', 'AAAA']),
+                 ({'A': ('vacio', []), 'AAAA': ('vacio', [])}, False, ['A', 'AAAA']),
+                 ({'A': falla}, None, ['A']),
+                 ({'A': ('vacio', []), 'AAAA': falla}, None, ['A', 'AAAA'])]
+        for respuestas, esperado, tipos in casos:
+            pedidos = []
+
+            def consultar(nombre, tipo, respuestas=respuestas, pedidos=pedidos):
+                pedidos.append((nombre, tipo))
+                if isinstance(respuestas[tipo], Exception):
+                    raise respuestas[tipo]
+                return respuestas[tipo]
+            with mock.patch.object(crtsh.registros_dns, '_consultar', consultar), \
+                    mock.patch('socket.getaddrinfo', side_effect=AssertionError('DNS del sistema')):
+                self.assertIs(crtsh._resolver_dns('www.acme-demo.mx'), esperado, respuestas)
+            self.assertEqual(pedidos, [('www.acme-demo.mx', t) for t in tipos])
+        with mock.patch.object(crtsh.registros_dns, '_consultar', side_effect=ImportError('sin dnspython')):
+            self.assertIsNone(crtsh._resolver_dns('www.acme-demo.mx'))   # no se sabe, no truena
+        self.assertEqual(crtsh.registros_dns.RESOLVEDORES, ('1.1.1.1', '8.8.8.8'))
+        self.assertEqual(crtsh.COSTO_DNS, 2 * crtsh.registros_dns.TIMEOUT_S)
+        self.assertIs(crtsh.ClienteCrtsh().resolver, crtsh._resolver_dns)   # el de omisión
 
 
 class Resumen(unittest.TestCase):
@@ -1221,14 +1753,14 @@ class Resumen(unittest.TestCase):
         self.assertEqual(lineas[0], 'acme-demo.mx · crt.sh y Cert Spotter · succeeded · 2 consultas')
         self.assertIn('  [media] El certificado de api.acme-demo.mx vence en 10 días', lineas)
         self.assertIn('  [alta] Certificado vencido en dev.acme-demo.mx', lineas)
-        self.assertIn('      tipo: certificado por vencer · antigüedad: 80 días · exposición: pública · sensibilidad: baja',
-                      lineas)
+        self.assertIn('      tipo: certificado por vencer · antigüedad: 80 días · exposición: pública'
+                      ' · sensibilidad: media', lineas)
         self.assertIn('6 activos, con su vencimiento en UTC:', lineas)
         # Una fecha con otro desfase se pasa a UTC antes de imprimirla: el 31 dic a la 01:00 en UTC+2 es el 30 dic.
         self.assertEqual(crtsh._dia(crtsh._fecha('2026-12-31T01:00:00+02:00')), '30 dic 2026')
         self.assertIn('  api.acme-demo.mx · vence 25 oct 2026', lineas)
         self.assertIn('  tienda.acme-demo.mx · vence 30 nov 2026 · comodín', lineas)
-        self.assertFalse([l for l in lineas if '[medium]' in l or '[high]' in l])
+        self.assertFalse([linea for linea in lineas if '[medium]' in linea or '[high]' in linea])
         self.assertEqual(crtsh.codigo_salida(res), 0)
 
     def test_2_reproducir_dice_de_cuando_es_la_grabacion(self):
@@ -1268,11 +1800,11 @@ class Resumen(unittest.TestCase):
             rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d)
             res = crtsh.recolectar('acme-demo.mx', rep, AHORA, propios=['acme-demo.com.mx'], parecidos=True)
             lineas = crtsh.resumen(res, rep)
-        faltan = [l for l in lineas if l.startswith('Faltan ')]
+        faltan = [linea for linea in lineas if linea.startswith('Faltan ')]
         self.assertEqual(len(faltan), 1)
         self.assertIn('%acme-demo%', faltan[0])
         self.assertTrue(faltan[0].endswith('Se completan con --grabar --completar.'))
-        self.assertFalse([l for l in lineas if 'saturado' in l or l.startswith('aviso:')])
+        self.assertFalse([linea for linea in lineas if 'saturado' in linea or linea.startswith('aviso:')])
 
     def test_3b_un_solo_faltante_en_singular(self):
         res = crtsh.Resultado('acme-demo.mx', avisos=[crtsh.SIN_GRABACION + '%.acme-demo.mx'])
@@ -1289,6 +1821,451 @@ class Resumen(unittest.TestCase):
         res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': [solo]}), parecidos=False)
         self.assertEqual(crtsh.resumen(res)[-2:], [
             'Sin hallazgos.', 'Cobertura parcial: no se revisaron dominios parecidos (lookalike_domain).'])
+
+
+LE = "C=US, O=Let's Encrypt, CN=R11"
+GS = 'C=BE, O=GlobalSign nv-sa, CN=GlobalSign GCC R3 DV TLS CA 2020'
+SECTIGO = 'C=GB, ST=Greater Manchester, O=Sectigo Limited, CN=Sectigo RSA Domain Validation Secure Server CA'
+
+
+def higiene(certs, dominio='acme-demo.mx'):
+    """Los hallazgos de _higiene por (código, activo), con los certificados como los deja recolectar()."""
+    return {(h.codigo, h.activo): h for h in crtsh._higiene(dominio, crtsh._con_fechas(certs), AHORA)}
+
+
+def emision_cs(id_, nombres, inicio, fin, emisor=LE, revocado=False):
+    """Una emisión de Cert Spotter (/v1/issuances con expand=dns_names y expand=issuer)."""
+    return {'id': id_, 'cert_sha256': ('%064x' % int(id_)), 'dns_names': nombres, 'not_before': inicio,
+            'not_after': fin, 'issuer': {'name': emisor, 'friendly_name': emisor}, 'revoked': revocado}
+
+
+class HigieneCertificados(unittest.TestCase):
+    """RC-218: cert_internal_name, cert_broad_wildcard y cert_new_issuer salen de los mismos certificados de CT."""
+
+    def test_1_nombre_interno_cuenta_y_uno_parecido_no(self):
+        hs = higiene([
+            cert(1, ['dev-api.acme-demo.mx'], '2026-09-01T00:00:00', '2026-11-30T00:00:00'),
+            cert(2, ['developer.acme-demo.mx', 'dev2.acme-demo.mx', 'devops-x.acme-demo.mx'],
+                 '2026-09-01T00:00:00', '2026-11-30T00:00:00'),
+            cert(3, ['jenkins.ci.acme-demo.mx'], '2026-09-01T00:00:00', '2026-11-30T00:00:00'),
+            cert(4, ['vpn.otra.com', 'dev.acme-demo.mx.otra.com'], '2026-09-01T00:00:00', '2026-11-30T00:00:00'),
+        ])
+        internos = {a: h for (c, a), h in hs.items() if c == 'cert_internal_name'}
+        self.assertEqual(sorted(internos), ['dev-api.acme-demo.mx', 'jenkins.ci.acme-demo.mx'])
+        h = internos['dev-api.acme-demo.mx']
+        self.assertEqual((h.severidad, h.evidencia['etiqueta'], h.evidencia['host']),
+                         ('low', 'dev', 'dev-api.acme-demo.mx'))
+        self.assertEqual(internos['jenkins.ci.acme-demo.mx'].evidencia['etiqueta'], 'jenkins')
+        # evidencia: host, emisor, vigencia, id del certificado y etiqueta (Hecho cuando 2), sin nada de más
+        self.assertEqual(h.evidencia, {
+            'title': h.titulo, 'host': 'dev-api.acme-demo.mx', 'etiqueta': 'dev', 'lista_version': 1, 'emisor': LE,
+            'emitido': '2026-09-01T00:00:00+00:00', 'vence': '2026-11-30T00:00:00+00:00', 'origen': 'crtsh',
+            'crtsh_id': 1, 'serie': '%040x' % 1, 'certificados': 1, 'primera_vez': '2026-09-01T00:00:00+00:00'})
+        self.assertEqual(h.partes, [crtsh.INTERNO + 'dev-api.acme-demo.mx@2026-11-30T00:00:00+00:00'])
+        self.assertEqual(h.huella, crtsh._huella('cert_internal_name', 'dev-api.acme-demo.mx'))
+        # la etiqueta del dominio autorizado no cuenta: dev es la marca de dev.mx
+        self.assertEqual(higiene([cert(5, ['dev.mx', 'www.dev.mx', 'api.dev.mx'], '2026-09-01T00:00:00',
+                                       '2026-11-30T00:00:00')], 'dev.mx'), {})
+
+    def test_2_nombre_interno_vencido_dentro_de_la_ventana_y_fuera(self):
+        hs = higiene([
+            cert(1, ['staging.acme-demo.mx'], '2026-05-27T00:00:00', '2026-08-26T00:00:00'),  # venció hace 50 días
+            cert(2, ['qa.acme-demo.mx'], '2025-01-01T00:00:00', '2025-04-01T00:00:00'),       # hace más de un año
+            cert(3, ['uat.acme-demo.mx'], '2026-11-01T00:00:00', '2027-01-30T00:00:00'),      # todavía no empieza
+            cert(4, ['staging.acme-demo.mx'], '2026-08-20T00:00:00', '2026-11-18T00:00:00', serie='ab'),
+        ])
+        self.assertEqual(sorted(a for c, a in hs if c == 'cert_internal_name'), ['staging.acme-demo.mx'])
+        h = hs[('cert_internal_name', 'staging.acme-demo.mx')]
+        # uno por nombre, con una parte por cada certificado que cuenta; la evidencia es del que vence después
+        self.assertEqual(h.partes, [crtsh.INTERNO + 'staging.acme-demo.mx@2026-08-26T00:00:00+00:00',
+                                    crtsh.INTERNO + 'staging.acme-demo.mx@2026-11-18T00:00:00+00:00'])
+        self.assertEqual((h.evidencia['certificados'], h.evidencia['crtsh_id'], h.evidencia['primera_vez']),
+                         (2, 4, '2026-05-27T00:00:00+00:00'))
+
+    def test_3_comodin_vigente_si_y_vencido_no(self):
+        vigente = cert(1, ['*.acme-demo.mx', 'acme-demo.mx'], '2026-09-01T00:00:00', '2026-11-30T00:00:00', emisor=GS)
+        otro = cert(2, ['*.acme-demo.mx'], '2026-10-01T00:00:00', '2026-12-30T00:00:00')
+        vencido = cert(3, ['*.acme-demo.mx'], '2026-05-01T00:00:00', '2026-07-30T00:00:00')
+        hs = higiene([vigente, otro, vencido])
+        h = hs[('cert_broad_wildcard', 'acme-demo.mx')]
+        self.assertEqual(len([c for c, _ in hs if c == 'cert_broad_wildcard']), 1)
+        self.assertEqual(h.severidad, 'low')
+        self.assertEqual(h.evidencia, {
+            'title': h.titulo, 'host': '*.acme-demo.mx', 'certificados': 2, 'ids': ['1', '2'], 'emisor': LE,
+            'emitido': '2026-10-01T00:00:00+00:00', 'vence': '2026-12-30T00:00:00+00:00', 'origen': 'crtsh',
+            'crtsh_id': 2, 'serie': '%040x' % 2, 'primera_vez': '2026-09-01T00:00:00+00:00'})
+        self.assertEqual(h.partes, ['acme-demo.mx@2026-11-30T00:00:00+00:00', 'acme-demo.mx@2026-12-30T00:00:00+00:00'])
+        # vencido, revocado o de un subdominio: no es el comodín de todo el dominio
+        self.assertEqual(higiene([vencido]), {})
+        self.assertEqual(higiene([dict(otro, revocado=True)]), {})
+        self.assertEqual(higiene([cert(4, ['*.tienda.acme-demo.mx'], '2026-09-01T00:00:00', '2026-11-30T00:00:00')]),
+                         {})
+
+    def test_4_autoridad_nueva(self):
+        antes = [cert(i, ['www.acme-demo.mx'], '2025-0%d-01T00:00:00' % i, '2025-0%d-28T00:00:00' % (i + 2))
+                 for i in (1, 2, 3)]
+        nuevo = cert(10, ['acme-demo.mx', 'pagos.acme-demo.mx', 'otra.com'], '2026-09-15T00:00:00',
+                     '2026-12-14T00:00:00', emisor=GS)
+        segundo = cert(11, ['www.acme-demo.mx'], '2026-10-01T00:00:00', '2026-12-30T00:00:00', emisor=GS)
+        mayusculas = cert(12, ['www.acme-demo.mx'], '2026-10-02T00:00:00', '2026-12-31T00:00:00',
+                          emisor="C=US, O=LET'S  ENCRYPT, CN=R10")
+        hs = higiene(antes + [nuevo, segundo, mayusculas])
+        nuevas = [h for (c, _), h in hs.items() if c == 'cert_new_issuer']
+        self.assertEqual(len(nuevas), 1)  # uno por organización; Let's Encrypt en mayúsculas no es otra
+        h = nuevas[0]
+        self.assertEqual((h.activo, h.severidad, h.clave, h.partes),
+                         ('acme-demo.mx', 'medium', 'globalsign nv-sa', ['emisor:globalsign nv-sa']))
+        self.assertEqual(h.evidencia, {
+            'title': h.titulo, 'host': 'acme-demo.mx', 'nombres': ['acme-demo.mx', 'pagos.acme-demo.mx'],
+            'organizacion': 'GlobalSign nv-sa', 'emisor': GS, 'emitido': '2026-09-15T00:00:00+00:00',
+            'vence': '2026-12-14T00:00:00+00:00', 'origen': 'crtsh', 'crtsh_id': 10, 'serie': '%040x' % 10,
+            'certificados_anteriores': 3, 'organizaciones_anteriores': ["let's encrypt"],
+            'primera_vez': '2026-09-15T00:00:00+00:00'})
+        self.assertEqual(h.huella, crtsh._huella('cert_new_issuer', 'acme-demo.mx', 'globalsign nv-sa'))
+        self.assertEqual(crtsh._emisores(antes + [nuevo]), {"emisor:let's encrypt", 'emisor:globalsign nv-sa'})
+
+    def test_5_cambio_de_autoridad_sin_historia_suficiente_no_es_hallazgo(self):
+        antes = [cert(i, ['www.acme-demo.mx'], '2025-0%d-01T00:00:00' % i, '2025-0%d-28T00:00:00' % (i + 2))
+                 for i in (1, 2, 3)]
+        nuevo = cert(10, ['www.acme-demo.mx'], '2026-09-15T00:00:00', '2026-12-14T00:00:00', emisor=GS)
+        self.assertEqual(higiene(antes[:2] + [nuevo]), {})        # solo 2 anteriores
+        self.assertEqual(higiene([nuevo]), {})                    # el primero del dominio
+        viejo = cert(10, ['www.acme-demo.mx'], '2026-06-01T00:00:00', '2026-12-14T00:00:00', emisor=GS)
+        self.assertEqual(higiene(antes + [viejo]), {})            # emitido hace más de 90 días
+        self.assertEqual(higiene(antes + [dict(nuevo, revocado=True)]), {})
+        # el mismo día que otro de Sectigo: ninguno de los dos es anterior al otro, así que los dos son nuevos
+        mismo_dia = cert(11, ['api.acme-demo.mx'], '2026-09-15T00:00:00', '2026-12-14T00:00:00', emisor=SECTIGO)
+        self.assertEqual(sorted(h.clave for h in crtsh._higiene('acme-demo.mx', antes + [nuevo, mismo_dia], AHORA)),
+                         ['globalsign nv-sa', 'sectigo limited'])
+        # sin O= en el emisor no se sabe la organización: ni cuenta como anterior ni es nueva
+        sin_o = [cert(20 + i, ['www.acme-demo.mx'], '2025-0%d-01T00:00:00' % i, '2025-0%d-28T00:00:00' % (i + 2),
+                      emisor='CN=Sin organizacion') for i in (1, 2, 3)]
+        self.assertEqual(higiene(sin_o + [nuevo]), {})
+
+    def test_6_organizacion_del_emisor(self):
+        for emisor, org in [("C=US, O=Let's Encrypt, CN=R11", "Let's Encrypt"),
+                            ('C=US, O="DigiCert, Inc.", CN=DigiCert TLS RSA SHA256 2020 CA1', 'DigiCert, Inc.'),
+                            (r'C=US, O=Amazon\, Inc., CN=Amazon RSA 2048 M02', 'Amazon, Inc.'),
+                            ('CN=R3+O=Uno  dos , C=US', 'Uno dos'), ('2.5.4.10=Por OID', 'Por OID'),
+                            ('CN=Solo nombre', None), ('O=  ', None), ('', None), (None, None), (5, None)]:
+            with self.subTest(emisor=emisor):
+                self.assertEqual(crtsh.organizacion(emisor), org)
+
+    def test_7_las_caracteristicas_son_las_de_la_rubrica(self):
+        from cirdan.ml import caracteristicas as rubrica
+        antes = [cert(i, ['www.acme-demo.mx'], '2025-0%d-01T00:00:00' % i, '2025-0%d-28T00:00:00' % (i + 2))
+                 for i in (1, 2, 3)]
+        hs = higiene(antes + [
+            cert(10, ['*.acme-demo.mx', 'admin.acme-demo.mx'], '2026-09-15T00:00:00', '2026-12-14T00:00:00',
+                 emisor=GS)])
+        self.assertEqual(sorted(c for c, _ in hs), ['cert_broad_wildcard', 'cert_internal_name', 'cert_new_issuer'])
+        for (codigo, activo), h in hs.items():
+            with self.subTest(codigo=codigo):
+                tipo = 'domain' if activo == 'acme-demo.mx' else 'subdomain'
+                self.assertEqual(h.caracteristicas, rubrica.calcular(codigo, tipo, h.evidencia, AHORA))
+                self.assertEqual(set(h.caracteristicas), {'tipo', 'antiguedad_dias', 'exposicion', 'sensibilidad'})
+
+    def test_8_salen_en_la_corrida_con_sus_partes(self):
+        """Por recolectar(): con crt.sh completo salen los 3 y las partes emisor: de todas las organizaciones van en
+        revisados solo cuando llegaron todos los certificados. Con la búsqueda por nombre no van."""
+        antes = [cert(100 + i, ['www.acme-demo.mx'], '2025-0%d-01T00:00:00' % i, '2025-0%d-28T00:00:00' % (i + 2))
+                 for i in (1, 2, 3)]
+        certs = antes + [cert(110, ['*.acme-demo.mx', 'vpn.acme-demo.mx'], '2026-09-15T00:00:00',
+                              '2026-12-14T00:00:00', emisor=GS)]
+        res = recolectar(CrtshSimulado(respuestas={'%.acme-demo.mx': certs}), parecidos=False)
+        self.assertEqual((res.estado, res.sin_cobertura, res.revisados), ('succeeded', ['lookalike_domain'], None))
+        codigos = {(h.codigo, h.activo) for h in res.hallazgos}
+        self.assertTrue({('cert_internal_name', 'vpn.acme-demo.mx'), ('cert_broad_wildcard', 'acme-demo.mx'),
+                         ('cert_new_issuer', 'acme-demo.mx')} <= codigos)
+        self.assertEqual(contrato.validar(res, codigos=set(crtsh.CODIGOS)), [])
+        self.assertTrue(all(h.partes for h in res.hallazgos))
+
+        class SinComodin(CrtshSimulado):
+            def __call__(self, url, timeout):
+                partes = crtsh.urllib.parse.urlparse(url)
+                if partes.netloc != 'api.certspotter.com' and consulta(url).startswith('%.'):
+                    self.urls.append(url)
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return super().__call__(url, timeout)
+        parcial = recolectar(SinComodin(respuestas={'acme-demo.mx': certs}), parecidos=False)
+        self.assertIn(('cert_new_issuer', 'acme-demo.mx'), {(h.codigo, h.activo) for h in parcial.hallazgos})
+        self.assertIsNotNone(parcial.revisados)
+        self.assertFalse([p for p in parcial.revisados if p.startswith(crtsh.EMISOR)])  # no se cierra ninguno
+        self.assertIn('acme-demo.mx@2026-12-14T00:00:00+00:00', parcial.revisados)
+
+    def test_9_con_el_respaldo_internos_y_autoridades_quedan_sin_cobertura(self):
+        """crt.sh no responde y los certificados vigentes salen de Cert Spotter: cert_internal_name y cert_new_issuer
+        van en sin_cobertura y no traen hallazgos aunque los datos alcanzarían. El comodín vigente sí sale."""
+        emisiones = [emision_cs(str(9000 + i), ['www.acme-demo.mx'], '2026-0%d-01T00:00:00Z' % i,
+                                '2026-12-0%dT00:00:00Z' % i) for i in (1, 2, 3)]
+        emisiones.append(emision_cs('9010', ['*.acme-demo.mx', 'dev.acme-demo.mx'], '2026-09-15T00:00:00Z',
+                                    '2026-12-14T00:00:00Z', emisor=GS))
+        t = CrtshSimulado(fallas=2 * crtsh.INTENTOS, emisiones=emisiones)
+        res = recolectar(t, parecidos=False)
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertTrue(t.cert_spotter)
+        self.assertTrue({'cert_internal_name', 'cert_new_issuer'} <= set(res.sin_cobertura))
+        codigos = {h.codigo for h in res.hallazgos}
+        self.assertFalse(codigos & {'cert_internal_name', 'cert_new_issuer'})
+        h = [h for h in res.hallazgos if h.codigo == 'cert_broad_wildcard'][0]
+        self.assertEqual((h.evidencia['origen'], h.evidencia['certspotter_id']), ('certspotter', '9010'))
+        # los mismos datos con crt.sh sí dan los dos
+        self.assertTrue({'cert_internal_name', 'cert_new_issuer'} <=
+                        {c for c, _ in higiene([crtsh.certspotter.certificado(e) for e in emisiones])})
+
+    def test_10_respuesta_de_mas_de_50_mib_pasa_a_la_busqueda_por_nombre_sin_reintentar(self):
+        class Grande(CrtshSimulado):
+            def __init__(self, grandes, **kw):
+                super().__init__(**kw)
+                self.grandes = grandes
+
+            def __call__(self, url, timeout):
+                partes = crtsh.urllib.parse.urlparse(url)
+                if partes.netloc != 'api.certspotter.com' and consulta(url) in self.grandes:
+                    self.urls.append(url)
+                    raise crtsh.RespuestaGrande('respuesta de más de %d bytes' % crtsh.TOPE_BYTES)
+                return super().__call__(url, timeout)
+        t = Grande({'%.acme-demo.mx'}, respuestas={'acme-demo.mx': SUBDOMINIOS})
+        res = recolectar(t, parecidos=False)
+        self.assertEqual([consulta(u) for u in t.urls], ['%.acme-demo.mx', 'acme-demo.mx'])  # un solo intento
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertEqual(res.avisos[0], 'La respuesta de crt.sh a %.acme-demo.mx pasó de su tope de 52428800 bytes y '
+                                        'no se leyó. Se usó la búsqueda por nombre y pueden faltar subdominios')
+        # las dos de más: entra Cert Spotter
+        www = emision_cs('9001', ['www.acme-demo.mx'], '2026-09-20T00:00:00Z', '2026-12-19T00:00:00Z')
+        t = Grande({'%.acme-demo.mx', 'acme-demo.mx'}, emisiones=[www])
+        res = recolectar(t, parecidos=False)
+        self.assertEqual(len(t.urls), 2)
+        self.assertTrue(t.cert_spotter)
+        self.assertEqual(res.sin_cobertura, crtsh.certspotter.SIN_COBERTURA)
+        self.assertIn('después de 1 intento (RespuestaGrande: respuesta de más de 52428800 bytes)', res.avisos[0])
+
+    def test_11_descargar_pasa_el_tope_y_su_error_es_respuesta_grande(self):
+        pedidas = []
+
+        def descargar(req, plazo, tope, cronometro):
+            pedidas.append((req.full_url, tope, req.get_header('User-agent')))
+            raise ValueError('respuesta de más de %d bytes' % tope)
+        with mock.patch.object(crtsh.transporte, 'descargar', descargar):
+            with self.assertRaises(crtsh.RespuestaGrande):
+                crtsh._descargar('https://crt.sh/?q=acme-demo.mx&output=json', 45)
+        self.assertEqual(pedidas, [('https://crt.sh/?q=acme-demo.mx&output=json', 50 * 1024 * 1024, crtsh.AGENTE)])
+        self.assertTrue(issubclass(crtsh.RespuestaGrande, ValueError))
+
+    def test_12_las_dos_busquedas_comparten_plazo_principal(self):
+        reloj, timeouts = [0.0], []
+
+        class Reloj(CrtshSimulado):
+            def __init__(self, tarda, **kw):
+                super().__init__(**kw)
+                self.tarda = tarda
+
+            def __call__(self, url, timeout):
+                if crtsh.urllib.parse.urlparse(url).netloc != 'api.certspotter.com':
+                    timeouts.append((consulta(url), timeout))
+                    segundos = self.tarda(consulta(url))
+                    if segundos is None:  # 502 al instante
+                        self.urls.append(url)
+                        raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                    if segundos > timeout:
+                        reloj[0] += timeout
+                        raise crtsh.transporte.PlazoVencido('crt.sh no terminó dentro de su plazo')
+                    reloj[0] += segundos
+                return super().__call__(url, timeout)
+
+        def correr(tarda, **kw):
+            reloj[0], timeouts[:] = 0.0, []
+            cliente = crtsh.ClienteCrtsh(transporte=Reloj(tarda, **kw), cronometro=lambda: reloj[0],
+                                         dormir=lambda s: reloj.__setitem__(0, reloj[0] + s))
+            return crtsh.recolectar('acme-demo.mx', cliente, AHORA, parecidos=False)
+        # %.dominio da 502 tres veces (5 y 15 s de espera) dentro de sus 75 s: la búsqueda por nombre espera lo que
+        # queda de los 120, 100 s
+        res = correr(lambda q: None if q.startswith('%') else 1)
+        self.assertEqual(timeouts, [('%.acme-demo.mx', 75), ('%.acme-demo.mx', 70), ('%.acme-demo.mx', 55),
+                                    ('acme-demo.mx', 100)])
+        self.assertEqual(res.estado, 'succeeded')
+        # %.dominio se cuelga: se corta a los 75 s y la búsqueda por nombre todavía tiene RESERVA_NOMBRE
+        res = correr(lambda q: 1000 if q.startswith('%') else 2, respuestas={'acme-demo.mx': SUBDOMINIOS})
+        self.assertEqual(timeouts, [('%.acme-demo.mx', 75), ('acme-demo.mx', 45)])
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['lookalike_domain']))
+        self.assertIn('Se usó la búsqueda por nombre', res.avisos[0])
+        # las dos se cuelgan: no pasan de los 120 s y entra Cert Spotter
+        res = correr(lambda q: 1000, emisiones=[emision_cs('9001', ['www.acme-demo.mx'], '2026-09-20T00:00:00Z',
+                                                          '2026-12-19T00:00:00Z')])
+        self.assertEqual(timeouts, [('%.acme-demo.mx', 75), ('acme-demo.mx', 45)])
+        self.assertEqual(reloj[0], 120)
+        self.assertEqual(res.estado, 'succeeded')
+        self.assertEqual(res.sin_cobertura, crtsh.certspotter.SIN_COBERTURA)
+        self.assertIn('no quedó tiempo', ' '.join(res.avisos))
+
+    def test_13_volumen_5000_subdominios_y_20000_certificados(self):
+        """recolectar() completa, sin red, con un dominio de 5,000 subdominios y 20,000 certificados (comentario 10276):
+        tiempo, memoria y filas, desde el cuerpo JSON de crt.sh hasta activos, revisados y hallazgos.
+
+        Cada h<n> lleva 4 certificados de 90 días, emitidos de ene 2024 a abr 2026, y dev-<n> (n múltiplo de 100, 50
+        nombres) va en los mismos 4. El último de cada uno venció entre dic 2025 y jul 2026 y lo cubre el comodín
+        vigente *.acme-demo.mx, así que no hay cert_expired. h4990 a h4999 tienen uno vigente, de oct 2026, de 10
+        organizaciones nuevas."""
+        import time
+        import tracemalloc
+        certs = []
+        for i in range(20000):
+            n = i % 5000
+            nombres = ['h%d.acme-demo.mx' % n] + (['dev-%d.acme-demo.mx' % n] if n % 100 == 0 else [])
+            emisor = (LE, GS, SECTIGO)[i % 3] if i < 19990 else 'C=US, O=Nueva %d, CN=x' % i
+            dia = (datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(hours=i) if i < 19990 else
+                   datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(hours=i - 19990))
+            certs.append(cert(i + 1, nombres, dia.strftime('%Y-%m-%dT%H:%M:%S'),
+                              (dia + timedelta(days=90)).strftime('%Y-%m-%dT%H:%M:%S'), emisor=emisor))
+        certs.append(cert(30000, ['*.acme-demo.mx'], '2026-10-01T00:00:00', '2026-12-30T00:00:00'))
+        cuerpo = json.dumps(certs).encode()  # unos 5 MB, por debajo de TOPE_BYTES
+        self.assertLess(len(cuerpo), crtsh.TOPE_BYTES)
+        internos = sorted('dev-%d.acme-demo.mx' % n for n in range(0, 5000, 100))
+
+        class Volumen:
+            """crt.sh da el mismo cuerpo a %.dominio y a la búsqueda por nombre. Cert Spotter da la página vacía."""
+
+            def __init__(self, comodin_cae=False, cert_spotter_cae=False):
+                self.comodin_cae, self.cert_spotter_cae, self.urls = comodin_cae, cert_spotter_cae, []
+
+            def __call__(self, url, timeout):
+                self.urls.append(url)
+                if crtsh.urllib.parse.urlparse(url).netloc == 'api.certspotter.com':
+                    if self.cert_spotter_cae:
+                        raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                    return b'[]'
+                if consulta(url) == '%.acme-demo.mx' and self.comodin_cae:
+                    raise urllib.error.HTTPError(url, 502, 'Bad Gateway', None, None)
+                return cuerpo
+
+            def resolver(self, nombre):
+                raise AssertionError('el comodín cubre todos los vencidos: no se consulta el DNS de %s' % nombre)
+
+        def medir(memoria=False, **kw):
+            """Corre recolectar() y revisa tiempo y filas. Con `memoria`, otra vez con tracemalloc, que la hace unas 6
+            veces más lenta."""
+            inicio = time.perf_counter()
+            res = recolectar(Volumen(**kw))
+            dura = time.perf_counter() - inicio
+            self.assertLess(dura, 10, 'tardó %.1f s' % dura)  # 1 a 1.3 s en una PC del equipo
+            if memoria:
+                tracemalloc.start()
+                try:
+                    recolectar(Volumen(**kw))
+                    _, pico = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(pico, 100 * 1024 * 1024, 'pico de %d bytes' % pico)  # unos 31 MB
+            self.assertEqual(res.estado, 'succeeded')
+            self.assertEqual(sorted({a.tipo for a in res.activos}), ['domain', 'subdomain'])
+            self.assertEqual(len(res.activos), 5051)  # h0 a h4999, los 50 dev-<n> y acme-demo.mx del comodín
+            self.assertEqual(len({a.valor for a in res.activos}), 5051)
+            por_codigo = {}
+            for h in res.hallazgos:
+                por_codigo[h.codigo] = por_codigo.get(h.codigo, 0) + 1
+            self.assertEqual(por_codigo, {'cert_internal_name': 50, 'cert_broad_wildcard': 1, 'cert_new_issuer': 10})
+            self.assertEqual(sorted(h.activo for h in res.hallazgos if h.codigo == 'cert_internal_name'), internos)
+            nuevas = sorted(h.evidencia['organizacion'] for h in res.hallazgos if h.codigo == 'cert_new_issuer')
+            self.assertEqual(nuevas, sorted('Nueva %d' % i for i in range(19990, 20000)))
+            return res
+        # todo respondió: revisados en None, el orquestador da por revisado todo
+        res = medir()
+        self.assertIsNone(res.revisados)
+        self.assertEqual(res.sin_cobertura, ['lookalike_domain'])  # parecidos=False
+        # %.dominio no respondió: la búsqueda por nombre da los mismos certificados y revisados trae cada parte, 4 por
+        # nombre (h<n> y dev-<n>), la del comodín y la interno: de cada certificado de dev-<n>. Es la corrida que más
+        # guarda, así que aquí se mide la memoria
+        res = medir(memoria=True, comodin_cae=True)
+        self.assertEqual(len(res.revisados), 5050 * 4 + 1 + 50 * 4)
+        self.assertEqual(len([p for p in res.revisados if p.startswith(crtsh.INTERNO)]), 50 * 4)
+        self.assertIn('Se usó la búsqueda por nombre', res.avisos[0])
+        # el complemento de Cert Spotter no respondió: no se sabe qué se revocó, así que no van los nombres de más de
+        # un certificado; quedan la parte del comodín y las interno:
+        res = medir(cert_spotter_cae=True)
+        self.assertEqual(len(res.revisados), 1 + 50 * 4)
+        self.assertIn('acme-demo.mx@2026-12-30T00:00:00+00:00', res.revisados)
+        self.assertIn(crtsh.certspotter.SIN_COMPLEMENTO, ' '.join(res.avisos))
+
+    def test_14_reproducir_da_los_mismos_hallazgos_sin_otra_consulta(self):
+        antes = [cert(100 + i, ['www.acme-demo.mx'], '2025-0%d-01T00:00:00' % i, '2025-0%d-28T00:00:00' % (i + 2))
+                 for i in (1, 2, 3)]
+        certs = antes + [cert(110, ['*.acme-demo.mx', 'grafana.acme-demo.mx'], '2026-09-15T00:00:00',
+                              '2026-12-14T00:00:00', emisor=GS)]
+        with tempfile.TemporaryDirectory() as d:
+            t = CrtshSimulado(respuestas={'%.acme-demo.mx': certs})
+            grab = crtsh.ClienteCrtsh(modo='grabar', carpeta=d, transporte=t, dormir=lambda s: None)
+            vivo = crtsh.recolectar('acme-demo.mx', grab, AHORA, parecidos=False)
+            pedidas = len(t.urls) + len(t.cert_spotter)
+
+            def sin_red(url, timeout):
+                raise AssertionError('reproducir no consulta la red: %s' % url)
+            rep = crtsh.ClienteCrtsh(modo='reproducir', carpeta=d, transporte=sin_red, dormir=lambda s: None)
+            repetido = crtsh.recolectar('acme-demo.mx', rep, AHORA, parecidos=False)
+        self.assertGreater(pedidas, 0)
+        nuevos = {'cert_internal_name', 'cert_broad_wildcard', 'cert_new_issuer'}
+
+        def de_higiene(res):
+            return sorted((h.codigo, h.activo, h.huella, tuple(h.partes), json.dumps(h.evidencia, sort_keys=True))
+                          for h in res.hallazgos if h.codigo in nuevos)
+        self.assertEqual(len(de_higiene(vivo)), 3)
+        self.assertEqual(de_higiene(repetido), de_higiene(vivo))
+
+    def test_15_el_respaldo_de_universal_ssl_no_es_autoridad_nueva(self):
+        """Revisión de riesgo (base-1): Cloudflare emite, por cada certificado, uno de respaldo de otra autoridad con
+        los mismos nombres. Como olmardo.com el 14 oct (aquí un mes antes, por AHORA): 3 de Let's Encrypt y, 10 h después del comodín, el de SSL.com."""
+        ssl_com = 'C=US, O=SSL Corporation, CN=Cloudflare TLS Issuing ECC CA 4'
+        antes = [cert(1, ['olmardo.com', '*.olmardo.com'], '2026-09-14T00:04:00', '2027-01-12T00:04:00'),
+                 cert(2, ['reservas.olmardo.com'], '2026-09-14T01:10:00', '2027-01-12T01:10:00'),
+                 cert(3, ['camaras.olmardo.com'], '2026-09-14T01:23:00', '2027-01-12T01:23:00')]
+        respaldo = cert(4, ['*.olmardo.com', 'olmardo.com'], '2026-09-14T10:24:00', '2027-01-12T01:00:00',
+                        emisor=ssl_com)
+        hs = higiene(antes + [respaldo], 'olmardo.com')
+        self.assertEqual(sorted(c for c, _ in hs), ['cert_broad_wildcard'])
+        # con otros nombres o más de VENTANA_RESPALDO_HORAS después sí es una autoridad nueva
+        for otro in (dict(respaldo, name_value='*.olmardo.com\nolmardo.com\npagos.olmardo.com'),
+                     cert(4, ['*.olmardo.com', 'olmardo.com'], '2026-09-17T00:05:00', '2027-01-12T01:00:00',
+                          emisor=ssl_com)):
+            with self.subTest(otro=otro['not_before']):
+                self.assertIn(('cert_new_issuer', 'olmardo.com'), higiene(antes + [otro], 'olmardo.com'))
+        self.assertEqual(crtsh.VENTANA_RESPALDO_HORAS, 72)
+        # si las dos autoridades de la pareja son nuevas, cuenta la primera y la segunda es su respaldo
+        digicert = [cert(10 + i, ['www.olmardo.com'], '2025-0%d-01T00:00:00' % i, '2025-0%d-28T00:00:00' % (i + 2),
+                         emisor='C=US, O=DigiCert Inc, CN=x') for i in (1, 2, 3)]
+        hs = higiene(digicert + [antes[0], respaldo], 'olmardo.com')
+        self.assertEqual([h.clave for (c, _), h in hs.items() if c == 'cert_new_issuer'], ["let's encrypt"])
+
+    def test_16_una_etiqueta_en_punycode_no_es_nombre_interno(self):
+        """Revisión de riesgo (logica-5): 'xn--test-epa' es 'testé', no 'test'."""
+        for nombre, etiqueta in (('xn--test-epa.acme-demo.mx', None), ('xn--dev-xyz.api.acme-demo.mx', None),
+                                 ('dev.xn--bcher-kva.acme-demo.mx', 'dev'), ('test.acme-demo.mx', 'test')):
+            with self.subTest(nombre=nombre):
+                self.assertEqual(crtsh.nombres_internos.etiqueta_interna(nombre, 'acme-demo.mx'), etiqueta)
+
+    def test_17_el_respaldo_de_cert_spotter_no_da_por_revisado_un_nombre_interno(self):
+        """Revisión de riesgo (logica-1): con crt.sh caído y Cert Spotter sin todas sus páginas, revisados lleva la
+        parte de vigencia del certificado de staging pero no su parte interno:, así el orquestador no cierra el
+        cert_internal_name abierto, que esta corrida no revisó. Con crt.sh y una corrida parcial sí va."""
+        staging = emision_cs('9020', ['staging.acme-demo.mx'], '2026-09-20T00:00:00Z', '2026-12-19T00:00:00Z')
+        parte = 'staging.acme-demo.mx@2026-12-19T00:00:00+00:00'
+
+        class SinSegundaPagina(CrtshSimulado):
+            def __call__(self, url, timeout):
+                partes = crtsh.urllib.parse.urlparse(url)
+                if partes.netloc == 'api.certspotter.com' and 'after' in crtsh.urllib.parse.parse_qs(partes.query):
+                    self.cert_spotter.append(url)
+                    raise urllib.error.HTTPError(url, 429, 'Too Many Requests', {}, None)
+                return super().__call__(url, timeout)
+        res = recolectar(SinSegundaPagina(fallas=2 * crtsh.INTENTOS, emisiones=[staging]), parecidos=False)
+        self.assertIn('cert_internal_name', res.sin_cobertura)
+        self.assertIsNotNone(res.revisados)
+        self.assertIn(parte, res.revisados)
+        self.assertNotIn(crtsh.INTERNO + parte, res.revisados)
+        # la misma corrida parcial pero con crt.sh (búsqueda por nombre): la parte interno: sí va
+        certs = [cert(20, ['staging.acme-demo.mx'], '2026-09-20T00:00:00', '2026-12-19T00:00:00')]
+        parcial = recolectar(CrtshSimulado(fallas=crtsh.INTENTOS, respuestas={'acme-demo.mx': certs}), parecidos=False)
+        self.assertIn(crtsh.INTERNO + parte, parcial.revisados)
+        [h] = [h for h in parcial.hallazgos if h.codigo == 'cert_internal_name']
+        self.assertEqual(h.partes, [crtsh.INTERNO + parte])
 
 
 if __name__ == '__main__':

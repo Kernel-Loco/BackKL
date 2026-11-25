@@ -31,6 +31,7 @@ ENV_FALSO = {
     'TOTP_ENCRYPTION_KEY': 'CIRDAN_FAKE_totp',
     'ALLOWED_ORIGINS': ORIGEN,
     'TUNNEL_TOKEN': 'CIRDAN_FAKE_tunel',
+    'CARTA_KEY_VAULT_SECRET_URL': 'https://fake-vault.vault.azure.net/secrets/carta-key/0123456789abcdef0123456789abcdef',
     # Lo que un .env copiado de una PC de desarrollo traería: el despliegue tiene que ganarle.
     'DEMO_ACCOUNTS': 'true',
     'DEMO_EXPLORER': 'true',
@@ -40,7 +41,7 @@ ENV_FALSO = {
 }
 
 
-def _config(env, proyecto='prueba-despliegue'):
+def _config(env, proyecto='prueba-despliegue', archivos=ARCHIVOS, perfiles=()):
     """Corre `docker compose config` con solo las variables de env. Devuelve (código de salida, salida). Con
     `proyecto=None` no pasa `-p` y el nombre del proyecto sale de env (COMPOSE_PROJECT_NAME) o de la carpeta."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -49,11 +50,14 @@ def _config(env, proyecto='prueba-despliegue'):
         # Sin las variables del compose que traiga la terminal: le ganarían al archivo de valores falsos.
         base = {k: v for k, v in os.environ.items()
                 if k.upper() not in ENV_FALSO and not k.upper().startswith(('COMPOSE_', 'PG', 'POSTGRES_', 'VALKEY_',
-                                                                          'PORTAL_', 'DOMINIOS_', 'ORGS_', 'TOTP_'))}
+                                                                          'PORTAL_', 'DOMINIOS_', 'ORGS_', 'TOTP_',
+                                                                          'CARTA_'))}
         cmd = ['docker', 'compose', '--project-directory', str(RAIZ)] + (['-p', proyecto] if proyecto else []) + [
             '--env-file', str(archivo)]
-        for a in ARCHIVOS:
+        for a in archivos:
             cmd += ['-f', str(RAIZ / a)]
+        for perfil in perfiles:
+            cmd += ['--profile', perfil]
         r = subprocess.run(cmd + ['config', '--format', 'json'], capture_output=True, text=True, env=base,
                            timeout=60, encoding='utf-8')
         return r.returncode, r.stdout if r.returncode == 0 else r.stderr
@@ -79,10 +83,38 @@ class Despliegue(unittest.TestCase):
         # prueba pruebas/test_documentacion_api.py.
         self.assertEqual(self.svc['api']['environment']['API_DOCS'], 'false')
 
+    def test_3b_el_enlace_al_correo_sale_del_origen_publicado(self):
+        # M4 de RC-63: PORTAL_URL vacía, aunque el .env traiga la de la PC, para que la API use el primer origen de
+        # ALLOWED_ORIGINS (pruebas/test_enlace_sin_red.py, test_12b) también en el plan B de pruebas.
+        rc, salida = _config(dict(ENV_FALSO, PORTAL_URL='http://localhost:3000',
+                                  ALLOWED_ORIGINS='https://pruebas.lowtidesec.com'))
+        self.assertEqual(rc, 0, salida[-500:])
+        api = json.loads(salida)['services']['api']['environment']
+        self.assertEqual((api['PORTAL_URL'], api['ALLOWED_ORIGINS']), ('', 'https://pruebas.lowtidesec.com'))
+        self.assertEqual(api['CORREO_API_URL'], 'https://api.resend.com/emails')
+
     def test_3_origen_y_cookie_segura(self):
         self.assertEqual(self.svc['api']['environment']['ALLOWED_ORIGINS'], ORIGEN)
         self.assertEqual(self.svc['demo-accounts']['environment']['ALLOWED_ORIGINS'], ORIGEN)
         self.assertEqual(self.svc['api']['environment']['COOKIE_SECURE'], 'true')
+        self.assertEqual(self.svc['api']['environment']['CARTA_KEY_VAULT_SECRET_URL'],
+                         ENV_FALSO['CARTA_KEY_VAULT_SECRET_URL'])
+
+    def test_3c_el_alta_solo_se_enciende_desde_el_env(self):
+        # RC-339: apagada hasta que el .env la encienda tras una restauración completa validada.
+        self.assertEqual(self.svc['api']['environment']['CARTA_ALTA_ENABLED'], 'false')
+        rc, salida = _config(dict(ENV_FALSO, CARTA_ALTA_ENABLED='true'))
+        self.assertEqual(rc, 0, salida[-500:])
+        self.assertEqual(json.loads(salida)['services']['api']['environment']['CARTA_ALTA_ENABLED'], 'true')
+
+    def test_3d_el_plan_b_va_con_la_llave_directa(self):
+        # Sin IMDS, el plan B no lleva la URL de Key Vault: la llave de cartas va en CARTA_ENCRYPTION_KEY.
+        env = {k: v for k, v in ENV_FALSO.items() if k != 'CARTA_KEY_VAULT_SECRET_URL'}
+        env['CARTA_ENCRYPTION_KEY'] = 'CIRDAN_FAKE_carta'
+        rc, salida = _config(env)
+        self.assertEqual(rc, 0, salida[-500:])
+        api = json.loads(salida)['services']['api']['environment']
+        self.assertEqual((api['CARTA_KEY_VAULT_SECRET_URL'], api['CARTA_ENCRYPTION_KEY']), ('', 'CIRDAN_FAKE_carta'))
 
     def test_4_variables_obligatorias(self):
         for falta in ('ALLOWED_ORIGINS', 'TUNNEL_TOKEN'):
@@ -90,6 +122,17 @@ class Despliegue(unittest.TestCase):
             rc, salida = _config(env)
             self.assertNotEqual(rc, 0, falta)
             self.assertIn('Falta ' + falta, salida)
+
+    def test_4b_el_volumen_de_cartas_se_puede_cambiar_al_restaurar(self):
+        carta = self.svc['api']['volumes'][0]
+        self.assertEqual(carta['type'], 'volume')
+        self.assertIn(carta['source'], ('cirdan-cartas', 'prueba-despliegue_cirdan-cartas'))
+        self.assertEqual(self.cfg['volumes']['cirdan-cartas']['name'], 'prueba-despliegue_cirdan-cartas')
+        rc, salida = _config(dict(ENV_FALSO, CARTA_VOLUME_NAME='cartas-restauradas'))
+        self.assertEqual(rc, 0, salida[-500:])
+        cfg = json.loads(salida)
+        self.assertIn(cfg['services']['api']['volumes'][0]['source'], ('cirdan-cartas', 'cartas-restauradas'))
+        self.assertEqual(cfg['volumes']['cirdan-cartas']['name'], 'cartas-restauradas')
 
     def test_5_ningun_puerto_publicado_en_el_host(self):
         # Ni en 127.0.0.1: docker-compose.yml publica db, valkey y api en loopback y el despliegue los quita.
@@ -231,6 +274,39 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(doc.count('iptables -I DOCKER-USER ' + regla), 1)
         self.assertEqual(set(re.findall(r'! -s ([0-9.]+)/32', doc)), {str(api)})
 
+    def test_16_programador_solo_con_su_profile_y_sin_imds(self):
+        # RC-52: el programador no se enciende con `up -d` (test_1). Con su profile sale por default, sin puertos, sin
+        # la IP fija de la API ni NET_RAW, con el registro rotado y sin las llaves de Key Vault.
+        rc, salida = _config(ENV_FALSO, perfiles=('programador',))
+        self.assertEqual(rc, 0, salida[-500:])
+        cfg = json.loads(salida)
+        s = cfg['services']['programador']
+        self.assertEqual(s['command'], ['python', '-m', 'cirdan.programador'])
+        self.assertEqual(s['profiles'], ['programador'])
+        self.assertFalse(s.get('ports'))
+        self.assertEqual(set(s.get('networks') or {'default': None}), {'default'})
+        self.assertNotIn('ipv4_address', (s.get('networks') or {}).get('default') or {})
+        self.assertIn('NET_RAW', s.get('cap_drop') or [])
+        self.assertEqual(s['logging'], cfg['services']['db']['logging'])
+        self.assertTrue(s['init'])
+        self.assertEqual(s['stop_grace_period'], '1m0s')  # tiempos-3: detener() alcanza a cerrar los escaneos
+        for llave in ('TOTP', 'PASSWORD_HASH', 'CARTA', 'IA_', 'CORREO'):
+            self.assertEqual([k for k in s['environment'] if k.startswith(llave)], [], llave)
+        # El HEALTHCHECK de la imagen es el de la API (/health en el 8000) y el programador no abre puertos: sin
+        # quitarlo queda 'unhealthy' aunque funcione. Tampoco lo vuelve a poner el compose de las imágenes firmadas.
+        self.assertEqual(s.get('healthcheck'), {'disable': True})
+        con_imagenes = dict(ENV_FALSO, LOWTIDE_API_IMAGEN='ghcr.io/ejemplo/api@sha256:' + '0' * 64,
+                            LOWTIDE_PORTAL_IMAGEN='ghcr.io/ejemplo/portal@sha256:' + '0' * 64)
+        rc, salida = _config(con_imagenes, archivos=ARCHIVOS + ['docker-compose.imagenes.yml'],
+                             perfiles=('programador',))
+        self.assertEqual(rc, 0, salida[-500:])
+        self.assertEqual(json.loads(salida)['services']['programador'].get('healthcheck'), {'disable': True})
+        # En la VM va COMPOSE_PROFILES=programador en el .env (docs/despliegue.md, 'Escaneos programados'): así cada
+        # `up -d --build` también lo recrea con el código nuevo.
+        rc, salida = _config(dict(ENV_FALSO, COMPOSE_PROFILES='programador'))
+        self.assertEqual(rc, 0, salida[-500:])
+        self.assertIn('programador', json.loads(salida)['services'])
+
     def test_15_el_healthcheck_espera_a_la_llave_de_key_vault(self):
         # Hallazgos 8, 11 y 12: la API puede tardar hasta keyvault.PLAZO en leer cada llave antes de rendirse, y desde
         # RC-330 lee dos (la del MFA y la de las huellas). El periodo de arranque del HEALTHCHECK tiene que ser mayor
@@ -251,9 +327,40 @@ class ImagenDeLaApi(unittest.TestCase):
         # Comentario 10063: el CMD del Dockerfile manda --no-server-header. pruebas/test_documentacion_api.py arranca la
         # API con este mismo CMD y revisa que no salga el encabezado. No necesita docker.
         texto = re.sub(r'\\\n\s*', '', (RAIZ / 'Dockerfile').read_text(encoding='utf-8'))
-        cmds = [l[len('CMD'):].strip() for l in texto.splitlines() if l.startswith('CMD ')]
+        cmds = [linea[len('CMD'):].strip() for linea in texto.splitlines() if linea.startswith('CMD ')]
         self.assertEqual(json.loads(cmds[-1]), ['python', '-m', 'uvicorn', 'cirdan.api.main:app', '--host', '0.0.0.0',
                                                 '--port', '8000', '--proxy-headers', '--no-server-header'])
+
+    def test_2_documentacion_apagada_por_omision_en_desarrollo(self):
+        # RC-303: sin API_DOCS en el .env la API de la PC tampoco publica /openapi.json, /docs ni /redoc. Que la API
+        # use false cuando no le llega la variable lo prueba pruebas/test_documentacion_api.py. No necesita docker.
+        compose = (RAIZ / 'docker-compose.yml').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^\s*API_DOCS:\s*(.+?)\s*$', compose, re.M), ['${API_DOCS:-false}'])
+        ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^API_DOCS=(.*)$', ejemplo, re.M), ['false'])
+
+    def test_2b_portal_url_sin_valor_en_el_ejemplo(self):
+        # RC-63 punto 8: el .env.example nombra PORTAL_URL sin valor. Vacía, la PC usa el valor por omisión de
+        # docker-compose.yml y el despliegue la deja vacía para que el enlace salga del primer origen permitido.
+        ejemplo = (RAIZ / '.env.example').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^PORTAL_URL=(.*)$', ejemplo, re.M), [''])
+        compose = (RAIZ / 'docker-compose.yml').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'^\s*PORTAL_URL:\s*(.+?)\s*$', compose, re.M),
+                         ['${PORTAL_URL:-http://localhost:3000}'])
+
+
+@unittest.skipUnless(shutil.which('docker'), 'sin docker en el PATH')
+class ComposeDeDesarrollo(unittest.TestCase):
+    def test_1_la_api_recibe_allowed_origins(self):
+        # RC-277: con solo docker-compose.yml (el plan B sin el archivo del despliegue, o la PC de desarrollo) la API
+        # recibe ALLOWED_ORIGINS del .env. Sin poner llega vacía, y la API usa la lista local (test_ip_cliente.py).
+        env = {k: v for k, v in ENV_FALSO.items() if k != 'ALLOWED_ORIGINS'}
+        for extra, esperado in (({}, ''), ({'ALLOWED_ORIGINS': ORIGEN}, ORIGEN)):
+            with self.subTest(esperado=esperado):
+                rc, salida = _config({**env, **extra}, archivos=['docker-compose.yml'])
+                self.assertEqual(rc, 0, salida[-500:])
+                api = json.loads(salida)['services']['api']['environment']
+                self.assertEqual(api['ALLOWED_ORIGINS'], esperado)
 
 
 if __name__ == '__main__':

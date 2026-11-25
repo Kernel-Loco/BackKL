@@ -1,13 +1,24 @@
 {
-  "version": "v1-rc65-1",
+  "version": "v1-rc67-1",
   "algoritmo": "ExtraTreesClassifier",
   "dataset": "datos/ml/rc65/dataset.csv",
+  "dataset_sha256": "d0881691090119a3252d1e951c123bc149ca8c76fd337ced71194f17b11b2fde",
   "origen_etiquetas": "LLM; sin validación humana",
   "caracteristicas": [
     "tipo",
     "exposicion",
     "sensibilidad",
     "antiguedad_dias"
+  ],
+  "codigos_entrenados": [
+    "breach_exposure",
+    "cert_expired",
+    "cert_expiring_soon",
+    "dmarc_missing",
+    "exposed_rdp",
+    "lookalike_domain",
+    "outdated_software",
+    "spf_missing"
   ],
   "particionamiento": "por_plantilla",
   "filas_entrenamiento": 287,
@@ -61,7 +72,332 @@
       "media"
     ]
   },
+  "modelo_sin_calibrar": {
+    "por_clase": {
+      "alta": {
+        "precision": 0.574468085106383,
+        "recall": 1.0,
+        "f1": 0.7297297297297297,
+        "soporte": 27
+      },
+      "baja": {
+        "precision": 0.8378378378378378,
+        "recall": 0.7045454545454546,
+        "f1": 0.7654320987654321,
+        "soporte": 44
+      },
+      "media": {
+        "precision": 0.7592592592592593,
+        "recall": 0.6119402985074627,
+        "f1": 0.6776859504132231,
+        "soporte": 67
+      }
+    },
+    "macro_f1": 0.7242825929694616,
+    "matriz_confusion": [
+      [
+        27,
+        0,
+        0
+      ],
+      [
+        0,
+        31,
+        13
+      ],
+      [
+        20,
+        6,
+        41
+      ]
+    ],
+    "orden_matriz": [
+      "alta",
+      "baja",
+      "media"
+    ]
+  },
+  "ablacion_sensibilidad": {
+    "caracteristicas": [
+      "tipo",
+      "exposicion",
+      "antiguedad_dias"
+    ],
+    "macro_f1_prueba": 0.5589819886837537,
+    "delta_macro_f1_prueba": -0.16530060428570792,
+    "macro_f1_cv_media": 0.16685349553754647,
+    "macro_f1_cv_desviacion_estandar": 0.12043646480503536
+  },
+  "validacion_cruzada": {
+    "metodo": "StratifiedGroupKFold",
+    "grupos": "plantilla",
+    "particiones": 3,
+    "semilla": 67,
+    "folds": [
+      {
+        "fold": 1,
+        "macro_f1": 0.8667395264116576,
+        "plantillas_validacion": [
+          "brecha_solo_correos",
+          "dmarc_sin_mx",
+          "software_panel_kev",
+          "spf_con_mx_sin_dmarc",
+          "vencido_sin_contenido"
+        ]
+      },
+      {
+        "fold": 2,
+        "macro_f1": 0.3793532338308458,
+        "plantillas_validacion": [
+          "brecha_contrasenas_reciente",
+          "dmarc_con_mx",
+          "parecido_reciente_login_o_pago",
+          "por_vencer_sitio_principal",
+          "rdp_sin_ver_6_meses",
+          "spf_sin_mx"
+        ]
+      },
+      {
+        "fold": 3,
+        "macro_f1": 0.8730557299295528,
+        "plantillas_validacion": [
+          "parecido_viejo",
+          "por_vencer_sitio_secundario",
+          "rdp_produccion",
+          "software_libreria_sitio_estatico",
+          "vencido_sitio_de_acceso"
+        ]
+      }
+    ],
+    "macro_f1_media": 0.7063828300573521,
+    "macro_f1_desviacion_estandar": 0.23125922138410493
+  },
+  "bootstrap_macro_f1_prueba": {
+    "metodo": "bootstrap percentil por plantilla",
+    "repeticiones": 2000,
+    "plantillas": 8,
+    "nivel": 0.95,
+    "inferior": 0.334909085077473,
+    "superior": 0.9658094681472823
+  },
+  "calibracion": {
+    "metodo": "regresión logística one-vs-rest ajustada con probabilidades OOF agrupadas por plantilla",
+    "particiones_oof": 3,
+    "brier_sin_calibrar": {
+      "por_clase": {
+        "alta": 0.11238898081493971,
+        "baja": 0.077311539044062,
+        "media": 0.2187461742393479
+      },
+      "promedio_por_clase": 0.1361488980327832
+    },
+    "brier_calibrado": {
+      "por_clase": {
+        "alta": 0.09294212677445557,
+        "baja": 0.089673563645598,
+        "media": 0.19957591574838346
+      },
+      "promedio_por_clase": 0.1273972020561457
+    },
+    "curva_confiabilidad_sin_calibrar": {
+      "alta": [
+        {
+          "intervalo": [
+            0.0,
+            0.2
+          ],
+          "confianza_media": 0.0223252365185179,
+          "frecuencia_observada": 0.0,
+          "soporte": 91
+        },
+        {
+          "intervalo": [
+            0.8,
+            1.0
+          ],
+          "confianza_media": 0.9322760369499504,
+          "frecuencia_observada": 0.574468085106383,
+          "soporte": 47
+        }
+      ],
+      "baja": [
+        {
+          "intervalo": [
+            0.0,
+            0.2
+          ],
+          "confianza_media": 0.06566503939819378,
+          "frecuencia_observada": 0.0,
+          "soporte": 73
+        },
+        {
+          "intervalo": [
+            0.2,
+            0.4
+          ],
+          "confianza_media": 0.28254752127290855,
+          "frecuencia_observada": 0.4642857142857143,
+          "soporte": 28
+        },
+        {
+          "intervalo": [
+            0.4,
+            0.6000000000000001
+          ],
+          "confianza_media": 0.4961786957763098,
+          "frecuencia_observada": 0.5384615384615384,
+          "soporte": 13
+        },
+        {
+          "intervalo": [
+            0.8,
+            1.0
+          ],
+          "confianza_media": 0.9955694634354052,
+          "frecuencia_observada": 1.0,
+          "soporte": 24
+        }
+      ],
+      "media": [
+        {
+          "intervalo": [
+            0.0,
+            0.2
+          ],
+          "confianza_media": 0.004326782195919337,
+          "frecuencia_observada": 0.28169014084507044,
+          "soporte": 71
+        },
+        {
+          "intervalo": [
+            0.2,
+            0.4
+          ],
+          "confianza_media": 0.3475446485940648,
+          "frecuencia_observada": 0.46153846153846156,
+          "soporte": 13
+        },
+        {
+          "intervalo": [
+            0.6000000000000001,
+            0.8
+          ],
+          "confianza_media": 0.7174524787270918,
+          "frecuencia_observada": 0.5357142857142857,
+          "soporte": 28
+        },
+        {
+          "intervalo": [
+            0.8,
+            1.0
+          ],
+          "confianza_media": 0.930331143420161,
+          "frecuencia_observada": 1.0,
+          "soporte": 26
+        }
+      ]
+    },
+    "curva_confiabilidad_calibrada": {
+      "alta": [
+        {
+          "intervalo": [
+            0.0,
+            0.2
+          ],
+          "confianza_media": 0.10779526671144068,
+          "frecuencia_observada": 0.0,
+          "soporte": 91
+        },
+        {
+          "intervalo": [
+            0.6000000000000001,
+            0.8
+          ],
+          "confianza_media": 0.7460743734835621,
+          "frecuencia_observada": 0.574468085106383,
+          "soporte": 47
+        }
+      ],
+      "baja": [
+        {
+          "intervalo": [
+            0.0,
+            0.2
+          ],
+          "confianza_media": 0.13222236945774285,
+          "frecuencia_observada": 0.0,
+          "soporte": 66
+        },
+        {
+          "intervalo": [
+            0.2,
+            0.4
+          ],
+          "confianza_media": 0.2988318089971541,
+          "frecuencia_observada": 0.37142857142857144,
+          "soporte": 35
+        },
+        {
+          "intervalo": [
+            0.4,
+            0.6000000000000001
+          ],
+          "confianza_media": 0.5270203263631876,
+          "frecuencia_observada": 0.5384615384615384,
+          "soporte": 13
+        },
+        {
+          "intervalo": [
+            0.6000000000000001,
+            0.8
+          ],
+          "confianza_media": 0.7953841426318542,
+          "frecuencia_observada": 1.0,
+          "soporte": 24
+        }
+      ],
+      "media": [
+        {
+          "intervalo": [
+            0.0,
+            0.2
+          ],
+          "confianza_media": 0.1223527874139544,
+          "frecuencia_observada": 0.28169014084507044,
+          "soporte": 71
+        },
+        {
+          "intervalo": [
+            0.2,
+            0.4
+          ],
+          "confianza_media": 0.3017722288633167,
+          "frecuencia_observada": 0.46153846153846156,
+          "soporte": 13
+        },
+        {
+          "intervalo": [
+            0.4,
+            0.6000000000000001
+          ],
+          "confianza_media": 0.5384156721797552,
+          "frecuencia_observada": 0.07142857142857142,
+          "soporte": 14
+        },
+        {
+          "intervalo": [
+            0.6000000000000001,
+            0.8
+          ],
+          "confianza_media": 0.6962738879600916,
+          "frecuencia_observada": 1.0,
+          "soporte": 40
+        }
+      ]
+    }
+  },
   "supera_reglas": true,
   "supera_sensibilidad": true,
-  "integrable": true
+  "integrable": true,
+  "sha256": "32055d705c5af759aba0f1f4e6d1122fb94a7dbfb4db1052ec70883d99be84d4"
 }

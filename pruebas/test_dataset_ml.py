@@ -106,8 +106,13 @@ class Maestro(unittest.TestCase):
         self.assertEqual(len(reglas), 7)
         self.assertEqual(plantillas.REGLAS, dict(reglas, cert_expiring_soon=('infrastructure',
                                                                              crtsh.CODIGOS['cert_expiring_soon'])))
+        # Los 3 de higiene de certificados (RC-218) no entran al dataset: el punto 6 de su Hecho cuando no toca el
+        # modelo y caen en el tipo por omisión de caracteristicas.py. Sumarlos al reentrenar lo decide Emilio.
+        fuera = {'cert_internal_name', 'cert_broad_wildcard', 'cert_new_issuer'}
+        self.assertEqual(set(crtsh.CODIGOS) - set(plantillas.REGLAS), fuera)
         for codigo, severidad in crtsh.CODIGOS.items():
-            self.assertEqual(plantillas.REGLAS[codigo][1], severidad, codigo)
+            if codigo not in fuera:
+                self.assertEqual(plantillas.REGLAS[codigo][1], severidad, codigo)
 
     def test_5_caracteristicas_salen_de_la_rubrica(self):
         for h in MAESTRO:
@@ -364,7 +369,8 @@ class Caracteristicas(unittest.TestCase):
         self.assertEqual(a('exposed_rdp', {}, ref, detectado='2026-10-19'), 1)
 
     def test_5_con_la_evidencia_que_da_crtsh(self):
-        # crt.sh pone vence y no not_after en cert_expired, y no pone not_before en cert_expiring_soon (crtsh.py:369)
+        # crt.sh pone vence y no not_after en cert_expired. En cert_expiring_soon no pone not_before sino emitido, desde
+        # RC-218, y sus características salen de calcular() (comentario 10256 de RC-218)
         ahora = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
         certs = [cert(1, ['api.menorvento.example'], '2026-05-01T00:00:00', '2026-10-08T00:00:00'),
                  cert(2, ['www.menorvento.example'], '2026-07-26T00:00:00', '2026-11-01T00:00:00')]
@@ -378,11 +384,14 @@ class Caracteristicas(unittest.TestCase):
                          vencido.caracteristicas['antiguedad_dias'])   # 12, desde vence
         por_vencer = h['cert_expiring_soon']
         self.assertNotIn('not_before', por_vencer.evidencia)
+        self.assertEqual(por_vencer.evidencia['emitido'], '2026-07-26T00:00:00+00:00')
         self.assertEqual(calc('cert_expiring_soon', 'subdomain', por_vencer.evidencia, ahora,
-                              detectado='2026-10-15')['antiguedad_dias'], 5)   # sin not_before, desde detected_at
-        con_emision = dict(por_vencer.evidencia, not_before='2026-07-26')
-        self.assertEqual(calc('cert_expiring_soon', 'subdomain', con_emision, ahora)['antiguedad_dias'],
-                         por_vencer.caracteristicas['antiguedad_dias'])   # 86, cuando crt.sh agregue not_before
+                              detectado='2026-10-15')['antiguedad_dias'], 86)   # desde emitido, no desde detected_at
+        self.assertEqual(calc('cert_expiring_soon', 'subdomain', por_vencer.evidencia, ahora),
+                         por_vencer.caracteristicas)
+        sin_emision = {k: v for k, v in por_vencer.evidencia.items() if k != 'emitido'}
+        self.assertEqual(calc('cert_expiring_soon', 'subdomain', sin_emision, ahora,
+                              detectado='2026-10-15')['antiguedad_dias'], 5)   # sin emitido, desde detected_at
         parecido = cert(3, ['menorvento-pagos.example', 'www.menorvento-pagos.example'], '2026-10-01T00:00:00',
                         '2026-12-30T00:00:00')
         p, = crtsh._parecidos('menorvento.example', [('contiene_marca', [parecido], lambda n: True)], set(), ahora)
@@ -783,7 +792,7 @@ class EtiquetadorLlm(ConLote):
         self.assertTrue((self.carpeta / 'dataset.csv').exists())
         texto = self.salida_de_main()
         # sin personas, la línea del LLM no da un kappa None: dice que no hay contra quién medirlo
-        linea_llm = [l for l in texto.splitlines() if l.startswith('Etiquetador LLM')]
+        linea_llm = [linea for linea in texto.splitlines() if linea.startswith('Etiquetador LLM')]
         self.assertEqual(linea_llm, ['Etiquetador LLM (no vota): no hay personas contra quién medirlo. Filas que '
                                      'cubre: etiquetador_2 %d, etiquetador_3 %d, etiquetador_4 %d, bloque_comun %d.' % (
                                          *(x['filas_cubiertas'][e] for e in acuerdo.CIEGOS), len(COMUN))])

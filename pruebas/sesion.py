@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import http.cookiejar
 import json
+import os
 import struct
 import subprocess
 import time
@@ -16,7 +17,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = 'http://127.0.0.1:8000'
+from pruebas.pila import exigir_desechable
+
+BASE = os.environ.get('CIRDAN_TEST_BASE', 'http://127.0.0.1:8000')
 AUTH = BASE + '/api/v1/auth'
 PASSWORD = 'Lowtide-Demo-2026'
 STEP = 30
@@ -55,7 +58,9 @@ def next_code(email):
 
 def psql(sql):
     """Corre una sentencia en la base como postgres, fuera de la API."""
-    subprocess.run(['docker', 'exec', 'cirdan-pg16', 'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c', sql],
+    exigir_desechable()
+    subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_DB_CONTAINER', 'cirdan-pg16'),
+                    'psql', '-U', 'postgres', '-d', 'cirdan', '-q', '-c', sql],
                    check=True, capture_output=True)
 
 
@@ -63,7 +68,8 @@ def reset():
     """Deja las cuentas listas para la prueba: sin último código usado ni intentos fallidos, del login ni del cambio de
     contraseña (pw:fail:*, RC-290)."""
     psql('UPDATE users SET last_totp_step = NULL')
-    subprocess.run(['docker', 'exec', 'cirdan-valkey', 'sh', '-c',
+    exigir_desechable()
+    subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey'), 'sh', '-c',
                     'for p in "login:fail:*" "pw:fail:*"; do '
                     'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "$p" '
                     '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del; done'],
@@ -71,10 +77,48 @@ def reset():
     _last_step.clear()
 
 
+def valkey(*argumentos):
+    """Corre valkey-cli en el contenedor de Valkey y da su salida, una línea por valor."""
+    exigir_desechable()
+    r = subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey'), 'sh', '-c',
+                        'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning "$@"', 'sh', *argumentos],
+                       check=True, capture_output=True, text=True)
+    return r.stdout.splitlines()
+
+
+def esquema():
+    """El esquema OpenAPI de la API que corre, con app.openapi() dentro de su contenedor y con su mismo entorno.
+    /openapi.json no existe por omisión (API_DOCS, RC-303), así que no se pide por HTTP."""
+    exigir_desechable()
+    r = subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api'), 'python', '-c',
+                        'import json; from cirdan.api.main import app; print(json.dumps(app.openapi()))'],
+                       check=True, capture_output=True, text=True, encoding='utf-8')
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def en_api(codigo):
+    """Corre código de Python dentro del contenedor de la API, con su mismo entorno, y da la última línea que imprime."""
+    exigir_desechable()
+    contenedor = os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api')
+    r = subprocess.run(['docker', 'exec', contenedor, 'python', '-c', codigo],
+                       check=True, capture_output=True, text=True, encoding='utf-8')
+    return r.stdout.strip().splitlines()[-1]
+
+
+def api_logs():
+    """El log del contenedor de la API (stdout y stderr juntos), para buscar las líneas que no van a la base."""
+    exigir_desechable()
+    contenedor = os.environ.get('CIRDAN_TEST_API_CONTAINER', 'cirdan-api')
+    r = subprocess.run(['docker', 'logs', contenedor], check=True, capture_output=True, text=True, encoding='utf-8',
+                       errors='replace')
+    return r.stdout + r.stderr
+
+
 class Client:
     """Cliente HTTP con su propia cookie de sesión."""
 
     def __init__(self):
+        exigir_desechable()
         self.jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
 

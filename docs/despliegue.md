@@ -7,19 +7,48 @@ navegador → Cloudflare (HTTPS) → cloudflared ─borde─ portal ─interna�
                                       └─salida─ Cloudflare
 ```
 
+Una VM equivalente también se crea y se borra desde código con Terraform, en su propio grupo de recursos y sin túnel por omisión: `docs/terraform.md` (#81, RC-132).
+
 ## Antes de levantar
+
+**Alta de dominios:** el compose de despliegue la deja apagada mientras el `.env` no traiga `CARTA_ALTA_ENABLED=true`, y
+eso se pone solo después de una restauración completa validada (sección 'Restaurar'). El respaldo diario incluye, en un solo paquete cifrado,
+la base, el volumen con las cartas cifradas y la llave de cartas; la restauración completa verifica la llave y cada
+documento referenciado antes de usar los destinos nuevos. El respaldo usa la retención actual de Azure: inmutabilidad
+de 7 días y borrado entre 30 y 32 días. En la VM, la llave de cartas va como URL versionada de Key Vault
+en `CARTA_KEY_VAULT_SECRET_URL`. Sin ninguna llave de cartas, el alta da error y el respaldo diario guarda solo la base
+en el formato antiguo `.dump.age`. La verificación TXT de dominios ya registrados sigue
+funcionando para los que estén en `DOMINIOS_EN_VIVO`.
+
+Para pruebas locales sin datos reales: monta el volumen mediante `docker compose`, pon `CARTA_ALTA_ENABLED=true` y
+una llave aleatoria `CARTA_ENCRYPTION_KEY` de 32 bytes en base64 url-safe, diferente de las del MFA y contraseñas.
+El directorio del contenedor es `/var/lib/cirdan/cartas`, privado del usuario de la API. Fuera de Docker se debe
+configurar `CARTA_STORAGE_DIR` con un directorio absoluto, privado y persistente. Como alternativa a la llave directa,
+`CARTA_KEY_VAULT_SECRET_URL` acepta una URL versionada de Azure Key Vault; nunca se configuran ambas. La llave original
+se conserva como secreto versionado y cada respaldo completo lleva una copia cifrada con age para recuperar la bóveda.
+No se debe rotar ni borrar una versión mientras existan cartas cifradas con ella. El PDF se cifra con AES-256-GCM y la base guarda su SHA-256
+y nombre opaco, no la carta en claro. La API comprueba la estructura básica del PDF, no su firma: el administrador
+confirma que la carta firmada autoriza el dominio. Si una transacción falla después de escribir el archivo puede quedar
+un archivo cifrado huérfano; no se borra automáticamente porque el resultado de una confirmación fallida puede ser
+incierto. No se debe borrar ninguno sin conciliarlo primero con `domain_authorizations.signed_document_key` de todas las
+empresas y con los respaldos.
 
 1. FrontKL clonado junto a BackKL (`../FrontKL`), o su ruta en `PORTAL_DIR`.
 2. `.env` copiado de `.env.example`, con contraseñas propias y además:
    - `ALLOWED_ORIGINS=https://lowtidesec.com,https://www.lowtidesec.com`. Van los dos porque el túnel publica los dos nombres y el navegador manda el Origin del nombre que abrió: sin el de www, la API responde 403 al login que llega por www. Sin la variable la pila no arranca. También apaga las cuentas de demo (RC-287).
+   - `COOKIE_SECURE=true`. El archivo del despliegue ya la fija, pero con un origen https en `ALLOWED_ORIGINS` y sin `COOKIE_SECURE=true` la API no arranca (RC-286): así un `docker compose up` que se olvide de `docker-compose.despliegue.yml` tampoco publica la cookie de sesión sin Secure. Vale igual en el plan B y en el plan B de pruebas.
    - `TUNNEL_TOKEN`, el token del túnel de Cloudflare. Sin él la pila no arranca. Nunca va en git.
    - `COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml` y `COMPOSE_PATH_SEPARATOR=:`. Con eso cualquier `docker compose` de esa carpeta usa los dos archivos, aunque se escriba sin los `-f`. Sin ellos, un `docker compose up -d --build` recrea la API con la config de desarrollo, sin la red interna, y lowtidesec.com responde 500 en `/api/v1`. `COMPOSE_PATH_SEPARATOR=:` hace falta en Windows (plan B), donde el separador por omisión es `;`. En Linux no estorba.
-   - `DOMINIOS_EN_VIVO` y `ORGS_GITHUB_DECLARADAS` según las cartas vigentes.
+   - `DOMINIOS_EN_VIVO` y `ORGS_GITHUB_DECLARADAS` según las cartas vigentes. Mientras la llave de Have I Been Pwned sea Core 1, ningún dominio de un tercero entra en `DOMINIOS_EN_VIVO`, aunque su carta esté vigente (sección 5.8, punto 7, de la [política de seguridad y privacidad](politica_seguridad_privacidad.md)).
+   - `COMPOSE_PROFILES=programador`, solo después de aplicar la migración 030 (sección 'Escaneos programados').
    - La llave del MFA. En la VM va `TOTP_KEY_VAULT_SECRET_URL` y no va `TOTP_ENCRYPTION_KEY` (sección 'Llave del MFA en Azure Key Vault'). En el plan B es al revés (paso 3 de 'Carpeta y volumen'). Con las dos puestas, o con ninguna, la API no arranca.
    - La llave de las huellas de contraseña, con la misma regla: en la VM `PASSWORD_HASH_KEY_VAULT_SECRET_URL` y no `PASSWORD_HASH_ENCRYPTION_KEY`, y en el plan B al revés (sección 'Llave de las huellas de contraseña').
+   - `CARTA_KEY_VAULT_SECRET_URL`, con versión, para la llave de las cartas. En producción no pongas `CARTA_ENCRYPTION_KEY`; la API pide la llave con la identidad administrada y el respaldo guarda una copia protegida con age.
+   - `PWNED_PASSWORDS_ENABLED` vacía, como viene en `.env.example`, o en `true`. Así `docker-compose.despliegue.yml` prende la revisión de contraseñas filtradas (RC-334). Con `false` queda apagada y solo se revisa la lista local.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
    - SSL/TLS > Edge Certificates: 'Always Use HTTPS' prendido. Sin él el portal también responde por `http://` y el formulario de login manda la contraseña sin cifrar hasta Cloudflare (la API la rechaza después por el Origin, pero ya viajó). Se comprueba con `curl -sI http://lowtidesec.com/login` y `curl -sI http://www.lowtidesec.com/login`: los dos responden 301 con `Location: https://...`. HSTS queda para RC-89.
+   - SSL/TLS > Edge Certificates: 'Minimum TLS Version' en **TLS 1.2** (ASVS 5.0 V12.1.1, #75). Con el valor por omisión, Cloudflare todavía acepta TLS 1.0 y 1.1. Se comprueba con `openssl s_client -connect lowtidesec.com:443 -servername lowtidesec.com -tls1_1 -cipher 'DEFAULT:@SECLEVEL=0'`, que debe fallar el saludo, y con `-tls1_2` y `-tls1_3`, que deben conectar. `@SECLEVEL=0` hace falta porque el OpenSSL local ya no ofrece TLS 1.1 por su cuenta: sin él falla siempre y no prueba nada.
 4. `docker login` con `DOCKERHUB_USERNAME` y `DOCKERHUB_TOKEN` de la cuenta 'lowtidesec' (solo lectura).
 5. Docker Engine reciente, con Compose 2.24 o más nuevo. Las redes `borde` e `interna` usan `gateway_mode_ipv4=isolated` y los puertos se quitan con `ports: !reset []`. Un Docker viejo rechaza la opción de red y `up` falla: nunca levanta la pila sin el aislamiento. Se probó con Docker Engine 29.8 y Compose 5.5.
 
@@ -39,7 +68,7 @@ La segunda línea tiene que decir 'DEMO_ACCOUNTS no es true: se apagan las cuent
 Ningún .env le gana a estos valores:
 
 - `DEMO_ACCOUNTS=false` y `DEMO_EXPLORER=false`. El compose del despliegue también fija `API_DOCS=false`, así que `/openapi.json`, `/docs` y `/redoc` no existen, y la imagen corre uvicorn con `--no-server-header` (comentario 10063 de RC-91).
-- `COOKIE_SECURE=true`, porque el despliegue siempre va con HTTPS.
+- `COOKIE_SECURE=true`, porque el despliegue siempre va con HTTPS. La respuesta del login trae `Set-Cookie: lt_session` con `Secure` (RC-286).
 - `FORWARDED_ALLOW_IPS` con las IP fijas del portal (10.249.91.10) y de cloudflared (10.249.92.11). Cloudflare agrega la IP real al final de X-Forwarded-For y Next no le agrega nada si ya viene. uvicorn toma la primera IP de la derecha que no es de confianza. Una IP falsa que mande el navegador queda a la izquierda y no cuenta. El bloqueo por intentos del login cuenta por IPv4 y, como Cloudflare también entrega visitantes por IPv6, por red /64 en IPv6 (`cirdan/auth/sessions.py`): quien tiene un /64 puede estrenar dirección en cada intento, pero todas caen en el mismo contador. Quien tiene más de un /64 (un /56 trae 256 y un /48, 65 536) sí puede repartir los intentos entre sus redes /64 y saltarse el límite por IP, pero no el de 5 fallos por correo. Varios visitantes detrás de la misma IPv4 (una red corporativa) comparten contador.
 - `UVICORN_TIMEOUT_KEEP_ALIVE=65`. El proxy de Next suelta una conexión ociosa con la API a los 5 s, lo mismo que uvicorn por omisión, y un POST que sale justo entonces termina en 500. Con 65 s la suelta siempre Next primero. Del lado del portal, la imagen de FrontKL pone `KEEP_ALIVE_TIMEOUT=95000`, por encima de los 90 s con que cloudflared reutiliza las conexiones.
 - Sin `ports` en ningún servicio. Para entrar a la base de la VM se usa `docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d cirdan'`: `POSTGRES_USER` es la del contenedor, que sale del `.env` (`postgres` si no se puso).
@@ -61,6 +90,20 @@ La API tiene IP fija en `default` (10.249.93.20). Por eso en la VM los comandos 
 - Si Key Vault o la identidad fallan, la API no arranca y `docker compose logs api` dice por qué (HTTP 403 es que falta el rol y HTTP 404, que el nombre o la versión de la URL no existen, y ese no se reintenta). Ningún mensaje lleva el token ni la llave. Cada lectura reintenta hasta 90 s en total, para aguantar un IMDS que se está actualizando, y el HEALTHCHECK del Dockerfile le da 200 s antes de contar fallos, porque con la llave de las huellas también en Key Vault (RC-330) son dos lecturas seguidas, cada una con sus 90 s. Si se rinde, uvicorn sale y `restart: unless-stopped` la vuelve a levantar.
 - Lo que no cambia: quien sea root en la VM puede pedir el mismo token. Un contenedor que no sea la API no puede, por la regla de 'Solo la API llega a IMDS'. Lo que se gana es que cada lectura queda en el registro de la bóveda y que quitar el rol corta el acceso.
 - Costo: Key Vault Standard cobra 0.03 USD por cada 10 mil operaciones, sin cuota por bóveda. Por cada llave en Key Vault la API hace dos peticiones por arranque, una a la identidad y otra a la bóveda, y solo la de la bóveda cuenta como operación. Con la del MFA y la de las huellas son cuatro peticiones y dos operaciones.
+
+## Llave de las cartas en Azure Key Vault (RC-339)
+
+En producción, crea una llave aleatoria distinta de las del MFA y de las huellas, guárdala como secreto y dale a la identidad administrada de la VM `Key Vault Secrets User` sobre ese secreto. La URL versionada que devuelve el comando va en `CARTA_KEY_VAULT_SECRET_URL`; el valor no va en `.env`:
+
+```bash
+umask 077
+llave=$(mktemp /dev/shm/carta-key.XXXXXX)
+python3 -c 'import base64,secrets,sys; sys.stdout.write(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())' > "$llave"
+az keyvault secret set --vault-name <boveda> --name carta-encryption-key --file "$llave" --query id -o tsv
+rm -f -- "$llave"
+```
+
+Guarda la llave en el gestor de contraseñas además de Key Vault. No crees una versión nueva ni borres la actual mientras haya cartas cifradas con ella: la URL fijada en el `.env` no cambia sola, y la restauración completa crea una nueva versión de la misma llave. La privada de age debe estar disponible en el procedimiento de recuperación del equipo; se necesita para abrir los paquetes, incluso si Key Vault no está disponible.
 
 ### Solo la API llega a IMDS
 
@@ -140,7 +183,7 @@ La huella argon2id de cada contraseña se guarda cifrada con AES-256-GCM (`cirda
 - Las huellas de antes, sin cifrar, entran todavía y quedan cifradas en ese mismo inicio de sesión. No hace falta restablecer contraseñas. El hash de relleno de las semillas y de `cirdan/auth/demo.py` no cambia y sigue sin abrir nada.
 - Si la llave se pierde, ninguna contraseña guardada vuelve a abrir y cada cuenta se restablece con su script de alta. Por eso la copia del gestor de contraseñas se queda siempre, como la del MFA.
 - Si el cambio se revierte, el código viejo no abre las huellas cifradas: las cuentas que ya entraron se restablecen igual.
-- Rotar la llave no pide contraseñas nuevas, porque se descifra la huella y se vuelve a cifrar. Ese script todavía no existe: el `1` de `lt1$` es la versión de la llave para cuando exista.
+- Rotar la llave no pide contraseñas nuevas, porque se descifra la huella y se vuelve a cifrar (RC-333). El número de `lt1$` es la versión de la llave: los pasos están en 'Rotar la llave de las huellas'.
 
 ### Pasarla a la VM (una vez)
 
@@ -170,16 +213,55 @@ Cada paso va con el OK de quien administra la VM. La llave nunca va en un archiv
 
 En el plan B la misma llave va en `PASSWORD_HASH_ENCRYPTION_KEY`, tomada del gestor o con `az keyvault secret show --id <URL con versión> --query value -o tsv`, y se borra del `.env` al terminar. Con otra llave ninguna contraseña de la VM abre.
 
-## Respaldo diario (RC-233)
+### Rotar la llave de las huellas (RC-333)
+
+Se rota si la llave se filtra o cuando se decida, siempre con el OK de quien administra la VM. Nadie cambia su contraseña. La versión de la llave va en el prefijo de cada huella (`lt1$`, `lt2$`...) y en `PASSWORD_HASH_KEY_VERSION`, que sin poner vale 1. Mientras se rota, la llave de antes va en `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL` (en la VM) o en `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` (desarrollo y plan B), una de las dos. Con ella puesta, una huella de la versión anterior entra y el login la guarda cifrada con la actual. La API no arranca si la anterior es la misma llave que la actual o que la del MFA, ni con la anterior puesta y la versión en 1. Sin la anterior, una huella de la versión anterior no abre: 'Correo o contraseña incorrectos.' en el mismo tiempo que un correo que no existe.
+
+Nunca se crea otra versión del secreto `password-hash-key` sin seguir estos pasos: con una URL sin versión, la API tomaría la nueva al reiniciarse y ninguna huella abriría. Por eso las URL del `.env` siempre llevan su versión.
+
+1. (VM, una vez) La migración 026, que da al comando las empresas con huellas de una versión. La API no la lee: `docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/026_huellas_por_version.sql`.
+2. (Azure) Generar la llave nueva y guardarla en el gestor de contraseñas ('LowTide vm-lowtide PASSWORD_HASH_ENCRYPTION_KEY v2') como en el paso 1 de 'Pasarla a la VM', pero como un secreto nuevo, `password-hash-key-v2`, y darle a la identidad de la VM 'Key Vault Secrets User' sobre ese secreto como en el paso 2. El secreto de antes no se borra.
+3. (VM) En el `.env`: `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL=<la URL con versión que hoy está en PASSWORD_HASH_KEY_VAULT_SECRET_URL>`, `PASSWORD_HASH_KEY_VAULT_SECRET_URL=<el $r.id del secreto nuevo>` y `PASSWORD_HASH_KEY_VERSION=2` (o la que sigue).
+4. (VM) Reconstruir: `docker compose --dry-run up -d --build api` (sin recrear `cirdan-pg16`) y `docker compose up -d --build api`. `docker compose ps api` dice `healthy`. Un 403 en `docker compose logs api` es que falta el rol del paso 2.
+5. (VM) Contar sin cambiar nada y luego cifrar: `docker compose exec api python -m cirdan.auth.rotar_huellas --prueba` y `docker compose exec api python -m cirdan.auth.rotar_huellas`. Imprime por empresa cuántas cambió, cuántas no abrieron y cuántas quedan de la versión anterior, y, por empresa con al menos una cambiada, deja un evento `auth.password_hash_rotated` con esos conteos en `audit_log`. Si se corta a media empresa (Ctrl+C o un error), antes de salir deja el evento de lo que ya cambió con `interrupted`, y si la base es la que falló lo dice en la salida. Ni la salida ni la bitácora llevan huellas. Correrlo otra vez no cambia nada ni escribe eventos. Una que no abre ya no abría con la llave de antes (otra llave o una huella dañada): esa cuenta se restablece con su script de alta.
+6. (VM) Como postgres y solo lectura, con el número de la versión anterior. Tiene que dar `0`:
+
+   ```bash
+   docker exec cirdan-pg16 psql -U postgres -d cirdan -Atc "SELECT count(*) FROM users WHERE password_hash LIKE 'lt1\$%'"
+   ```
+
+7. (VM) Quitar `PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL` del `.env` y reconstruir como en el paso 4. `PASSWORD_HASH_KEY_VERSION` se queda. Después se puede quitar el rol de la identidad sobre el secreto de antes. El secreto de antes y su copia del gestor se quedan al menos 33 días después del paso 6: cada respaldo dura de 30 a 32 días ('Respaldo diario') y los de antes de rotar traen huellas de la versión anterior, que solo abren con esa llave. Para restaurar uno de ellos se le vuelve a dar a la identidad 'Key Vault Secrets User' sobre el secreto de antes, como en el paso 2 (sin ese rol la API recibe 403 y no arranca), y se vuelve a poner la anterior como en el paso 3.
+
+En desarrollo y en el plan B es lo mismo con `PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, sin Key Vault, y `docker compose exec api` como en la VM.
+
+## TOTP obligatorio para el Admin (RC-5)
+
+El TOTP del Admin se revisa al crear la sesión, no en cada petición. Las sesiones de un Admin sin TOTP abiertas antes de desplegar RC-5 seguirían vivas hasta 8 h, así que se cierran al desplegar (H6 de la revisión de RC-5):
+
+1. (VM) Después del `up -d --build`, listar los Admins activos sin TOTP: `docker exec cirdan-pg16 psql -U postgres -d cirdan -Atc "SELECT id FROM users WHERE role = 'admin' AND is_active AND (mfa_enabled_at IS NULL OR totp_secret_enc IS NULL)"`.
+2. (VM) Por cada id, cerrar sus sesiones: `docker compose exec api python -c "from cirdan.auth import sessions; sessions.delete_others('<id>', None)"`. Sin filas en el paso 1 no hay nada que cerrar. En su siguiente `/login` reciben el 403 con el QR.
+
+## Escaneos programados (RC-52)
+
+El servicio `programador` vuelve a escanear cada dominio autorizado según el plan de su empresa (`plans.scan_interval`: Starter cada 7 días, Business y Enterprise cada día). Usa la misma imagen y el mismo rol de la base que la API, sin puertos y sin llegar a IMDS. Va con profile: sin `COMPOSE_PROFILES`, `docker compose up -d` no lo enciende. Al encenderlo salen en el acto los dominios con `next_scan_at` vacío o vencido, así que se enciende con el OK de quien administra la VM.
+
+1. (VM, una vez) La migración 030, antes de encenderlo. La API no la lee: `docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/030_escaneos_programados.sql`.
+2. (VM) Revisar que `DOMINIOS_EN_VIVO` del `.env` lista solo los dominios con carta vigente y, con la llave Core 1 de Have I Been Pwned, ninguno de un tercero (paso 2 de 'Antes de levantar'). El programador se salta los demás sin consultar su TXT y los vuelve a ver al día siguiente.
+3. (VM) En el `.env`, `COMPOSE_PROFILES=programador`. Con ella cada `docker compose up -d --build` de esta guía, y `infra/verificar_imagenes.sh --levantar` con las imágenes firmadas, también recrea el programador con el código nuevo. Sin ella, un programador ya encendido seguiría con la imagen de antes, porque un `up` sin su profile no lo toca.
+4. (VM) `docker compose --dry-run up -d --build` (sin recrear `cirdan-pg16`) y `docker compose up -d --build`. `docker compose ps programador` dice `running` y `docker compose logs programador` dice 'escaneo programado' con cada escaneo que pidió, sin errores.
+5. Para apagarlo: quitar `COMPOSE_PROFILES` del `.env` y `docker compose --profile programador stop programador`. Tiene 60 s para cerrar: los escaneos que dejó corriendo quedan en 'failed' y su turno queda a una hora, no al siguiente intervalo del plan, así que salen en cuanto se vuelva a encender.
+
+## Respaldo diario (RC-233, RC-28 y RC-339)
 
 Una vez al día, a las 09:00 UTC (03:00 en Monterrey), `lowtide-respaldo.timer` corre `db/respaldo/respaldar.sh`:
 
 1. Espera hasta 5 minutos a que `cirdan-pg16` acepte conexiones: si la VM estaba apagada a esa hora, el timer corre al arrancar, antes que la base.
-2. `pg_dump -Fc` de la base `cirdan` con el usuario postgres dentro de `cirdan-pg16`. Nunca con `cirdan_app`, que con FORCE RLS no ve todas las filas.
-3. Lo cifra al vuelo con [age](https://age-encryption.org) y una llave pública. El respaldo sin cifrar nunca toca el disco. La llave privada no está en la VM: vive en la PC de Ernesto, cifrada con DPAPI, y en el gestor de contraseñas. Quien entre a la VM no puede leer los respaldos.
-4. Deja `cirdan_<fecha UTC>_<8 hex al azar>.dump.age` en `/var/backups/lowtide` (carpeta 700, archivo 600). El sufijo al azar hace que nadie pueda ocupar antes en Azure el nombre del respaldo de mañana.
-5. Lo sube a un contenedor de Azure Blob con la identidad administrada de la VM, la misma de Key Vault. No hay llave de almacenamiento en la VM: el token sale de IMDS y llega a `curl` por stdin. La subida nunca escribe encima de un blob con el mismo nombre (`If-None-Match: *`), Azure revisa el MD5 del archivo y el blob lleva su sha256 en `x-ms-meta-sha256`. Si `curl` reintenta una subida que sí llegó, Azure responde `403 UnauthorizedBlobOverwrite`, porque la identidad no puede escribir encima, y el respaldo cuenta como subido solo si el blob que ya está tiene el mismo MD5. En cada corrida también sube los respaldos locales que todavía no están en Azure, así que una subida que falló un día se repite al siguiente.
-6. Conserva en la VM los respaldos de los últimos 7 días que tienen alguno (una corrida a mano no le quita su lugar a un día). Nunca borra uno que no está en Azure, salvo que ya haya más de 31. La retención solo borra archivos con ese nombre exacto dentro de esa carpeta.
+2. Toma `pg_dump -Fc` como postgres (nunca `cirdan_app`, que con FORCE RLS no ve todas las filas), seguido del volumen de cartas y la llave activa que obtiene la API.
+3. Cifra cada componente con age y agrupa únicamente esos archivos cifrados. Los temporales viven en `/run` (o `/run/lock` si `/run` no es escribible), siempre en tmpfs; ni el dump ni la llave de cartas en claro se escriben en disco persistente. El paquete completo se cifra de nuevo con age y una llave pública. La llave privada de recuperación no está en la VM: vive en el gestor de contraseñas y en los medios seguros de recuperación del equipo.
+4. Deja `cirdan_<fecha UTC>_<8 hex al azar>.backup.age` en `/var/backups/lowtide` (carpeta 700, archivo 600). El sufijo al azar hace que nadie pueda ocupar antes en Azure el nombre del respaldo de mañana.
+5. La base se captura primero. Como el archivo de carta se sincroniza antes de que su referencia se confirme en la base y las cartas son inmutables, esa secuencia puede incluir archivos huérfanos, pero no omite una carta que la base restaurada referencia. `restaurar_completo.sh` comprueba después que cada referencia abre con la llave restaurada y su SHA-256 coincide.
+6. Sube el paquete a Azure Blob con la identidad administrada de la VM. No hay llave de almacenamiento en la VM: el token sale de IMDS y llega a `curl` por stdin. La subida nunca escribe encima de un blob con el mismo nombre (`If-None-Match: *`), Azure revisa el MD5 del archivo y el blob lleva su sha256 en `x-ms-meta-sha256`. Si `curl` reintenta una subida que sí llegó, Azure responde `403 UnauthorizedBlobOverwrite`, porque la identidad no puede escribir encima, y el respaldo cuenta como subido solo si el blob que ya está tiene el mismo MD5. En cada corrida también sube los respaldos locales que todavía no están en Azure, así que una subida que falló un día se repite al siguiente.
+7. Conserva en la VM los respaldos de los últimos 7 días que tienen alguno (una corrida a mano no le quita su lugar a un día). Nunca borra uno que no está en Azure, salvo que ya haya más de 31. Los antiguos `.dump.age` se conservan y cargan como legado, pero contienen solo la base y no son puntos completos de recuperación.
 
 El contenedor tiene una política de inmutabilidad de 7 días: nadie, ni con el rol de la VM, borra ni cambia un respaldo antes de ese plazo. Una regla del ciclo de vida lo borra después de 30 días, y como Azure la aplica una vez al día, cada blob dura entre 30 y 32 días. La regla borra por antigüedad, no por cantidad: si los respaldos dejan de llegar, el último bueno se borra a los 30 días, así que ese es el plazo para enterarse (ver la alerta de abajo). Valkey no se respalda: guarda sesiones, MFA pendientes y bloqueos, y no escribe a disco. El respaldo no lleva contraseñas de roles: en una base nueva los roles los crea `db/init`.
 
@@ -222,7 +304,7 @@ En la VM, desde `/opt/lowtide/BackKL`:
 ```bash
 sudo apt-get install -y age
 sudo install -d -m 700 /etc/lowtide /var/backups/lowtide
-sudo install -m 600 db/respaldo/respaldo.conf.example /etc/lowtide/respaldo.conf   # y se llenan RECEPTOR_AGE y CUENTA_BLOB
+sudo install -m 600 db/respaldo/respaldo.conf.example /etc/lowtide/respaldo.conf   # y se llenan RECEPTOR_AGE, CUENTA_BLOB y CONTENEDOR_BLOB
 sudo install -m 644 db/respaldo/lowtide-respaldo.service db/respaldo/lowtide-respaldo.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now lowtide-respaldo.timer
@@ -230,20 +312,21 @@ sudo systemctl start lowtide-respaldo.service   # el primero, para ver que sube
 journalctl -u lowtide-respaldo -n 20 --no-pager
 ```
 
-`respaldar.sh` se niega si `/etc/lowtide/respaldo.conf` es un enlace, no es de root o el grupo u otros pueden escribirla: quien la cambie decide para quién se cifran los respaldos. El registro dice `respaldo: cirdan_<fecha>_<sufijo>.dump.age, <bytes> bytes, sha256 ...`, `respaldo: subido a ...` y `respaldo: listo`. `systemctl list-timers lowtide-respaldo.timer` da la siguiente corrida. Un `403` al subir es que falta el rol de la identidad en el contenedor, o que el rol se acaba de dar y Azure tarda unos minutos en verlo. Si la subida falla, la unidad queda en `failed` con cuántos respaldos locales faltan por subir, y la corrida del día siguiente los vuelve a intentar.
+`respaldar.sh` se niega si `/etc/lowtide/respaldo.conf` es un enlace, no es de root o el grupo u otros pueden escribirla: quien la cambie decide para quién se cifran los respaldos. La ejecución falla si falta el contenedor de la API, el volumen de cartas, la llave o el espacio tmpfs. El registro dice `respaldo: cirdan_<fecha>_<sufijo>.backup.age, <bytes> bytes, sha256 ...`, `respaldo: subido a ...` y `respaldo: listo`. `systemctl list-timers lowtide-respaldo.timer` da la siguiente corrida. Un `403` al subir es que falta el rol de la identidad en el contenedor, o que el rol se acaba de dar y Azure tarda unos minutos en verlo. Si la subida falla, la unidad queda en `failed` con cuántos respaldos locales faltan por subir, y la corrida del día siguiente los vuelve a intentar.
 
 ### Restaurar
 
-`db/respaldo/restaurar.sh` siempre crea una base nueva con otro nombre. Nunca hace DROP DATABASE ni escribe sobre `cirdan`, y se niega si la base ya existe. Antes de crearla descifra el respaldo completo: con otra llave o un archivo cortado falla sin dejar ninguna base. Después de restaurar le quita TEMPORARY a PUBLIC, como la migración 004, porque `pg_dump` no guarda los permisos de la base. Se corre donde esté la llave privada, en Git Bash o Linux, contra el contenedor de una base de Postgres 16 con los roles de `db/init`, por ejemplo una pila aislada:
+Para recuperar el conjunto completo se usa `restaurar_completo.sh`. Siempre crea una base y un volumen Docker nuevos; nunca borra ni reemplaza los existentes. Desencripta en `/run` (o `/run/lock` si `/run` no es escribible), siempre en tmpfs, recrea una nueva versión de la llave en Key Vault, y valida con AES-GCM y las huellas de la base cada carta referenciada antes de terminar. La cuenta que ejecuta la restauración necesita `az login`, permisos para crear una versión del secreto y acceso al contenedor de Postgres. El contenedor de la API aporta la imagen Python usada para poblar y verificar el volumen restaurado. Los contenedores temporales corren como root sin red y con capacidades limitadas para leer los temporales privados; el volumen y sus archivos quedan a nombre del usuario de la API.
 
 ```bash
 az storage blob download --auth-mode login --account-name stlowtiderespaldo -c respaldos -n <blob> -f <blob>
-AGE_IDENTIDAD=<ruta del archivo de la llave privada> db/respaldo/restaurar.sh <blob> <contenedor> cirdan_restaurada
+AGE_IDENTIDAD=<ruta del archivo de la llave privada> db/respaldo/restaurar_completo.sh \
+  <blob> cirdan-pg16 cirdan-api cirdan_restaurada lowtide-cartas-restauradas <boveda> carta-encryption-key
 ```
 
-`AGE_IDENTIDAD` es la ruta del archivo de la llave, nunca la llave misma, y con `AGE_IDENTIDAD=-` la lee de stdin para no dejarla en un archivo (así la manda el script de restauración de la PC de Ernesto, que también revisa el sha256 del blob bajado). Para saber si la restauración quedó completa se corre `db/respaldo/conteos.sql` como postgres en la base de la VM y en la restaurada, y se comparan las dos salidas: filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base. Las tablas que cambiaron después del respaldo (la bitácora, por ejemplo) pueden traer más filas en la VM. `db/respaldo/comparar.sh` hace esa comparación solo entre dos bases del mismo contenedor: en una pila aislada, su `cirdan` es la de las semillas, no la de la VM. Para volver a poner un respaldo en la base de producción se siguen los pasos de 'Copiar los datos de la VM' en el plan B, con su `pg_restore --clean`.
+`AGE_IDENTIDAD` es la ruta del archivo de la llave, nunca la llave misma; con `AGE_IDENTIDAD=-` la lee de stdin para no dejarla en un archivo. El script comprueba que la base y el volumen nuevos no existan, nunca sobrescribe datos y solo devuelve la URL versionada de Key Vault, no la llave. Al terminar, pon en el `.env` las tres variables que imprime (`PGDATABASE`, `CARTA_VOLUME_NAME` y `CARTA_KEY_VAULT_SECRET_URL`), detén y recrea la API. Cuando esa verificación pasó, pon `CARTA_ALTA_ENABLED=true` en el `.env` para habilitar el alta. Si la verificación falla, no apuntes la API a esos destinos. El respaldo crea una base aparte para poder comparar primero con `db/respaldo/conteos.sql`; `db/respaldo/comparar.sh` también compara filas, RLS, FORCE, políticas y permisos. La restauración del plan B se hace en esa misma base nueva, no con `pg_restore --clean` sobre la base que ya está en uso.
 
-`pruebas/test_respaldo.py` saca un respaldo de la base del compose de prueba, lo restaura en una base nueva y compara todo, y revisa la retención por días, que la restauración no pise ninguna base ni deje una vacía con otra llave, que no muestre la llave, que la configuración no la pueda cambiar otro usuario y que una configuración mala no deje nada. Corre en el CI con las pruebas de la base. No prueba la subida a Azure, que se revisa en la VM con el primer `systemctl start`.
+`pruebas/test_respaldo.py` cubre el cifrado, la restauración de base, la retención y la subida simulada. `pruebas/test_respaldo_cartas.py` cubre el contenido seguro del paquete y, en el CI, la restauración de DB, volumen y llave y la autenticación AES-GCM de la carta. En una PC, las pruebas con Docker solo corren si se indican `RESPALDO_CONTENEDOR` y `RESPALDO_CARTAS_CONTENEDOR` de una pila aislada; nunca usan por omisión los contenedores de desarrollo.
 
 ## Plan B
 
@@ -255,7 +338,7 @@ El plan B no usa la base de desarrollo de esa PC: sus datos son de prueba y las 
 
 1. En la carpeta de desarrollo, `docker compose down` (sin `-v`, la base de desarrollo se queda). Hace falta porque `cirdan-pg16`, `cirdan-valkey` y `cirdan-api` tienen nombre fijo y el plan B los volvería a crear.
 2. Un clon aparte de BackKL y FrontKL, por ejemplo en `C:\lowtide-planb\BackKL` y `C:\lowtide-planb\FrontKL`, en el mismo commit que la VM. En la VM, `git -C BackKL rev-parse HEAD` y `git -C FrontKL rev-parse HEAD` dan los dos commits, y en cada clon del plan B `git checkout <commit>` los fija. Con otro commit el portal o la API pueden esperar otra versión de la base que la del respaldo de la VM.
-3. Su `.env` como el de la VM (paso 2 de 'Antes de levantar'), con el `TUNNEL_TOKEN` del plan B, sin `TOTP_KEY_VAULT_SECRET_URL` ni `PASSWORD_HASH_KEY_VAULT_SECRET_URL` (su llave va en `PASSWORD_HASH_ENCRYPTION_KEY`, sección 'Llave de las huellas de contraseña') y además `COMPOSE_PROJECT_NAME=lowtide-planb` (viene comentada en `.env.example`). Esa PC no tiene la identidad de la VM, así que la llave del MFA es la misma de la VM, pero va en `TOTP_ENCRYPTION_KEY`. Se toma del gestor de contraseñas ('LowTide vm-lowtide TOTP_ENCRYPTION_KEY') o de la bóveda con la sesión de `az` de quien la administra (`az keyvault secret show --id <URL con versión del .env de la VM> --query value -o tsv`). Mientras dure el plan B puede ir en ese `.env`, y al terminar se borra de ahí. Con otra llave TOTP los secretos de las cuentas reales no se descifran y nadie pasa la verificación en dos pasos. Sin `COMPOSE_PROJECT_NAME`, el proyecto toma el nombre de la carpeta: `C:\lowtide-planb\BackKL` da `backkl`, el mismo que la carpeta de desarrollo, y los dos usan el mismo volumen de la base, así que el `pg_restore --clean` y el `down -v` de abajo borrarían la base de desarrollo. Las contraseñas de PostgreSQL y Valkey pueden ser otras.
+3. Su `.env` como el de la VM (paso 2 de 'Antes de levantar'), con el `TUNNEL_TOKEN` del plan B, sin `TOTP_KEY_VAULT_SECRET_URL` ni `PASSWORD_HASH_KEY_VAULT_SECRET_URL` (su llave va en `PASSWORD_HASH_ENCRYPTION_KEY`, sección 'Llave de las huellas de contraseña') y además `COMPOSE_PROJECT_NAME=lowtide-planb` (viene comentada en `.env.example`). Tampoco lleva `CARTA_KEY_VAULT_SECRET_URL`: la llave de cartas de la VM va en `CARTA_ENCRYPTION_KEY`, sacada de la bóveda igual que la del MFA. Sin ella, `CARTA_ALTA_ENABLED` tiene que quedar en false. Esa PC no tiene la identidad de la VM, así que la llave del MFA es la misma de la VM, pero va en `TOTP_ENCRYPTION_KEY`. Se toma del gestor de contraseñas ('LowTide vm-lowtide TOTP_ENCRYPTION_KEY') o de la bóveda con la sesión de `az` de quien la administra (`az keyvault secret show --id <URL con versión del .env de la VM> --query value -o tsv`). Mientras dure el plan B puede ir en ese `.env`, y al terminar se borra de ahí. Con otra llave TOTP los secretos de las cuentas reales no se descifran y nadie pasa la verificación en dos pasos. Sin `COMPOSE_PROJECT_NAME`, el proyecto toma el nombre de la carpeta: `C:\lowtide-planb\BackKL` da `backkl`, el mismo que la carpeta de desarrollo, y los dos usan el mismo volumen de la base, así que el `pg_restore --clean` y el `down -v` de abajo borrarían la base de desarrollo. Las contraseñas de PostgreSQL y Valkey pueden ser otras.
 4. La primera línea de `docker compose config` tiene que ser `name: lowtide-planb`. Después, `docker compose up -d --build` y la comprobación de `logs demo-accounts`.
 5. `docker volume ls` muestra `lowtide-planb_cirdan-pg16-data`, el volumen nuevo y vacío del plan B, aparte del de desarrollo (`backkl_cirdan-pg16-data` o el nombre de esa carpeta).
 
@@ -291,6 +374,40 @@ Lo que se escriba durante el plan B (escaneos, usuarios, cambios de contraseña)
 Si el plan B dura poco y no se copia de vuelta, se avisa a los usuarios que lo que hagan ahí se pierde.
 
 Al terminar, en la carpeta del plan B, la primera línea de `docker compose config` tiene que ser otra vez `name: lowtide-planb`, porque una `COMPOSE_PROJECT_NAME` puesta en la terminal le gana al `.env` y `docker volume ls` lista todos los volúmenes, no dice cuál borra esa carpeta. Con ese nombre, `docker compose down -v` borra `lowtide-planb_cirdan-pg16-data`, que trae los datos reales. Con otro nombre no se corre. En la carpeta de desarrollo, `docker compose up -d` levanta otra vez la pila local con su base de siempre.
+
+### Plan B de pruebas (RC-277)
+
+La misma pila en la PC de Ernesto, de respaldo por si la VM cae: otro túnel que publica solo `pruebas.lowtidesec.com`. ZAP activo (RC-89), ASVS (RC-136) y el pentest (RC-153) van contra el producto final en la VM, nunca contra esta pila (`docs/politica_uso_etico.md`). Queda abierto, como la VM, pero el túnel solo está arriba en las ventanas de prueba. No trae datos de la VM.
+
+1. Ernesto crea en Zero Trust el túnel de pruebas con un solo nombre público, `pruebas.lowtidesec.com`, con destino `http://portal:3000`. Ni `lowtidesec.com` ni su www apuntan a ese túnel.
+2. El paso 2 de 'Carpeta y volumen', con los clones en otra carpeta (por ejemplo `C:\lowtide-pruebas\`) y en el commit que se quiere probar. El paso 1 no hace falta: la pila de desarrollo puede seguir arriba con el archivo del paso 3.
+3. `docker-compose.yml` fija `container_name` en `cirdan-pg16`, `cirdan-valkey` y `cirdan-api`, los mismos de la pila de desarrollo, y con ella arriba el `up` choca. En el clon de pruebas va un tercer archivo, `docker-compose.pruebas-pc.yml`, que les cambia el nombre. Es solo de esa PC: no se versiona ni se agrega con `git add`. El prefijo `lote14-` es el de las pilas aisladas de prueba. En redes que cortan UDP, cloudflared no sale por QUIC (UDP 7844) y el túnel cae con el error 1033 de Cloudflare. Con `TUNNEL_TRANSPORT_PROTOCOL: http2` va por TCP 443 y vuelve con sus 4 conexiones (prueba del 20 nov). `docker compose logs cloudflared` dice con qué protocolo registró cada conexión.
+
+   ```yaml
+   services:
+     db:
+       container_name: lote14-planb-pg16
+     valkey:
+       container_name: lote14-planb-valkey
+     api:
+       container_name: lote14-planb-api
+     cloudflared:
+       environment:
+         TUNNEL_TRANSPORT_PROTOCOL: http2
+   ```
+
+4. Su `.env` sale de `.env.example`: `COMPOSE_FILE=docker-compose.yml:docker-compose.despliegue.yml:docker-compose.pruebas-pc.yml`, `COMPOSE_PATH_SEPARATOR=:`, `COMPOSE_PROJECT_NAME=lowtide-pruebas`, `ALLOWED_ORIGINS=https://pruebas.lowtidesec.com`, el `TUNNEL_TOKEN` del túnel de pruebas y llaves nuevas en `TOTP_ENCRYPTION_KEY` y `PASSWORD_HASH_ENCRYPTION_KEY`, distintas entre sí y de las de la VM. `COOKIE_SECURE`, `DEMO_ACCOUNTS`, `DEMO_EXPLORER`, `API_DOCS` y `FORWARDED_ALLOW_IPS` los fija `docker-compose.despliegue.yml`, diga lo que diga el `.env`. `WEBAUTHN_RP_ID` se queda en `lowtidesec.com`, que también sirve en el subdominio.
+5. La primera línea de `docker compose config` es `name: lowtide-pruebas` y `docker compose config --format json` trae los tres `container_name` con `lote14-planb-`. Después, `docker compose up -d --build`: la base nueva se carga con las semillas y `docker compose logs demo-accounts` dice que las cuentas de demo quedaron apagadas.
+6. Las cuentas de prueba las da de alta Ernesto. Nunca se usan las de demo, que tienen contraseña y secreto TOTP en el repo público (comentario 10312 de RC-91).
+
+En cada ventana de prueba:
+
+- Al abrir, `docker compose up -d`. Se anotan la hora y los minutos hasta que `https://pruebas.lowtidesec.com/login` respondió 200.
+- La prueba de punta a punta: login con MFA, ver un dominio y cerrar sesión, sin 403. La respuesta del login trae `Set-Cookie: lt_session` con `Secure` (RC-286). Un login con una X-Forwarded-For inventada cuenta el fallo con la IP real, y 20 fallos desde una IP no bloquean el login desde otra.
+- Esas dos pruebas de fallos van desde un navegador, con correos inventados, no con curl. El captcha se revisa antes de contar el fallo (`cirdan/auth/routes.py:221`): sin resolverlo, curl recibe 401 y el contador no sube. La X-Forwarded-For inventada se agrega a cada `POST /auth/login` que manda la página. El contador de cada IP es `login:fail:ip:<ip>` en Valkey (una IPv6 cuenta por su /64) y vence 15 min después del primer fallo (`LOCK_SECONDS`, `cirdan/auth/sessions.py:37`), así que los fallos van seguidos y se lee en seguida: `docker compose exec valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "login:fail:ip:*"'` lista las IP que contaron. El mismo comando con `get login:fail:ip:<ip>` en lugar de `--scan --pattern ...` da cuántos fallos lleva esa IP.
+- Por este túnel no va ninguna prueba activa. ZAP activo, ASVS y el pentest van contra la VM por `lowtidesec.com`, con una cuenta de prueba que da de alta Ernesto. Cómo se le abre paso al escáner en Cloudflare durante la ventana y cómo se cierra después va en RC-89.
+- Al cerrar, `docker compose stop` (la base se queda) y se anota la hora. `docker inspect -f '{{.State.StartedAt}} {{.State.FinishedAt}}' lowtide-pruebas-cloudflared-1` da las dos horas del túnel en UTC. Con `restart: unless-stopped`, un contenedor detenido a mano no vuelve a arrancar al reiniciar la PC. Uno que no se detuvo sí: si la PC se apaga o se reinicia a mitad de una ventana, Docker Desktop vuelve a levantar el túnel. Por eso el `stop` va antes de apagar, y al prender la PC fuera de una ventana se revisa `docker compose ps`. Si cloudflared quedó arriba, se detiene y se anota el rato que estuvo publicado.
+- Las horas de cada ventana van en un comentario de RC-277.
 
 ## Pruebas
 

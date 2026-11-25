@@ -1,5 +1,5 @@
 [Unit]
-Description=Respaldo diario cifrado de la base de LowTide (BackKL db/respaldo, RC-233)
+Description=Respaldo diario cifrado de la base, cartas y llave de LowTide (BackKL db/respaldo, RC-339)
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

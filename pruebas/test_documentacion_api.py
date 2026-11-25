@@ -1,8 +1,9 @@
 """Documentación de la API y encabezado Server (comentario 10063 de RC-91).
 
-API_DOCS se lee al arrancar la API. Por eso estas pruebas levantan dentro del contenedor dos API propias, una con
-API_DOCS=false, como la fija el despliegue, y otra con API_DOCS=true, como queda en desarrollo. Las dos corren con el
-CMD del Dockerfile, que se lee del propio Dockerfile, así que la del despliegue manda el mismo `--no-server-header`:
+API_DOCS se lee al arrancar la API. Por eso estas pruebas levantan dentro del contenedor tres API propias: una sin
+API_DOCS, que por omisión no publica la documentación (RC-303), otra con API_DOCS=false, como la fija el despliegue, y
+otra con API_DOCS=true, como se pone en una PC para ver /docs. Las tres corren con el CMD del Dockerfile, que se lee
+del propio Dockerfile, así que la del despliegue manda el mismo `--no-server-header`:
 
     docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" -v "$PWD/Dockerfile:/app/Dockerfile:ro" api python -m unittest -v pruebas/test_documentacion_api.py
 
@@ -21,6 +22,7 @@ import urllib.request
 from pathlib import Path
 
 DOCKERFILE = Path(__file__).resolve().parents[1] / 'Dockerfile'
+ENV_LOCAL = Path(__file__).resolve().parents[1] / '.env'
 # Lo que pruebas/test_despliegue.py exige en el CMD del Dockerfile.
 CMD_ESPERADO = ['python', '-m', 'uvicorn', 'cirdan.api.main:app', '--host', '0.0.0.0', '--port', '8000',
                 '--proxy-headers', '--no-server-header']
@@ -32,7 +34,7 @@ def cmd_del_dockerfile():
     if not DOCKERFILE.exists():
         return list(CMD_ESPERADO)
     texto = re.sub(r'\\\n\s*', '', DOCKERFILE.read_text(encoding='utf-8'))
-    cmds = [l[len('CMD'):].strip() for l in texto.splitlines() if l.startswith('CMD ')]
+    cmds = [linea[len('CMD'):].strip() for linea in texto.splitlines() if linea.startswith('CMD ')]
     return json.loads(cmds[-1])
 
 
@@ -46,7 +48,11 @@ class Api:
         cmd[cmd.index('--host') + 1] = '127.0.0.1'
         cmd[cmd.index('--port') + 1] = str(puerto)
         entorno = dict(os.environ, DEMO_EXPLORER='false')
-        entorno.update(variables)
+        for nombre, valor in variables.items():   # None quita la variable: la API usa su valor por omisión
+            if valor is None:
+                entorno.pop(nombre, None)
+            else:
+                entorno[nombre] = valor
         self.proc = subprocess.Popen([sys.executable] + cmd[1:] + ['--log-level', 'warning'], env=entorno)
         for _ in range(100):
             if self.proc.poll() is not None:
@@ -73,6 +79,28 @@ class Api:
                 return e.code, e.headers
 
 
+def api_docs_en_env_local():
+    """Si el .env de la raíz trae API_DOCS: cirdan/config.py lo lee cuando la variable no está en el entorno. En el
+    contenedor no hay .env (.dockerignore)."""
+    return ENV_LOCAL.exists() and any(linea.startswith('API_DOCS=') for linea in ENV_LOCAL.read_text(encoding='utf-8').split())
+
+
+@unittest.skipIf(api_docs_en_env_local(), 'el .env de la raíz trae API_DOCS: no se puede ver el valor por omisión')
+class DocumentacionPorOmision(unittest.TestCase):
+    """Sin API_DOCS en el entorno las tres rutas no existen (RC-303)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api = Api(8105, API_DOCS=None)
+        cls.addClassCleanup(cls.api.cerrar)
+
+    def test_1_sin_rutas_de_documentacion(self):
+        for ruta in RUTAS_DOCS:
+            code, _ = self.api.get(ruta)
+            self.assertEqual(code, 404, ruta)
+        self.assertEqual(self.api.get('/health')[0], 200)
+
+
 class DocumentacionApagada(unittest.TestCase):
     """Con API_DOCS=false, como en el despliegue."""
 
@@ -95,9 +123,17 @@ class DocumentacionApagada(unittest.TestCase):
         code, _ = self.api.get('/health')
         self.assertEqual(code, 200)
 
+    def test_4_sin_api_docs_no_hay_csp_de_documentacion(self):
+        """RC-89: la CSP de /docs y /redoc solo existe con API_DOCS=true. Sin ella, su 404 lleva la de la API."""
+        for ruta in ('/docs', '/redoc'):
+            _, headers = self.api.get(ruta)
+            csp = headers.get('Content-Security-Policy', '')
+            self.assertNotIn('cdn.jsdelivr.net', csp, ruta)
+            self.assertIn("default-src 'none'", csp, ruta)
+
 
 class DocumentacionPuesta(unittest.TestCase):
-    """Con API_DOCS=true, como en desarrollo: las tres rutas siguen, también sin encabezado Server."""
+    """Con API_DOCS=true, como se pone en una PC: las tres rutas existen, también sin encabezado Server."""
 
     @classmethod
     def setUpClass(cls):
@@ -109,6 +145,23 @@ class DocumentacionPuesta(unittest.TestCase):
             code, headers = self.api.get(ruta)
             self.assertEqual(code, 200, ruta)
             self.assertIsNone(headers.get('Server'), ruta)
+
+    def test_2_docs_y_redoc_con_su_csp(self):
+        """RC-89: la CSP de la API (default-src 'none') dejaría /docs y /redoc en blanco. Llevan la suya, que deja
+        cargar swagger-ui y redoc de cdn.jsdelivr.net y sigue sin dejar meterlas en un marco."""
+        for ruta in ('/docs', '/docs/oauth2-redirect', '/redoc'):
+            _, headers = self.api.get(ruta)
+            csp = headers.get('Content-Security-Policy', '')
+            self.assertIn("script-src 'unsafe-inline' https://cdn.jsdelivr.net", csp, ruta)
+            self.assertIn("frame-ancestors 'none'", csp, ruta)
+            self.assertIn("base-uri 'none'", csp, ruta)
+            self.assertEqual(headers.get('X-Frame-Options'), 'DENY', ruta)
+        # El resto de la API sigue con la CSP que no deja cargar nada.
+        for ruta in ('/openapi.json', '/health'):
+            _, headers = self.api.get(ruta)
+            csp = headers.get('Content-Security-Policy', '')
+            self.assertTrue(csp.startswith("default-src 'none'; frame-ancestors"), ruta)
+            self.assertNotIn('cdn.jsdelivr.net', csp, ruta)
 
 
 if __name__ == '__main__':

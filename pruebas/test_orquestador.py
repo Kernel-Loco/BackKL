@@ -16,16 +16,20 @@ exportada antes en la terminal (sin escribir su valor en el comando).
 import contextlib
 import io
 import tempfile
+import threading
 import time
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from urllib.parse import urlsplit
 
 import psycopg
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from cirdan import orquestador
 from cirdan.api import v1 as api_v1
@@ -34,8 +38,11 @@ from cirdan.db import DSN
 from cirdan.orquestador import __main__ as cli
 from cirdan.orquestador.txt import ConsultaTxt
 from cirdan.recolectores import api_docs, certspotter, crtsh, ejemplo, github, shodan
+from cirdan.recolectores import contrato, transporte
 from cirdan.recolectores.contrato import Activo, Hallazgo, Resultado
+from cirdan.score import configuracion, criterio
 from pruebas.test_certspotter import AHORA, EMISIONES, RespaldoSimulado, emision
+from pruebas.test_certspotter import FUENTES_CT, RedSimulada, con_red_simulada
 from pruebas.test_certspotter import recolectar as recolectar_ct
 from pruebas.test_crtsh import SUBDOMINIOS, CrtshSimulado, cert
 
@@ -61,7 +68,7 @@ def responde(*valores):
 
 
 # Resultados de una corrida, para probar los reintentos sin recolector ni red
-FALLA = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[],
+FALLA = SimpleNamespace(estado='failed', activos=[], hallazgos=[], consultas=1, avisos=[], sin_cobertura=[], sin_llave=[],
                         error='crt.sh no respondió')
 BIEN = Resultado('acme-demo.mx', 'ejemplo', activos=[Activo('domain', 'acme-demo.mx'),
                                                      Activo('subdomain', 'www.acme-demo.mx')], consultas=1)
@@ -79,7 +86,8 @@ def resultado_github(*hallazgos, revisados=None, sin_revisar=None):
 
 def secreto(repo, ruta):
     return github.hallazgo_secreto('acme-demo.mx', 'acme-demo/' + repo, {'ruta': ruta, 'regla': 'cirdan-fake-token',
-                                                                         'primera_vez': '2026-09-01T12:00:00Z'}, AHORA)
+                                                                         'primera_vez': '2026-09-01T12:00:00Z',
+                                                                         'ultima_vez': '2026-09-01T12:00:00Z'}, AHORA)
 
 
 def correo(usuario, *repos):
@@ -104,7 +112,7 @@ def resultado_shodan(*puertos, revisados=None, sin_revisar=None, cves=(), omitid
         res.hallazgos.append(shodan.hallazgo_puerto(shodan.codigo_de_puerto(puerto), 'acme-demo.mx', servicio, ip,
                                                     puerto, hosts, datos, AHORA))
     con_hallazgos = {h.codigo for h in res.hallazgos}
-    res.sin_cobertura = [] if revisados is None else [c for c in shodan.CODIGOS if c not in con_hallazgos]
+    res.sin_cobertura = [] if revisados is None else [c for c in shodan.CODIGOS_PUERTOS if c not in con_hallazgos]
     res.sin_cobertura += list(shodan.SIN_LLAVE)
     return res
 
@@ -122,10 +130,10 @@ CARTA_ACME_DEMO = '41000000-0000-4000-8000-000000000001'
 def renovar_carta(conn):
     conn.execute(
         'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
-        'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by) '
+        'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, activities) '
         'SELECT organization_id, domain_id, signer_name, signer_title, signer_email, '
         "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
-        'accepted_by FROM domain_authorizations WHERE id = %s', (CARTA_ACME_DEMO,))
+        'accepted_by, template_version, activities FROM domain_authorizations WHERE id = %s', (CARTA_ACME_DEMO,))
 
 
 def conexion_postgres():
@@ -202,12 +210,60 @@ class Orquestador(unittest.TestCase):
         self.assertEqual((evidencia['check_reason'], evidencia['result']), ('pre_scan', 'match'))
         self.assertIn(TXT_ACME, evidencia['observed_values'])
 
+    def carta_con_alcance(self, actividades):
+        """Una carta vigente que vence después de la de renovar_carta(), así es la que toma el escaneo (RC-59)."""
+        self.conn.execute(
+            'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
+            'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, '
+            "activities) SELECT organization_id, domain_id, signer_name, signer_title, signer_email, "
+            "signed_document_key || '.rc59', signed_document_sha256, current_date - 1, current_date + 60, accepted_by, "
+            '%s, %s FROM domain_authorizations WHERE id = %s',
+            (None if actividades is None else 1, actividades, CARTA_ACME_DEMO))
+
+    def test_2b_la_fuente_que_la_carta_no_autoriza_no_corre(self):
+        self.carta_con_alcance([2])   # solo DNS: ct_logs (actividad 1) queda fuera
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(s.aceptada, s.detalle)
+        usado = self.uno("SELECT daily_used, daily_used_on FROM data_sources WHERE code = 'ct_logs'")
+        with mock.patch.object(orquestador, 'ejecutar', wraps=orquestador.ejecutar) as ejecutar, \
+                mock.patch.object(orquestador, 'en_vivo_permitido', return_value=True), \
+                mock.patch.object(orquestador, '_reservar', wraps=orquestador._reservar) as reservar:
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo', 'ct_logs'], modo='vivo',
+                                         conn=self.conn)
+        self.assertEqual([c.args[0].FUENTE for c in ejecutar.call_args_list], ['ejemplo'])
+        self.assertEqual([c.args[1] for c in reservar.call_args_list], ['ejemplo'])   # en vivo, sin cupo de ct_logs
+        self.assertEqual(self.uno("SELECT daily_used, daily_used_on FROM data_sources WHERE code = 'ct_logs'"), usado)
+        self.assertEqual(resumen['status'], 'partial')
+        self.assertEqual(resumen['stats']['sources_unauthorized'], ['ct_logs'])
+        self.assertLessEqual(set(crtsh.CODIGOS), set(resumen['stats']['rules_without_coverage']))
+        run = self.uno('SELECT r.status, r.attempt, r.next_retry_at, r.error FROM scan_source_runs r '
+                       "JOIN data_sources d ON d.id = r.source_id WHERE r.scan_id = %s AND d.code = 'ct_logs'", s.scan_id)
+        self.assertEqual((run['status'], run['attempt'], run['next_retry_at']), ('failed', 0, None))
+        self.assertIn('no autorizada por la carta (actividad 1', run['error'])
+
+    def test_2c_carta_sin_alcance_no_corre_ninguna_fuente(self):
+        self.carta_con_alcance(None)   # carta de antes de la 029 que nadie llenó: falla cerrado
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(s.aceptada, s.detalle)
+        with mock.patch.object(orquestador, 'ejecutar') as ejecutar:
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs', 'dns'], modo='reproducir',
+                                         conn=self.conn)
+        ejecutar.assert_not_called()
+        self.assertEqual(resumen['status'], 'failed')
+        self.assertEqual(resumen['stats']['sources_unauthorized'], ['ct_logs', 'dns'])
+
     def test_2_corre_el_recolector_grabado_y_cierra_el_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
         self.assertEqual(resumen['status'], 'completed')
+        duracion = resumen['stats'].pop('duration_seconds')
+        self.assertIsInstance(duracion, float)
+        segundos = resumen['stats'].pop('seconds_by_source')
+        self.assertEqual(list(segundos), ['ejemplo'])
+        self.assertLessEqual(segundos['ejemplo'], duracion)
         self.assertEqual(resumen['stats'], {'assets': 2, 'findings': 1, 'new_findings': 1, 'resolved_findings': 0,
-                                            'sources_ok': 1, 'sources_failed': 0})
+                                            'sources_ok': 1, 'sources_failed': 0, 'queries': 0,
+                                            'queries_by_source': {'ejemplo': 0}})
         run = self.uno('SELECT r.status, r.attempt, r.raw_payload FROM scan_source_runs r WHERE r.scan_id = %s', s.scan_id)
         self.assertEqual((run['status'], run['attempt']), ('succeeded', 0))
         self.assertEqual(run['raw_payload']['hallazgos'], 1)
@@ -257,6 +313,182 @@ class Orquestador(unittest.TestCase):
 
     def estado(self, finding_id):
         return self.uno('SELECT status, resolved_at, last_scan_id::text FROM findings WHERE id = %s', finding_id)
+
+    def test_2a_si_los_pesos_cambian_a_mitad_del_escaneo_el_score_sale_con_los_nuevos(self):
+        """RC-62: un PUT /scoring/weights mientras corre la fuente. El score del escaneo usa el juego activo al guardar."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        inicial = configuracion.juego_activo(self.conn, ACME)
+        pesos = {categoria: 0.25 for categoria in criterio.CATEGORIAS}
+        nuevo = {}
+
+        def cambia_pesos_y_corre(*a, **k):  # lo que deja el PUT, en la misma transacción de la prueba
+            configuracion.bloquear_pesos(self.conn, ACME)
+            self.conn.execute('UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = %s AND is_active',
+                              (ACME,))
+            nuevo['id'] = self.uno(
+                'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, '
+                "activated_at) VALUES (%s, %s, %s, true, 'prueba', now()) RETURNING id::text",
+                ACME, int(inicial['version']) + 50, Jsonb(pesos))['id']
+            self.conn.execute(
+                'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
+                'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
+                (nuevo['id'], inicial['id']))
+            # y el recálculo del PUT, que deja un rules_change con el juego nuevo antes del cierre (RC-310)
+            configuracion.recalcular_scores(self.conn, ACME, nuevo['id'], pesos)
+            return contrato.ejecutar(*a, **k)
+
+        with mock.patch.object(orquestador, 'ejecutar', cambia_pesos_y_corre):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        self.assertEqual(resumen['status'], 'completed')
+        score = self.uno('SELECT id::text, rule_set_id::text FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertNotEqual(nuevo['id'], inicial['id'])
+        self.assertEqual(score['rule_set_id'], nuevo['id'])
+        reglas_del_aporte = self.uno('SELECT count(*) AS n FROM score_contributions sc JOIN scoring_rules r '
+                                     'ON r.id = sc.rule_id WHERE sc.score_id = %s AND r.rule_set_id = %s',
+                                     score['id'], nuevo['id'])['n']
+        self.assertGreater(reglas_del_aporte, 0)
+        # RC-310: el rules_change del PUT quedó antes, y el del escaneo es el último snapshot del dominio, el que leen
+        # /domains y el recálculo de pesos.
+        del_put = self.uno("SELECT count(*) AS n FROM domain_scores WHERE domain_id = %s AND reason = 'rules_change' "
+                           'AND rule_set_id = %s', s.domain_id, nuevo['id'])['n']
+        self.assertEqual(del_put, 1)
+        ultimo = self.uno('SELECT id::text, reason, rule_set_id::text FROM domain_scores WHERE domain_id = %s '
+                          'ORDER BY computed_at DESC, created_at DESC, id DESC LIMIT 1', s.domain_id)
+        self.assertEqual((ultimo['id'], ultimo['reason'], ultimo['rule_set_id']), (score['id'], 'scan', nuevo['id']))
+
+    def test_2a1_si_los_cortes_cambian_a_mitad_del_escaneo_el_score_sale_con_los_nuevos(self):
+        """RC-237: un PUT que solo cambia los cortes de bandas mientras corre la fuente. El score del escaneo guarda el
+        juego nuevo, así su banda, su letra y su piso salen de los cortes nuevos y no de los del inicio."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        inicial = configuracion.juego_activo(self.conn, ACME)
+        cortes = {'medium': 50, 'high': 70, 'critical': 85}
+        self.assertNotEqual(configuracion.cortes_de_fila(inicial), cortes)
+        nuevo = {}
+
+        def cambia_cortes_y_corre(*a, **k):  # lo que deja el PUT con los mismos pesos y otros cortes
+            self.conn.execute('UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = %s AND is_active',
+                              (ACME,))
+            nuevo['id'] = self.uno(
+                'INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active, validated_by, '
+                'activated_at, band_medium_from, band_high_from, band_critical_from) '
+                "VALUES (%s, %s, %s, true, 'prueba', now(), %s, %s, %s) RETURNING id::text",
+                ACME, int(inicial['version']) + 50, Jsonb(inicial['category_weights']), cortes['medium'],
+                cortes['high'], cortes['critical'])['id']
+            self.conn.execute(
+                'INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty) '
+                'SELECT %s, code, category, base_severity, weight, max_penalty FROM scoring_rules WHERE rule_set_id = %s',
+                (nuevo['id'], inicial['id']))
+            return contrato.ejecutar(*a, **k)
+
+        usados = []
+        calcular = orquestador.motor.calcular
+
+        def calcular_anotado(*a, **k):
+            usados.append(a[3] if len(a) > 3 else k.get('cortes'))
+            return calcular(*a, **k)
+
+        with mock.patch.object(orquestador, 'ejecutar', cambia_cortes_y_corre), \
+                mock.patch.object(orquestador.motor, 'calcular', calcular_anotado):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        self.assertEqual(resumen['status'], 'completed')
+        score = self.uno('SELECT rule_set_id::text FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertEqual(score['rule_set_id'], nuevo['id'])
+        self.assertEqual(configuracion.cortes_del_juego(self.conn, score['rule_set_id']), cortes)
+        self.assertEqual(usados, [cortes])  # el piso y la banda del cálculo salieron de los cortes nuevos
+
+    def test_2a2_el_ultimo_score_es_el_del_que_tomo_el_candado_al_final(self):
+        """RC-62: un PUT antes del cierre del escaneo y otro después. computed_at sigue el orden del candado de pesos
+        y el modelo corre antes de tomarlo."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        juego = configuracion.juego_activo(self.conn, ACME)
+        pesos = configuracion.pesos_del_juego(juego)
+        orden = []
+        preparar, bloquear = orquestador._preparar_score, configuracion.bloquear_pesos
+
+        def put_antes(*a, **k):  # el recálculo de un PUT que gana el candado antes de que cierre el escaneo
+            configuracion.bloquear_pesos(self.conn, ACME)
+            configuracion.recalcular_scores(self.conn, ACME, juego['id'], pesos)
+            return contrato.ejecutar(*a, **k)
+
+        def preparar_anotado(*a, **k):
+            orden.append('modelo')
+            return preparar(*a, **k)
+
+        def bloquear_anotado(*a, **k):
+            orden.append('candado')
+            return bloquear(*a, **k)
+
+        with mock.patch.object(orquestador, 'ejecutar', put_antes), \
+                mock.patch.object(orquestador, '_preparar_score', preparar_anotado), \
+                mock.patch.object(configuracion, 'bloquear_pesos', bloquear_anotado):
+            orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
+        self.assertEqual(orden[-2:], ['modelo', 'candado'])
+        ultimo = 'SELECT reason, scan_id::text, computed_at FROM domain_scores ds JOIN domains d ON d.id = ds.domain_id ' \
+                 "WHERE d.fqdn = 'acme-demo.mx' ORDER BY ds.computed_at DESC, ds.created_at DESC, ds.id DESC LIMIT 1"
+        del_escaneo = self.uno(ultimo)
+        self.assertEqual((del_escaneo['reason'], del_escaneo['scan_id']), ('scan', s.scan_id))
+        configuracion.bloquear_pesos(self.conn, ACME)  # un PUT que llega después del cierre
+        configuracion.recalcular_scores(self.conn, ACME, juego['id'], pesos)
+        despues = self.uno(ultimo)
+        self.assertEqual((despues['reason'], despues['scan_id']), ('rules_change', s.scan_id))
+        self.assertGreater(despues['computed_at'], del_escaneo['computed_at'])
+
+    def test_2a3_si_lo_dieron_por_caido_antes_del_cierre_no_corre_el_modelo(self):
+        """RC-62: el modelo corre antes del candado, pero no si el escaneo ya no está en 'running'."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        llamadas, abandonados = [], []
+        guardar = orquestador._guardar_resultado
+
+        def guarda_y_lo_abandonan(*a, **k):  # la última fuente ya pasó su latido y otra petición lo da por caído
+            cambios = guardar(*a, **k)
+            self.conn.execute("UPDATE scans SET updated_at = now() - interval '31 minutes' WHERE id = %s", (s.scan_id,))
+            abandonados.extend(orquestador.abandonar_vencidos(self.conn, ACME, scan_id=s.scan_id))
+            return cambios
+
+        with mock.patch.object(orquestador, '_guardar_resultado', guarda_y_lo_abandonan), \
+                mock.patch.object(orquestador, '_preparar_score', lambda *a, **k: llamadas.append(a)):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        self.assertEqual(abandonados, [s.scan_id])  # se abandonó después del último latido, no antes
+        self.assertEqual(resumen['status'], 'failed')
+        self.assertEqual(llamadas, [])
+        self.assertIsNone(self.uno('SELECT 1 FROM domain_scores WHERE scan_id = %s', s.scan_id))
+
+    def escanear_secreto_github(self, ultima_vez):
+        huella = 'ab' * 32
+        titulo = 'Clave de acceso publicada en GitHub: acme-demo/api, archivo config/.env'
+        hallazgo = Hallazgo(
+            'secret_in_public_repo', 'critical', 'acme-demo.mx', titulo,
+            {'title': titulo, 'repo': 'acme-demo/api', 'ruta': 'config/.env', 'tipo': 'test-token',
+             'huella': huella, 'primera_vez': '2026-09-01T00:00:00+00:00', 'ultima_vez': ultima_vez},
+            {'tipo': 'secreto_en_repositorio', 'antiguedad_dias': 0, 'exposicion': 'publica', 'sensibilidad': 'alta'},
+            huella,
+        )
+        resultado = Resultado('acme-demo.mx', 'github', activos=[Activo('domain', 'acme-demo.mx')],
+                              hallazgos=[hallazgo])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with mock.patch.object(orquestador, 'ejecutar', return_value=resultado):
+            orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['github'], modo='reproducir', conn=self.conn)
+        return self.uno('SELECT id::text FROM findings WHERE fingerprint = %s', bytes.fromhex(huella))['id']
+
+    def test_2h_un_secreto_rotado_no_se_reabre_sin_un_commit_posterior(self):
+        finding_id = self.escanear_secreto_github('2026-09-20T00:00:00+00:00')
+        self.conn.execute("UPDATE findings SET status = 'resolved', resolved_at = now() WHERE id = %s", (finding_id,))
+        actor_id = self.uno('SELECT id::text FROM users WHERE organization_id = %s ORDER BY id LIMIT 1', ACME)['id']
+        orquestador.audit(self.conn, ACME, orquestador.ACCION_HALLAZGO_RESUELTO, actor_id, entity_type='finding',
+                          entity_id=finding_id, details={'reason': orquestador.MOTIVO_SECRETO_ROTADO})
+
+        self.escanear_secreto_github('2026-09-20T00:00:00+00:00')
+        estado = self.estado(finding_id)
+        self.assertEqual(estado['status'], 'resolved')
+        self.assertIsNotNone(estado['resolved_at'])
+
+        self.escanear_secreto_github('2099-01-01T00:00:00+00:00')
+        estado = self.estado(finding_id)
+        self.assertEqual(estado['status'], 'open')
+        self.assertIsNone(estado['resolved_at'])
 
     def test_2b_lo_que_la_fuente_ya_no_encuentra_queda_resuelto_y_deja_de_sumar(self):
         _, f = self.escanear_ejemplo()
@@ -487,7 +719,8 @@ class Orquestador(unittest.TestCase):
                          {'config/.env': 'open', 'web/.env': 'open', 'web/viejo.env': 'resolved'})
         self.assertEqual([self.abiertos('title', h).popitem()[1] for h in (de_sitio, de_los_dos)], ['resolved', 'open'])
         self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['github']))
-        self.assertEqual(resumen['stats']['rules_without_coverage'], ['email_in_public_commits'])   # sin hallazgos
+        self.assertEqual(resumen['stats']['rules_without_coverage'],
+                         ['email_in_public_commits', 'file_share_link_in_repo'])   # sin hallazgos
         self.assertTrue(resumen['sources'][0]['cobertura_parcial'])
         self.assertTrue(self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s',
                                  s.scan_id)['partial_coverage'])
@@ -839,6 +1072,53 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.abiertos('host', nuevo), {'nuevo.acme-demo.mx': 'resolved'})
         self.assertEqual(self.conteos(s.scan_id)[1], 1)
 
+    TIENDA_SECTIGO = cert(50, ['tienda.acme-demo.mx'], '2026-10-01T00:00:00', '2027-01-01T00:00:00',
+                          emisor='C=GB, O=Sectigo Limited, CN=Sectigo RSA Domain Validation Secure Server CA')
+
+    def test_2z3_la_autoridad_nueva_y_el_nombre_interno_se_cierran_por_fecha_aunque_toda_corrida_sea_parcial(self):
+        """RC-218: si ct_logs siempre queda parcial y no vuelve a ver esos certificados, cert_new_issuer se cierra a los
+        90 días de emitido y cert_internal_name a los 365 días de vencido, cuando crtsh.py ya no los daría. Antes no."""
+        completo = self.ct_logs(SUBDOMINIOS + [self.TIENDA_SECTIGO], [EMISIONES])
+        self.reescanear(completo, 'ct_logs', AHORA)
+        # el 9004 de EMISIONES (SSL Corporation) también es una autoridad nueva: solo cuenta el de Sectigo
+        [nueva] = [h for h in completo.hallazgos if h.codigo == 'cert_new_issuer' and 'Sectigo' in h.evidencia['emisor']]
+        [interno] = [h for h in completo.hallazgos if h.codigo == 'cert_internal_name']
+        self.assertEqual((nueva.evidencia['emitido'], interno.evidencia['vence']),
+                         ('2026-10-01T00:00:00+00:00', '2026-08-26T00:00:00+00:00'))
+        parcial = Resultado(**dict(vars(completo), hallazgos=[], sin_cobertura=[], sin_revisar=None,
+                                   revisados=['nada.acme-demo.mx@2026-01-01T00:00:00+00:00']))
+        for ahora, esperado in ((datetime(2026, 12, 29, 23, 59, tzinfo=timezone.utc), ('open', 'open')),
+                                (datetime(2026, 12, 30, 0, 0, 1, tzinfo=timezone.utc), ('resolved', 'open')),
+                                (datetime(2027, 8, 25, 23, 59, tzinfo=timezone.utc), ('resolved', 'open')),
+                                (datetime(2027, 8, 26, 0, 0, 1, tzinfo=timezone.utc), ('resolved', 'resolved'))):
+            with self.subTest(ahora=ahora):
+                _, resumen = self.reescanear(parcial, 'ct_logs', ahora)
+                self.assertEqual(resumen['stats']['sources_partial'], ['ct_logs'])
+                self.assertEqual((self.abiertos('emisor', nueva).popitem()[1],
+                                  self.abiertos('host', interno).popitem()[1]), esperado)
+
+    def test_2z4_el_respaldo_sin_todas_sus_paginas_no_cierra_un_nombre_interno(self):
+        """RC-218: con crt.sh caído, el respaldo de Cert Spotter sin todas sus páginas no trae los vencidos y deja
+        cert_internal_name en sin_cobertura. Su revisados no lleva partes interno:, así que el nombre interno dev, que
+        sale de un certificado vencido, sigue abierto entre los dos escaneos y no cuenta como resuelto."""
+        sin_comodin = EMISIONES[:3]   # sin el comodín 9004, que cubriría al vencido de dev
+        self.reescanear(self.ct_logs(SUBDOMINIOS, [sin_comodin]), 'ct_logs', AHORA)
+        [interno] = [h for h in self.ct_logs(SUBDOMINIOS, [sin_comodin]).hallazgos if h.codigo == 'cert_internal_name']
+        respaldo, _ = recolectar_ct(RespaldoSimulado(paginas=[sin_comodin, []], limite_en=1))
+        self.assertIn('cert_internal_name', respaldo.sin_cobertura)
+        self.assertFalse([p for p in respaldo.revisados if p.startswith(crtsh.INTERNO)])
+        s, resumen = self.reescanear(respaldo, 'ct_logs', AHORA)
+        self.assertEqual(resumen['stats']['sources_partial'], ['ct_logs'])
+        self.assertEqual(self.abiertos('host', interno), {'dev.acme-demo.mx': 'open'})
+        self.assertEqual(self.conteos(s.scan_id)[1], 0)
+
+    def test_2z5_el_cierre_por_fecha_usa_las_ventanas_de_crtsh(self):
+        """Los días de CIERRE_POR_FECHA son los de crtsh.py: si una ventana cambia allá, esta prueba lo avisa."""
+        self.assertEqual(orquestador.CIERRE_POR_FECHA,
+                         (('cert_expiring_soon', 'vence', 0), ('cert_new_issuer', 'vence', 0),
+                          ('cert_new_issuer', 'emitido', crtsh.VENTANA_EMISOR_DIAS),
+                          ('cert_internal_name', 'vence', crtsh.VENTANA_VENCIDOS_DIAS)))
+
     def test_2z2_un_archivo_danado_de_la_grabacion_de_ct_logs_no_cierra_nada(self):
         """RC-46 (Ernesto, 9 nov): al reproducir con un archivo de la grabación dañado, ct_logs no cierra ningún
         hallazgo en ese escaneo, ni el por vencer de pagos, que solo trae crt.sh. El escaneo queda parcial, con ct_logs
@@ -898,7 +1178,8 @@ class Orquestador(unittest.TestCase):
             resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], modo='reproducir', ahora=AHORA,
                                          conn=self.conn)
         self.assertEqual(resumen['status'], 'partial')
-        self.assertEqual(resumen['stats']['rules_without_coverage'], ['cert_expired', 'lookalike_domain'])
+        self.assertEqual(resumen['stats']['rules_without_coverage'],
+                         ['cert_expired', 'cert_internal_name', 'cert_new_issuer', 'lookalike_domain'])  # RC-218
         self.assertNotIn('sources_partial', resumen['stats'])   # el respaldo con todas sus páginas es completo (RC-55)
         self.assertEqual((resumen['stats']['sources_ok'], resumen['stats']['assets']), (1, 4))
         run = self.uno('SELECT status, attempt FROM scan_source_runs WHERE scan_id = %s', s.scan_id)
@@ -926,7 +1207,8 @@ class Orquestador(unittest.TestCase):
         self.assertEqual([n for n in t.dns if not n.endswith('acme-demo.mx')], [])  # ni su DNS
         self.assertNotIn('rules_without_coverage', resumen['stats'])
         self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 7)  # el vencido, el que vence pronto y 5 parecidos
+        # el vencido, el que vence pronto, el nombre interno dev (RC-218) y 5 parecidos
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 8)
         parecidos = self.conn.execute(
             "SELECT f.evidence->>'dominio_parecido' AS d, a.value AS activo FROM findings f "
             "JOIN scoring_rules r ON r.id = f.rule_id JOIN assets a ON a.id = f.asset_id "
@@ -964,7 +1246,7 @@ class Orquestador(unittest.TestCase):
         resumen = escanear(SinParecidos())
         self.assertEqual(resumen['status'], 'partial')
         self.assertEqual(resumen['stats']['rules_without_coverage'], ['lookalike_domain'])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 2)
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 3)  # con el nombre interno dev (RC-218)
         self.assertEqual(abiertos(), antes + 5)  # nunca '0 parecidos': siguen abiertos
 
     def escanear_ct(self, t):
@@ -975,6 +1257,65 @@ class Orquestador(unittest.TestCase):
                 mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
             return s, orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
                                          conn=self.conn)
+
+    def test_3c6_cert_spotter_se_pide_una_vez_por_pagina_en_cada_escaneo(self):
+        """RC-326, con base. Un escaneo en vivo con las cinco fuentes que piden Cert Spotter hace 2 consultas (la
+        página y la vacía que cierra), no 10, y el cupo diario de cada fuente sube solo con lo que de verdad salió. Sin
+        compartir (certspotter.descargar directo al transporte) son 8 consultas más, 2 de ct_logs, identity, shodan y
+        web (identity desde RC-56)."""
+        def escanear(compartido):
+            red = RedSimulada()
+            antes = {codigo: self.cupo(codigo)[1] for codigo in FUENTES_CT}
+            s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+            with contextlib.ExitStack() as pila:
+                pila.enter_context(con_red_simulada(red))
+                pila.enter_context(mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(pila.enter_context(
+                    tempfile.TemporaryDirectory()))))
+                pila.enter_context(mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True))
+                if not compartido:
+                    pila.enter_context(mock.patch.object(certspotter, 'descargar', transporte.descargar))
+                resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=list(FUENTES_CT), ahora=AHORA,
+                                             conn=self.conn)
+            subio = {codigo: self.cupo(codigo)[1] - antes[codigo] for codigo in FUENTES_CT}
+            return red, resumen['stats']['queries_by_source'], subio
+        for codigo in FUENTES_CT:  # cada corrida reserva su MAX_CONSULTAS, más lo que gastan los dos escaneos
+            self.exige_cupo(codigo, orquestador.cargar(codigo).MAX_CONSULTAS + 40)
+        con, por_fuente, subio = escanear(compartido=True)
+        self.assertEqual(len(con.cert_spotter), 2)
+        self.assertEqual(subio, por_fuente)  # el cupo cuenta lo que gastó cada fuente, nada reservado de más
+        sin, por_fuente_sin, subio_sin = escanear(compartido=False)
+        self.assertEqual(len(sin.cert_spotter), 10)
+        self.assertEqual(subio_sin, por_fuente_sin)
+        self.assertEqual({codigo: por_fuente_sin[codigo] - por_fuente[codigo] for codigo in FUENTES_CT},
+                         {'api_docs': 0, 'ct_logs': 2, 'identity': 2, 'shodan': 2, 'web': 2})
+
+    def test_3c7_un_reintento_del_orquestador_vuelve_a_pedir_cert_spotter(self):
+        """RC-326, con base. Con crt.sh caído y Cert Spotter con 503, ct_logs queda en 'retrying'. Si Cert Spotter
+        vuelve antes del minuto, el reintento sí le pide las páginas otra vez, no repite la falla guardada, y ct_logs
+        termina bien con lo de Cert Spotter tras un solo reintento."""
+        red = RespaldoSimulado(crtsh=None, certspotter_caido=True)
+        esperas, antes = [], []
+
+        def descargar(req, plazo, tope, cronometro=None):
+            return red(req.full_url, 0)
+
+        def dormir(segundos):
+            esperas.append(segundos)
+            antes.append(len(red.de('api.certspotter.com')))
+            red.certspotter_caido = False
+        self.exige_cupo('ct_logs', 2 * crtsh.MAX_CONSULTAS)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
+                mock.patch.object(transporte, 'descargar', descargar), \
+                mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
+                mock.patch.object(crtsh, '_resolver_dns', lambda nombre, control=False: None), \
+                mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True):
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ct_logs'], ahora=AHORA,
+                                         conn=self.conn, dormir=dormir)
+        self.assertEqual(sum(esperas), 60)  # un solo reintento, al minuto
+        self.assertEqual(len(red.de('api.certspotter.com')) - antes[0], 2)  # la página y la vacía, otra vez a la red
+        self.assertEqual(self.corrida(s.scan_id)['status'], 'succeeded')
+        self.assertEqual(resumen['sources'][0]['status'], 'succeeded')
 
     def test_3c3_una_variante_sin_respuesta_mantiene_abierto_su_parecido(self):
         """B4 de RC-226, con base. Si %marca% responde y la variante acme-dem0.mx no, su huella va en omitidos y el
@@ -998,7 +1339,7 @@ class Orquestador(unittest.TestCase):
         _, resumen = self.escanear_ct(SinLaVariante())
         self.assertNotIn('rules_without_coverage', resumen['stats'])
         self.assertEqual(resumen['sources'][0]['sin_cobertura'], [])
-        self.assertEqual(resumen['sources'][0]['hallazgos'], 6)  # los 7 de siempre menos el de la variante
+        self.assertEqual(resumen['sources'][0]['hallazgos'], 7)  # los 8 de siempre menos el de la variante
         self.assertEqual(estado(), ['open'])  # no saber si sigue ahí no es que ya no esté
         self.assertEqual((resumen['status'], resumen['stats']['sources_partial']), ('partial', ['ct_logs']))
         sin_certificado = CrtshSimulado()
@@ -1156,6 +1497,34 @@ class Orquestador(unittest.TestCase):
         self.assertEqual([f['activos'] for f in resumen['sources']], [2, 2])  # cada fuente guarda lo suyo
         self.assertEqual((resumen['status'], resumen['stats']['assets']), ('completed', 3))  # www una sola vez
 
+    def test_3i4_stats_guarda_las_consultas_y_los_segundos_de_cada_fuente(self):
+        """#52 (RC-87): el costo medido del escaneo. Cuenta las consultas de todos los intentos, también las de una
+        fuente que falló. seconds_by_source no suma las esperas entre reintentos y duration_seconds sí."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.exige_cupo('ct_logs', crtsh.MAX_CONSULTAS)
+        reloj = [1000.0]
+
+        def tarda(resultado):  # cada corrida del recolector tarda 2 s en el reloj simulado
+            def correr_fuente():
+                reloj[0] += 2
+                return resultado
+            return correr_fuente
+
+        def dormir(segundos):
+            reloj[0] += segundos
+        tiempo = SimpleNamespace(monotonic=lambda: reloj[0], sleep=time.sleep)
+        with mock.patch.object(orquestador, 'time', tiempo):
+            resumen = self.en_vivo(s, [tarda(FALLA)] * 4 + [tarda(BIEN)], dormir, fuentes=('ejemplo', 'ct_logs'))
+        esperado = {'queries': 5, 'queries_by_source': {'ejemplo': 4, 'ct_logs': 1},
+                    'seconds_by_source': {'ejemplo': 8.0, 'ct_logs': 2.0}, 'duration_seconds': 8 + 31 * 60 + 2.0}
+        self.assertEqual(resumen['status'], 'partial')  # `ejemplo` agotó sus 4 intentos
+        self.assertEqual({k: resumen['stats'][k] for k in esperado}, esperado)
+        guardado = self.uno('SELECT stats FROM scans WHERE id = %s', s.scan_id)['stats']
+        self.assertEqual({k: guardado[k] for k in esperado}, esperado)
+        # las llaves de antes siguen igual (las leen la API v1, el SIEM y RC-229)
+        self.assertEqual({k: guardado[k] for k in ('assets', 'findings', 'sources_ok', 'sources_failed')},
+                         {'assets': 2, 'findings': 0, 'sources_ok': 1, 'sources_failed': 1})
+
     def test_3j_mientras_corre_una_fuente_un_hilo_marca_vida_y_para_al_terminar(self):
         latidos = []
         with mock.patch.object(orquestador, 'LATIDO', 0.01), \
@@ -1213,6 +1582,24 @@ class Orquestador(unittest.TestCase):
         with mock.patch.object(orquestador, '_latiendo', latiendo):
             self.en_vivo(s, [responder], lambda segundos: None)
         self.assertEqual(dentro, [True, False])
+
+    def test_3m2_cada_corrida_de_una_fuente_va_con_el_candado_de_turno_de_su_modo(self):
+        # Si se quita turno.con_candado(_candado_de(...)) de correr(), producción deja de tomar el turno (RC-46).
+        from cirdan.recolectores import turno
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        puesto, pedidos = object(), []
+
+        def candado_de(modo, conn):
+            pedidos.append((modo, conn))
+            return puesto
+
+        def responder():
+            self.assertIs(turno._CANDADO.get(), puesto)   # ejecutar corre con el candado puesto
+            return BIEN
+        with mock.patch.object(orquestador, '_candado_de', candado_de):
+            self.en_vivo(s, [responder], lambda segundos: None)
+        self.assertEqual(pedidos, [('vivo', self.conn)])
+        self.assertIsNone(turno._CANDADO.get(), 'el candado quedó puesto al terminar la fuente')
 
     # ------------------------------------------------------- límite diario por fuente (#13b, RC-184)
 
@@ -1502,7 +1889,7 @@ class Orquestador(unittest.TestCase):
                 self.assertEqual(cli.main(['acme-demo.mx', '--org', 'ACME']), 0)
             return salida.getvalue().splitlines()
         lineas = terminal(resumen)
-        avisos = [l for l in lineas if l.startswith('    aviso: ')]
+        avisos = [linea for linea in lineas if linea.startswith('    aviso: ')]
         self.assertEqual(len(avisos), 1, lineas)
         self.assertTrue(avisos[0].endswith(certspotter.SIN_COMPLEMENTO), avisos[0])
         # La corrida guarda solo 10 avisos: la terminal dice cuántos más hubo
@@ -1521,6 +1908,161 @@ class Orquestador(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 cli.main(['acme-demo.mx', '--org', 'ACME'])
         self.assertEqual(cerrados, [(s.scan_id, KeyboardInterrupt)])
+
+
+class TurnoHost(unittest.TestCase):
+    """Una petición a la vez por host entre escaneos (comentario 10281.2 de RC-46): el candado de PostgreSQL de
+    orquestador._turno_host, con la base real. Cada prueba usa hosts propios, así no choca con otro escaneo ni con otra
+    prueba. Nada sale a la red: los sitios los simula `visitar`."""
+
+    def setUp(self):
+        from cirdan.recolectores import turno, visita
+        self.turno, self.visita = turno, visita
+        self.host = 'turno-%s.acme-demo.mx' % uuid.uuid4().hex[:12]
+
+    def sostener(self, host, dentro, soltar, espera=5):
+        """Un hilo con el turno de `host` hasta que `soltar` se active. `dentro` se activa al tenerlo."""
+        def correr():
+            with orquestador._turno_host(host, espera):
+                dentro.set()
+                soltar.wait(10)
+        hilo = threading.Thread(target=correr, daemon=True)
+        hilo.start()
+        self.assertTrue(dentro.wait(10), 'el primer hilo no tomó el turno')
+        return hilo
+
+    def test_1_el_mismo_host_espera_a_que_termine_la_otra_peticion(self):
+        dentro, soltar, eventos = threading.Event(), threading.Event(), []
+        hilo = self.sostener(self.host, dentro, soltar)
+
+        def segundo():
+            with orquestador._turno_host(self.host, 10):
+                eventos.append('segundo dentro')
+        otro = threading.Thread(target=segundo, daemon=True)
+        otro.start()
+        otro.join(1.0)
+        self.assertEqual(eventos, [], 'entró al host mientras el otro escaneo tenía su petición abierta')
+        eventos.append('primero suelta')
+        soltar.set()
+        otro.join(10)
+        hilo.join(10)
+        self.assertEqual(eventos, ['primero suelta', 'segundo dentro'])
+
+    def test_2_otro_host_no_espera(self):
+        dentro, soltar = threading.Event(), threading.Event()
+        hilo = self.sostener(self.host, dentro, soltar)
+        try:
+            inicio = time.monotonic()
+            with orquestador._turno_host('otro-' + self.host, 5):
+                self.assertLess(time.monotonic() - inicio, 3)
+        finally:
+            soltar.set()
+            hilo.join(10)
+
+    def test_3_si_la_espera_no_alcanza_lanza_sin_turno_y_no_entra(self):
+        dentro, soltar = threading.Event(), threading.Event()
+        hilo = self.sostener(self.host, dentro, soltar)
+        try:
+            inicio = time.monotonic()
+            with self.assertRaises(self.turno.SinTurno) as error:
+                with orquestador._turno_host(self.host, 0.3):
+                    self.fail('entró sin turno')
+            self.assertLess(time.monotonic() - inicio, 5)
+            self.assertIn(self.host, str(error.exception))
+            with self.assertRaises(self.turno.SinTurno):
+                with orquestador._turno_host(self.host, 0):
+                    self.fail('entró sin tiempo para esperar')
+        finally:
+            soltar.set()
+            hilo.join(10)
+
+    def test_4_una_peticion_que_lanza_suelta_el_turno(self):
+        with self.assertRaises(RuntimeError):
+            with orquestador._turno_host(self.host, 5):
+                raise RuntimeError('la petición falló')
+        inicio = time.monotonic()
+        with orquestador._turno_host(self.host, 5):
+            self.assertLess(time.monotonic() - inicio, 3)
+
+    def test_5_sin_base_no_sale_la_peticion_y_no_es_falta_de_tiempo(self):
+        # Una base que no conecta no corta la corrida como si se acabara el tiempo: SinBase deja la fuente en 'failed'.
+        self.assertFalse(issubclass(self.turno.SinBase, shodan.SinTiempo))
+        malo = make_conninfo(DSN, port='1')
+        with mock.patch.object(orquestador.db, 'DSN', malo), self.assertRaises(self.turno.SinBase) as error:
+            with orquestador._turno_host(self.host, 3):
+                self.fail('entró sin poder tomar el candado')
+        self.assertIn(self.host, str(error.exception))
+
+    def test_6_el_candado_va_en_vivo_y_al_grabar(self):
+        self.assertIs(orquestador._candado_de('vivo', None), orquestador._turno_host)
+        self.assertIs(orquestador._candado_de('grabar', None), orquestador._turno_host)
+        self.assertIsNone(orquestador._candado_de('reproducir', None))
+        self.assertIsNone(orquestador._candado_de('vivo', object()))
+
+    def test_7_dos_escaneos_que_piden_el_mismo_host_no_se_enciman(self):
+        # Dos hilos como dos escaneos (de olmardo.com y de tienda.olmardo.com, por ejemplo), cada uno con su cliente y
+        # el candado real, piden las mismas páginas. Nunca hay dos peticiones abiertas al mismo host, y cada escaneo
+        # hizo todas las suyas: si uno se cae (SinTurno, SinBase), el máximo de 1 no probaría que se turnan.
+        abiertas, maximo, pedidas, errores, candado = {}, {}, {}, [], threading.Lock()
+
+        def visitar(url, timeout):
+            host = urlsplit(url).hostname
+            with candado:
+                abiertas[host] = abiertas.get(host, 0) + 1
+                maximo[host] = max(maximo.get(host, 0), abiertas[host])
+            time.sleep(0.2)
+            with candado:
+                abiertas[host] -= 1
+            return {'rechazada': True}
+
+        def escaneo(n, hosts):
+            try:
+                cliente = self.visita.ClienteWeb(modo='vivo', carpeta=self.visita.carpeta_de('acme-demo.mx'),
+                                                 visitar=visitar, dormir=lambda s: None)
+                with self.turno.con_candado(orquestador._candado_de('vivo', None)):
+                    for host in hosts:
+                        cliente.sitio('https://%s/' % host)
+                pedidas[n] = cliente.pedidas
+            except BaseException as e:   # un hilo que lanza no lo ve unittest: se revisa abajo
+                errores.append((n, repr(e)))
+
+        compartidos = ['a-' + self.host, 'b-' + self.host, 'c-' + self.host]
+        hilos = [threading.Thread(target=escaneo, args=(n, compartidos), daemon=True) for n in range(2)]
+        hilos.append(threading.Thread(target=escaneo, args=(2, ['solo-' + self.host]), daemon=True))
+        for hilo in hilos:
+            hilo.start()
+        for hilo in hilos:
+            hilo.join(30)
+        self.assertFalse([h for h in hilos if h.is_alive()], 'un escaneo no terminó en 30 s')
+        self.assertEqual(errores, [])
+        self.assertEqual(pedidas, {0: 3, 1: 3, 2: 1})
+        self.assertEqual({h: maximo.get(h) for h in compartidos}, {h: 1 for h in compartidos})
+        self.assertEqual(maximo.get('solo-' + self.host), 1)
+
+    def test_8_el_connect_cuenta_en_la_espera_y_la_conexion_lleva_keepalives(self):
+        real, vistos = psycopg.connect, []
+
+        def lento(*a, **k):
+            vistos.append(k)
+            time.sleep(0.5)
+            return real(*a, **k)
+        with mock.patch.object(orquestador.psycopg, 'connect', lento):
+            with self.assertRaises(self.turno.SinTurno) as error:
+                with orquestador._turno_host(self.host, 0.3):   # el connect se comió la espera
+                    self.fail('entró sin tiempo para esperar el turno')
+            self.assertIn('no quedó tiempo', str(error.exception))
+            inicio = time.monotonic()
+            with orquestador._turno_host(self.host, 5):
+                self.assertLess(time.monotonic() - inicio, 3)
+        self.assertEqual(len(vistos), 2)
+        for k in vistos:
+            self.assertEqual({n: k[n] for n in ('keepalives', 'keepalives_idle', 'tcp_user_timeout')},
+                             {'keepalives': 1, 'keepalives_idle': 5, 'tcp_user_timeout': 10000})
+            self.assertIn('-c tcp_keepalives_idle=5', k['options'])
+        # El servidor acepta los keepalives de la sesión (son de usuario): así suelta el candado si el cliente se cae.
+        with psycopg.connect(DSN, **orquestador.RED_TURNO) as conn:
+            self.assertEqual(conn.execute('SHOW tcp_user_timeout').fetchone()[0], '10000')   # SHOW da los ms sin unidad
+            self.assertEqual(conn.execute('SHOW tcp_keepalives_idle').fetchone()[0], '5')
 
 
 if __name__ == '__main__':

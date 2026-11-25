@@ -23,7 +23,7 @@ import dns.rcode
 import dns.rdatatype
 import dns.resolver
 
-from cirdan.recolectores import transporte
+from cirdan.recolectores import contrato, transporte
 
 PREFIJO = 'cirdan-verification='
 RESOLVER_IP = '1.1.1.1'
@@ -32,7 +32,6 @@ DOH_IP = '1.0.0.1'        # fija: getaddrinfo no consulta DNS por una IP literal
 DOH_URL = 'https://%s/dns-query' % DOH_IP
 DOH_TIPO = 'application/dns-message'
 DOH_TOPE = 65535          # el mensaje DNS más largo que existe: su largo es de 16 bits
-AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'   # el mismo de crtsh.py
 
 # Lo que puede salir de una petición DoH que no respondió bien: la red, el TLS y un HTTP 4xx o 5xx (OSError, con
 # urllib.error.HTTPError), una respuesta HTTP mal formada (HTTPException), el tope o el tipo de contenido (ValueError),
@@ -88,7 +87,7 @@ def _por_doh(fqdn, cronometro):
         pregunta = dns.message.make_query(fqdn, dns.rdatatype.TXT)
         pregunta.id = 0   # RFC 8484, 4.1: el ID va en 0. TLS ya protege la respuesta y la pregunta se compara entera
         req = urllib.request.Request(DOH_URL, data=pregunta.to_wire(), method='POST', headers={
-            'User-Agent': AGENTE, 'Accept': DOH_TIPO, 'Content-Type': DOH_TIPO})
+            'User-Agent': contrato.AGENTE, 'Accept': DOH_TIPO, 'Content-Type': DOH_TIPO})
         respuesta = dns.message.from_wire(transporte.descargar(req, plazo, DOH_TOPE, cronometro, tipo=DOH_TIPO))
         if not pregunta.is_response(respuesta):
             return ConsultaTxt(None, DOH_IP, 'la respuesta no es de la pregunta')

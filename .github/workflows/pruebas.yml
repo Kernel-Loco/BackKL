@@ -57,6 +57,18 @@ jobs:
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
           sed -i "s|^PASSWORD_HASH_ENCRYPTION_KEY=.*|PASSWORD_HASH_ENCRYPTION_KEY=$llave|" .env
           grep -q '^PASSWORD_HASH_ENCRYPTION_KEY=.\{44\}$' .env
+          # Llave de las cartas: el CI prueba que el respaldo la incluye cifrada y la restaura sin mostrarla.
+          llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+          sed -i "s|^CARTA_ENCRYPTION_KEY=.*|CARTA_ENCRYPTION_KEY=$llave|" .env
+          grep -q '^CARTA_ENCRYPTION_KEY=.\{44\}$' .env
+          # Otra para las llaves de API de las fuentes (RC-54). Ninguna fuente tiene llave en el CI: HIBP queda sin
+          # cobertura por falta de llave y nunca sale a la red.
+          llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+          sed -i "s|^SOURCE_KEYS_ENCRYPTION_KEY=.*|SOURCE_KEYS_ENCRYPTION_KEY=$llave|" .env
+          grep -q '^SOURCE_KEYS_ENCRYPTION_KEY=.\{44\}$' .env
+          # Sin llave anterior de las huellas (RC-333) y sin consultas en vivo a Pwned Passwords (RC-334).
+          grep -qx 'PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY=' .env
+          grep -qx 'PWNED_PASSWORDS_ENABLED=' .env
           # .env.example la trae en false (#169, RC-287) y las pruebas entran con las cuentas de demo.
           sed -i "s|^DEMO_ACCOUNTS=.*|DEMO_ACCOUNTS=true|" .env
           grep -qx 'DEMO_ACCOUNTS=true' .env
@@ -97,38 +109,76 @@ jobs:
       - name: Pruebas de la base y la API
         run: >-
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
-          pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_llaves_api.py
-          pruebas/test_superadmin.py
-          pruebas/test_respaldo.py
+          pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_bitacora.py pruebas/test_bitacora_descargas.py pruebas/test_inventario_activos.py pruebas/test_llaves_api.py
+          pruebas/test_superadmin.py pruebas/test_operador.py
+          pruebas/test_respaldo.py pruebas/test_respaldo_cartas.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
       # porque no trae gitleaks. Aquí INTEGRACION_GITHUB=1 hace que falle si a la imagen le faltan.
       # Transporte de test_rdap.py hace su certificado con cryptography, que el runner no trae: allí se salta y aquí
       # prueba el transporte, TLS incluido, con el OpenSSL de la imagen. TRANSPORTE_TLS=1 hace que falle si a la
-      # imagen le falta (RC-166).
-      - name: Pruebas dentro del contenedor (orquestador, explorador, modelo ML, TXT, cuentas de demo, bloqueo por IP, llaves del MFA y de las huellas, captcha, documentación de la API, gitleaks, TLS, pesos, ruta del reporte y subfinder sin red)
+      # imagen le falta (RC-166). SaludoReal de test_visita.py hace lo mismo con el saludo TLS de la visita web: certificados
+      # malos y un servidor que solo habla TLS 1.0 o 1.1 (RC-239).
+      - name: Pruebas dentro del contenedor (asistente, orquestador, explorador, modelo ML, TXT, cuentas de demo, bloqueo por IP, IP del cliente, cookie Secure, código MFA y logout sin red, tope del cuerpo, llaves del MFA y de las huellas, captcha, documentación de la API, gitleaks, TLS, pesos, ruta del reporte, subfinder sin red y cartas)
         run: >-
-          docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -e RUTA_REPORTE=1 -e INTEGRACION_SUBFINDER=1
+          docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -e RUTA_REPORTE=1 -e INTEGRACION_SUBFINDER=1 -e ESTADO_CARTA=1 -e CIRDAN_TEST_DB_ISOLATED=true
           -v "$PWD/pruebas:/app/pruebas:ro"
           -v "$PWD/datos/ml:/app/datos/ml:ro" -v "$PWD/db:/app/db:ro" -v "$PWD/docs:/app/docs:ro" -v "$PWD/Dockerfile:/app/Dockerfile:ro"
-          api python -m unittest pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_txt.py
-          pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_llave_totp.py pruebas/test_llave_huellas.py
+          api python -m unittest pruebas/test_asistente.py pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_anomalias_ml.py pruebas/test_auditoria_humana_ml.py pruebas/test_txt.py
+          pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_ip_cliente.py pruebas/test_cookie_segura.py pruebas/test_login_sin_red.py pruebas/test_tope_cuerpo.py pruebas/test_llave_totp.py pruebas/test_llave_huellas.py
           pruebas/test_captcha.py pruebas/test_documentacion_api.py
+          pruebas/test_rotar_huellas.py pruebas/test_contrasenas_filtradas.py
           pruebas.test_github.Integracion
-          pruebas.test_rdap.Transporte pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
-          pruebas.test_subfinder.Integracion
+          pruebas.test_rdap.Transporte pruebas.test_crtsh.TopeDeBytes pruebas.test_visita.SaludoReal pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
+          pruebas.test_subfinder.Integracion pruebas/test_estado_carta.py
+          pruebas/test_alta_dominio.py pruebas/test_verificacion_txt_api.py pruebas/test_alta_dominio_integracion.py
+          pruebas/test_firma.py pruebas/test_firma_base.py
+          pruebas/test_enlace_sin_red.py pruebas/test_recuperar_sin_red.py pruebas/test_programador.py pruebas/test_llave_fuentes.py
 
       - name: Pruebas sin base ni red
         run: >-
           python -m unittest pruebas/test_criterio.py pruebas/test_motor_score.py pruebas/test_plan_accion.py
-          pruebas/test_cambios.py
+          pruebas/test_cambios.py pruebas/test_cobertura.py
           pruebas/test_contrato.py pruebas/test_crtsh.py pruebas/test_certspotter.py pruebas/test_contrato_api.py
           pruebas/test_catalogo_reglas.py pruebas/test_subfinder.py pruebas/test_registros_dns.py
           pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py pruebas/test_borde.py
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
-          pruebas/test_contrasenas_comunes.py
-          pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_siem.py pruebas/test_despliegue.py
-          pruebas/test_ci.py
+          pruebas/test_contrasenas_comunes.py pruebas/test_identidad.py pruebas/test_hibp.py
+          pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_plan_zap.py pruebas/test_reto_hackeo.py pruebas/test_pruebas_usuarios.py pruebas/test_asvs.py pruebas/test_siem.py pruebas/test_despliegue.py
+          pruebas/test_reporte_tecnico.py
+          pruebas/test_ci.py pruebas/test_cadena_suministro.py pruebas/test_terraform.py pruebas/test_alcance_carta.py
+
+      # #28 (RC-63): el enlace al correo de punta a punta en otro compose, aislado y sin red, con Resend simulado,
+      # y en el mismo compose la recuperación de la contraseña con un enlace (RC-335, test_recuperar.py)
+      # (pruebas/enlace). La prueba corre dentro de esa red, porque una red interna no publica puertos. Después,
+      # revisar_log.sh busca en el log de esa API cada token que vio la prueba.
+      - name: Enlace al correo en un compose aislado y sin red
+        run: |
+          C='docker compose -p backkl-enlace -f docker-compose.yml -f pruebas/enlace/docker-compose.yml'
+          trap "$C down -v" EXIT
+          $C up -d --build --wait db valkey api correo-falso
+          $C run --rm pruebas python -m unittest -v pruebas/test_enlace.py pruebas/test_recuperar.py > enlace.log 2> enlace.err || { cat enlace.err; exit 1; }
+          cat enlace.err
+          # Sin 'skipped': fuera del compose aislado la prueba se salta y no debe contar como verde. Se lee la última
+          # línea de resultado de unittest, no la última del archivo: un aviso de Python puede salir después del OK.
+          grep -E '^(OK|FAILED)( |$)' enlace.err | tail -1 | grep -qx 'OK'
+          sh pruebas/enlace/revisar_log.sh enlace.log
+
+      # RC-313, punto 3b: con la base a las 20:00 de México y la API en UTC, GET /api/v1/domains da 'missing' a una carta
+      # que empieza mañana. La base se levanta otra vez con libfaketime (pruebas/hora_base) en las 02:00 UTC de hoy, que
+      # son las 20:00 de México de ayer. La API no cambia y queda un día delante. Va al final porque deja la base con otra
+      # imagen y otro reloj, sobre el mismo volumen.
+      - name: Hora de la base fijada a las 20:00 de México
+        run: |
+          PG_IMAGE=$(docker compose config --images db)
+          FAKETIME_BASE=$(printf '%+ds' $(( $(TZ=UTC date -d 'today 02:00' +%s) - $(date +%s) )))
+          export PG_IMAGE FAKETIME_BASE
+          echo "Imagen $PG_IMAGE con el reloj de la base movido $FAKETIME_BASE"
+          docker compose -f docker-compose.yml -f pruebas/hora_base/docker-compose.yml up -d --build --wait db
+          HORA_BASE_FIJA=1 python -m unittest -v pruebas.test_api_v1.ApiV1.test_1c_carta_que_empieza_manana_con_la_base_a_las_20 \
+            2>&1 | tee hora_base.log
+          # Sin pipefail el código de salida es el de tee: pasa solo con 'OK' a secas, sin 'skipped'.
+          grep -qx 'OK' hora_base.log
 
       - name: Logs si algo falló
         if: failure()
@@ -137,3 +187,23 @@ jobs:
       - name: Apagar y borrar la base de prueba
         if: always()
         run: docker compose down -v
+
+  # Infraestructura como código (#81, RC-132): formato, validación sin nube (init -backend=false no crea nada ni pide
+  # cuenta de Azure) y Trivy sin hallazgos altos ni críticos en la configuración. Imágenes con versión fija.
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Terraform fmt y validate
+        run: |
+          tf() { docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD/infra/terraform:/tf" -w /tf hashicorp/terraform:1.17.2 "$@"; }
+          tf fmt -check -recursive -diff
+          tf init -backend=false -input=false -lockfile=readonly
+          tf validate
+
+      - name: Trivy revisa la configuración de Terraform
+        run: >-
+          docker run --rm -v "$PWD/infra/terraform:/src:ro" aquasec/trivy:0.76.2
+          config --severity HIGH,CRITICAL --exit-code 1 /src

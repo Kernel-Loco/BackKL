@@ -3,6 +3,7 @@
     python -m unittest -v pruebas/test_auth.py      (con `docker compose up -d`, DEMO_ACCOUNTS=true)
 """
 import base64
+import hashlib
 import hmac
 import http.client
 import json
@@ -15,7 +16,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
-from pruebas import sesion
+from pruebas import sesion, test_aislamiento
 from pruebas.sesion import AUTH, PASSWORD, Client
 from pruebas.test_aislamiento import scalar
 
@@ -27,7 +28,16 @@ INVALID = 'Correo o contraseña incorrectos.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MAX_FALLOS = 5  # MAX_FAILS_EMAIL de cirdan/auth/sessions.py
+MAX_FALLOS_IP = 20  # MAX_FAILS_IP de cirdan/auth/sessions.py
 CAPTCHA_INVALID = 'No se pudo comprobar que no eres un robot. Espera a que termine la verificación e inténtalo de nuevo.'
+ADMIN_MFA_REQUIRED = ('Las cuentas de administrador deben activar la verificación en dos pasos antes de entrar. '
+                      'Escanea el código QR con tu app autenticadora.')
+MFA_SETUP_EXPIRED = 'El código QR venció o ya se usaron sus 5 intentos. Empieza de nuevo.'
+
+
+def _bitacora(email, accion, extra=''):
+    return int(scalar("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                      "AND a.action = '%s' %s;" % (email, accion, extra), user='postgres'))
 
 
 def codigos_malos(email, n):
@@ -135,23 +145,192 @@ class Login(unittest.TestCase):
                         user='postgres')
         scalar("UPDATE users SET mfa_enabled_at = NULL WHERE email = '%s' RETURNING 1;" % email, user='postgres')
 
+    def _sin_totp(self, email):
+        """Quita el TOTP completo (secreto, fecha y paso) solo durante la prueba y al final lo devuelve igual."""
+        antes = scalar("SELECT coalesce(quote_literal(totp_secret_enc::text), 'NULL') || '|' || "
+                       "coalesce(quote_literal(mfa_enabled_at), 'now()') || '|' || coalesce(last_totp_step::text, 'NULL') "
+                       "FROM users WHERE email = '%s';" % email, user='postgres')
+        secreto, fecha, paso = antes.split('|')
+        self.addCleanup(scalar, "UPDATE users SET totp_secret_enc = %s, mfa_enabled_at = %s, last_totp_step = %s "
+                                "WHERE email = '%s' RETURNING 1;" % (secreto, fecha, paso, email), user='postgres')
+        scalar("UPDATE users SET totp_secret_enc = NULL, mfa_enabled_at = NULL, last_totp_step = NULL "
+               "WHERE email = '%s' RETURNING 1;" % email, user='postgres')
+
+    def _token_de_alta(self, email, client=None):
+        """El 403 de /login de un Admin sin TOTP: devuelve su mfa_setup_token."""
+        client = client or Client()
+        code, body = sesion.post_login(client, email, PASSWORD)
+        self.assertEqual((code, body.get('detail'), body.get('mfa_setup_required')), (403, ADMIN_MFA_REQUIRED, True), body)
+        return body['mfa_setup_token']
+
     def test_9_sin_mfa_la_sesion_lleva_el_rol_de_la_base(self):
         # login_lookup() ya no devuelve el rol (migración 004): sin MFA, la API lo lee con RLS.
         # El rol de la sesión se ve en lo que deja hacer: solo admin lee los TXT y el gerente no pide
-        # escaneos. Un dominio que no existe responde 404 sin escribir nada.
-        for email, role, txt, scan in ((JORDAN, 'analyst', 403, 404), (ALEX, 'admin', 200, 404)):
-            with self.subTest(email=email):
-                self._sin_mfa(email)
-                client = Client()
-                code, body = sesion.post_login(client, email, PASSWORD)
-                self.assertEqual(code, 200)
-                self.assertFalse(body['mfa_required'])
-                self.assertEqual((body['user']['email'], body['user']['role']), (email, role))
-                self.assertIsNotNone(client.cookie())
-                self.assertEqual(client.get(AUTH + '/me')[0], 200)
-                self.assertEqual(client.get('/api/v1/domains/txt')[0], txt, 'solo admin lee los TXT')
-                self.assertEqual(client.post('/api/v1/domains/no-existe.acme-demo.mx/scans')[0], scan,
-                                 'el gerente no puede pedir escaneos')
+        # escaneos. Un dominio que no existe responde 404 sin escribir nada. Un Admin sin MFA ya no entra (test_9b) y su
+        # rol se revisa después de activar el TOTP (test_9c).
+        self._sin_mfa(JORDAN)
+        client = Client()
+        code, body = sesion.post_login(client, JORDAN, PASSWORD)
+        self.assertEqual(code, 200)
+        self.assertFalse(body['mfa_required'])
+        self.assertEqual((body['user']['email'], body['user']['role']), (JORDAN, 'analyst'))
+        self.assertIsNotNone(client.cookie())
+        self.assertEqual(client.get(AUTH + '/me')[0], 200)
+        self.assertEqual(client.get('/api/v1/domains/txt')[0], 403, 'solo admin lee los TXT')
+        self.assertEqual(client.post('/api/v1/domains/no-existe.acme-demo.mx/scans')[0], 404)
+
+    def test_9b_un_admin_sin_mfa_recibe_403_sin_sesion(self):
+        # Hecho cuando de RC-5: TOTP obligatorio para Admins. La contraseña buena no basta: 403, sin cookie ni sesión.
+        self._sin_mfa(ALEX)
+        antes = _bitacora(ALEX, 'auth.admin_mfa_required')
+        client = Client()
+        code, body = sesion.post_login(client, ALEX, PASSWORD)
+        self.assertEqual((code, body['detail'], body['mfa_setup_required']), (403, ADMIN_MFA_REQUIRED, True))
+        self.assertGreaterEqual(len(body['mfa_setup_token']), 40)
+        self.assertNotIn('user', body)
+        self.assertNotIn('mfa_token', body)
+        self.assertIsNone(client.cookie())
+        self.assertEqual(client.get(AUTH + '/me')[0], 401)
+        self.assertEqual(client.get('/api/v1/domains/txt')[0], 401)
+        self.assertEqual(_bitacora(ALEX, 'auth.admin_mfa_required'), antes + 1)
+        # El token de alta no es un mfa_token: no abre sesión por /mfa/verify.
+        self.assertEqual(client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_setup_token'],
+                                                            'code': '123456'}), (401, {'detail': MFA_EXPIRED}))
+        # Con la contraseña mala sigue siendo el 401 de siempre, sin token.
+        self.assertEqual(sesion.post_login(Client(), ALEX, 'no-es-la-contrasena'), (401, {'detail': INVALID}))
+
+    def test_9c_el_admin_activa_el_totp_al_entrar_y_entonces_entra(self):
+        self._sin_totp(ALEX)
+        sesion.reset()
+        client = Client()
+        token = self._token_de_alta(ALEX, client)
+        code, qr = client.post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token})
+        self.assertEqual(code, 200, qr)
+        self.assertTrue(qr['qr_svg'].startswith('data:image/svg+xml'))
+        self.assertEqual(qr['expires_in_seconds'], 600)
+        self.assertIsNone(client.cookie())
+        self.assertEqual(scalar("SELECT totp_secret_enc IS NULL FROM users WHERE email = '%s';" % ALEX,
+                                user='postgres'), 't', 'sin un código válido la base no guarda nada')
+        paso = int(time.time() // sesion.STEP)
+        validos = {sesion.totp(qr['secret'], s) for s in range(paso - 2, paso + 3)}
+        malo = next(c for c in ('%06d' % i for i in range(20)) if c not in validos)
+        self.assertEqual(client.post(AUTH + '/mfa/enroll/enable', {'mfa_setup_token': token, 'code': malo}),
+                         (401, {'detail': MFA_INVALID}))
+        self.assertIsNone(client.cookie(), 'un código malo no crea sesión')
+        antes = _bitacora(ALEX, 'auth.login_succeeded', "AND a.details->>'via' = 'totp_enroll'")
+        code, body = client.post(AUTH + '/mfa/enroll/enable',
+                                 {'mfa_setup_token': token, 'code': sesion.totp(qr['secret'], paso)})
+        self.assertEqual(code, 200, body)
+        self.assertEqual((body['mfa_required'], body['user']['role'], body['user']['mfa_enabled']), (False, 'admin', True))
+        self.assertIsNotNone(client.cookie())
+        self.assertEqual(client.get(AUTH + '/me')[1]['mfa_enabled'], True)
+        self.assertEqual(client.get('/api/v1/domains/txt')[0], 200, 'la sesión lleva el rol admin de la base')
+        self.assertEqual(_bitacora(ALEX, 'auth.login_succeeded', "AND a.details->>'via' = 'totp_enroll'"), antes + 1)
+        # El token ya no sirve, y el siguiente inicio de sesión pide el código.
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token}),
+                         (401, {'detail': MFA_EXPIRED}))
+        code, body = sesion.post_login(Client(), ALEX, PASSWORD)
+        self.assertEqual((code, body['mfa_required']), (200, True))
+
+    def test_9d_el_token_de_alta_no_sirve_si_cambia_la_contrasena_o_sin_qr(self):
+        self._sin_totp(ALEX)
+        sesion.reset()
+        token = self._token_de_alta(ALEX)
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/enable', {'mfa_setup_token': token, 'code': '123456'}),
+                         (401, {'detail': MFA_SETUP_EXPIRED}), 'sin QR pedido no hay alta')
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': 'x' * 43}),
+                         (401, {'detail': MFA_EXPIRED}), 'un token inventado no da QR')
+        huella = scalar("SELECT quote_literal(password_hash) FROM users WHERE email = '%s';" % ALEX, user='postgres')
+        self.addCleanup(scalar, "UPDATE users SET password_hash = %s WHERE email = '%s' RETURNING 1;" % (huella, ALEX),
+                        user='postgres')
+        scalar("UPDATE users SET password_hash = password_hash || 'x' WHERE email = '%s' RETURNING 1;" % ALEX,
+               user='postgres')
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token}),
+                         (401, {'detail': MFA_EXPIRED}), 'con otra contraseña el token ya no sirve')
+
+    def test_9e_dos_codigos_buenos_a_la_vez_abren_una_sola_sesion(self):
+        self._sin_totp(ALEX)
+        sesion.reset()
+        token = self._token_de_alta(ALEX)
+        code, qr = Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token})
+        self.assertEqual(code, 200, qr)
+        bueno = sesion.totp(qr['secret'], int(time.time() // sesion.STEP))
+        clientes = [Client() for _ in range(4)]
+        with ThreadPoolExecutor(4) as pool:
+            respuestas = list(pool.map(lambda c: c.post(AUTH + '/mfa/enroll/enable',
+                                                        {'mfa_setup_token': token, 'code': bueno}), clientes))
+        self.assertEqual(sorted(r[0] for r in respuestas), [200, 401, 401, 401], respuestas)
+        self.assertEqual(sum(c.cookie() is not None for c in clientes), 1)
+
+    def _codigo_malo(self, secreto):
+        paso = int(time.time() // sesion.STEP)
+        validos = {sesion.totp(secreto, s) for s in range(paso - 2, paso + 3)}
+        return next(c for c in ('%06d' % i for i in range(20)) if c not in validos)
+
+    def test_9f_el_token_da_3_qr_y_5_codigos_en_total(self):
+        # H3, H7 y H8 de la revisión de RC-5: pedir otro QR no devuelve los intentos ni escribe la bitácora sin tope.
+        self._sin_totp(ALEX)
+        sesion.reset()
+        token = self._token_de_alta(ALEX)
+
+        def enroll(ruta, **extra):
+            return Client().post(AUTH + '/mfa/enroll/' + ruta, dict(mfa_setup_token=token, **extra))
+
+        code, qr = enroll('setup')
+        self.assertEqual(code, 200, qr)
+        malo = self._codigo_malo(qr['secret'])
+        for _ in range(4):
+            self.assertEqual(enroll('enable', code=malo), (401, {'detail': MFA_INVALID}))
+        code, qr = enroll('setup')
+        self.assertEqual(code, 200, qr)
+        self.assertEqual(enroll('enable', code=self._codigo_malo(qr['secret'])), (401, {'detail': MFA_INVALID}),
+                         'el quinto código se revisa')
+        bueno = sesion.totp(qr['secret'], int(time.time() // sesion.STEP))
+        self.assertEqual(enroll('enable', code=bueno), (401, {'detail': MFA_EXPIRED}),
+                         'con 5 códigos el token se gasta aunque se haya pedido otro QR')
+        self.assertEqual(scalar("SELECT totp_secret_enc IS NULL FROM users WHERE email = '%s';" % ALEX,
+                                user='postgres'), 't')
+        sesion.reset()
+        token = self._token_de_alta(ALEX)
+        for _ in range(3):
+            self.assertEqual(enroll('setup')[0], 200)
+        self.assertEqual(enroll('setup'), (401, {'detail': MFA_EXPIRED}), 'el cuarto QR ya no sale')
+        self.assertEqual(enroll('enable', code=bueno), (401, {'detail': MFA_EXPIRED}), 'y el token quedó gastado')
+
+    def test_9g_dos_tokens_de_la_misma_cuenta_no_se_pisan_el_qr(self):
+        # H5 y H9: el secreto pendiente vive en cada token, no en mfa:setup:<usuario>.
+        self._sin_totp(ALEX)
+        sesion.reset()
+        token_a, token_b = self._token_de_alta(ALEX), self._token_de_alta(ALEX)
+        code, qr_a = Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token_a})
+        self.assertEqual(code, 200, qr_a)
+        code, qr_b = Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token_b})
+        self.assertEqual(code, 200, qr_b)
+        self.assertNotEqual(qr_a['secret'], qr_b['secret'])
+        client = Client()
+        code, body = client.post(AUTH + '/mfa/enroll/enable', {
+            'mfa_setup_token': token_a, 'code': sesion.totp(qr_a['secret'], int(time.time() // sesion.STEP))})
+        self.assertEqual(code, 200, body)
+        self.assertIsNotNone(client.cookie())
+
+    def test_9h_con_el_correo_bloqueado_el_alta_al_entrar_da_429(self):
+        # H2, H8 y H15: el alta al entrar respeta el bloqueo del correo y de la IP, como /login y /mfa/verify.
+        self._sin_totp(ALEX)
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        token = self._token_de_alta(ALEX)
+        code, qr = Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token})
+        self.assertEqual(code, 200, qr)
+        for _ in range(MAX_FALLOS):
+            self.assertEqual(sesion.post_login(Client(), ALEX, 'no-es-la-contrasena')[0], 401)
+        self.assertEqual(Client().post(AUTH + '/mfa/enroll/setup', {'mfa_setup_token': token}), (429, {'detail': LOCKED}))
+        client = Client()
+        code, body = client.post(AUTH + '/mfa/enroll/enable', {
+            'mfa_setup_token': token, 'code': sesion.totp(qr['secret'], int(time.time() // sesion.STEP))})
+        self.assertEqual((code, body), (429, {'detail': LOCKED}), 'ni con el código bueno')
+        self.assertIsNone(client.cookie())
+        self.assertEqual(scalar("SELECT totp_secret_enc IS NULL FROM users WHERE email = '%s';" % ALEX,
+                                user='postgres'), 't')
 
     def test_10_la_contrasena_mala_queda_en_la_bitacora(self):
         # La API escribe el fallo después de mandar el 401, para que el tiempo no delate que el correo
@@ -265,6 +444,320 @@ class Login(unittest.TestCase):
             code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': sesion.next_code(DANA)})
             self.assertEqual(code, 200, 'código %d' % (i + 1))
 
+    def test_16_un_codigo_con_digitos_que_no_son_0_a_9_da_422_y_no_gasta_el_token(self):
+        # \d y isdigit() aceptaban '١٢٣٤٥٦' y '１２３４５６', y hmac.compare_digest tronaba con un 500 sin bitácora (RC-315).
+        client = Client()
+        _, body = sesion.post_login(client, MAYA, PASSWORD)
+        token = body['mfa_token']
+        for codigo in ('١٢٣٤٥٦', '１２３４５６'):
+            code, body = client.post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': codigo})
+            self.assertEqual(code, 422, ascii(codigo))
+        code, _ = client.post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': sesion.next_code(MAYA)})
+        self.assertEqual(code, 200, 'el 422 sale antes de revisar el token, así que el token sigue sirviendo')
+
+    def test_17_treinta_contrasenas_en_paralelo_solo_revisan_cinco(self):
+        # RC-270: /login cuenta el intento antes de revisar la contraseña, en un solo paso de Valkey. Antes revisaba el
+        # bloqueo, luego la contraseña y contaba el fallo al final, así que las 30 leían el contador en 0 y se revisaban.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                  "AND a.action = 'auth.login_failed' AND a.details->>'reason' = 'password';" % DANA)
+        antes = int(scalar(contar, user='postgres'))
+        resueltos = [sesion.captcha(Client()) for _ in range(30)]  # fuera de la carrera: resolverlos tarda
+        salida = threading.Barrier(len(resueltos))
+
+        def intento(par):
+            n, resuelto = par
+            salida.wait()
+            code, body = Client().post(AUTH + '/login', {'email': DANA, 'password': 'CIRDAN_FAKE_mala-%d' % n,
+                                                          'captcha': resuelto})
+            return code, (body or {}).get('detail')
+
+        with ThreadPoolExecutor(len(resueltos)) as pool:
+            respuestas = list(pool.map(intento, enumerate(resueltos)))
+        self.assertEqual(respuestas.count((401, INVALID)), MAX_FALLOS, respuestas)
+        self.assertEqual([r[0] for r in respuestas].count(429), len(resueltos) - MAX_FALLOS, respuestas)
+        for _ in range(50):  # la bitácora del 401 se escribe después de responder: hasta 5 s
+            if int(scalar(contar, user='postgres')) - antes >= MAX_FALLOS:
+                break
+            time.sleep(0.1)
+        time.sleep(0.5)  # por si llegara una de más
+        self.assertEqual(int(scalar(contar, user='postgres')) - antes, MAX_FALLOS, 'solo 5 contraseñas se revisaron')
+        self.assertEqual(_fallos(_llave_correo(DANA)), MAX_FALLOS)
+        ip, = _llaves_ip()
+        self.assertEqual(_fallos(ip), MAX_FALLOS, 'los 25 que recibieron 429 no le suman a la IP')
+        sesion.valkey('DEL', ip)  # así el 429 que sigue solo puede salir por el correo
+        code, _ = sesion.post_login(Client(), DANA, PASSWORD)
+        self.assertEqual(code, 429, 'después de la carrera el correo sigue bloqueado, también con la contraseña buena')
+
+    def test_18_el_mismo_codigo_con_dos_tokens_a_la_vez_abre_una_sola_sesion(self):
+        # RC-270 (el arreglo es de RC-331): /mfa/verify lee last_totp_step sin bloquear la fila y solo guarda el paso si
+        # sigue siendo menor. Para que las dos lecturas lleguen antes que cualquier escritura, una transacción aparte
+        # tiene la fila bloqueada 3 s: las dos peticiones leen el mismo last_totp_step y esperan en el UPDATE. Con el
+        # UPDATE sin condición, como antes, las dos abrían sesión.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        contar = ("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                  "AND a.action = '%%s';" % MAYA)
+        antes = {a: int(scalar(contar % a, user='postgres')) for a in ('auth.mfa_failed', 'auth.login_succeeded')}
+        clientes = [Client(), Client()]
+        tokens = [sesion.post_login(c, MAYA, PASSWORD)[1]['mfa_token'] for c in clientes]
+        codigo = sesion.next_code(MAYA)
+        candado = threading.Thread(target=test_aislamiento.psql, kwargs={'user': 'postgres', 'sql': (
+            "BEGIN; SELECT 1 FROM users WHERE email = '%s' FOR UPDATE; SELECT pg_sleep(3) AS rc270_candado; COMMIT;"
+            % MAYA)})
+        candado.start()
+        self.addCleanup(candado.join)
+        esperando = "SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%rc270_candado%' AND pid <> pg_backend_pid();"
+        for _ in range(100):  # hasta 10 s a que la fila quede bloqueada
+            if int(scalar(esperando, user='postgres')):
+                break
+            time.sleep(0.1)
+        else:
+            self.fail('la transacción que bloquea la fila no empezó')
+        salida = threading.Barrier(2)
+
+        def intento(par):
+            client, token = par
+            salida.wait()
+            return client.post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': codigo})
+
+        with ThreadPoolExecutor(2) as pool:
+            respuestas = list(pool.map(intento, zip(clientes, tokens)))
+        self.assertEqual(sorted(r[0] for r in respuestas), [200, 401], respuestas)
+        self.assertIn((401, {'detail': MFA_INVALID}), respuestas)
+        self.assertEqual([c.cookie() is not None for c in clientes].count(True), 1, 'una sola cookie de sesión')
+        self.assertEqual(int(scalar(contar % 'auth.login_succeeded', user='postgres')) - antes['auth.login_succeeded'], 1)
+        self.assertEqual(int(scalar(contar % 'auth.mfa_failed', user='postgres')) - antes['auth.mfa_failed'], 1,
+                         'el código usado queda en la bitácora como auth.mfa_failed')
+
+    def test_19_veintiuna_entradas_buenas_no_bloquean_la_ip(self):
+        # RC-270: /login cuenta cada intento antes de revisar la contraseña y lo devuelve si fue correcta. Sin esa
+        # devolución, la entrada 21 de la misma IP en 15 min respondería 429, aunque todas fueran buenas.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        self._sin_mfa(JORDAN)
+        for i in range(MAX_FALLOS_IP + 1):
+            code, body = sesion.post_login(Client(), JORDAN, PASSWORD)
+            self.assertEqual((code, body.get('mfa_required')), (200, False), 'entrada %d' % (i + 1))
+
+    def test_20_un_429_no_le_suma_al_otro_contador(self):
+        # RC-270: con la IP en su máximo, un login a otro correo responde 429 sin subir ese correo, y con el correo en
+        # su máximo el 429 no sube la IP. Si contara, una IP bloqueada seguiría bloqueando correos ajenos sin límite.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        self.assertEqual(sesion.post_login(Client(), DANA, 'CIRDAN_FAKE_mala')[0], 401)
+        ip, = _llaves_ip()
+        sesion.valkey('SET', ip, str(MAX_FALLOS_IP), 'KEEPTTL')
+        self.assertEqual(sesion.post_login(Client(), MAYA, 'CIRDAN_FAKE_mala')[0], 429)
+        self.assertEqual(sesion.valkey('EXISTS', _llave_correo(MAYA)), ['0'], 'el 429 de la IP no cuenta para el correo')
+        self.assertEqual(_fallos(ip), MAX_FALLOS_IP)
+        sesion.reset()
+        for _ in range(MAX_FALLOS):
+            self.assertEqual(sesion.post_login(Client(), DANA, 'CIRDAN_FAKE_mala')[0], 401)
+        ip, = _llaves_ip()
+        self.assertEqual(sesion.post_login(Client(), DANA, PASSWORD)[0], 429)
+        self.assertEqual((_fallos(_llave_correo(DANA)), _fallos(ip)), (MAX_FALLOS, MAX_FALLOS),
+                         'el 429 del correo no cuenta para la IP')
+
+    def test_21_tres_malas_y_una_buena_dejan_tres_con_vencimiento(self):
+        # RC-270, con Valkey real: con TOTP la contraseña buena no borra los fallos del correo, solo devuelve su
+        # intento. Los dos contadores quedan en 3 y vencen en 15 min como mucho, contados desde el primer fallo.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        for _ in range(3):
+            self.assertEqual(sesion.post_login(Client(), MAYA, 'CIRDAN_FAKE_mala')[0], 401)
+        correo, (ip,) = _llave_correo(MAYA), _llaves_ip()
+        vence = {llave: int(sesion.valkey('PEXPIRETIME', llave)[0]) for llave in (correo, ip)}
+        code, body = sesion.post_login(Client(), MAYA, PASSWORD)
+        self.assertEqual((code, body.get('mfa_required')), (200, True))
+        for llave in (correo, ip):
+            self.assertEqual(_fallos(llave), 3, llave)
+            self.assertIn(int(sesion.valkey('TTL', llave)[0]), range(1, 901), llave)
+            self.assertEqual(int(sesion.valkey('PEXPIRETIME', llave)[0]), vence[llave], 'el login bueno no lo renueva')
+
+    def test_22_la_devolucion_no_crea_llaves_ni_baja_una_ventana_nueva(self):
+        # RC-270, con el Valkey y el código de la API: refund_login_attempt solo baja el contador de la misma ventana
+        # que subió take_login_attempt. Si el contador desapareció no lo crea, y si venció y otro fallo abrió una
+        # ventana nueva, ese fallo sigue contando.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        salida = sesion.en_api(
+            'import json, time\n'
+            'from cirdan.auth import sessions as s\n'
+            "e, ip, v = 'rc270-ventana@ejemplo.test', '198.51.100.70', s._valkey()\n"
+            'llaves = (s._email_key(e), s._ip_key(ip))\n'
+            't = s.take_login_attempt(e, ip)\n'
+            'v.delete(*llaves)\n'
+            's.refund_login_attempt(e, ip, t)\n'
+            'sin = v.exists(*llaves)\n'
+            't = s.take_login_attempt(e, ip)\n'
+            'for k in llaves: v.pexpire(k, 1)\n'
+            'time.sleep(0.05)\n'
+            's.register_fail(e, ip)\n'
+            's.refund_login_attempt(e, ip, t)\n'
+            'print(json.dumps([sin] + [int(v.get(k) or 0) for k in llaves] + [v.ttl(k) for k in llaves]))')
+        sin, correo, ip, *ttl = json.loads(salida)
+        self.assertEqual(sin, 0, 'sin contadores, la devolución no los crea')
+        self.assertEqual((correo, ip), (1, 1), 'el fallo de la ventana nueva sigue contando')
+        for segundos in ttl:
+            self.assertIn(segundos, range(1, 901))
+
+    def test_23_la_sexta_contrasena_mala_deja_un_solo_login_locked(self):
+        # RC-302: el 429 de un correo que existe queda en la bitácora de su empresa, escrito tras la respuesta, y
+        # solo el primero de su ventana de bloqueo: la séptima y la octava no suman, ni con la contraseña buena.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        antes = _eventos(DANA, 'auth.login_locked')
+        for _ in range(MAX_FALLOS):
+            self.assertEqual(sesion.post_login(Client(), DANA, 'CIRDAN_FAKE_mala')[0], 401)
+        self.assertEqual(_login_con_cabeceras(DANA, 'CIRDAN_FAKE_mala'), (429, LOCKED, '900'))
+        self.assertEqual(_esperar(lambda: _eventos(DANA, 'auth.login_locked'), antes + 1), antes + 1)
+        for password in ('CIRDAN_FAKE_mala', PASSWORD):
+            self.assertEqual(sesion.post_login(Client(), DANA, password)[0], 429)
+        time.sleep(1)  # tiempo para que corriera una tarea de más
+        self.assertEqual(_eventos(DANA, 'auth.login_locked'), antes + 1, 'la séptima y la octava no suman eventos')
+        self.assertEqual(_ultimo_detalle(DANA, 'auth.login_locked'), {'lock': ['email']})
+
+    def test_24_el_sexto_codigo_deja_un_solo_mfa_locked(self):
+        # RC-302: con 5 códigos malos el sexto da 429 y deja auth.mfa_locked. Dos mfa_token sacados al principio no se
+        # gastaron, así que llegan al bloqueo del correo: el séptimo código tampoco suma.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        antes = _eventos(DANA, 'auth.mfa_locked')
+        guardados = [sesion.post_login(Client(), DANA, PASSWORD)[1]['mfa_token'] for _ in range(2)]
+        for i, malo in enumerate(codigos_malos(DANA, MAX_FALLOS)):
+            _, body = sesion.post_login(Client(), DANA, PASSWORD)
+            code, body = Client().post(AUTH + '/mfa/verify', {'mfa_token': body['mfa_token'], 'code': malo})
+            self.assertEqual((code, body['detail']), (401, MFA_INVALID), 'código %d' % (i + 1))
+        code, body = Client().post(AUTH + '/mfa/verify', {'mfa_token': guardados[0], 'code': sesion.next_code(DANA)})
+        self.assertEqual((code, body['detail']), (429, LOCKED))
+        self.assertEqual(_esperar(lambda: _eventos(DANA, 'auth.mfa_locked'), antes + 1), antes + 1)
+        code, _ = Client().post(AUTH + '/mfa/verify', {'mfa_token': guardados[1], 'code': sesion.next_code(DANA)})
+        self.assertEqual(code, 429)
+        time.sleep(1)
+        self.assertEqual(_eventos(DANA, 'auth.mfa_locked'), antes + 1, 'el séptimo código no suma eventos')
+        self.assertEqual(_ultimo_detalle(DANA, 'auth.mfa_locked'), {'lock': ['email']})
+
+    def test_25_el_correo_que_no_existe_deja_una_linea_con_el_dominio_y_sin_el_correo(self):
+        # RC-302, decisiones 1a y 2b: sin empresa no hay bitácora. El 401 y el primer 429 dejan una línea en el log de
+        # la API con la IP y el dominio, nunca el correo. El 429 siguiente de la misma ventana no deja otra.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        usuario, dominio = 'nadie-%s' % secrets.token_hex(4), 'rc302-%s.test' % secrets.token_hex(4)
+        email = usuario + '@' + dominio
+        for _ in range(MAX_FALLOS):
+            self.assertEqual(sesion.post_login(Client(), email, 'CIRDAN_FAKE_mala'), (401, {'detail': INVALID}))
+        self.assertEqual(_login_con_cabeceras(email, 'CIRDAN_FAKE_mala'), (429, LOCKED, '900'))
+        self.assertEqual(sesion.post_login(Client(), email, 'CIRDAN_FAKE_mala')[0], 429)
+
+        def lineas():
+            return [linea for linea in sesion.api_logs().splitlines() if dominio in linea]
+        for _ in range(50):
+            if len(lineas()) >= MAX_FALLOS + 1:
+                break
+            time.sleep(0.1)
+        time.sleep(1)
+        encontradas = lineas()
+        fallos = [linea for linea in encontradas if 'auth.login_failed de un correo que no existe' in linea]
+        bloqueos = [linea for linea in encontradas if 'auth.login_locked de un correo que no existe' in linea]
+        self.assertEqual((len(fallos), len(bloqueos), len(encontradas)), (MAX_FALLOS, 1, MAX_FALLOS + 1), encontradas)
+        for linea in encontradas:
+            self.assertIn("dominio='%s'" % dominio, linea)
+            self.assertRegex(linea, r"ip='[^']+'")
+        self.assertIn('bloqueo=email', bloqueos[0])
+        self.assertNotIn(usuario, sesion.api_logs(), 'el correo completo nunca va al log')
+
+    def test_26_con_la_ip_bloqueada_solo_el_primer_429_deja_evento(self):
+        # RC-302: el bloqueo de la IP avisa una vez por ventana aunque cada 429 sea de otro correo.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        self.assertEqual(sesion.post_login(Client(), DANA, 'CIRDAN_FAKE_mala')[0], 401)
+        ip, = _llaves_ip()
+        sesion.valkey('SET', ip, str(MAX_FALLOS_IP), 'KEEPTTL')
+        antes = {email: _eventos(email, 'auth.login_locked') for email in (MAYA, JORDAN)}
+        self.assertEqual(sesion.post_login(Client(), MAYA, 'CIRDAN_FAKE_mala')[0], 429)
+        self.assertEqual(_esperar(lambda: _eventos(MAYA, 'auth.login_locked'), antes[MAYA] + 1), antes[MAYA] + 1)
+        self.assertEqual(_ultimo_detalle(MAYA, 'auth.login_locked'), {'lock': ['ip']})
+        self.assertEqual(sesion.post_login(Client(), JORDAN, PASSWORD)[0], 429)
+        time.sleep(1)
+        self.assertEqual(_eventos(JORDAN, 'auth.login_locked'), antes[JORDAN], 'la IP ya avisó en esta ventana')
+        self.assertEqual(_eventos(MAYA, 'auth.login_locked'), antes[MAYA] + 1)
+
+    def test_27_con_la_ip_bloqueada_el_429_del_codigo_avisa_una_vez_por_empresa(self):
+        # RC-302, C2 de la revisión: el 429 de /mfa/verify ya sabe de qué empresa es la cuenta, así que la IP avisa
+        # una vez por empresa en cada ventana. MAYA es de Acme y DANA de Beta: las dos dejan su auth.mfa_locked. El
+        # segundo 429 de Acme en la misma ventana ya no suma.
+        sesion.reset()
+        self.addCleanup(sesion.reset)
+        tokens = {'maya': [sesion.post_login(Client(), MAYA, PASSWORD)[1]['mfa_token'] for _ in range(2)],
+                  'dana': [sesion.post_login(Client(), DANA, PASSWORD)[1]['mfa_token']]}
+        self.assertEqual(sesion.post_login(Client(), JORDAN, 'CIRDAN_FAKE_mala')[0], 401)
+        ip, = _llaves_ip()
+        sesion.valkey('SET', ip, str(MAX_FALLOS_IP), 'KEEPTTL')
+        antes = {email: _eventos(email, 'auth.mfa_locked') for email in (MAYA, DANA)}
+
+        def codigo(token):
+            return Client().post(AUTH + '/mfa/verify', {'mfa_token': token, 'code': '000000'})[0]
+        self.assertEqual(codigo(tokens['maya'][0]), 429)
+        self.assertEqual(_esperar(lambda: _eventos(MAYA, 'auth.mfa_locked'), antes[MAYA] + 1), antes[MAYA] + 1)
+        self.assertEqual(_ultimo_detalle(MAYA, 'auth.mfa_locked'), {'lock': ['ip']})
+        self.assertEqual(codigo(tokens['dana'][0]), 429)
+        self.assertEqual(_esperar(lambda: _eventos(DANA, 'auth.mfa_locked'), antes[DANA] + 1), antes[DANA] + 1,
+                         'Beta deja su evento aunque Acme ya avisó de la misma IP')
+        self.assertEqual(_ultimo_detalle(DANA, 'auth.mfa_locked'), {'lock': ['ip']})
+        self.assertEqual(codigo(tokens['maya'][1]), 429)
+        time.sleep(1)
+        self.assertEqual(_eventos(MAYA, 'auth.mfa_locked'), antes[MAYA] + 1, 'Acme ya avisó en esta ventana')
+        self.assertEqual(_eventos(DANA, 'auth.mfa_locked'), antes[DANA] + 1)
+
+
+def _eventos(email, accion):
+    return int(scalar("SELECT count(*) FROM audit_log a JOIN users u ON u.id = a.actor_user_id WHERE u.email = '%s' "
+                      "AND a.action = '%s';" % (email, accion), user='postgres'))
+
+
+def _ultimo_detalle(email, accion):
+    return json.loads(scalar("SELECT a.details::text FROM audit_log a JOIN users u ON u.id = a.actor_user_id "
+                             "WHERE u.email = '%s' AND a.action = '%s' ORDER BY a.occurred_at DESC LIMIT 1;"
+                             % (email, accion), user='postgres'))
+
+
+def _esperar(contar, meta):
+    """Hasta 5 s a que contar() llegue a meta: la API escribe estos eventos después de mandar la respuesta."""
+    for _ in range(50):
+        if contar() >= meta:
+            break
+        time.sleep(0.1)
+    return contar()
+
+
+def _login_con_cabeceras(email, password):
+    """POST /auth/login que devuelve (código, detail, Retry-After)."""
+    client = Client()
+    req = urllib.request.Request(AUTH + '/login', method='POST',
+                                 data=json.dumps({'email': email, 'password': password,
+                                                  'captcha': sesion.captcha(client)}).encode(),
+                                 headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read()).get('detail'), r.headers.get('Retry-After')
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read()).get('detail'), e.headers.get('Retry-After')
+
+
+def _llave_correo(email):
+    return 'login:fail:email:' + hashlib.sha256(email.lower().encode()).hexdigest()  # _email_key de sessions.py
+
+
+def _llaves_ip():
+    """Los contadores de IP que hay en Valkey. La IP con la que llegan las pruebas depende de Docker: se buscan."""
+    return sesion.valkey('--scan', '--pattern', 'login:fail:ip:*')
+
+
+def _fallos(llave):
+    return int(sesion.valkey('GET', llave)[0] or 0)
+
 
 def _cambiar(resuelto, cambio):
     """El mismo captcha resuelto con un cambio aplicado a su JSON."""
@@ -288,7 +781,8 @@ class Captcha(unittest.TestCase):
 
     def assertRechazado(self, client, respuesta, motivo):
         code, body = respuesta
-        self.assertEqual((code, body['detail']), (400, CAPTCHA_INVALID), motivo)
+        # 401 como la contraseña o el código inválidos (Hecho cuando de RC-5), sin sesión ni mfa_token.
+        self.assertEqual((code, body['detail']), (401, CAPTCHA_INVALID), motivo)
         self.assertNotIn('mfa_token', body, motivo)
         self.assertIsNone(client.cookie(), motivo)
 
@@ -357,7 +851,7 @@ class Captcha(unittest.TestCase):
 
         with ThreadPoolExecutor(10) as pool:
             codigos = list(pool.map(intento, range(10)))
-        self.assertEqual((codigos.count(200), codigos.count(400)), (1, 9), codigos)
+        self.assertEqual((codigos.count(200), codigos.count(401)), (1, 9), codigos)
 
     def test_7_el_captcha_malo_no_cuenta_para_el_bloqueo(self):
         # Si contara, cualquiera bloquearía un correo ajeno sin hacer la prueba de trabajo.

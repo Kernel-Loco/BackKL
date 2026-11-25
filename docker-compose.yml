@@ -47,7 +47,7 @@ services:
     environment:
       PGHOST: db
       PGPORT: "5432"
-      PGDATABASE: cirdan
+      PGDATABASE: ${PGDATABASE:-cirdan}
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
       VALKEY_URL: redis://:${VALKEY_PASSWORD}@valkey:6379/0
       # Llave del MFA: la llave misma en .env (desarrollo, CI y plan B) o, en la VM, la URL del secreto de
@@ -59,13 +59,32 @@ services:
       # de su secreto en Key Vault, una de las dos (cirdan/auth/passwords.py).
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
       PASSWORD_HASH_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_KEY_VAULT_SECRET_URL:-}
+      # Rotación de esa llave (RC-333, docs/despliegue.md): la versión de la actual y, mientras se rota, la anterior
+      # con la misma regla de una de las dos. Sin ellas, versión 1 y sin anterior.
+      PASSWORD_HASH_KEY_VERSION: ${PASSWORD_HASH_KEY_VERSION:-}
+      PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY: ${PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY:-}
+      PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL:-}
+      # Contraseñas filtradas (RC-334): consulta a api.pwnedpasswords.com en cada cambio de contraseña. Apagada en tu
+      # PC y en el CI. Prendida en la VM (docker-compose.despliegue.yml).
+      PWNED_PASSWORDS_ENABLED: ${PWNED_PASSWORDS_ENABLED:-false}
+      CARTA_ALTA_ENABLED: ${CARTA_ALTA_ENABLED:-false}
+      CARTA_STORAGE_DIR: /var/lib/cirdan/cartas
+      CARTA_ENCRYPTION_KEY: ${CARTA_ENCRYPTION_KEY:-}
+      CARTA_KEY_VAULT_SECRET_URL: ${CARTA_KEY_VAULT_SECRET_URL:-}
+      # Firma con Mifiel (RC-211): apagado por omisión, sin llamar a su API.
+      FIRMA_MODO: ${FIRMA_MODO:-apagado}
+      MIFIEL_APP_ID: ${MIFIEL_APP_ID:-}
+      MIFIEL_APP_SECRET: ${MIFIEL_APP_SECRET:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       # Dominio al que quedan amarradas las passkeys (RC-331). localhost en tu PC; los orígenes salen de ALLOWED_ORIGINS.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      # Orígenes que pueden escribir con la cookie (cirdan/api/main.py). Vacía o sin poner, la lista local
+      # (localhost y 127.0.0.1). El despliegue y el plan B la piden (docker-compose.despliegue.yml, RC-277).
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       # De quién se acepta X-Forwarded-For, que da la IP del bloqueo por intentos del login.
-      # Por omisión de nadie de fuera del contenedor. El portal (Next) no agrega ese encabezado:
-      # pasa tal cual el que mande el navegador, así que con "*" quien llama elige su IP y se
-      # salta el bloqueo. Sin proxy, la API ve con una sola IP a todo lo que entra por el puerto
+      # Por omisión de nadie de fuera del contenedor. El portal (Next) no limpia ese encabezado:
+      # reenvía tal cual el que mande el navegador y solo pone el suyo si no viene, así que con "*"
+      # quien llama elige su IP y se salta el bloqueo. Sin proxy, la API ve con una sola IP a todo lo que entra por el puerto
       # publicado (el portal y el host): la puerta de enlace de la red de Docker. Así el bloqueo
       # por IP es uno solo para todos. En el despliegue (#49) va la IP o el CIDR con que la API ve
       # llegar al portal (con el portal en el host, esa puerta de enlace, que da docker network
@@ -79,14 +98,43 @@ services:
       # comas (#16, RC-50). Solo se revisan los repos públicos de la declarada. Un dominio sin par, o con
       # 'ninguna', no consulta GitHub y queda sin cobertura. Hace de campo de la carta hasta la tabla de #64.
       ORGS_GITHUB_DECLARADAS: ${ORGS_GITHUB_DECLARADAS:-olmardo.com=olmardo}
+      # Llave de la API de host de Shodan (RC-337), de una cuenta académica: solo para uso no comercial. El
+      # recolector de Shodan solo pide GET /shodan/host/<ip>, nunca el escaneo ni la búsqueda. Vacía, solo usa
+      # InternetDB: exposed_iot_device, exposed_ot_device y outdated_software salen de sus etiquetas y, sin ellas,
+      # quedan sin cobertura (docs/servicios_externos.md). El valor va solo en el .env, nunca en git.
+      SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      # Llave que descifra las llaves de API de las fuentes guardadas en data_sources.api_key_enc (RC-54, la de
+      # HIBP). Vacía, HIBP queda sin cobertura por falta de llave. El valor va solo en el .env.
+      SOURCE_KEYS_ENCRYPTION_KEY: ${SOURCE_KEYS_ENCRYPTION_KEY:-}
+      # Llave del HMAC de la huella de los correos personales del recolector de identidad (RC-56), de 32
+      # caracteres o más. Vacía, personal_email_exposed queda sin cobertura. El valor va solo en el .env.
+      IDENTITY_HMAC_KEY: ${IDENTITY_HMAC_KEY:-}
+      # Asistente (#38): endpoints compatibles con OpenAI. Los secretos solo viven en .env; sin configuración,
+      # el endpoint responde 503 y no sustituye la respuesta por texto inventado.
+      IA_BASE_URL: ${IA_BASE_URL:-}
+      IA_API_KEY: ${IA_API_KEY:-}
+      IA_MODELO: ${IA_MODELO:-openai/gpt-oss-120b}
+      IA_RESPALDO_BASE_URL: ${IA_RESPALDO_BASE_URL:-}
+      IA_RESPALDO_API_KEY: ${IA_RESPALDO_API_KEY:-}
+      IA_RESPALDO_MODELO: ${IA_RESPALDO_MODELO:-openai/gpt-oss-120b}
+      # Enlace al correo (#28, RC-63) por la API HTTPS de Resend. Sin CORREO_API_KEY la ruta responde igual y deja un
+      # aviso en el log. PORTAL_URL arma el enlace: nunca sale de la cabecera Host. CORREO_API_URL solo cambia en las
+      # pruebas (pruebas/enlace), que apuntan a un servidor simulado.
+      CORREO_API_KEY: ${CORREO_API_KEY:-}
+      CORREO_REMITENTE: ${CORREO_REMITENTE:-LowTide <acceso@lowtidesec.com>}
+      CORREO_API_URL: ${CORREO_API_URL:-https://api.resend.com/emails}
+      PORTAL_URL: ${PORTAL_URL:-http://localhost:3000}
+      ENLACE_TOPE_DIARIO: ${ENLACE_TOPE_DIARIO:-80}
       # Explorador de la base para la demo (/demo y /db), siempre con sesión (RC-58). Con false
       # esas rutas no existen. Nunca true en producción.
       DEMO_EXPLORER: ${DEMO_EXPLORER:-false}
-      # Documentación de la API en /openapi.json, /docs y /redoc. Con false esas rutas no existen. El despliegue la
-      # fija en false (comentario 10063 de RC-91).
-      API_DOCS: ${API_DOCS:-true}
+      # Documentación de la API en /openapi.json, /docs y /redoc. Por omisión esas rutas no existen (RC-303). Con
+      # API_DOCS=true en el .env se ven en la PC. El despliegue la fija en false (comentario 10063 de RC-91).
+      API_DOCS: ${API_DOCS:-false}
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - cirdan-cartas:/var/lib/cirdan/cartas
     depends_on:
       db:
         condition: service_healthy
@@ -97,6 +145,44 @@ services:
     # tini como PID 1: recoge los procesos que deja git cuando el recolector de GitHub lo mata por tiempo (#16).
     init: true
     restart: unless-stopped
+
+  # Escaneos programados (#27, RC-52): cada PROGRAMADOR_INTERVALO segundos pide el escaneo de los dominios a los que
+  # ya les toca según plans.scan_interval (cirdan/programador). Misma imagen y rol que la API, sin puertos. Va con
+  # profile: `docker compose up -d` no lo enciende. Se enciende a propósito con
+  # `docker compose --profile programador up -d programador`, porque al arrancar salen en el acto los dominios con
+  # next_scan_at vacío o vencido. Pide la migración 030 aplicada. En la VM va COMPOSE_PROFILES=programador en el .env,
+  # para que cada `up -d --build` lo recree con el código nuevo (docs/despliegue.md, 'Escaneos programados').
+  programador:
+    build: .
+    command: ["python", "-m", "cirdan.programador"]
+    profiles: ["programador"]
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: ${PGDATABASE:-cirdan}
+      CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
+      # Lo mismo que la API le pasa al orquestador y a los recolectores.
+      DOMINIOS_EN_VIVO: ${DOMINIOS_EN_VIVO:-olmardo.com}
+      ORGS_GITHUB_DECLARADAS: ${ORGS_GITHUB_DECLARADAS:-olmardo.com=olmardo}
+      SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      SOURCE_KEYS_ENCRYPTION_KEY: ${SOURCE_KEYS_ENCRYPTION_KEY:-}
+      IDENTITY_HMAC_KEY: ${IDENTITY_HMAC_KEY:-}
+      # Segundos entre vueltas y escaneos programados a la vez (comentario 10262 de RC-52).
+      PROGRAMADOR_INTERVALO: ${PROGRAMADOR_INTERVALO:-60}
+      PROGRAMADOR_MAX_ESCANEOS: ${PROGRAMADOR_MAX_ESCANEOS:-2}
+    depends_on:
+      db:
+        condition: service_healthy
+    # tini como PID 1, como la API: recoge los git que el recolector de GitHub mata por tiempo y pasa SIGTERM.
+    init: true
+    # Con SIGTERM no empieza otro dominio, pero el que está consultando su TXT termina, y detener() cierra en la base
+    # los escaneos que siguen corriendo. Los 10 s de Docker no siempre alcanzan.
+    stop_grace_period: 60s
+    restart: unless-stopped
+    # El HEALTHCHECK de la imagen pega a /health de la API en el 8000, que aquí nadie escucha: sin esto queda
+    # 'unhealthy' a los 200 s aunque funcione. Si el proceso muere, restart lo levanta (vm-lowtide, 22 nov).
+    healthcheck:
+      disable: true
 
   # Corre una vez en cada `up`: con DEMO_ACCOUNTS=true pone contraseña y MFA a las cuentas
   # de la semilla (cirdan/auth/demo.py). Con false las apaga: les vuelve a poner el hash de relleno
@@ -109,12 +195,15 @@ services:
     environment:
       PGHOST: db
       PGPORT: "5432"
-      PGDATABASE: cirdan
+      PGDATABASE: ${PGDATABASE:-cirdan}
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
       TOTP_KEY_VAULT_SECRET_URL: ${TOTP_KEY_VAULT_SECRET_URL:-}
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
       PASSWORD_HASH_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_KEY_VAULT_SECRET_URL:-}
+      PASSWORD_HASH_KEY_VERSION: ${PASSWORD_HASH_KEY_VERSION:-}
+      PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY: ${PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY:-}
+      PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL:-}
       DEMO_ACCOUNTS: ${DEMO_ACCOUNTS:-false}
       # Vacía cuenta como sin poner: vale la lista local por omisión.
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
@@ -125,3 +214,5 @@ services:
 
 volumes:
   cirdan-pg16-data:
+  cirdan-cartas:
+    name: ${CARTA_VOLUME_NAME:-${COMPOSE_PROJECT_NAME:-backkl}_cirdan-cartas}

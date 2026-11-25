@@ -21,6 +21,14 @@ _TRAS_SEPARADOR = re.compile(r'(?<=[;\t\r\n])(?="*[=+\-@\t\r])')
 _PIDE_COMILLAS = re.compile(r'[",;\t\r\n]')
 BOM = '﻿'
 
+# Atribución que pide la licencia CC BY 4.0 de HIBP en cada fila con sus datos (RC-54): la fuente con su enlace y la
+# licencia con el suyo. La usan la evidencia (recolectores/hibp.py) y los CSV de hallazgos y de comparación.
+ATRIBUCION_HIBP = ('Fuente: Have I Been Pwned (https://haveibeenpwned.com), CC BY 4.0 '
+                   '(https://creativecommons.org/licenses/by/4.0/)')
+ATRIBUCION_POR_FUENTE = {'hibp': ATRIBUCION_HIBP}
+ATRIBUCION_POR_REGLA = dict.fromkeys(('breach_exposure', 'breach_exposure_old', 'breach_exposure_no_passwords'),
+                                     ATRIBUCION_HIBP)
+
 
 def escapar_formula(value):
     """Antepone una comilla al texto que Excel podría ejecutar. Recorre listas y diccionarios."""

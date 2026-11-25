@@ -66,11 +66,23 @@ class JuegoActivo(unittest.TestCase):
         self.assertEqual(conn.parametros, ('org-1', 'org-1'))
 
 
+class CandadoDePesos(unittest.TestCase):
+
+    def test_la_llave_pasa_por_uuid_como_la_de_los_hallazgos(self):
+        """RC-62: el uuid en mayúsculas de la línea de comandos y el de la sesión caen en el mismo candado."""
+        conn = ConexionSimulada()
+        configuracion.bloquear_pesos(conn, '20000000-0000-4000-8000-00000000000A')
+        self.assertIn('hashtextextended(%s::uuid::text, 32)', conn.sql)
+        self.assertEqual(conn.parametros, ('20000000-0000-4000-8000-00000000000A',))
+
+
 class Recalculo:
 
-    def __init__(self):
+    def __init__(self, cortes=None, critico=False):
         self.consultas = []
         self.aportes = []
+        self.cortes = cortes or {'band_medium_from': 40, 'band_high_from': 60, 'band_critical_from': 80}
+        self.severidad, self.severidad_score = ('critical', 'critical') if critico else ('medium', 'high')
 
     def execute(self, sql, parametros=()):
         self.consultas.append((sql, parametros))
@@ -87,10 +99,12 @@ class Recalculo:
             }])
         if sql.startswith('SELECT f.id::text AS id'):
             return ResultadoSimulado(filas=[{
-                'id': 'finding-1', 'rule_code': 'spf_missing', 'severity': 'medium', 'status': 'open',
-                'score_severity': 'high',
+                'id': 'finding-1', 'rule_code': 'spf_missing', 'severity': self.severidad, 'status': 'open',
+                'score_severity': self.severidad_score,
                 'previous_factors': {'confidence': .91, 'shap': [{'feature': 'sensibilidad'}]},
             }])
+        if sql.startswith('SELECT band_medium_from'):
+            return ResultadoSimulado(fila=self.cortes)
         if sql.startswith('INSERT INTO domain_scores'):
             return ResultadoSimulado(fila={'id': 'score-nuevo'})
         if sql.startswith('INSERT INTO score_contributions'):
@@ -118,6 +132,54 @@ class RecalculoScores(unittest.TestCase):
         self.assertEqual(factores['confidence'], .91)
         self.assertEqual(factores['shap'][0]['feature'], 'sensibilidad')
         self.assertFalse(any('UPDATE domain_scores' in sql for sql, _ in conn.consultas))
+        self.assertIn('clock_timestamp()', score_sql)  # el orden de computed_at es el del candado de pesos (RC-62)
+
+
+    def test_un_dominio_ml_sin_severidades_congeladas_falla_o_se_salta(self):
+        # RC-310: sin lista de saltados lanza ValueError. Con ella, se salta y no inserta nada de ese dominio.
+        pesos = {categoria: .25 for categoria in criterio.CATEGORIAS}
+        conn = Recalculo()
+        conn.severidad_score = None
+        with self.assertRaisesRegex(ValueError, 'severidades ML congeladas'):
+            configuracion.recalcular_scores(conn, 'org-1', 'ruleset-v2', pesos)
+        conn = Recalculo()
+        conn.severidad_score = None
+        saltados = []
+        self.assertEqual(configuracion.recalcular_scores(conn, 'org-1', 'ruleset-v2', pesos, saltados=saltados), 0)
+        self.assertEqual(saltados, ['domain-1'])
+        self.assertFalse(any(sql.startswith('INSERT') for sql, _ in conn.consultas))
+
+    def _score_guardado(self, conn):
+        return next(params for sql, params in conn.consultas if sql.startswith('INSERT INTO domain_scores'))[4]
+
+    def test_usa_los_cortes_del_juego_nuevo_para_el_piso(self):
+        # RC-237: con cortes 50, 70 y 85, un crítico deja el dominio en 70 y no en el 60 de la plantilla.
+        pesos = {categoria: .25 for categoria in criterio.CATEGORIAS}
+        conn = Recalculo({'band_medium_from': 50, 'band_high_from': 70, 'band_critical_from': 85}, critico=True)
+        configuracion.recalcular_scores(conn, 'org-1', 'ruleset-v2', pesos)
+        self.assertEqual(self._score_guardado(conn), 70)
+        lectura = next(params for sql, params in conn.consultas if sql.startswith('SELECT band_medium_from'))
+        self.assertEqual(lectura, ('ruleset-v2',))
+        plantilla = Recalculo(critico=True)
+        configuracion.recalcular_scores(plantilla, 'org-1', 'ruleset-v2', pesos)
+        self.assertEqual(self._score_guardado(plantilla), 60)
+
+
+class CortesDelJuego(unittest.TestCase):
+
+    def test_lee_los_cortes_por_id_y_falla_si_no_existe(self):
+        conn = Recalculo({'band_medium_from': 50, 'band_high_from': 70, 'band_critical_from': 85})
+        self.assertEqual(configuracion.cortes_del_juego(conn, 'rs-1'), {'medium': 50, 'high': 70, 'critical': 85})
+
+        class SinFila(Recalculo):
+            def execute(self, sql, parametros=()):
+                return ResultadoSimulado()
+        with self.assertRaises(ValueError):
+            configuracion.cortes_del_juego(SinFila(), 'rs-x')
+
+    def test_cortes_de_fila(self):
+        fila = {'band_medium_from': 45, 'band_high_from': 65, 'band_critical_from': 85, 'otro': 1}
+        self.assertEqual(configuracion.cortes_de_fila(fila), {'medium': 45, 'high': 65, 'critical': 85})
 
 
 if __name__ == '__main__':

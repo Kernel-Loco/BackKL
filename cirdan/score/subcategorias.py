@@ -8,14 +8,20 @@ las corridas de `scan_source_runs` de su escaneo. El documento está en docs/cri
 
 Al cambiar el mapa (una regla nueva, otra subcategoría u otro KRI) sube VERSION.
 """
-VERSION = 1
+VERSION = 7   # 2: exposed_container_api (RC-224). 3: directory_listing y debug_page_exposed en
+              # server_configuration (#111, RC-228). 4: tls_certificate_invalid y tls_legacy_only en
+              # certificates (RC-239). 5: file_share_link_in_repo en public_storage (RC-247). 6:
+              # exposed_ai_service en exposed_services (#144, RC-262). 7: cert_internal_name,
+              # cert_broad_wildcard y cert_new_issuer en certificates (RC-218)
 
 # (clave, categoría, nombre, códigos de regla). El orden es el que muestra el portal.
 SUBCATEGORIAS = (
-    ('certificates', 'infrastructure', 'Certificados', ('cert_expired', 'cert_expiring_soon')),
+    ('certificates', 'infrastructure', 'Certificados',
+     ('cert_expired', 'cert_expiring_soon', 'tls_certificate_invalid', 'tls_legacy_only', 'cert_internal_name',
+      'cert_broad_wildcard', 'cert_new_issuer')),
     ('exposed_services', 'infrastructure', 'Exposición de servicios',
-     ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database', 'exposed_ot_device',
-      'exposed_iot_device', 'exposed_service')),
+     ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database', 'exposed_container_api',
+      'exposed_ai_service', 'exposed_ot_device', 'exposed_iot_device', 'exposed_service')),
     ('exposed_apis', 'infrastructure', 'Documentación de APIs expuesta', ('exposed_api_docs', 'api_auth_not_declared')),
     ('vulnerable_software', 'infrastructure', 'Software vulnerable o sin soporte',
      ('outdated_software', 'known_vulnerability')),
@@ -25,17 +31,17 @@ SUBCATEGORIAS = (
      ('email_in_public_commits', 'personal_email_exposed', 'email_pattern_exposed')),
     ('email', 'configuration', 'Correo', ('spf_missing', 'spf_allow_all', 'dmarc_missing', 'dmarc_policy_none')),
     ('server_configuration', 'configuration', 'Configuración de servidores',
-     ('server_version_disclosed', 'subdomain_takeover_risk')),
+     ('server_version_disclosed', 'subdomain_takeover_risk', 'directory_listing', 'debug_page_exposed')),
     ('breaches', 'data_leaks', 'Brechas de datos',
      ('breach_exposure', 'breach_exposure_old', 'breach_exposure_no_passwords')),
     ('exposed_secrets', 'data_leaks', 'Secretos expuestos', ('secret_in_public_repo', 'secret_in_container_image')),
-    ('public_storage', 'data_leaks', 'Almacenamiento público', ('public_bucket',)),
+    ('public_storage', 'data_leaks', 'Almacenamiento público', ('public_bucket', 'file_share_link_in_repo')),
 )
 
 # (clave, nombre, subcategorías que junta, fuentes de data_sources.code que lo alimentan).
 # Reputación no tiene fuente hasta que RC-234 esté en dev: sale 'sin fuente todavía'.
 KRIS = (
-    ('certificates', 'Certificados', ('certificates',), ('ct_logs',)),
+    ('certificates', 'Certificados', ('certificates',), ('ct_logs', 'web')),
     ('service_exposure', 'Exposición de servicios', ('exposed_services', 'exposed_apis'), ('shodan', 'api_docs')),
     ('email', 'Correo', ('email',), ('dns',)),
     ('impersonation', 'Suplantación', ('impersonation',), ('ct_logs',)),
@@ -45,11 +51,14 @@ KRIS = (
 # Qué fuente revisa cada regla de un KRI, para saber cuáles quedaron sin revisar cuando la fuente no corrió.
 # Trae también las reglas que shodan no puede revisar sin su llave (SIN_LLAVE de shodan.py).
 EMITEN = (
-    ('ct_logs', ('cert_expired', 'cert_expiring_soon', 'lookalike_domain')),
-    ('shodan', ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database', 'exposed_ot_device',
-                'exposed_iot_device', 'exposed_service')),
+    ('ct_logs', ('cert_expired', 'cert_expiring_soon', 'lookalike_domain', 'cert_internal_name', 'cert_broad_wildcard',
+                 'cert_new_issuer')),
+    ('shodan', ('exposed_rdp', 'exposed_remote_admin', 'exposed_file_sharing', 'exposed_database',
+                'exposed_container_api', 'exposed_ai_service', 'exposed_ot_device', 'exposed_iot_device',
+                'exposed_service')),
     ('api_docs', ('exposed_api_docs', 'api_auth_not_declared')),
     ('dns', ('spf_missing', 'spf_allow_all', 'dmarc_missing', 'dmarc_policy_none')),
+    ('web', ('tls_certificate_invalid', 'tls_legacy_only')),
 )
 
 # Fila de un aporte de una regla que el mapa no conoce o que su juego de reglas puso en otra categoría.
@@ -138,7 +147,7 @@ def resumen(aportes, corridas, sin_cobertura=(), a_medias=()):
     - 'ok': todas sus fuentes corrieron completas y ninguna regla suya quedó sin cobertura.
 
     `sources_partial` va por fuente, no por regla: si a ct_logs solo le faltó una variante de dominios parecidos,
-    Certificados también sale 'partial' aunque sus dos reglas se revisaron completas. Es el límite de `scans.stats`.
+    Certificados también sale 'partial' aunque sus reglas se revisaron completas. Es el límite de `scans.stats`.
     Los aportes de un KRI se juntan por código de regla: si un juego puso una regla suya en otra categoría, en las
     subcategorías va a 'other' y en su KRI sigue contando.
     """

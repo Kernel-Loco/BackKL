@@ -8,6 +8,11 @@ Lote de hallazgos ficticios etiquetado a ciegas para entrenar el clasificador al
 
 | Archivo | Qué es |
 |---|---|
+| `cirdan/ml/modelo.py` y `cirdan/ml/modelo_v1.joblib` | Clasificador, calibradores y entrenamiento reproducible |
+| `docs/modelo_ml_v1.json` | Ficha del clasificador, métricas y huellas SHA-256 |
+| `cirdan/ml/anomalias.py` y `cirdan/ml/modelo_anomalias_v1.joblib` | Detector experimental de perfiles raros de alto riesgo |
+| `docs/modelo_anomalias_v1.json` | Ficha y límites del detector experimental |
+| `cirdan/ml/auditoria_humana.py` | Genera y compara una futura muestra humana ciega |
 | `cirdan/ml/plantillas.py` | Las 24 plantillas y el mapa de severidad base de cada código |
 | `cirdan/ml/caracteristicas.py` | Tipo, antigüedad, exposición y sensibilidad de un hallazgo, con la rúbrica |
 | `cirdan/ml/generar_lote.py` | Arma el lote con semilla fija y escribe el maestro y las copias |
@@ -25,7 +30,17 @@ El lote son archivos. No toca la base.
 
 ## Códigos y severidad base
 
-Se usan los 8 códigos que existen en dev: las 7 reglas de `db/semillas/001_datos_demo.sql:36-42` y `cert_expiring_soon`, que solo está en `cirdan/recolectores/crtsh.py:79` mientras #30 no la agregue al catálogo. La severidad base sale de un solo mapa, `REGLAS` en `plantillas.py`. Las pruebas revisan que coincida con esas dos fuentes. `severity` es igual a `base_severity` porque el motor de score (#31) todavía no está en dev. Si #30 o #31 cambian una severidad base, se cambia el mapa, se regenera el lote y se recalcula `clase_reglas`.
+Se usan los 8 códigos del lote: las 7 reglas de `db/semillas/001_datos_demo.sql:36-42` y `cert_expiring_soon`, que solo está en `cirdan/recolectores/crtsh.py:79` mientras #30 no la agregue al catálogo. La severidad base sale de un solo mapa, `REGLAS` en `plantillas.py`. Las pruebas revisan que coincida con esas dos fuentes. La severidad del maestro ficticio es igual a `base_severity`; eso no representa un score guardado ni cambia la regla del motor. Si #30 o #31 cambian una severidad base, se cambia el mapa, se regenera el lote y se recalcula `clase_reglas`.
+
+El clasificador solo reemplaza severidades para esos 8 códigos. Si llega un código fuera de `codigos_entrenados`, la inferencia no devuelve predicción y el orquestador conserva la severidad base. Al ampliar el dataset y reentrenar se puede ampliar también esa cobertura.
+
+## Ficha formal y detector experimental
+
+`docs/modelo_ml_v1.json` se regenera con `python -m cirdan.ml.modelo`. Registra SHA-256 del dataset y del artefacto, F1 por clase, ablación de `sensibilidad`, validación cruzada `StratifiedGroupKFold` de 3 particiones agrupadas por plantilla, bootstrap de la macro-F1 por plantilla y curvas de confiabilidad/Brier por clase antes y después de calibrar. Una prueba offline carga el artefacto y reproduce la macro-F1 registrada.
+
+En esta versión, la macro-F1 media de CV es 0.706 (desviación 0.231); los tres folds van de 0.379 a 0.873. En las 8 plantillas de prueba, el bootstrap percentil del 95 % queda entre 0.335 y 0.966, una incertidumbre amplia. La calibración sigmoid one-vs-rest baja el Brier promedio por clase de 0.136 a 0.127, aunque no mejora todas las clases por igual. Quitar `sensibilidad` reduce el F1 de prueba sin calibrar de 0.724 a 0.559. Son métricas del conjunto semisintético etiquetado por LLM, no validación humana ni garantía de rendimiento real.
+
+`python -m cirdan.ml.anomalias` entrena un Isolation Forest con los 72 casos `alta` de entrenamiento y las cuatro características ML. Su función `puntuar()` devuelve un score continuo para ordenar hallazgos `high`/`critical` por rareza; no asigna una etiqueta de anomalía ni un umbral. La ficha `docs/modelo_anomalias_v1.json` declara que no hay etiquetas de anomalía ni validación humana. Es experimental e informativo: aún no se expone en la API ni en el FrontKL y no cambia severidades ni score.
 
 ## Plantillas
 
@@ -209,6 +224,19 @@ La sección `llm` de `acuerdo.json` trae:
 | `solo_llm` | Si ninguna persona de las que deciden entregó y todo el dataset salió del LLM |
 | `motivo` | Por qué cubre o no cubre |
 | `filas_cubiertas` | Cuántas filas llenó, por etiquetador. Con `solo_llm` también trae `bloque_comun` |
+
+## Evaluación humana futura, separada del dataset
+
+`cirdan.ml.auditoria_humana` prepara una muestra ciega de 45 casos de la partición de prueba: 15 por cada etiqueta LLM. La selección usa esas etiquetas solo para estratificar; el CSV entregado a la persona no incluye etiqueta, severidad, regla, plantilla, partición ni características del modelo. No se modifican `dataset.csv`, `acuerdo.json` ni los archivos de los etiquetadores existentes.
+
+```bash
+python -m cirdan.ml.auditoria_humana crear
+# Entregar datos/ml/rc65/auditoria_humana_ciega.csv para revisión y llenar etiqueta (alta, media o baja).
+python -m cirdan.ml.auditoria_humana comparar datos/ml/rc65/auditoria_humana_ciega.csv \
+  --informe datos/ml/rc65/auditoria_humana_reporte.json
+```
+
+La comparación informa exactitud, kappa de Cohen, F1 macro y matriz de confusión entre la anotación humana y la etiqueta LLM que ya está en el conjunto de prueba. Hasta que una persona devuelva el CSV no hay resultados humanos. Aun después, este acuerdo no es una medida de verdad-terreno ni una validación independiente del modelo: compara dos anotaciones de los mismos casos.
 
 ## Acuerdo con el diseño del lote
 

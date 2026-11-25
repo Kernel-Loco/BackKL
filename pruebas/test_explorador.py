@@ -10,8 +10,11 @@ Las sesiones se crean con cirdan.auth.sessions, igual que al iniciar sesión, y 
 Solo leen: la base queda igual.
 """
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -106,10 +109,15 @@ class ExploradorApagado(Explorador):
                     self.assertEqual(self.api.get(ruta, sesion, org=BETA)[0], 404)
 
     def test_2_tampoco_salen_en_la_documentacion(self):
-        code, body = self.api.get('/openapi.json')
-        self.assertEqual(code, 200)
-        self.assertEqual([p for p in body['paths'] if p.startswith('/db')], [])
-        self.assertIn('/domains', body['paths'])
+        # /openapi.json no existe por omisión (API_DOCS, RC-303): el esquema sale de app.openapi() en otro proceso con
+        # el mismo DEMO_EXPLORER=false de esta API.
+        r = subprocess.run([sys.executable, '-c',
+                            'import json; from cirdan.api.main import app; print(json.dumps(app.openapi()))'],
+                           env=dict(os.environ, DEMO_EXPLORER='false'), check=True, capture_output=True, text=True,
+                           encoding='utf-8', timeout=60)
+        paths = json.loads(r.stdout.strip().splitlines()[-1])['paths']
+        self.assertEqual([p for p in paths if p.startswith('/db')], [])
+        self.assertIn('/domains', paths)
         self.assertEqual(self.api.get('/domains', self.acme)[0], 200, 'el resto de la API sigue igual')
 
 
@@ -175,7 +183,8 @@ class ExploradorEncendido(Explorador):
             with transaction(ACME) as conn:
                 conn.execute('UPDATE findings SET cve_id = NULL WHERE id = %s', (hallazgo,))
         self.addCleanup(limpiar)
-        de = lambda sesion, org: [f['cve_id'] for f in self.filas('cves', sesion, org)]
+        def de(sesion, org):
+            return [f['cve_id'] for f in self.filas('cves', sesion, org)]
         self.assertEqual(de(self.acme, BETA), [de_acme])
         self.assertEqual(de(self.beta, ACME), [])
         for sesion, cuantas in ((self.acme, 1), (self.beta, 0)):
@@ -193,6 +202,22 @@ class ExploradorEncendido(Explorador):
         self.assertNotIn(ACME, html)
         self.assertNotIn(BETA, html)
 
+    def test_6b_la_csp_de_demo_deja_correr_solo_su_script(self):
+        # RC-89: con la CSP del resto de la API (default-src 'none') la página no corre. La suya lleva el hash de cada
+        # <script> que trae, sin 'unsafe-inline' en script-src, y conserva frame-ancestors 'none'.
+        with urllib.request.urlopen(self.api.base + '/demo', timeout=10) as r:
+            html, csp = r.read().decode(), r.headers.get_all('Content-Security-Policy')
+        self.assertEqual(len(csp), 1)
+        directivas = dict((d.split(' ', 1) + [''])[:2] for d in (x.strip() for x in csp[0].split(';')))
+        scripts = re.findall(r'<script\b[^>]*>(.*?)</script\b[^>]*>', html, re.S | re.I)
+        self.assertEqual(len(scripts), html.lower().count('<script'))
+        huellas = ["'sha256-%s'" % base64.b64encode(hashlib.sha256(s.encode()).digest()).decode() for s in scripts]
+        self.assertEqual(directivas['script-src'].split(), huellas)
+        self.assertEqual(directivas['default-src'], "'none'")
+        self.assertEqual(directivas['connect-src'], "'self'")
+        self.assertEqual(directivas['frame-ancestors'], "'none'")
+        self.assertEqual(directivas['form-action'], "'none'")
+
     def test_7_las_tablas_son_solo_para_admin(self):
         # Traen usuarios, bitácora y valores TXT, que la API solo da a Administración (GET /api/v1/domains/txt).
         for rol, datos in (('analista', JORDAN), ('gerente', MAYA)):
@@ -205,6 +230,18 @@ class ExploradorEncendido(Explorador):
                     self.assertEqual(body['detail'], SIN_PERMISO)
             self.assertEqual(self.api.get('/api/v1/domains/txt', token)[0], 403, 'la misma regla que la API v1')
             self.assertEqual(self.api.get('/domains', token)[0], 200, 'los dominios de la página sí le responden')
+
+    def test_8_las_cartas_no_dan_los_datos_de_quien_firma(self):
+        # RC-274. El explorador no sabe si una carta sigue vigente, y los datos de quien firma una revocada o vencida
+        # están en bloqueo (sección 5.6 de la política). La semilla de Acme trae old-example.net, vencida el 15 ago.
+        code, body = self.api.get('/db/tables/domain_authorizations/rows', self.acme)
+        self.assertEqual(code, 200, body)
+        self.assertEqual(len(body['rows']), 4, body)
+        self.assertEqual([c for c in body['columns'] if c.startswith('signer_')], [], body['columns'])
+        self.assertIn('valid_until', body['columns'])
+        texto = json.dumps(body, ensure_ascii=False)
+        for dato in ('it@old-example.net', 'security@acme-demo.mx', 'Old Example IT', 'Acme Demo Security'):
+            self.assertNotIn(dato, texto)
 
 
 class ErrorSinManejar(unittest.TestCase):
@@ -239,6 +276,8 @@ class ErrorSinManejar(unittest.TestCase):
         cabeceras = [(k.decode().lower(), v.decode()) for k, v in inicio[0]['headers']]
         for nombre, valor in main.CABECERAS_SEGURIDAD.items():
             self.assertEqual([v for k, v in cabeceras if k == nombre.lower()], [valor], nombre)
+        # RC-136: el 500 tampoco se guarda en una caché, como las respuestas que pasan por el middleware
+        self.assertEqual([v for k, v in cabeceras if k == 'cache-control'], ['no-store'])
         cuerpo = b''.join(m.get('body', b'') for m in mensajes if m['type'] == 'http.response.body')
         self.assertEqual(cuerpo, b'Internal Server Error')
 

@@ -1,17 +1,32 @@
 """Dependencias de FastAPI: quién llama, a partir de la cookie de sesión o de una llave de API."""
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
 
 from cirdan.auth import api_keys, sessions
-from cirdan.config import config
+from cirdan.config import config, origenes_permitidos
 from cirdan.db import transaction
 
 COOKIE = 'lt_session'
 COOKIE_SECURE = config('COOKIE_SECURE', 'false').lower() == 'true'  # true en producción (HTTPS)
+
+
+def comprobar_cookie_segura():
+    """La API no arranca publicada por HTTPS con la cookie de sesión sin Secure (RC-286). Un origen https en
+    ALLOWED_ORIGINS dice que el portal está publicado, y sin Secure el navegador también manda `lt_session` por http,
+    por ejemplo con un enlace viejo a http://lowtidesec.com antes de la redirección. Con los orígenes locales
+    (http://localhost) arranca como siempre. Lee el mismo COOKIE_SECURE que usa cirdan/auth/routes.py."""
+    https = [o for o in origenes_permitidos() if urlsplit(o).scheme == 'https']
+    if https and not COOKIE_SECURE:
+        raise RuntimeError('ALLOWED_ORIGINS trae un origen https (%s) y COOKIE_SECURE no es true: la cookie de sesión '
+                           'saldría sin Secure. Pon COOKIE_SECURE=true en .env (RC-286).' % ', '.join(https))
+
+
 ROL_LLAVE = 'api_key'  # no es un rol de la base: ningún require_roles() lo deja pasar
 LLAVE_INVALIDA = 'La llave de API no es válida, venció o fue revocada.'
 SESION_TERMINADA = 'Tu sesión terminó. Vuelve a iniciar sesión.'
+SIN_PERMISO = 'Tu rol no tiene permiso para esta acción.'
 
 
 @dataclass(frozen=True)
@@ -70,7 +85,23 @@ def current_session(request: Request) -> Session:
         # las 8 h.
         sessions.delete(token)
         raise HTTPException(401, SESION_TERMINADA)
+    if session.role == ROL_OPERADOR and not _ruta_de_operador(request):
+        # Un operator de la consola del integrador (#66, RC-126) solo usa su cuenta y la consola: en su propia empresa
+        # no lee dominios, hallazgos, reportes ni exportaciones, aunque la ruta no pida un rol (migración 033).
+        raise HTTPException(403, SIN_PERMISO)
+    request.state.cirdan_session = session
     return session
+
+
+ROL_OPERADOR = 'operator'
+RUTAS_DE_OPERADOR = ('/api/v1/auth/', '/api/v1/operator/')
+
+
+def _ruta_de_operador(request: Request) -> bool:
+    """Si la petición es de /api/v1/auth/* o /api/v1/operator. Se mira la plantilla de la ruta que resolvió FastAPI
+    (sin root_path ni valores de la URL) y, si no la hay, el path."""
+    ruta = getattr(request.scope.get('route'), 'path', None) or request.url.path
+    return ruta == '/api/v1/operator' or ruta.startswith(RUTAS_DE_OPERADOR)
 
 
 def is_platform_admin(user_id) -> bool:
@@ -120,6 +151,19 @@ def require_roles(*roles):
     def dependency(request: Request) -> Session:
         session = current_session(request)
         if session.role not in roles:
-            raise HTTPException(403, 'Tu rol no tiene permiso para esta acción.')
+            raise HTTPException(403, SIN_PERMISO)
+        return session
+    return dependency
+
+
+def api_key_or_roles(*roles):
+    """Como session_or_api_key, pero con cookie solo deja pasar a esos roles de la base (RC-280).
+
+    Una llave de API entra igual que con session_or_api_key: la crea un Admin y la limita su dominio. Con cookie, otro
+    rol recibe 403, como require_roles(). Así el gerente no lee por la API lo que el portal no le muestra."""
+    def dependency(request: Request) -> Session:
+        session = session_or_api_key(request)
+        if session.role != ROL_LLAVE and session.role not in roles:
+            raise HTTPException(403, SIN_PERMISO)
         return session
     return dependency

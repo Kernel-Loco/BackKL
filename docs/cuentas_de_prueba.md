@@ -20,6 +20,8 @@ La contraseña es la misma para las cinco: **`Lowtide-Demo-2026`**
 | `dana.cruz@beta-corp.mx` | Administrador | Beta Corp | Solo los datos de Beta Corp. Sirve para comprobar que una empresa no ve los datos de otra |
 | `admin@olmardo.com` | Administrador | Grupo Olmardo | Cuenta de demo con contraseña pública. Sirve para probar el escaneo de olmardo.com en tu PC. No es la de las demos con el socio |
 
+Las cuentas `pruebas-p1@lowtidesec.com`, `pruebas-p2@lowtidesec.com` y `pruebas-p3@lowtidesec.com` de Grupo Olmardo no son de demo: las crea Ernesto en la VM solo para las pruebas con usuarios (#50, [`pruebas_usuarios.md`](pruebas_usuarios.md)) y se desactivan al terminar las sesiones.
+
 ## Cómo pasar el MFA (verificación en dos pasos)
 
 Después de la contraseña, el portal pide un código de 6 dígitos que cambia cada 30 segundos. Hay dos formas de obtenerlo.
@@ -95,5 +97,5 @@ docker compose exec valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-war
 ## Lo que no funciona todavía
 
 - **Registro abierto y «¿Olvidaste tu contraseña?»** todavía no tienen backend; esas pantallas lo dicen al enviarlas. Las cuentas nuevas las creará un Administrador por invitación.
-- **Captcha** (RC-5): pendiente.
+- **Captcha** (RC-5): implementado con ALTCHA; el login obtiene un reto en `/api/v1/auth/captcha` y exige una solución válida.
 - **Los datos del portal** (dominios, hallazgos, score, reportes) siguen simulados hasta conectar la API v1 (RC-17). El inicio de sesión, la sesión, el rol y el perfil sí son reales.

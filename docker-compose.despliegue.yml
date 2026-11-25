@@ -9,7 +9,7 @@
 # - borde: cloudflared y el portal. cloudflared no ve la API, la base ni Valkey.
 # - interna: el portal y la API.
 # - salida: solo cloudflared, para llegar a Cloudflare. La API sale a internet por la red default.
-# - default: la API, la base, Valkey y demo-accounts. Subred fija y la API con IP fija fuera del rango que Docker
+# - default: la API, la base, Valkey, demo-accounts y, con su profile, el programador. Subred fija y la API con IP fija fuera del rango que Docker
 #   reparte solo, para que la regla de DOCKER-USER de docs/despliegue.md ('Solo la API llega a IMDS') deje pedir el
 #   token de la identidad de la VM a la API y a nadie más.
 # borde e interna no salen a internet (internal) y el host no tiene IP en ellas (gateway_mode_ipv4=isolated, pide un
@@ -57,9 +57,18 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Falta ALLOWED_ORIGINS en .env, ver docs/despliegue.md}
       # El despliegue siempre va con HTTPS (Cloudflare): la cookie de sesión solo viaja cifrada.
       COOKIE_SECURE: "true"
+      # RC-339: el alta sigue apagada hasta poner CARTA_ALTA_ENABLED=true en el .env, y eso va solo después de una
+      # restauración completa validada (docs/despliegue.md). La llave de cartas sale del compose base: en la VM,
+      # CARTA_KEY_VAULT_SECRET_URL versionada. En el plan B, sin IMDS, CARTA_ENCRYPTION_KEY.
+      CARTA_ALTA_ENABLED: ${CARTA_ALTA_ENABLED:-false}
       # Las passkeys quedan amarradas a lowtidesec.com (RC-331): sirven en https://lowtidesec.com y en su www, que vienen
       # de ALLOWED_ORIGINS. Si el dominio cambia, dejan de servir y se entra con contraseña y TOTP.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-lowtidesec.com}
+      # El enlace al correo (#28, RC-63) lleva al portal publicado, y siempre a Resend, aunque el .env diga otra cosa.
+      # Vacía, la API usa el primer origen de ALLOWED_ORIGINS: https://lowtidesec.com en la VM y
+      # https://pruebas.lowtidesec.com en el plan B de pruebas (M4 de la revisión de RC-63).
+      PORTAL_URL: ""
+      CORREO_API_URL: https://api.resend.com/emails
       FORWARDED_ALLOW_IPS: "10.249.91.10,10.249.92.11"
       # Nunca en el despliegue, aunque el .env diga otra cosa.
       DEMO_EXPLORER: "false"
@@ -68,6 +77,16 @@ services:
       # uvicorn cierra una conexión ociosa a los 5 s por omisión, lo mismo que tarda el proxy de Next (agente de Node)
       # en soltarla: un POST que sale justo entonces termina en 500. Con 65 s siempre la suelta Next primero.
       UVICORN_TIMEOUT_KEEP_ALIVE: "65"
+      # Contraseñas filtradas (RC-334): prendida aquí, solo los 5 primeros caracteres del SHA-1 salen a
+      # api.pwnedpasswords.com. Se apaga con PWNED_PASSWORDS_ENABLED=false en el .env.
+      PWNED_PASSWORDS_ENABLED: ${PWNED_PASSWORDS_ENABLED:-true}
+      # Asistente (#38): Workers AI principal y Groq respaldo. Llaves solo en el .env de despliegue.
+      IA_BASE_URL: ${IA_BASE_URL:-}
+      IA_API_KEY: ${IA_API_KEY:-}
+      IA_MODELO: ${IA_MODELO:-openai/gpt-oss-120b}
+      IA_RESPALDO_BASE_URL: ${IA_RESPALDO_BASE_URL:-}
+      IA_RESPALDO_API_KEY: ${IA_RESPALDO_API_KEY:-}
+      IA_RESPALDO_MODELO: ${IA_RESPALDO_MODELO:-openai/gpt-oss-120b}
     networks:
       default:
         # La única IP que la regla de IMDS deja pasar (docs/despliegue.md). Por eso en la VM se usa
@@ -83,6 +102,11 @@ services:
       # esas credenciales. Se comprueba con `docker compose logs demo-accounts`.
       DEMO_ACCOUNTS: "false"
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Falta ALLOWED_ORIGINS en .env, ver docs/despliegue.md}
+
+  # Escaneos programados (#27, RC-52), solo con `--profile programador`. Sale a internet por default, como la API, pero
+  # sin su IP fija ni NET_RAW: no llega a IMDS (no lee Key Vault) ni puede quitarle la IP a la API.
+  programador:
+    <<: [*registro, *sin-raw]
 
   portal:
     <<: *registro
@@ -108,7 +132,7 @@ services:
 
   cloudflared:
     <<: *registro
-    image: cloudflare/cloudflared:2026.10.7
+    image: cloudflare/cloudflared:2026.11.0
     # Túnel administrado desde Cloudflare: los nombres (lowtidesec.com y www) y su destino, http://portal:3000,
     # se configuran en el panel de Zero Trust. Aquí solo va el token del túnel.
     command: ["tunnel", "--no-autoupdate", "run"]

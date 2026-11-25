@@ -35,7 +35,8 @@ MAYA = '30000000-0000-4000-8000-000000000002'
 ORG = '20000000-0000-4000-8000-000000000001'
 CLAVE = 'Clave-De-Prueba-Larga-1'
 VARIABLES = ('PASSWORD_HASH_ENCRYPTION_KEY', 'PASSWORD_HASH_KEY_VAULT_SECRET_URL', 'TOTP_ENCRYPTION_KEY',
-             'TOTP_KEY_VAULT_SECRET_URL')
+             'TOTP_KEY_VAULT_SECRET_URL', 'PASSWORD_HASH_KEY_VERSION', 'PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY',
+             'PASSWORD_HASH_PREVIOUS_KEY_VAULT_SECRET_URL', 'PWNED_PASSWORDS_ENABLED')
 
 
 class Falso:
@@ -56,7 +57,7 @@ class Falso:
 
 class Base(unittest.TestCase):
     def setUp(self):
-        for nombre in ('_llave_vault', '_relleno'):
+        for nombre in ('_llave_vault', '_llave_vault_anterior', '_relleno'):
             setattr(passwords, nombre, None)
             self.addCleanup(setattr, passwords, nombre, None)
         totp._llave_vault = None
@@ -311,13 +312,28 @@ class BaseFalsa:
 
 class Login(Base):
     """Puntos 3, 4 y 5 por la ruta de /auth/login, con base y Valkey falsos."""
+    TICKET = [1, 2]  # lo que devuelve take_login_attempt: el vencimiento de cada contador
+
+    @classmethod
+    def sesiones(cls, ticket=TICKET):
+        return mock.Mock(**{'take_login_attempt.return_value': ticket, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+
+    def assert_vuelve_a_contar(self, sesiones, respuesta):
+        # RC-270: el intento se devolvió al ver la contraseña buena, pero ya no abre la huella de ahora: vuelve a
+        # contar, después de la devolución, y queda en la bitácora como cualquier contraseña mala.
+        from cirdan.auth import routes
+        nombres = [c[0] for c in sesiones.mock_calls if c[0] in ('refund_login_attempt', 'register_fail')]
+        self.assertEqual(nombres, ['refund_login_attempt', 'register_fail'])
+        sesiones.refund_login_attempt.assert_called_once_with('alex@acme-demo.mx', '127.0.0.1', self.TICKET)
+        sesiones.register_fail.assert_called_once_with('alex@acme-demo.mx', '127.0.0.1')
+        self.assertEqual((respuesta.background.func, respuesta.background.args),
+                         (routes._audit_bad_password, (ORG, ALEX, '127.0.0.1')))
 
     def entrar(self, huella, clave=CLAVE, user_id=ALEX, existe=True, rowcount=1, sesiones=None, releida=None):
         from cirdan.auth import routes
         base = BaseFalsa({'user_id': user_id, 'organization_id': ORG, 'password_hash': huella, 'mfa_enabled': True}
                          if existe else None, rowcount, releida)
-        sesiones = sesiones or mock.Mock(**{'is_locked.return_value': False,
-                                            'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+        sesiones = sesiones or self.sesiones()
         with mock.patch.object(routes, 'transaction', base.transaction), \
                 mock.patch.object(routes, 'sessions', sesiones), \
                 mock.patch.object(routes, 'client_ip', return_value='127.0.0.1'), \
@@ -347,12 +363,13 @@ class Login(Base):
         # Ronda 1, hallazgo 7: el UPDATE condicional no tocó ninguna fila porque la contraseña cambió entre la
         # búsqueda y el rehash. La contraseña que se verificó ya no es la de la cuenta: 401 y ni mfa_token ni
         # sesión.
-        sesiones = mock.Mock(**{'is_locked.return_value': False, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+        sesiones = self.sesiones()
         respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), rowcount=0, sesiones=sesiones,
                                       releida=passwords.hash_password('Otra-Clave-De-Prueba-2', ALEX))
         self.assertEqual(respuesta.status_code, 401)
         self.assertEqual((len(base.updates), base.relecturas), (1, 1))
         sesiones.create_mfa.assert_not_called()
+        self.assert_vuelve_a_contar(sesiones, respuesta)
 
     def test_3f_dos_logins_seguidos_con_huella_vieja_entran_los_dos(self):
         # Ronda 2, R1: doble clic. El primer login ya cifró la huella vieja, así que el UPDATE del segundo no toca
@@ -363,10 +380,21 @@ class Login(Base):
         self.assertEqual((len(base.updates), base.relecturas), (1, 1))
 
     def test_3g_si_la_fila_ya_no_esta_al_releer_no_entra(self):
-        sesiones = mock.Mock(**{'is_locked.return_value': False, 'create_mfa.return_value': 'CIRDAN_FAKE_mfa'})
+        sesiones = self.sesiones()
         respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), rowcount=0, sesiones=sesiones, releida=False)
         self.assertEqual(respuesta.status_code, 401)
         self.assertEqual(base.relecturas, 1)
+        sesiones.create_mfa.assert_not_called()
+        self.assert_vuelve_a_contar(sesiones, respuesta)
+
+    def test_3h_con_el_bloqueo_alcanzado_no_revisa_ni_cifra_la_huella(self):
+        # RC-270: take_login_attempt sin comprobante es el 429, antes de buscar la cuenta y de tocar la huella.
+        sesiones = self.sesiones(ticket=None)
+        respuesta, base = self.entrar(PasswordHasher().hash(CLAVE), sesiones=sesiones)
+        self.assertEqual(respuesta.status_code, 429)
+        self.assertEqual(base.updates, [])
+        sesiones.refund_login_attempt.assert_not_called()
+        sesiones.register_fail.assert_not_called()
         sesiones.create_mfa.assert_not_called()
 
     def test_3c_el_hash_de_relleno_no_abre_ninguna_cuenta(self):
@@ -444,38 +472,73 @@ class Login(Base):
                 self.assertEqual(respuesta.status_code, 401)
                 self.assertEqual(base.updates, [])
 
+    RONDAS = 22  # par: la mitad de las rondas mide primero cada caso
+
+    def comparar_tiempos(self, otro):
+        """(mediana de (otro - inexistente) / el menor de los dos, en proporción, y las medianas del inexistente y de
+        otro, en segundos).
+
+        En el runner del CI una medida suelta va de 45 a 130 ms según los vecinos (argon2id corre en 4 hilos), y con
+        los dos casos medidos en bloques seguidos una ráfaga de carga caía entera en uno solo: fallaba en los dos
+        sentidos y también con 'base64 mala', que hace menos trabajo que el inexistente. Aquí cada ronda mide los dos
+        seguidos, alternando cuál va primero, y la diferencia es la de cada par: una ráfaga pega en los dos. Dividir
+        entre el menor hace la cota igual de estricta en los dos sentidos."""
+        def inexistente():
+            passwords.burn_time('Otra-Clave-Larga-99')
+
+        def medir(f):
+            inicio = time.perf_counter()
+            f()
+            return time.perf_counter() - inicio
+        diferencias, de_inexistente, de_otro = [], [], []
+        for ronda in range(self.RONDAS):
+            if ronda % 2 == 0:
+                a = medir(inexistente)
+                b = medir(otro)
+            else:
+                b = medir(otro)
+                a = medir(inexistente)
+            de_inexistente.append(a)
+            de_otro.append(b)
+            diferencias.append((b - a) / min(a, b))
+        return statistics.median(diferencias), statistics.median(de_inexistente), statistics.median(de_otro)
+
+    def tardan_lo_mismo_sin_argon2id(self, otro):
+        """Segunda fase: todo lo que no es argon2id (descifrar, decodificar, ramas), que se mide en microsegundos. Con
+        argon2id real, una fuga de 2 ms queda en unos 0.04 de comparar_tiempos, debajo del 0.35. Aquí argon2id no
+        corre, así que se ve sola. Cada lado toma el mínimo de 200 pares alternados: el ruido solo suma tiempo."""
+        def inexistente():
+            passwords.burn_time('Otra-Clave-Larga-99')
+        de_inexistente, de_otro = [], []
+        with mock.patch.object(passwords, '_verificar_phc', lambda phc, clave: False):
+            for vuelta in range(200):
+                for f, t in ((inexistente, de_inexistente), (otro, de_otro))[::1 if vuelta % 2 == 0 else -1]:
+                    inicio = time.perf_counter()
+                    f()
+                    t.append(time.perf_counter() - inicio)
+        a, b = min(de_inexistente), min(de_otro)
+        self.assertLess(abs(b - a), 0.001, (a, b))
+
     def test_5d_y_tardan_lo_mismo_que_un_correo_inexistente(self):
         passwords.comprobar_llave()
         no_abren = self._no_abren()
-
-        def medir(f):
-            tiempos = []
-            for _ in range(7):
-                inicio = time.perf_counter()
-                f()
-                tiempos.append(time.perf_counter() - inicio)
-            return statistics.median(tiempos)
-        inexistente = medir(lambda: passwords.burn_time('Otra-Clave-Larga-99'))
         for caso in ('otra llave', 'base64 mala'):
             with self.subTest(caso=caso):
-                no_abre = medir(lambda: passwords.verify_password(no_abren[caso], 'Otra-Clave-Larga-99', ALEX))
-                self.assertLess(abs(inexistente - no_abre) / inexistente, 0.35, (inexistente, no_abre))
+                def no_abre():
+                    return passwords.verify_password(no_abren[caso], 'Otra-Clave-Larga-99', ALEX)
+                diferencia, inexistente, tiempo = self.comparar_tiempos(no_abre)
+                self.assertLess(abs(diferencia), 0.35, (diferencia, inexistente, tiempo))
+                self.tardan_lo_mismo_sin_argon2id(no_abre)
 
     def test_5b_y_tardan_lo_mismo(self):
         huella = passwords.hash_password(CLAVE, ALEX)
         passwords.comprobar_llave()
-
-        def medir(f):
-            tiempos = []
-            for _ in range(7):
-                inicio = time.perf_counter()
-                f()
-                tiempos.append(time.perf_counter() - inicio)
-            return statistics.median(tiempos)
-        inexistente = medir(lambda: passwords.burn_time('Otra-Clave-Larga-99'))
-        equivocada = medir(lambda: passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX))
+        def equivocada():
+            return passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX)
+        diferencia, inexistente, tiempo = self.comparar_tiempos(equivocada)
         self.assertGreater(inexistente, 0.01, 'el correo inexistente también debe gastar el tiempo de argon2id')
-        self.assertLess(abs(inexistente - equivocada) / equivocada, 0.35, (inexistente, equivocada))
+        self.assertLess(abs(diferencia), 0.35, (diferencia, inexistente, tiempo))
+        self.tardan_lo_mismo_sin_argon2id(equivocada)
 
 
 class Parametros(unittest.TestCase):

@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# Respaldo diario de la base cirdan (#115, RC-233, y RC-91). Lo corre el timer lowtide-respaldo.timer en la VM.
+# Respaldo diario coordinado de la base y las cartas (#115, RC-233, RC-28 y RC-339). Lo corre lowtide-respaldo.timer.
 #
 # 1. Espera hasta 5 min a que Postgres acepte conexiones (al arrancar la VM el timer corre antes que la base).
-# 2. pg_dump en formato custom con el usuario postgres dentro del contenedor de la base, nunca con cirdan_app,
-#    que con FORCE RLS no ve todas las filas.
-# 3. Lo cifra al vuelo con age y la llave pública de RECEPTOR_AGE. El respaldo sin cifrar nunca toca el disco
-#    y la llave privada no vive en la VM: quien entre a la VM no lee los respaldos.
-# 4. Lo deja en CARPETA con permisos 600 como cirdan_<fecha UTC>_<8 hex al azar>.dump.age. El sufijo al azar
-#    hace que nadie pueda ocupar antes en Azure el nombre del respaldo de mañana.
+# 2. Cifra por separado pg_dump, el volumen de cartas cifradas y la llave de cartas, luego los agrupa y cifra con age.
+#    Los temporales solo viven en /run (tmpfs); la llave privada de age no vive en la VM.
+# 3. Deja el paquete en CARPETA con permisos 600 como cirdan_<fecha UTC>_<8 hex al azar>.backup.age. El sufijo
+#    aleatorio evita que alguien ocupe antes en Azure el nombre del respaldo de mañana.
 # 5. Con SUBIR=1 sube a Azure Blob, con la identidad administrada de la VM (IMDS) y sin llaves en disco, el
 #    respaldo nuevo y cualquier local que todavía no esté allá (una subida que falló un día se repite al siguiente).
-# 6. Conserva los respaldos locales de los últimos RETENCION días con respaldo. Con SUBIR=1 nunca borra uno que no
-#    está en Azure, salvo que ya haya más de TOPE_LOCAL archivos.
+# 4. Conserva juntos los respaldos completos de los últimos RETENCION días. Las copias antiguas .dump.age se retienen
+#    y suben como legado, pero no incluyen cartas y no sirven para habilitar un alta restaurada.
 #
 # Configuración en /etc/lowtide/respaldo.conf (o en RESPALDO_CONF), una CLAVE=valor por línea. No es un
 # script: solo se leen las claves de abajo y cada valor se revisa. No lleva secretos, pero quien la cambie decide
@@ -22,6 +20,7 @@ export LC_ALL=C
 
 CONF=${RESPALDO_CONF:-/etc/lowtide/respaldo.conf}
 CONTENEDOR_BASE=cirdan-pg16
+CONTENEDOR_CARTAS=cirdan-api
 CARPETA=/var/backups/lowtide
 RECEPTOR_AGE=
 RETENCION=7
@@ -44,12 +43,13 @@ while IFS= read -r linea || [ -n "$linea" ]; do
   clave=${linea%%=*}
   valor=${linea#*=}
   case $clave in
-    CONTENEDOR_BASE|CARPETA|RECEPTOR_AGE|RETENCION|SUBIR|CUENTA_BLOB|CONTENEDOR_BLOB) printf -v "$clave" '%s' "$valor" ;;
+    CONTENEDOR_BASE|CONTENEDOR_CARTAS|CARPETA|RECEPTOR_AGE|RETENCION|SUBIR|CUENTA_BLOB|CONTENEDOR_BLOB) printf -v "$clave" '%s' "$valor" ;;
     *) falla "clave desconocida en $CONF: $clave" ;;
   esac
 done < "$CONF"
 
 [[ $CONTENEDOR_BASE =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] || falla "CONTENEDOR_BASE no válido"
+[[ $CONTENEDOR_CARTAS =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] || falla "CONTENEDOR_CARTAS no válido"
 while [[ $CARPETA == */ && $CARPETA != / ]]; do CARPETA=${CARPETA%/}; done
 [[ $CARPETA =~ ^(/[A-Za-z0-9._-]+)+$ && $CARPETA != *..* ]] || falla "CARPETA tiene que ser una ruta absoluta sin '..' ni espacios"
 [[ $RECEPTOR_AGE =~ ^age1[02-9ac-hj-np-z]{58}$ ]] || falla "RECEPTOR_AGE no es una llave pública de age"
@@ -60,6 +60,10 @@ if [ "$SUBIR" = 1 ]; then
   [[ $CONTENEDOR_BLOB =~ ^[a-z0-9]([a-z0-9]|-[a-z0-9]){2,62}$ ]] || falla "CONTENEDOR_BLOB no válido"
 fi
 command -v age >/dev/null || falla "falta age (apt-get install age)"
+command -v python3 >/dev/null || falla "falta python3"
+temporal=/run
+[ -w "$temporal" ] || temporal=/run/lock
+[[ $(findmnt -n -o FSTYPE --target "$temporal" 2>/dev/null) == tmpfs ]] || falla "$temporal debe ser tmpfs para proteger los temporales"
 # Archivos locales como máximo, aunque Azure lleve semanas sin recibir nada: 31, o 4 por día de retención.
 TOPE_LOCAL=$(( RETENCION * 4 > 31 ? RETENCION * 4 : 31 ))
 
@@ -71,36 +75,99 @@ chmod 700 "$CARPETA"
 exec 9>"$CARPETA/.candado"
 flock -w 600 9 || falla "otro respaldo sigue corriendo"
 
-PATRON='^cirdan_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}\.dump\.age$'
-nombre="cirdan_$(date -u +%Y%m%dT%H%M%SZ)_$(openssl rand -hex 4).dump.age"
-[[ $nombre =~ $PATRON ]] || falla "no se pudo armar el nombre del respaldo"
-final="$CARPETA/$nombre"
-parcial="$CARPETA/.$nombre.parcial"
-[ ! -e "$final" ] || falla "$final ya existe"
+PATRON='^cirdan_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}\.(backup|dump)\.age$'
+raiz_nombre="cirdan_$(date -u +%Y%m%dT%H%M%SZ)_$(openssl rand -hex 4)"
+parcial=
 
-limpiar() { rm -f -- "$parcial"; }
+trabajo=$(mktemp -d "$temporal/lowtide-respaldo.XXXXXX")
+limpiar() {
+  [ -z "$parcial" ] || rm -f -- "$parcial"
+  rm -rf -- "$trabajo"
+}
 trap limpiar EXIT
 
 # Al arrancar la VM, Persistent=true lanza la corrida atrasada antes de que cirdan-pg16 acepte conexiones. Un
 # contenedor que no existe falla enseguida; uno que existe se espera hasta ESPERA_BASE segundos.
 docker inspect --type container "$CONTENEDOR_BASE" >/dev/null 2>&1 || falla "no existe el contenedor $CONTENEDOR_BASE"
+docker inspect --type container "$CONTENEDOR_CARTAS" >/dev/null 2>&1 || falla "no existe el contenedor $CONTENEDOR_CARTAS"
+# La base que se respalda es la que usa la API (PGDATABASE de su contenedor, docker-compose.yml). Tras una
+# restauración completa apunta a la base nueva: respaldar la vieja junto al volumen actual dejaría un paquete
+# incoherente. Sale de la configuración del contenedor, así que sirve aunque la API esté detenida.
+base_datos=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTENEDOR_CARTAS" \
+  | sed -n 's/^PGDATABASE=//p' | tail -n 1)
+base_datos=${base_datos:-cirdan}
+[[ $base_datos =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || falla "PGDATABASE de $CONTENEDOR_CARTAS no es un nombre de base válido"
 listo=0
 for ((t = 0; t < ESPERA_BASE; t += 5)); do
-  if docker exec "$CONTENEDOR_BASE" sh -c 'exec pg_isready -q -U "$POSTGRES_USER" -d cirdan' 2>/dev/null; then
+  if docker exec -e BASE="$base_datos" "$CONTENEDOR_BASE" sh -c \
+      'exec pg_isready -q -U "$POSTGRES_USER" -d "$BASE"' 2>/dev/null; then
     listo=1; break
   fi
   sleep 5
 done
 [ "$listo" = 1 ] || falla "$CONTENEDOR_BASE no aceptó conexiones en $ESPERA_BASE s"
 
-# POSTGRES_USER es la del contenedor (sale del .env, postgres si no se puso). Va entre comillas simples para que
-# la expanda el sh del contenedor y no este script.
-docker exec "$CONTENEDOR_BASE" sh -c 'exec pg_dump -U "$POSTGRES_USER" -d cirdan -Fc --no-password' \
-  | age -r "$RECEPTOR_AGE" -o "$parcial"
+# Un despliegue que todavía no configura la llave de cartas (alta apagada) y no tiene cartas sigue con el respaldo
+# de solo la base, en el formato antiguo .dump.age: así el respaldo diario no se pierde, pero ese archivo no sirve
+# para habilitar un alta restaurada. Con cartas en el volumen y sin llave, el respaldo falla.
+estado_llave=0
+docker exec "$CONTENEDOR_CARTAS" python -c '
+import os, sys
+from cirdan.config import config
+if config("CARTA_KEY_VAULT_SECRET_URL") or config("CARTA_ENCRYPTION_KEY"):
+    sys.exit(0)
+root = os.environ.get("CARTA_STORAGE_DIR", "")
+sys.exit(4 if os.path.isdir(root) and os.listdir(root) else 3)
+' || estado_llave=$?
+case $estado_llave in
+  0) nombre="$raiz_nombre.backup.age" ;;
+  3) nombre="$raiz_nombre.dump.age"
+     echo "respaldo: AVISO: $CONTENEDOR_CARTAS no tiene llave de cartas; respaldo solo de la base (.dump.age)" >&2 ;;
+  4) falla "hay cartas en el volumen, pero $CONTENEDOR_CARTAS no tiene llave de cartas" ;;
+  *) falla "no se pudo revisar la llave de cartas en $CONTENEDOR_CARTAS" ;;
+esac
+[[ $nombre =~ $PATRON ]] || falla "no se pudo armar el nombre del respaldo"
+final="$CARPETA/$nombre"
+[ ! -e "$final" ] || falla "$final ya existe"
+parcial="$CARPETA/.$nombre.parcial"
 
+# La base se captura primero. Una carta nueva se escribe y sincroniza antes de que la transacción la referencie;
+# por eso la captura posterior del volumen puede incluir huérfanos, pero no dejar referencias sin archivo.
+if [ "$estado_llave" = 3 ]; then
+  docker exec -e BASE="$base_datos" "$CONTENEDOR_BASE" sh -c \
+    'exec pg_dump -U "$POSTGRES_USER" -d "$BASE" -Fc --no-password' | age -r "$RECEPTOR_AGE" -o "$parcial"
+else
+docker exec -e BASE="$base_datos" "$CONTENEDOR_BASE" sh -c \
+  'exec pg_dump -U "$POSTGRES_USER" -d "$BASE" -Fc --no-password' \
+  | age -r "$RECEPTOR_AGE" -o "$trabajo/cirdan.dump.age"
+
+docker exec "$CONTENEDOR_CARTAS" python -c '
+import os, re, sys, tarfile
+root = os.environ.get("CARTA_STORAGE_DIR", "")
+if not os.path.isabs(root) or not os.path.isdir(root) or os.path.islink(root):
+    raise SystemExit("CARTA_STORAGE_DIR no es un directorio absoluto válido")
+with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
+    for name in sorted(os.listdir(root)):
+        if not re.fullmatch(r"[0-9a-f]{32}\.lt1", name):
+            raise SystemExit("nombre de carta inválido")
+        path = os.path.join(root, name)
+        if os.path.islink(path) or not os.path.isfile(path) or not 31 <= os.path.getsize(path) <= 25 * 1024 * 1024 + 31:
+            raise SystemExit("archivo de carta inválido")
+        with open(path, "rb") as carta:
+            if carta.read(3) != b"LT1":
+                raise SystemExit("formato de carta inválido")
+        archive.add(path, arcname=name, recursive=False)
+' | age -r "$RECEPTOR_AGE" -o "$trabajo/cartas.tar.age"
+
+# La llave se exporta solo por una tubería y queda cifrada con el mismo receptor de recuperación.
+docker exec "$CONTENEDOR_CARTAS" python -c \
+  'import base64, sys; from cirdan.cartas import _key; sys.stdout.write(base64.urlsafe_b64encode(_key()).decode("ascii"))' \
+  | age -r "$RECEPTOR_AGE" -o "$trabajo/carta.key.age"
+
+python3 "$(dirname -- "$0")/paquete.py" crear "$trabajo" | age -r "$RECEPTOR_AGE" -o "$parcial"
+fi
 bytes=$(stat -c %s "$parcial")
-# Un respaldo de la base con su esquema mide mucho más que esto. Menos es un pg_dump que no escribió nada.
-[ "$bytes" -ge 1024 ] || falla "el respaldo cifrado mide $bytes bytes"
+[ "$bytes" -ge 1024 ] || falla "el paquete cifrado mide $bytes bytes"
 chmod 600 "$parcial"
 mv -n -- "$parcial" "$final"
 [ -f "$final" ] || falla "no se pudo dejar $final"
@@ -214,7 +281,7 @@ for n in "${respaldos[@]}"; do
   fi
 done
 # Restos de una corrida que se cortó (apagón o kill -9, que no corren el trap).
-find "$CARPETA" -maxdepth 1 -type f -name '.cirdan_*.dump.age.parcial' -mmin +60 -delete
+find "$CARPETA" -maxdepth 1 -type f -name '.cirdan_*.age.parcial' -mmin +60 -delete
 echo "respaldo: $quedan respaldos locales"
 if [ "$SUBIR" = 1 ] && { [ -z "${en_azure[$nombre]:-}" ] || (( pendientes > 0 )); }; then
   falla "$pendientes respaldos locales sin subir a Azure (se reintentan en la siguiente corrida)"

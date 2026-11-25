@@ -1,0 +1,137 @@
+# Cadena de suministro de la imagen de la API (#82, RC-117). Guía: docs/cadena_de_suministro.md.
+#
+# En cada PR a dev o main: compila la imagen, Trivy la revisa y frena con cualquier vulnerabilidad crítica, sin
+# excepciones, y Syft saca su SBOM (artefacto de la corrida). Con un push a dev o main (el merge del PR), además la
+# sube a ghcr.io/kernel-loco/backkl, la firma con cosign sin llaves (OIDC de GitHub) y le pega el SBOM como
+# atestación firmada. El despliegue verifica esa firma antes de levantarla (infra/verificar_imagenes.sh).
+# Las imágenes de terceros del compose (PostgreSQL, Valkey, cloudflared) también pasan por Trivy, sin frenar.
+# Herramientas en imágenes con versión fija: ninguna acción de terceros recibe el token.
+name: Imágenes
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: imagenes-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TRIVY: aquasec/trivy:0.76.2
+  SYFT: anchore/syft:v1.57.2
+  COSIGN: ghcr.io/sigstore/cosign/cosign:v3.1.4
+  IMAGEN: ghcr.io/kernel-loco/backkl
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # subir a ghcr.io (solo en push)
+      id-token: write # firma sin llaves de cosign (solo en push)
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Compilar la imagen
+        run: docker build --pull -t lowtide-api:ci .
+
+      # Sin excepciones: cualquier crítica frena, tenga arreglo o no (sin --ignore-unfixed ni archivo de excepciones).
+      # Si una no tiene arreglo, se cambia la base o se quita el paquete de la imagen (RC-117).
+      - name: Trivy frena con vulnerabilidades críticas
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY"
+          image --scanners vuln --severity CRITICAL --exit-code 1 --no-progress lowtide-api:ci
+
+      - name: Trivy, resumen de altas y críticas (no frena)
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY"
+          image --scanners vuln --severity HIGH,CRITICAL --exit-code 0 --no-progress lowtide-api:ci
+
+      - name: SBOM con Syft (SPDX JSON)
+        run: |
+          mkdir -p sbom
+          # Con -u la imagen de Syft no puede escribir en su /tmp: va uno propio en memoria, y la caché ahí mismo.
+          docker run --rm -u "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
+            --tmpfs /tmp:rw,exec,mode=1777 -e TMPDIR=/tmp -e XDG_CACHE_HOME=/tmp/cache \
+            -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/sbom:/out" "$SYFT" docker:lowtide-api:ci -o spdx-json=/out/backkl.spdx.json
+          test -s sbom/backkl.spdx.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-backkl
+          path: sbom/backkl.spdx.json
+          retention-days: 30
+
+      - name: Subir a ghcr.io, firmar y atestar el SBOM
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RAMA: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/docker"
+          mkdir -p "$DOCKER_CONFIG"
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for etiqueta in "$GITHUB_SHA" "$RAMA"; do
+            docker tag lowtide-api:ci "$IMAGEN:$etiqueta"
+            docker push -q "$IMAGEN:$etiqueta"
+          done
+          # Se firma el digest, nunca la etiqueta: una etiqueta se puede mover a otra imagen. Se le pide a ghcr.io:
+          # docker inspect puede dar primero el de la imagen local (lowtide-api@sha256:…), que cosign no encuentra.
+          sha=$(docker buildx imagetools inspect "$IMAGEN:$GITHUB_SHA" --format '{{.Manifest.Digest}}')
+          [[ "$sha" =~ ^sha256:[0-9a-f]{64}$ ]]
+          digest="$IMAGEN@$sha"
+          echo "Imagen: $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          cosign() {
+            # Con el usuario del runner: el config.json de docker login es 0600 y la imagen corre como nonroot.
+            docker run --rm -u "$(id -u):$(id -g)" --tmpfs /tmp:rw,mode=1777 -e HOME=/tmp \
+              -e ACTIONS_ID_TOKEN_REQUEST_URL -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+              -e DOCKER_CONFIG=/docker -v "$DOCKER_CONFIG:/docker:ro" -v "$PWD/sbom:/sbom:ro" "$COSIGN" "$@"
+          }
+          cosign sign --yes "$digest"
+          cosign attest --yes --type spdxjson --predicate /sbom/backkl.spdx.json "$digest"
+          # La misma verificación que hace el despliegue.
+          cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/imagenes.yml@$GITHUB_REF" \
+            "$digest" > /dev/null
+          echo "Firma y SBOM verificados" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  terceros:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Las mismas versiones que levantan docker-compose.yml y docker-compose.despliegue.yml. Informativo: no son
+      # imágenes nuestras, el CI no las arma, no las firma ni les saca SBOM, y no siempre hay versión sin críticas
+      # (postgres:16 de Debian trae libxml2 CVE-2026-6653 sin arreglo y gosu compilado con un Go viejo). Las críticas
+      # salen completas, sin excepciones, en la corrida y en su resumen. Decisión de Ernesto, 23 nov (RC-117).
+      - name: Trivy, críticas en las imágenes de terceros del compose (no frena)
+        run: |
+          set -euo pipefail
+          imagenes=$(grep -hE '^\s+image:\s' docker-compose.yml docker-compose.despliegue.yml | awk '{print $2}' | sort -u)
+          test -n "$imagenes"
+          for imagen in $imagenes; do
+            echo | tee -a "$GITHUB_STEP_SUMMARY"
+            # Informativo también si Trivy no puede correr (red, límite de ghcr.io): lo dice y sigue con la siguiente.
+            if ! docker run --rm "$TRIVY" image --scanners vuln --severity CRITICAL --exit-code 0 --no-progress -q \
+              --format json "$imagen" > trivy.json; then
+              echo "$imagen: Trivy no pudo revisarla" | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            n=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy.json)
+            echo "$imagen: $n críticas" | tee -a "$GITHUB_STEP_SUMMARY"
+            jq -r '.Results[]? | .Target as $t | .Vulnerabilities[]? |
+              "- \(.VulnerabilityID) (\(.Status)) \(.PkgName) \(.InstalledVersion) en \($t)"' trivy.json |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          done

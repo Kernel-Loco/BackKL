@@ -1,12 +1,12 @@
 """Características del reto para el ML (#33 a #36): tipo, antigüedad, exposición y sensibilidad.
 
 Salen de la evidencia del hallazgo con una sola rúbrica, la de sensibilidad(). El lote de #33 la usa. Hoy la API
-(cirdan/api/v1.py:26-27) y crt.sh (crtsh.py:390, 398 y 435) todavía ponen la sensibilidad fija por código. Que adopten
-calcular() va en otra tarjeta, antes de #36. Mientras tanto el modelo ve en producción valores distintos a los del lote.
+(cirdan/api/v1.py:26-27) todavía pone la sensibilidad fija por código. Que la adopte va en otra tarjeta, antes de #36.
+crt.sh ya usa calcular() en todos sus códigos desde RC-218 (comentario 10256).
 
-calcular() ya acepta lo que crt.sh pone hoy en la evidencia: vence en cert_expired y primer_certificado en
-lookalike_domain, y lo que pone rdap.py: por_vencer_desde en domain_expiring_soon. crt.sh no pone not_before en
-cert_expiring_soon, y ningún recolector pone primera_vez. Sin esas fechas la antigüedad cuenta desde detected_at o
+calcular() acepta lo que crt.sh pone en la evidencia: vence en cert_expired, emitido en cert_expiring_soon,
+primer_certificado en lookalike_domain y primera_vez en cert_internal_name, cert_broad_wildcard y cert_new_issuer, y lo
+que pone rdap.py: por_vencer_desde en domain_expiring_soon. Sin esas fechas la antigüedad cuenta desde detected_at o
 asset_first_seen, como v1.py:67-74, si quien llama las pasa. Los códigos de shodan.py no traen fecha: InternetDB no
 la da.
 
@@ -19,7 +19,8 @@ from datetime import date, datetime
 
 # Código de regla -> tipo, con los mismos nombres que cirdan/api/v1.py:20-25
 TIPO = {
-    'breach_exposure': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
+    'breach_exposure': 'correos_en_brecha', 'breach_exposure_old': 'correos_en_brecha',
+    'breach_exposure_no_passwords': 'correos_en_brecha', 'cert_expired': 'certificado_vencido',
     'cert_expiring_soon': 'certificado_por_vencer', 'outdated_software': 'software_desactualizado',
     'exposed_rdp': 'servicio_expuesto', 'dmarc_missing': 'dmarc_faltante', 'spf_missing': 'spf_faltante',
     'lookalike_domain': 'dominio_parecido',
@@ -30,9 +31,11 @@ ACTIVOS_DIRECTOS = ('ip', 'service')                          # v1.py:80
 # De qué fecha de la evidencia cuenta la antigüedad, en orden. Los demás códigos cuentan desde primera_vez.
 DESDE = {
     'breach_exposure': ('breach_date',),             # la brecha (v1.py:69-70)
+    'breach_exposure_old': ('breach_date',),         # las dos de HIBP de RC-54 cuentan igual
+    'breach_exposure_no_passwords': ('breach_date',),
     'cert_expired': ('not_after', 'vence'),          # el vencimiento (v1.py:71-72). crt.sh lo pone en vence
-    'cert_expiring_soon': ('not_before',),           # la emisión (crtsh.py:397)
-    'lookalike_domain': ('primer_certificado',),     # el primer certificado del parecido (crtsh.py:434)
+    'cert_expiring_soon': ('not_before', 'emitido'), # la emisión. crt.sh la pone en emitido
+    'lookalike_domain': ('primer_certificado',),     # el primer certificado del parecido (crtsh._parecidos)
     'domain_expiring_soon': ('por_vencer_desde',),   # el vencimiento menos 30 días (rdap.hallazgo_vencimiento)
 }
 
@@ -51,6 +54,7 @@ USO = {
 PALABRAS_SOSPECHOSAS = ('login', 'acceso', 'pago', 'cuenta', 'verifica', 'seguridad')
 DIAS_SIN_VER = 180   # un servicio que no se ve desde hace más de esto ya no da acceso confirmado
 SPF_NULO = 'v=spf1 -all'   # el dominio dice que ningún servidor manda su correo
+BRECHAS = ('breach_exposure', 'breach_exposure_old', 'breach_exposure_no_passwords')   # los 3 de HIBP (RC-54)
 
 
 def _dia(valor):
@@ -84,7 +88,7 @@ def exposicion(codigo, tipo_activo):
 def sensibilidad(codigo, evidencia, referencia):
     """La rúbrica de sensibilidad (alta, media o baja) según lo que la evidencia dice que expone el hallazgo."""
     e = evidencia or {}
-    if codigo == 'breach_exposure':
+    if codigo in BRECHAS:
         return 'alta' if DATOS_SENSIBLES & set(e.get('data_classes') or ()) else 'media'
     if codigo == 'exposed_rdp':
         ultima = e.get('ultima_vez')

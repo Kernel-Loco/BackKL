@@ -12,8 +12,9 @@ citas a la carta no se revisan.
 test_10 revisa el Hecho cuando de #96g (RC-207): los términos de uso de la sección 11 en 1 página con cada pieza en su
 punto, el responsable provisional en el aviso integral y en el simplificado, la matriz de responsable y encargado de la
 sección 5.1 y el buzón arco@lowtidesec.com probado con un correo real. También revisa que hallazgos_esperados.md y
-servicios_externos.md pongan #19 (RC-54) y la llave de HIBP detrás de la revisión legal de la sección 9, y que esa
-fila de la sección 9 lleve como pendiente de carta la fecha prevista de #19 en el Anexo A de la carta.
+servicios_externos.md pongan #19 (RC-54) y la llave de HIBP detrás de la revisión legal, y que esa fila de la
+sección 9 deje #19 con olmardo.com tras la revisión del 23 nov 2026 y la actividad 7 del Anexo A de la carta desde
+el 30 nov 2026.
 
     python -m unittest -v pruebas/test_politica_seguridad.py
 """
@@ -99,10 +100,29 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
         # Una brecha puede revelar datos sensibles, que piden consentimiento expreso y por escrito (r15-datos-1).
         for cita in ('5. Brechas que revelan datos sensibles:', '(art. 2, fracción VI)',
                      'el consentimiento expreso y por escrito, que el aviso de la empresa no da',
-                     'Hoy nada separa esas brechas', 'es parte de la revisión legal de la sección 9',
-                     'antes de que exista el recolector de brechas (#19, RC-54)'):
+                     'Mientras la revisión legal de la sección 9 no decida otra cosa',
+                     'el recolector de brechas (#19, RC-54) descarta las que Have I Been Pwned marca como sensibles: '
+                     'no crea hallazgo, no liga ningún correo',
+                     'no marca como sensible sí se registra (sección 9)',
+                     'la búsqueda por correo no las trae',
+                     'La llave de HIBP no se compra antes de la revisión legal de la sección 9, salvo Core 1 para '
+                     'olmardo.com, que ya permite la revisión del 23 nov 2026 (sección 5.8, punto 7)'):
             with self.subTest(seccion='5.3', cita=cita):
                 self.assertIn(cita, empleados)
+        self.assertNotIn('Ese conteo no identifica a nadie', empleados,
+                         'el conteo de brechas sensibles vuelve a ser absoluto')
+        # El texto modelo promete solo lo que el recolector cumple y no basta para la búsqueda por correo (RC-54).
+        modelo = _seccion(self.texto, '5.4 Texto modelo')
+        for cita in ('[Si la consulta por correo no cabe en el artículo 36, fracción VII (sección 5.8, punto 7), aquí '
+                     'va la cláusula para aceptarla o no (art. 35).]',
+                     'Las brechas que Have I Been Pwned marca como sensibles',
+                     'Para la búsqueda por correo no basta sin la cláusula del corchete y sin comunicar a Have I '
+                     'Been Pwned el aviso y sus finalidades (art. 35)',
+                     'No basta para las brechas que revelan datos sensibles'):
+            with self.subTest(seccion='5.4', cita=cita):
+                self.assertIn(cita, modelo)
+        self.assertNotIn('Las brechas de sitios que pueden revelar datos sensibles', modelo,
+                         'el texto modelo promete descartar brechas que el recolector no descarta')
         matriz = _seccion(self.texto, '5.1 Quién responde')
         fila = next(f for f in matriz.splitlines() if f.startswith('| Empleados, exempleados'))
         self.assertIn('Una brecha que revela datos sensibles pide consentimiento expreso y por escrito '
@@ -133,6 +153,15 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
         for nombre in ('Cloudflare Workers AI', 'Groq', 'gpt-oss-120b', 'fuera de México', 'art. 2, fracción XX'):
             self.assertIn(nombre, ia)
         self.assertNotIn('gpt-oss-20b', ia)
+        # Have I Been Pwned según la revisión legal del 23 nov 2026 (sección 5.8, punto 7, RC-54).
+        for cita in ('Son terceros (art. 2, fracción XVII)', 'cuando la búsqueda por dominio da 403',
+                     'artículo 36, fracción VII',
+                     'Con Core 1 la única búsqueda por dominio que responde es la de olmardo.com',
+                     'solo consulta en vivo los de DOMINIOS_EN_VIVO', 'Un cliente real pide el plan Pro'):
+            with self.subTest(seccion='5.8 punto 7', cita=cita):
+                self.assertIn(cita, ia)
+        self.assertNotIn('Con Core 1 la única búsqueda es la de olmardo.com', ia,
+                         'el punto 7 vuelve a decir que con Core 1 solo se consulta olmardo.com')
         alcance = _seccion(self.texto, '1. Alcance')
         for cita in ('artículo 28 del RGPD', '2021/914', 'artículo 14 del RGPD'):
             self.assertIn(cita, alcance)
@@ -383,34 +412,57 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
             with self.subTest(seccion='9', cita=cita):
                 self.assertIn(cita, pendientes)
         legal = next(f for f in pendientes.splitlines() if f.startswith('| Que Cloudflare, Groq y Microsoft'))
-        self.assertTrue(legal.endswith('| Revisión legal, antes del primer cliente real y de #19 (RC-54) |'),
-                        'la fila de las brechas sensibles no es la de revisión legal antes de #19 '
-                        '(r15-datos-1 y r16-reg-1)')
+        self.assertTrue(legal.endswith('| Revisión legal, antes del primer cliente real. Para #19 (RC-54) con '
+                                       'olmardo.com, la del 23 nov 2026 |'),
+                        'la fila de la revisión legal no deja #19 con olmardo.com tras la revisión del 23 nov 2026')
         for cita in ('cómo se tratan las brechas que revelan datos sensibles (sección 5.3, punto 5)',
-                     'si basta el texto modelo de la sección 5.4'):
+                     'si basta el texto modelo de la sección 5.4',
+                     'si la búsqueda por correo en Have I Been Pwned cabe en el artículo 36, fracción VII, o pide la '
+                     'cláusula del artículo 35',
+                     'si recibirlas y descartarlas en memoria ya pide el consentimiento del artículo 8',
+                     'qué se hace con las de sitios sensibles que Have I Been Pwned no marca como sensibles'):
             with self.subTest(seccion='9 revisión legal', cita=cita):
                 self.assertIn(cita, legal, 'las brechas sensibles no van a la revisión legal (r15-datos-1)')
-        # La fecha prevista de #19 en la carta (Anexo A, actividad 7) queda como pendiente de carta (r17-reg-1).
+        # La fecha prevista de #19 en la carta (Anexo A, actividad 7) va después de la revisión del 23 nov (RC-54).
         with self.subTest(seccion='9 revisión legal', regla='fecha de #19 en la carta'):
-            self.assertIn('que la carta mueva la fecha prevista de la actividad 7 de su Anexo A (Have I Been '
-                          'Pwned, #19), hoy el 6 nov 2026, a después de esta revisión', legal,
-                          'la fecha de #19 en la carta no queda como pendiente de la revisión legal (r17-reg-1)')
+            self.assertIn('la plantilla de la carta ya prevé la actividad 7 de su Anexo A desde el 30 nov 2026',
+                          legal,
+                          'la fila de la revisión legal no dice la fecha nueva de #19 en la carta')
+            self.assertNotIn('hoy el 6 nov 2026', legal, 'la fila de la revisión legal sigue con la fecha vieja')
+            self.assertNotIn('falta que la carta mueva la fecha prevista', legal,
+                             'la fila de la revisión legal sigue con el pendiente viejo de la carta')
+            self.assertIn('En las cartas ya firmadas, que dicen 6 nov 2026, esa fecha es informativa', legal,
+                          'la fila de la revisión legal no dice qué pasa con las cartas ya firmadas')
+            carta = _texto(RAIZ / 'docs' / 'plantilla_carta_autorizacion.md')
+            fila7 = next(f for f in carta.split('## Anexo A', 1)[1].splitlines() if f.startswith('| 7 |'))
+            self.assertTrue(fila7.endswith('| 30 nov 2026 |'), 'la actividad 7 de la carta no va tras la revisión')
         # Los documentos que fechan #19 o la llave de HIBP los ponen detrás de esa revisión (r17-reg-1).
         esperados = _texto(RAIZ / 'docs' / 'hallazgos_esperados.md')
         fila13 = next(f for f in esperados.splitlines() if f.startswith('| 13 |'))
+        self.assertNotIn('cómo se califica mandar correos de empleados', fila13,
+                         'la fila 13 sigue esperando un punto que ya no está en la sección 9')
         servicios = _texto(RAIZ / 'docs' / 'servicios_externos.md')
         inicios = ('| HIBP | Correos del dominio en brechas', '| HIBP, 1 mes |', '10. **HIBP:**')
         hibp = [f for f in servicios.splitlines() if f.startswith(inicios)]
         self.assertEqual(len(hibp), 3, 'faltan las líneas de HIBP en servicios_externos.md')
-        lineas = [('fila 13 de hallazgos_esperados.md', fila13, 'que espera toda la revisión legal de la sección 9'),
-                  ('fila 13 de hallazgos_esperados.md', fila13, '| La revisión legal y la llave de #19 |'),
+        # El inventario de proveedores enlaza el DPA de Have I Been Pwned que cita la sección 5.8, punto 7 (RC-54).
+        dpa = next(f for f in servicios.splitlines() if f.startswith('| Have I Been Pwned (Core 1'))
+        with self.subTest(documento='HIBP en el inventario de servicios_externos.md', regla='DPA'):
+            self.assertIn('[DPA](https://haveibeenpwned.com/DPA)', dpa, 'el inventario no enlaza el DPA de HIBP')
+            self.assertNotIn('Sin DPA publicado', dpa, 'el inventario sigue diciendo que HIBP no tiene DPA')
+        with self.subTest(documento='servicios_externos.md', regla='revisión del 23 nov'):
+            self.assertNotIn('la revisión legal que #19 espera', servicios,
+                             'servicios_externos.md sigue esperando la revisión legal de #19')
+        lineas = [('fila 13 de hallazgos_esperados.md', fila13, 'Para olmardo.com basta la revisión legal del 23 nov '
+                   '2026'),
+                  ('fila 13 de hallazgos_esperados.md', fila13, '| La llave de #19 (Core 1) |'),
                   ('fechas de hallazgos_esperados.md', esperados, '#19 llega después de la revisión legal'),
                   ('HIBP en servicios_externos.md', hibp[0], 'Se compra después de la revisión legal'),
                   ('gasto de HIBP en servicios_externos.md', hibp[1], 'Sin compra: espera la revisión legal'),
                   ('pregunta 10 de servicios_externos.md', hibp[2], 'No se compra antes de la revisión legal')]
         vence = next((f for f in servicios.splitlines() if f.startswith('| Ninguna llave vence antes')), '')
         with self.subTest(documento='vencimientos de servicios_externos.md'):
-            self.assertIn('La de HIBP se compra después de la revisión legal que #19 espera', vence,
+            self.assertIn('La de HIBP se compra después de la revisión legal del 23 nov 2026', vence,
                           'el vencimiento de HIBP no espera la revisión legal (r17-reg-1)')
             self.assertNotIn('si se compra el 5 nov', vence, 'el vencimiento de HIBP sigue con la compra del 5 nov')
         for donde, linea, cita in lineas:
@@ -464,6 +516,17 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
                                 r'(?:debe llevar|lleva) la hora de (?:esa|la) pausa',
                                 'vuelve la regla vieja: la carta no termina con la pausa ni deja iniciar análisis '
                                 'sin carta vigente (r11-1, r12-2, r12-9, r13-8)')
+
+    def test_11_correo_de_quien_firma_ya_no_es_pendiente(self):
+        # RC-274: GET /api/v1/domains da el correo de quien firma solo con su carta vigente (pruebas/test_api_v1.py,
+        # test_1d). La fila sale de la sección 9 y la fila de la carta de la sección 5.6 ya no lo nombra.
+        pendientes = _seccion(self.texto, '9. Pendientes')
+        self.assertNotIn('correo de quien firma solo mientras su carta esté vigente', pendientes)
+        fila = [f for f in _seccion(self.texto, '5.6 Retención y borrado').splitlines()
+                if f.startswith('| Carta, datos de quien firma, verificaciones del TXT y bitácora |')]
+        self.assertEqual(len(fila), 1)
+        self.assertNotIn('GET /api/v1/domains', fila[0])
+        self.assertIn('así que en la práctica se guardan para siempre |', fila[0])
 
 
 if __name__ == '__main__':

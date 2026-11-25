@@ -31,10 +31,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from cirdan.version import VERSION
+
 CARPETA_GRABADAS = Path(__file__).resolve().parent / 'respuestas_grabadas'   # dentro del paquete, viaja con el código
 MODOS = ('vivo', 'grabar', 'reproducir')
 ESTADOS = ('succeeded', 'failed')                                                    # scan_source_runs.status final de una corrida
-TIPOS_ACTIVO = ('domain', 'subdomain', 'ip', 'service', 'certificate', 'email', 'api_doc')   # assets.asset_type
+TIPOS_ACTIVO = ('domain', 'subdomain', 'ip', 'service', 'certificate', 'email', 'api_doc', 'profile')   # assets.asset_type
 SEVERIDADES = ('critical', 'high', 'medium', 'low')                                  # scoring_rules.base_severity
 CARACTERISTICAS = ('tipo', 'antiguedad_dias', 'exposicion', 'sensibilidad')          # las del reto (lámina 7)
 EXPOSICIONES = ('directa', 'publica')     # directa: el activo responde en internet. publica: el dato es público
@@ -44,8 +46,11 @@ ESPERAS_REINTENTO = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minut
 SIN_GRABACION = 'no hay respuesta grabada para '
 MARCA = '.grabacion'                      # inicio de la grabación en curso, dentro de la carpeta del dominio
 # El User-Agent de toda petición de LowTide, el que nombra la sección 9 de la carta (docs/plantilla_carta_autorizacion.md)
-# para que el cliente lo reconozca en sus registros. Uno solo para todas las fuentes y la visita web (#18, RC-46).
-AGENTE = 'lowtide-osint/0.1 (+https://github.com/Kernel-Loco)'
+# para que el cliente lo reconozca en sus registros. Uno solo para todas las fuentes, la visita web y la consulta del
+# TXT (cirdan/orquestador/txt.py) (#18, RC-46). Lleva la versión del build (cirdan/version.py) y la liga a la página
+# de LowTide que dice qué es y a quién escribir (sección 'Tráfico de LowTide' de /seguridad en FrontKL).
+PAGINA = 'https://lowtidesec.com/seguridad'
+AGENTE = 'lowtide-osint/%s (+%s)' % (VERSION, PAGINA)
 NOMBRE_VALIDO = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
 CODIGO_VALIDO = re.compile(r'^[a-z][a-z0-9_]{1,62}$')
 HUELLA_VALIDA = re.compile(r'^[0-9a-f]{64}$')
@@ -70,7 +75,7 @@ class SinGrabacion(FuenteNoResponde):
 class Activo:
     tipo: str                      # uno de TIPOS_ACTIVO
     valor: str                     # nombre, IP, ip:puerto/protocolo, correo, huella del certificado o URL del documento
-    atributos: dict = field(default_factory=dict)   # va a assets.attributes. ip, service, certificate y api_doc llevan 'host' o 'hosts'
+    atributos: dict = field(default_factory=dict)   # va a assets.attributes. ip, service, certificate, api_doc y profile llevan 'host' o 'hosts'
 
 
 @dataclass
@@ -97,6 +102,7 @@ class Resultado:
     activos: list = field(default_factory=list)
     hallazgos: list = field(default_factory=list)
     sin_cobertura: list = field(default_factory=list)  # códigos que la fuente no pudo revisar: cobertura parcial, no 0
+    sin_llave: list = field(default_factory=list)  # de sin_cobertura, los que faltaron por no tener la llave (RC-229)
     revisados: list | None = None    # None si revisó todo. Si no, las partes que sí revisó completas (#23)
     sin_revisar: list | None = None  # con revisados, las que existen, revisaría y no revisó. None si no las sabe
     omitidos: list = field(default_factory=list)  # huellas de lo que sigue ahí pero un tope no deja reportar (#23)
@@ -204,6 +210,10 @@ def _errores_activo(a):
         # El filtro de alcance mira 'host' y 'hosts': con la URL de otro sitio, o con otro nombre además del suyo,
         # pasaría como si fuera del dominio
         errores.append("activo %r: debe ser una URL https del sitio de su 'host', y solo de ese" % a.valor)
+    elif a.tipo == 'profile' and _host_de_url(a.valor) is None:
+        # Un perfil público (#20, RC-56) es la URL https del perfil en su red: GitHub, LinkedIn y otras. Su sitio no es
+        # del dominio, así que el filtro de alcance mira 'hosts', los nombres del dominio que lo ligan
+        errores.append("activo %r: debe ser una URL https sin usuario, puerto, consulta ni fragmento" % a.valor)
     return errores
 
 
@@ -246,6 +256,8 @@ def validar(res, codigos=None):
         errores.append('sin_cobertura tiene códigos repetidos')
     elif codigos is not None and set(sin) - set(codigos):
         errores.append('sin_cobertura: %s no está en el catálogo de reglas' % ', '.join(sorted(set(sin) - set(codigos))))
+    if not isinstance(res.sin_llave, list) or (isinstance(sin, list) and set(res.sin_llave) - set(sin)):
+        errores.append('sin_llave debe ser una lista con códigos de sin_cobertura')
     rev, falta = res.revisados, res.sin_revisar
     errores += _errores_partes('revisados', rev, puede_faltar=True)
     errores += _errores_partes('sin_revisar', falta, puede_faltar=True)
@@ -349,8 +361,8 @@ def en_alcance_nombre(nombre, dominio):
 
 
 def en_alcance(activo, dominio):
-    """Nombres por su nombre, correos por su dominio, y IP, servicios, certificados y documentos de API por su 'host' o
-    'hosts'."""
+    """Nombres por su nombre, correos por su dominio, y IP, servicios, certificados, documentos de API y perfiles por su
+    'host' o 'hosts'."""
     if activo.tipo in ('domain', 'subdomain'):
         return en_alcance_nombre(activo.valor, dominio)
     if activo.tipo == 'email':
@@ -384,7 +396,7 @@ def _conteo(n):
     return n if type(n) is int and 0 <= n < 2 ** 63 else 0
 
 
-def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=None):
+def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=None, extras=None):
     """Lo que llama el orquestador: nunca lanza excepciones y siempre devuelve un Resultado del contrato.
 
     Si el dominio no es un nombre válido, no llama al recolector. El resultado tiene que ser del dominio
@@ -393,6 +405,9 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
     A recolectar() le pasa dominio, cliente, ahora y propios, más las opciones que el recolector declare en
     EN_ESCANEO (un diccionario, ninguna si no lo trae). Así crt.sh busca dominios parecidos en cada escaneo
     (#109, RC-226). Un EN_ESCANEO que no es un diccionario de opciones deja la fuente en 'failed'.
+    `extras` son las opciones que arma el orquestador para el recolector que las pide: los correos del dominio y la
+    llave de la fuente para HIBP (PIDE_CORREOS y PIDE_LLAVE, RC-54). Tampoco pueden repetir una de EN_ESCANEO ni
+    llamarse dominio, cliente, ahora o propios. Un error nunca trae su valor: puede ser la llave.
     """
     fuente = getattr(recolector, 'FUENTE', '') or getattr(recolector, '__name__', '?')
     fuente = fuente if isinstance(fuente, str) else '?'
@@ -409,6 +424,10 @@ def ejecutar(recolector, dominio, modo='vivo', ahora=None, propios=(), codigos=N
         opciones = {} if opciones is None else opciones  # [], '' o 0 no son un diccionario: failed, no se ignoran
         if not isinstance(opciones, dict) or set(opciones) & {'dominio', 'cliente', 'ahora', 'propios'}:
             return fallido('EN_ESCANEO debe ser un diccionario de opciones de recolectar()')
+        extras = {} if extras is None else extras
+        if not isinstance(extras, dict) or set(extras) & ({'dominio', 'cliente', 'ahora', 'propios'} | set(opciones)):
+            return fallido('las opciones del orquestador no pueden repetir las de recolectar() ni las de EN_ESCANEO')
+        opciones = {**opciones, **extras}
         cliente = recolector.crear_cliente(modo, autorizado)
         res = recolector.recolectar(autorizado, cliente, ahora=ahora, propios=propios, **opciones)
     except Exception as e:  # un recolector con errores no tumba el escaneo

@@ -9,6 +9,7 @@ REGISTRO = {'ct_logs': 'cirdan.recolectores.crtsh', 'dns': 'cirdan.recolectores.
             'subfinder': 'cirdan.recolectores.subfinder', 'github': 'cirdan.recolectores.github',
             'shodan': 'cirdan.recolectores.shodan', 'whois': 'cirdan.recolectores.rdap',
             'web': 'cirdan.recolectores.visita', 'api_docs': 'cirdan.recolectores.api_docs',
+            'identity': 'cirdan.recolectores.identidad', 'hibp': 'cirdan.recolectores.hibp',
             'ejemplo': 'cirdan.recolectores.ejemplo'}
 
 

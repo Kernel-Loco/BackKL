@@ -1,5 +1,6 @@
-"""HTTPS con un plazo absoluto por petición y sin redirecciones, para rdap.py y shodan.py (#15b, RC-166) y para el
-TXT de verificación por DNS sobre HTTPS de orquestador/txt.py (#119, RC-236).
+"""HTTPS con un plazo absoluto por petición y sin redirecciones, para rdap.py y shodan.py (#15b, RC-166), para el
+TXT de verificación por DNS sobre HTTPS de orquestador/txt.py (#119, RC-236), para crt.sh y Cert Spotter (RC-218 y
+RC-288) y para la API de GitHub (RC-304).
 
 urllib solo pone un timeout a cada operación del socket: getaddrinfo no tiene, y el connect de cada dirección, el
 handshake TLS, el envío y cada lectura de las cabeceras o del cuerpo tienen el timeout entero. Un servidor que contesta
@@ -17,7 +18,7 @@ Si se pasa del plazo, descargar() lanza PlazoVencido. El certificado se revisa c
 
 Una redirección (3xx) nunca se sigue: lanza Redirigida. Así cada petición llega solo al servidor que se pidió y es una
 sola consulta, la que cuenta el cliente para el cupo (#13b), sin saltos que no cuentan. El bootstrap de IANA, los
-registros RDAP, InternetDB y Cert Spotter responden sin redirigir. Si alguno redirige, el cliente lo toma como una
+registros RDAP, InternetDB, Cert Spotter y la API de GitHub responden sin redirigir. Si alguno redirige, el cliente lo toma como una
 respuesta que no se puede leer. Tampoco se usan los proxies del entorno (HTTPS_PROXY y los demás): cada
 petición va directa al servidor, porque el plazo no cubriría el CONNECT de un túnel.
 
@@ -38,6 +39,14 @@ recibe lo que queda del plazo (_SocketPlano).
 visitar() es la petición de la visita web: da el estado, las cabeceras y hasta `tope` bytes del cuerpo de cualquier
 respuesta, también un 4xx o un 5xx, y corta el cuerpo en vez de fallar. Una redirección tampoco se sigue: Redirigida
 trae el destino (`destino`) y quien llama decide si lo visita.
+
+El saludo TLS de la visita (#121, RC-239). Si la petición trae el atributo `saludo` (un dict), la conexión https lo
+llena con la versión y el cifrado que se negociaron (SSLSocket.version() y cipher()), después de revisar el
+certificado. Es el mismo saludo de la petición, con el mismo contexto: no hay otro saludo para verlo. Un certificado
+que no se pudo verificar o un servidor que no acepta TLS 1.2 ni 1.3 (el mínimo de ssl.create_default_context) salen
+como el OSError de siempre, y visita.py lee su verify_code o su alerta de versión. Si el dict ya trae la llave
+'correos' (identidad.py, #20, RC-56), también la llena con los correos del certificado ya verificado: el emailAddress
+de su sujeto y los rfc822Name de su subjectAltName, de SSLSocket.getpeercert(), en el mismo saludo.
 
 retry_after() lee la cabecera Retry-After, para que un 5xx que la trae espere lo que pide antes de otro intento.
 """
@@ -197,9 +206,9 @@ class _ConPlazo:
     puertos = PUERTOS
     clase_socket = None   # None: socket.socket, buscado en cada conexión (las pruebas lo cambian con mock.patch)
 
-    def __init__(self, host, plazo, cronometro, familia=socket.AF_UNSPEC, **otros):
+    def __init__(self, host, plazo, cronometro, familia=socket.AF_UNSPEC, saludo=None, **otros):
         super().__init__(host, **otros)
-        self.plazo, self.cronometro, self.familia = plazo, cronometro, familia
+        self.plazo, self.cronometro, self.familia, self.saludo = plazo, cronometro, familia, saludo
         self._create_connection = self._conectar
 
     def queda(self):
@@ -254,6 +263,27 @@ class _ConPlazo:
     def connect(self):
         super().connect()
         self.sock.queda = self.queda
+        if self.saludo is not None and isinstance(self.sock, ssl.SSLSocket):
+            # El saludo ya terminó y se revisó el certificado: la versión y el cifrado que se negociaron (RC-239)
+            cifrado = self.sock.cipher()
+            self.saludo.update(version=self.sock.version(), cifrado=cifrado[0] if cifrado else None)
+            if 'correos' in self.saludo:
+                self.saludo['correos'] = correos_del_certificado(self.sock.getpeercert())
+
+
+def correos_del_certificado(cert):
+    """Los correos (textos) del certificado de SSLSocket.getpeercert(): el emailAddress de su sujeto y los 'email' de
+    su subjectAltName, sin repetir y en el orden en que vienen. Lista vacía si no trae ninguno o no se puede leer."""
+    correos = []
+    try:
+        pares = [par for rdn in cert.get('subject') or () for par in rdn]
+        pares += [('emailAddress', v) for tipo, v in cert.get('subjectAltName') or () if tipo == 'email']
+        for tipo, valor in pares:
+            if tipo == 'emailAddress' and isinstance(valor, str) and valor not in correos:
+                correos.append(valor)
+    except (AttributeError, TypeError, ValueError):
+        return []
+    return correos
 
 
 class _Conexion(_ConPlazo, http.client.HTTPSConnection):
@@ -287,7 +317,9 @@ class _Https(urllib.request.HTTPSHandler):
         self._conexion = functools.partial(_Conexion, plazo=plazo, cronometro=cronometro, familia=familia)
 
     def https_open(self, req):
-        return self.do_open(self._conexion, req, context=self._context)
+        saludo = getattr(req, 'saludo', None)   # un dict que llena la conexión con la versión y el cifrado (RC-239)
+        conexion = self._conexion if saludo is None else functools.partial(self._conexion, saludo=saludo)
+        return self.do_open(conexion, req, context=self._context)
 
 
 class _SinRedirecciones(urllib.request.HTTPRedirectHandler):

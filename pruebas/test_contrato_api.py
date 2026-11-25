@@ -66,10 +66,13 @@ class Score(unittest.TestCase):
 
     def test_1_cuadra_con_el_criterio(self):
         notas = {c['category']: c['score'] for c in SCORE['categories']}
-        r = calcular(notas, SCORE['critical_open'])
+        r = calcular(notas, SCORE['critical_at_time'])   # el piso sale de los críticos del snapshot (RC-316)
         self.assertEqual((SCORE['weighted'], SCORE['floor'], SCORE['score'], SCORE['band'], SCORE['floor_applied']),
                          (r['ponderado'], r['piso'], r['score'], r['banda'], r['piso_aplicado']))
-        self.assertEqual(SCORE['floor_message'], motor.mensaje_piso(r, SCORE['critical_open']))
+        self.assertEqual(SCORE['floor_message'], motor.mensaje_piso(r, SCORE['critical_at_time']))
+        # needs_rescan compara cuáles críticos, no cuántos, así que la cuenta sola no lo decide. El ejemplo es la semilla
+        # sin cambios desde su score: misma cuenta y false. Los casos en true van en test_3a de test_api_v1 (RC-316).
+        self.assertEqual((SCORE['critical_open'], SCORE['needs_rescan']), (SCORE['critical_at_time'], False))
 
     def test_2_categorias_con_su_peso_y_banda(self):
         self.assertEqual([c['category'] for c in SCORE['categories']], list(criterio.CATEGORIAS))
@@ -215,8 +218,8 @@ class Dominios(unittest.TestCase):
 
     def test_4_motivos_como_en_el_contrato_y_el_orquestador(self):
         # Los de docs/contrato_api_v1.md, y el orquestador tiene el texto de cada uno
-        fila = next(l for l in (EJEMPLOS.parent / 'contrato_api_v1.md').read_text(encoding='utf-8').splitlines()
-                    if l.startswith('| `scan_eligibility`'))
+        fila = next(linea for linea in (EJEMPLOS.parent / 'contrato_api_v1.md').read_text(encoding='utf-8').splitlines()
+                    if linea.startswith('| `scan_eligibility`'))
         self.assertEqual(set(fila.split('dice por qué:')[1].split('.')[0].split('`')[1::2]), set(MOTIVOS_BLOQUEO))
         orquestador = (EJEMPLOS.parents[1] / 'cirdan' / 'orquestador' / '__init__.py').read_text(encoding='utf-8')
         for motivo in MOTIVOS_BLOQUEO:

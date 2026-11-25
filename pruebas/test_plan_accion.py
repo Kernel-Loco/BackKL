@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from cirdan.score import plan
+from cirdan.score import motor, plan
 
 PESOS = {
     'infrastructure': 0.30,
@@ -39,6 +39,30 @@ class PlanAccion(unittest.TestCase):
         self.assertEqual(resultado['score_after'], 60)
         self.assertEqual(resultado['method'], 'rules')
         self.assertEqual(resultado['category_scores_after']['configuration'], 0)
+
+    def test_simulacion_coincide_con_recalculo_del_motor_tras_resolver_acciones(self):
+        casos = (['secret'], ['secret', 'spf_missing'])
+        calculo_antes = motor.calcular(HALLAZGOS, REGLAS, PESOS)
+
+        for action_ids in casos:
+            with self.subTest(action_ids=action_ids):
+                resueltos = [
+                    {**hallazgo, 'status': 'resolved'}
+                    if hallazgo['status'] == 'open' and hallazgo['rule_code'] in action_ids
+                    else dict(hallazgo)
+                    for hallazgo in HALLAZGOS
+                ]
+                calculo_despues = motor.calcular(resueltos, REGLAS, PESOS)
+                simulado = plan.simular(HALLAZGOS, REGLAS, PESOS, action_ids)
+
+                self.assertEqual(simulado['score_before'], calculo_antes['score'])
+                self.assertEqual(simulado['category_scores_before'], calculo_antes['category_scores'])
+                self.assertEqual(simulado['score_after'], calculo_despues['score'])
+                self.assertEqual(simulado['category_scores_after'], calculo_despues['category_scores'])
+                self.assertEqual(simulado['score_reduction'],
+                                 calculo_antes['score'] - calculo_despues['score'])
+                self.assertEqual([hallazgo['status'] for hallazgo in HALLAZGOS],
+                                 ['open', 'open', 'accepted_risk'])
 
     def test_simulacion_rechaza_acciones_desconocidas_o_cerradas(self):
         with self.assertRaisesRegex(ValueError, 'desconocida'):
@@ -85,6 +109,22 @@ class PlanAccion(unittest.TestCase):
         resultado = plan.construir_plan('acme-tienda.mx', [], REGLAS, PESOS, guardado=guardado)
         self.assertEqual((resultado['score_before'], resultado['band_before']), (54, 'medium'))
         self.assertEqual((resultado['actions'], resultado['total']), ([], 0))
+
+    def test_bandas_del_plan_y_la_simulacion_usan_los_cortes_del_juego(self):
+        # RC-237: con 50, 70 y 85 el 80 de antes es alto y no crítico, y el 60 del después es medio.
+        cortes = {'medium': 50, 'high': 70, 'critical': 85}
+        resultado = plan.construir_plan('olmardo.com', HALLAZGOS, REGLAS, PESOS, cortes=cortes)
+        self.assertEqual((resultado['score_before'], resultado['band_before']), (85, 'critical'))
+        simulado = plan.simular(HALLAZGOS, REGLAS, PESOS, ['secret'], cortes=cortes)
+        self.assertEqual(simulado['band_before'], 'critical')
+        self.assertEqual(simulado['band_after'], plan.criterio.banda(simulado['score_after'], cortes))
+        guardado = {'score': 80, 'category_scores': {'infrastructure': 80, 'digital_identity': 55,
+                                                     'configuration': 30, 'data_leaks': 90}}
+        con_guardado = plan.simular(HALLAZGOS, REGLAS, PESOS, ['secret', 'spf_missing'], guardado=guardado,
+                                    cortes=cortes)
+        self.assertEqual((con_guardado['score_before'], con_guardado['band_before']), (80, 'high'))
+        sin_cortes = plan.simular(HALLAZGOS, REGLAS, PESOS, ['secret', 'spf_missing'], guardado=guardado)
+        self.assertEqual(sin_cortes['band_before'], 'critical')
 
     def test_exportaciones_escapan_celdas_con_formula(self):
         data = plan.construir_plan('olmardo.com', HALLAZGOS, REGLAS, PESOS)

@@ -5,6 +5,10 @@ Revisa los repositorios públicos de la organización de GitHub que la empresa d
   de un repo. La busca gitleaks 8.21.2 con gitleaks_cirdan.toml: sus reglas de omisión más una para los tokens falsos
   CIRDAN_FAKE_ de la siembra y de las pruebas, copiadas sin las rutas de su allowlist que saltan archivos del cliente,
   como los lock files (ver gitleaks_reglas.py). Un secreto que ya solo vive en el historial también es crítico.
+- file_share_link_in_repo (medio, sobre el activo domain, RC-247): un enlace para compartir de Google Drive, OneDrive o
+  SharePoint, o Dropbox, en la versión actual o en el historial de un repo. Lo reconocen las 3 reglas cirdan-enlace-*
+  de gitleaks_cirdan.toml solo por su forma: nada abre, sigue ni valida el enlace, que sería usar un acceso filtrado.
+  La evidencia guarda el servicio, el repo, la ruta y la huella, nunca el enlace.
 - email_in_public_commits (bajo, sobre un activo email por correo): un correo del dominio, o de un subdominio, como
   autor o como quien subió un commit.
 - el activo domain con atributos['github']: la organización, si su perfil enlaza al dominio, si GitHub la verificó y
@@ -14,7 +18,7 @@ Organización declarada. Solo se revisa la organización que la empresa declara 
 'Organización de GitHub de la empresa' de la carta. Hasta la tabla de #64 la declaración vive en la variable
 ORGS_GITHUB_DECLARADAS, con pares dominio=org separados por comas (por omisión olmardo.com=olmardo), y es de toda la
 plataforma, no de cada carta. Sin declaración, con 'ninguna' o con un nombre inválido no se consulta nada: la fuente
-queda succeeded, con sus 2 códigos en sin_cobertura y un aviso, así el portal dice 'sin cobertura' y no 0. Deducir la
+queda succeeded, con sus 3 códigos en sin_cobertura y un aviso, así el portal dice 'sin cobertura' y no 0. Deducir la
 organización del nombre del dominio (GET /orgs/<etiqueta>) va apagado: la política de uso ético prohíbe adivinar
 nombres de recursos.
 
@@ -31,9 +35,9 @@ Qué consulta, y nada más:
   la corrida (keep_raw_payload). Al grabar, ese repo cuenta como falla y no se graba sin filtrar.
 
 Sin secretos ni datos personales de más:
-- gitleaks corre con --redact y su reporte se lee por lista blanca: RuleID, File y Date. Nunca Secret, Match, Author,
-  Email ni Message. Si un hallazgo trae Secret o Match sin redactar, la corrida se descarta: queda sin cobertura con un
-  aviso fijo, sin grabar nada, y no se reintenta, porque daría lo mismo.
+- gitleaks corre con --redact y su reporte se lee por lista blanca: RuleID, File y Date (primera y última aparición).
+  Nunca Secret, Match, Author, Email ni Message. Si un hallazgo trae Secret o Match sin redactar, la corrida se
+  descarta: queda sin cobertura con un aviso fijo, sin grabar nada, y no se reintenta, porque daría lo mismo.
 - La huella es el sha256 de código, repo, ruta y regla: no depende del valor del secreto, que no se usa, no se guarda ni
   sale del proceso. Si llega sin redactar, solo se lee para comprobarlo y la corrida se descarta.
 - De git log solo salen los correos del autor y de quien subió cada commit, en minúsculas. Los nombres nunca. Los que no
@@ -58,7 +62,7 @@ no está, como uno borrado o que se hizo privado (#23). Si no se pudo revisar ni
 la fuente no respondió. Sin git o gitleaks instalados tampoco responde, y se sabe antes de consultar la API.
 
 Cuota de GitHub sin token: 60 consultas por hora por IP. Un 403 o 429 no se reintenta en la corrida ni la deja failed,
-porque el orquestador la reintentaría a 1, 5 y 25 minutos reservando MAX_CONSULTAS cada vez: queda succeeded con sus 2
+porque el orquestador la reintentaría a 1, 5 y 25 minutos reservando MAX_CONSULTAS cada vez: queda succeeded con sus 3
 códigos en sin_cobertura y un aviso. Un clon no gasta esa cuota, pero cuenta como consulta del límite diario (#13b).
 
 Modos: 'vivo' consulta GitHub; 'grabar' además guarda lo ya limpio en
@@ -76,6 +80,7 @@ Código de salida: 0 bien, 1 si queda en 'failed', 2 si quedan avisos.
 import argparse
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -94,7 +99,7 @@ from pathlib import Path
 
 from cirdan.config import config
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import contrato
+from cirdan.recolectores import contrato, transporte
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoResponde, Grabadora, Hallazgo, Resultado,
                                           SinGrabacion, con_reintentos, en_alcance_nombre, fecha_iso, nombre_archivo)
@@ -103,9 +108,14 @@ FUENTE = 'github'
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'github'
 REGLAS = Path(__file__).resolve().parent / 'gitleaks_cirdan.toml'
 
-# Código de regla -> severidad base. Los dos existen en el catálogo de reglas (semilla 004).
-CODIGOS = {'secret_in_public_repo': 'critical', 'email_in_public_commits': 'low'}
-TIPOS = {'secret_in_public_repo': 'secreto_en_repositorio', 'email_in_public_commits': 'correo_en_commits'}
+# Código de regla -> severidad base. Los tres existen en el catálogo de reglas (semilla 004 y, el de los enlaces, 023).
+CODIGOS = {'secret_in_public_repo': 'critical', 'file_share_link_in_repo': 'medium', 'email_in_public_commits': 'low'}
+TIPOS = {'secret_in_public_repo': 'secreto_en_repositorio', 'file_share_link_in_repo': 'enlace_compartido_en_repositorio',
+         'email_in_public_commits': 'correo_en_commits'}
+# Regla de gitleaks (gitleaks_reglas.REGLAS_ENLACES) -> servicio. Lo que sale de ellas da file_share_link_in_repo y no
+# secret_in_public_repo.
+SERVICIOS_ENLACE = {'cirdan-enlace-google-drive': 'google_drive', 'cirdan-enlace-onedrive': 'onedrive',
+                    'cirdan-enlace-dropbox': 'dropbox'}
 
 DECLARADAS = 'ORGS_GITHUB_DECLARADAS'          # dominio=org,dominio=org
 DECLARADAS_OMISION = 'olmardo.com=olmardo'
@@ -232,6 +242,15 @@ def _primera(a, b):
     return min(x for x in (a, b) if x) if a or b else None
 
 
+def _fecha_extrema(a, b, extremo):
+    fechas = []
+    for valor in (a, b):
+        fecha = _fecha(valor)
+        if fecha:
+            fechas.append(fecha_iso(fecha))
+    return extremo(fechas).astimezone(timezone.utc).isoformat() if fechas else None
+
+
 def _repo_valido(nombre):
     return (isinstance(nombre, str) and bool(REPO_VALIDO.fullmatch(nombre)) and '..' not in nombre
             and bool(nombre.strip('.')))
@@ -343,7 +362,7 @@ class SecretoSinRedactar(FuenteNoResponde):
 
 
 def leer_reporte(texto):
-    """[{regla, ruta, primera_vez}] del reporte JSON de gitleaks: uno por ruta y regla, con la fecha más vieja.
+    """[{regla, ruta, primera_vez, ultima_vez}] del reporte de gitleaks: un rango de fechas por ruta y regla.
 
     Solo lee RuleID, File y Date. Secret y Match solo se miran para comprobar que vienen redactados. Lanza
     SecretoSinRedactar si no, y ValueError si el reporte no tiene la forma de gitleaks."""
@@ -359,8 +378,11 @@ def leer_reporte(texto):
             raise SecretoSinRedactar()
         regla = f.get('RuleID') if isinstance(f.get('RuleID'), str) and REGLA_VALIDA.fullmatch(f['RuleID']) else 'desconocida'
         llave = (_ruta(f.get('File')), regla)
-        vistos[llave] = _primera(vistos.get(llave), _fecha(f.get('Date')))
-    return [{'regla': regla, 'ruta': ruta, 'primera_vez': fecha} for (ruta, regla), fecha in sorted(vistos.items())]
+        primera, ultima = vistos.get(llave, (None, None))
+        vistos[llave] = (_fecha_extrema(primera, f.get('Date'), min),
+                         _fecha_extrema(ultima, f.get('Date'), max))
+    return [{'regla': regla, 'ruta': ruta, 'primera_vez': primera, 'ultima_vez': ultima}
+            for (ruta, regla), (primera, ultima) in sorted(vistos.items())]
 
 
 def leer_entornos(texto):
@@ -452,7 +474,9 @@ def revision_valida(datos, dominio):
     for s in datos['secretos']:
         if isinstance(s, dict) and isinstance(s.get('regla'), str) and REGLA_VALIDA.fullmatch(s['regla']):
             llave = (_ruta(s.get('ruta')), s['regla'])
-            secretos[llave] = _primera(secretos.get(llave), _fecha(s.get('primera_vez')))
+            primera, ultima = secretos.get(llave, (None, None))
+            secretos[llave] = (_fecha_extrema(primera, s.get('primera_vez'), min),
+                               _fecha_extrema(ultima, s.get('ultima_vez'), max))
     correos = {}
     for c in datos['correos']:
         if (isinstance(c, dict) and isinstance(c.get('correo'), str) and correo_valido(c['correo'], dominio)
@@ -463,7 +487,8 @@ def revision_valida(datos, dominio):
 
     def conteo(n):
         return n if type(n) is int and n >= 0 else 0
-    return {'secretos': [{'regla': regla, 'ruta': ruta, 'primera_vez': f} for (ruta, regla), f in sorted(secretos.items())],
+    return {'secretos': [{'regla': regla, 'ruta': ruta, 'primera_vez': primera, 'ultima_vez': ultima}
+                         for (ruta, regla), (primera, ultima) in sorted(secretos.items())],
             'correos': [correos[c] for c in sorted(correos)],
             'ajenos': conteo(datos.get('ajenos')), 'invalidos': conteo(datos.get('invalidos'))}
 
@@ -547,24 +572,13 @@ def _entorno(casa):
 
 
 def _descargar(url, timeout):
-    """El cuerpo de la respuesta. `timeout` vale para cada operación del socket y también para toda la respuesta, así
-    una que llega gota a gota se corta igual."""
-    fin = time.monotonic() + timeout
+    """El cuerpo de la respuesta con transporte.descargar() (RC-304): `timeout` es el plazo de toda la petición, de
+    getaddrinfo al último bloque, y el cuerpo no pasa de MAX_BYTES (ValueError). Como RDAP y Shodan, nunca sigue una
+    redirección (Redirigida), no usa los proxies del entorno y solo se conecta a direcciones públicas en el 443
+    (RC-299). El HTTPError de un 4xx o un 5xx sale tal cual, para que _api lea su código."""
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/vnd.github+json',
                                                'X-GitHub-Api-Version': VERSION_API})
-    partes, total = [], 0
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        while True:
-            if time.monotonic() > fin:
-                raise TimeoutError('la respuesta no terminó en %s s' % timeout)
-            trozo = r.read1(64 * 1024)
-            if not trozo:
-                break
-            partes.append(trozo)
-            total += len(trozo)
-            if total > MAX_BYTES:
-                raise ValueError('respuesta de más de %d bytes' % MAX_BYTES)
-    return b''.join(partes)
+    return transporte.descargar(req, time.monotonic() + timeout, MAX_BYTES, time.monotonic)
 
 
 def _archivo(consulta):
@@ -664,8 +678,13 @@ class ClienteGitHub:
 
     def _api(self, ruta, paso):
         """JSON de la API de GitHub con hasta INTENTOS intentos, dentro del tiempo de la corrida. Un 404 lanza NoExiste
-        y un 403 o 429 CuotaAgotada, sin reintentar. Lo demás sale como FuenteNoResponde con texto fijo."""
+        y un 403 o 429 CuotaAgotada, sin reintentar. Lo demás sale como FuenteNoResponde con texto fijo. Una redirección
+        (transporte.Redirigida) no se sigue ni se reintenta, y un PlazoVencido se reintenta como cualquier falla de la
+        red (RC-304)."""
         url = API + ruta
+
+        def fija():
+            return FuenteNoResponde('github: la API de GitHub no respondió (%s)' % paso)
 
         def consulta():
             limite = min(TIMEOUT_HTTP, self.restante())
@@ -674,6 +693,8 @@ class ClienteGitHub:
             self.consultas += 1
             try:
                 return json.loads(self.descargar(url, limite))
+            except transporte.Redirigida:
+                raise fija() from None   # otro intento volvería a redirigir
             except urllib.error.HTTPError as e:
                 codigo = e.code
                 e.close()
@@ -686,13 +707,14 @@ class ClienteGitHub:
                 raise
         consulta.__name__ = paso
         try:
-            return con_reintentos(consulta, intentos=INTENTOS, dormir=self.dormir)
+            return con_reintentos(consulta, intentos=INTENTOS, dormir=self.dormir,
+                                  errores=(OSError, ValueError, http.client.HTTPException, transporte.PlazoVencido))
         except (NoExiste, CuotaAgotada):
             raise
         except FuenteNoResponde as e:
             if str(e).startswith('github: '):
                 raise
-            raise FuenteNoResponde('github: la API de GitHub no respondió (%s)' % paso) from None
+            raise fija() from None
 
     def perfil(self, org, dominio):
         consulta = 'perfil:' + org
@@ -849,7 +871,7 @@ def _caracteristicas(codigo, tipo_activo, evidencia, ahora, sensibilidad):
 
 
 def hallazgo_secreto(dominio, repo, secreto, ahora, aviso=None):
-    """secret_in_public_repo sobre el dominio. La evidencia lleva repo, ruta, tipo (la regla de gitleaks) y huella,
+    """secret_in_public_repo sobre el dominio. La evidencia lleva repo, ruta, tipo, huella y rango de fechas,
     nunca el valor ni el commit. La sensibilidad es alta: es una credencial (rúbrica de caracteristicas.py). Si no se
     pudieron buscar los entornos de Python del repo, lleva también `aviso` (SIN_ENTORNOS con la causa): el portal
     muestra la evidencia, y el resumen de la corrida, con sus avisos, no se guarda (keep_raw_payload)."""
@@ -857,12 +879,36 @@ def hallazgo_secreto(dominio, repo, secreto, ahora, aviso=None):
     titulo = 'Clave de acceso publicada en GitHub: %s, archivo %s' % (repo, secreto['ruta'])
     huella = _huella(codigo, repo, secreto['ruta'], secreto['regla'])
     evidencia = {'title': titulo, 'repo': repo, 'ruta': secreto['ruta'], 'tipo': secreto['regla'], 'huella': huella,
-                 'primera_vez': secreto['primera_vez']}
+                 'primera_vez': secreto['primera_vez'], 'ultima_vez': secreto['ultima_vez']}
     if aviso:
         evidencia['aviso'] = aviso
     return Hallazgo(codigo, CODIGOS[codigo], dominio, titulo, evidencia,
                     _caracteristicas(codigo, 'domain', evidencia, ahora, 'alta'), huella,
                     clave='%s:%s:%s' % (repo, secreto['ruta'], secreto['regla']), partes=[repo])
+
+
+def hallazgo_enlace(dominio, repo, enlace, ahora, aviso=None):
+    """file_share_link_in_repo sobre el dominio (RC-247), de una regla de SERVICIOS_ENLACE. La evidencia lleva repo,
+    ruta, tipo (el servicio: google_drive, onedrive o dropbox) y huella, nunca el enlace, que gitleaks ya tapó con
+    --redact y que nadie abre. La huella es la de hallazgo_secreto con este código: no depende del enlace. La
+    sensibilidad sale de la rúbrica (media): no se sabe qué hay detrás del enlace. `aviso` como en hallazgo_secreto."""
+    codigo = 'file_share_link_in_repo'
+    titulo = 'Enlace para compartir archivos de la nube publicado en GitHub: %s, archivo %s' % (repo, enlace['ruta'])
+    huella = _huella(codigo, repo, enlace['ruta'], enlace['regla'])
+    evidencia = {'title': titulo, 'repo': repo, 'ruta': enlace['ruta'], 'tipo': SERVICIOS_ENLACE[enlace['regla']],
+                 'huella': huella, 'primera_vez': enlace['primera_vez']}
+    if aviso:
+        evidencia['aviso'] = aviso
+    return Hallazgo(codigo, CODIGOS[codigo], dominio, titulo, evidencia,
+                    _caracteristicas(codigo, 'domain', evidencia, ahora, rubrica.sensibilidad(codigo, evidencia, ahora)),
+                    huella, clave='%s:%s:%s' % (repo, enlace['ruta'], enlace['regla']), partes=[repo])
+
+
+def hallazgo_de_gitleaks(dominio, repo, secreto, ahora, aviso=None):
+    """Lo que halló gitleaks: un enlace para compartir si su regla es de SERVICIOS_ENLACE y si no, un secreto."""
+    if secreto['regla'] in SERVICIOS_ENLACE:
+        return hallazgo_enlace(dominio, repo, secreto, ahora, aviso)
+    return hallazgo_secreto(dominio, repo, secreto, ahora, aviso)
 
 
 def hallazgo_correo(correo, datos, ahora, partes=None):
@@ -961,7 +1007,7 @@ def _revisar(res, cliente, org, dominio, ahora):
     for nombre, datos in revisados:
         repo = '%s/%s' % (login, nombre)
         aviso = SIN_ENTORNOS % datos['sin_entornos'] if datos.get('sin_entornos') else None
-        res.hallazgos += [hallazgo_secreto(res.dominio, repo, s, ahora, aviso) for s in datos['secretos']]
+        res.hallazgos += [hallazgo_de_gitleaks(res.dominio, repo, s, ahora, aviso) for s in datos['secretos']]
         if aviso:
             sin_entornos.append(aviso)
         ajenos += datos['ajenos']

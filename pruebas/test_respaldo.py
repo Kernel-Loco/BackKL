@@ -1,4 +1,4 @@
-"""Pruebas del respaldo de la base (#115, RC-233): db/respaldo/respaldar.sh, restaurar.sh y comparar.sh.
+"""Pruebas de respaldos (#115, RC-233, RC-28 y RC-339): base, paquete completo y restauración segura.
 
 Sacan un respaldo cifrado con age de la base `cirdan` del compose de prueba, lo restauran en una base nueva y
 comparan filas por tabla, RLS, FORCE, políticas y los permisos de PUBLIC sobre la base. También revisan la
@@ -7,8 +7,9 @@ puede descifrar, que no muestre la llave y que una configuración mala no deje n
 
     python -m unittest -v pruebas/test_respaldo.py
 
-Necesitan bash, age y age-keygen, y el contenedor de la base del compose de prueba (`cirdan-pg16` en el CI, otro
-con RESPALDO_CONTENEDOR). Solo crean y borran bases que empiezan con `cirdan_prueba_respaldo_<pid>_`. En el CI
+Necesitan bash, age y age-keygen, y el contenedor de la base del compose de prueba: `cirdan-pg16` en el CI y, en una
+PC, el de una pila aislada con RESPALDO_CONTENEDOR. Sin esa variable fuera del CI se saltan, para no tocar la base de
+desarrollo. Solo crean y borran bases que empiezan con `cirdan_prueba_respaldo_<pid>_`. En el CI
 fallan si falta age, para que no se salten sin aviso.
 """
 import base64
@@ -25,10 +26,26 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from pruebas.pila import exigir_contenedor
+
 RAIZ = Path(__file__).resolve().parent.parent
 RESPALDO = RAIZ / 'db' / 'respaldo'
-CONTENEDOR = os.environ.get('RESPALDO_CONTENEDOR', 'cirdan-pg16')
-PATRON = re.compile(r'^cirdan_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}\.dump\.age$')
+
+def en_ci(env):
+    """GitHub Actions pone CI=true. CI=false o CI=0 en una terminal no cuentan."""
+    return (env.get('CI') or '').strip().lower() in ('true', '1')
+
+
+def contenedor(env):
+    """La base contra la que corren. En el CI el compose de prueba se llama cirdan-pg16, pero en una PC ese nombre es
+    la base de desarrollo: ahí hay que nombrar el contenedor de una pila aislada con RESPALDO_CONTENEDOR."""
+    return (env.get('RESPALDO_CONTENEDOR') or '').strip() or ('cirdan-pg16' if en_ci(env) else None)
+
+
+CONTENEDOR = contenedor(os.environ)
+CONTENEDOR_CARTAS = (os.environ.get('RESPALDO_CARTAS_CONTENEDOR') or '').strip() or (
+    'cirdan-api' if en_ci(os.environ) else None)
+PATRON = re.compile(r'^cirdan_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}\.(?:backup|dump)\.age$')
 PREFIJO = 'cirdan_prueba_respaldo_%d_' % os.getpid()
 HERRAMIENTAS = ('bash', 'age', 'age-keygen', 'docker')
 FALTAN = [h for h in HERRAMIENTAS if not shutil.which(h)]
@@ -40,6 +57,7 @@ def correr(args, entrada=None, env=None):
 
 
 def psql(sql, base='postgres'):
+    exigir_contenedor(CONTENEDOR)
     proc = subprocess.run(
         ['docker', 'exec', '-i', '-e', 'BASE=' + base, CONTENEDOR, 'sh', '-c',
          'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -v ON_ERROR_STOP=1'],
@@ -66,11 +84,26 @@ def existe(base):
     return psql("SELECT count(*) FROM pg_database WHERE datname = '%s';" % base) == '1'
 
 
-@unittest.skipIf(FALTAN and not os.environ.get('CI'), 'faltan %s' % ', '.join(FALTAN))
+class Contenedor(unittest.TestCase):
+
+    def test_fuera_del_ci_no_toma_la_base_de_desarrollo(self):
+        self.assertIsNone(contenedor({}))
+        self.assertIsNone(contenedor({'RESPALDO_CONTENEDOR': '  '}))
+        self.assertEqual(contenedor({'RESPALDO_CONTENEDOR': 'lote14-x-pg16'}), 'lote14-x-pg16')
+        self.assertEqual(contenedor({'CI': 'true'}), 'cirdan-pg16')
+        for valor in ('false', '0', '', 'no'):
+            self.assertIsNone(contenedor({'CI': valor}), valor)
+        self.assertEqual(contenedor({'CI': 'true', 'RESPALDO_CONTENEDOR': 'otra-pg16'}), 'otra-pg16')
+
+
+@unittest.skipIf(FALTAN and not en_ci(os.environ), 'faltan %s' % ', '.join(FALTAN))
+@unittest.skipIf(not CONTENEDOR, 'sin RESPALDO_CONTENEDOR: fuera del CI se nombra la base de una pila aislada')
+@unittest.skipIf(not CONTENEDOR_CARTAS, 'sin RESPALDO_CARTAS_CONTENEDOR: nombra la API de una pila aislada')
 class Respaldo(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        exigir_contenedor(CONTENEDOR)   # los .sh de db/respaldo/ también entran a ese contenedor
         if FALTAN:
             raise AssertionError('en el CI no puede faltar: %s' % ', '.join(FALTAN))
         cls.tmp = Path(tempfile.mkdtemp(prefix='respaldo_'))
@@ -90,7 +123,8 @@ class Respaldo(unittest.TestCase):
             psql('DROP DATABASE "%s";' % b)
 
     def conf(self, carpeta, **extra):
-        valores = {'CONTENEDOR_BASE': CONTENEDOR, 'CARPETA': carpeta.as_posix(), 'RECEPTOR_AGE': self.publica,
+        valores = {'CONTENEDOR_BASE': CONTENEDOR, 'CONTENEDOR_CARTAS': CONTENEDOR_CARTAS,
+                   'CARPETA': carpeta.as_posix(), 'RECEPTOR_AGE': self.publica,
                    'SUBIR': '0', 'RETENCION': '7', **extra}
         ruta = carpeta.parent / ('%s.conf' % carpeta.name)
         ruta.write_text(''.join('%s=%s\n' % kv for kv in valores.items()), encoding='utf-8')
@@ -190,7 +224,8 @@ class Respaldo(unittest.TestCase):
         self.assertEqual(esquema(conteos('cirdan')), esquema(self.cirdan_antes))
 
     def test_4_configuracion_mala_no_deja_nada(self):
-        casos = [{'RECEPTOR_AGE': 'age1nooo'}, {'CLAVE_RARA': 'x'}, {'RETENCION': '0'}, {'SUBIR': '1'},
+        casos = [{'RECEPTOR_AGE': 'age1nooo'}, {'CLAVE_RARA': 'x'}, {'RETENCION': '0'},
+                 {'CONTENEDOR_CARTAS': '-invalido'}, {'SUBIR': '1'},
                  {'SUBIR': '1', 'CUENTA_BLOB': 'Mala_Cuenta'}, {'CONTENEDOR_BASE': '-x'},
                  {'CARPETA': '/tmp/con espacio'}, {'CARPETA': '/tmp/../etc'}]
         for i, extra in enumerate(casos):
@@ -265,6 +300,7 @@ class Respaldo(unittest.TestCase):
                 texto = texto.replace(viejo, nuevo)
             script = self.tmp / 'respaldar_falso.sh'
             script.write_text(texto, encoding='utf-8')
+            shutil.copyfile(RESPALDO / 'paquete.py', self.tmp / 'paquete.py')
 
             def subir(caso, modo, rol=True):
                 falso.blobs.clear()

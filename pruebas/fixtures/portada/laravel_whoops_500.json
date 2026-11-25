@@ -1,0 +1,11 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de Laravel con Whoops, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 500,
+ "cabeceras": [
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!DOCTYPE html><!--\n\n\nErrorException: Undefined variable $usuario in file /var/www/acme/app/Http/Controllers/InicioController.php on line 18\n\n\n-->\n<html>\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"robots\" content=\"noindex,nofollow\"/>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, shrink-to-fit=no\"/>\n    <title>Whoops! There was an error.</title>\n    <style>body { font: 12px \"Helvetica Neue\", helvetica, arial, sans-serif; }</style>\n  </head>\n  <body>\n    <div class=\"Whoops container\">\n      <div class=\"panel left-panel cf \">\n        <header><div class=\"exception\"><h3 class=\"exc-title\">ErrorException</h3></div></header>\n      </div>\n    </div>\n  </body>\n</html>\n"
+}

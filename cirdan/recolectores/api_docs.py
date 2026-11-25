@@ -53,7 +53,7 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 
 from cirdan.ml import caracteristicas as rubrica
-from cirdan.recolectores import borde, certspotter, contrato, shodan, transporte, visita
+from cirdan.recolectores import borde, certspotter, contrato, shodan, transporte, turno, visita
 from cirdan.recolectores.contrato import CARPETA_GRABADAS as RAIZ_GRABADAS
 from cirdan.recolectores.contrato import NOMBRE_VALIDO, Activo, FuenteNoResponde, Hallazgo, Resultado, SinGrabacion
 from cirdan.recolectores.shodan import RespuestaIlegible, SinTiempo
@@ -490,11 +490,12 @@ def limpiar(datos):
 
 def _descargar_ct(url, timeout, cronometro=None):
     """El cuerpo de una página de Cert Spotter, de a lo más MAX_BYTES_CT, con el plazo absoluto de
-    transporte.descargar. Una respuesta más grande o una redirección dan RespuestaIlegible."""
+    transporte.descargar. Una respuesta más grande o una redirección dan RespuestaIlegible. Va por
+    certspotter.descargar: una página que otra fuente ya pidió en este escaneo no sale a la red (RC-326)."""
     cronometro = cronometro or time.monotonic
     req = urllib.request.Request(url, headers={'User-Agent': AGENTE, 'Accept': 'application/json'})
     try:
-        return transporte.descargar(req, cronometro() + timeout, MAX_BYTES_CT, cronometro)
+        return certspotter.descargar(req, cronometro() + timeout, MAX_BYTES_CT, cronometro)
     except transporte.PlazoVencido:
         raise SinTiempo('api_docs: la respuesta tardó más de %s s' % timeout) from None
     except (transporte.Redirigida, ValueError) as e:
@@ -517,12 +518,19 @@ def _visitar(url, timeout, cronometro=None):
     except urllib.error.URLError as e:
         if isinstance(e.reason, ConnectionRefusedError):
             return {'rechazada': True}
-        return {'sin_respuesta': visita._motivo(e)}
+        return {'sin_respuesta': _motivo(e)}
     except ConnectionRefusedError:
         return {'rechazada': True}
     except (OSError, http.client.HTTPException, ValueError) as e:
-        return {'sin_respuesta': visita._motivo(e)}
+        return {'sin_respuesta': _motivo(e)}
     return resumir(estado, cabeceras, cuerpo, cortado)
+
+
+def _motivo(error):
+    """El motivo de SIN_RESPUESTA de una petición que no terminó. 'tls_viejo' de la visita web (RC-239) aquí es 'tls':
+    api_docs no tiene regla de la versión de TLS y la ruta solo queda sin revisar."""
+    motivo = visita._motivo(error)
+    return 'tls' if motivo == 'tls_viejo' else motivo
 
 
 class ClienteApiDocs(shodan.ClienteShodan):
@@ -557,12 +565,20 @@ class ClienteApiDocs(shodan.ClienteShodan):
                 raise FuenteNoResponde('api_docs: la grabación de %s no se puede leer' % url) from None
         if self.pedidas:
             self.dormir(PAUSA_RUTA)
-        limite = min(TIMEOUT_RUTA, self.restante())
+        quedan = self.restante()
+        limite = min(TIMEOUT_RUTA, quedan)
         if limite < shodan.MIN_INTENTO:
             raise SinTiempo('api_docs: se acabó el tiempo de la corrida antes de pedir %s' % url)
-        self.pedidas += 1
-        self.consultas += 1
-        datos = limpiar((self.visitar or _visitar)(url, limite))
+        # Una petición a la vez por host también entre escaneos (turno.py): espera a que el host quede libre.
+        with turno.turno(host, quedan - shodan.MIN_INTENTO) as espero:
+            if espero:
+                limite = min(TIMEOUT_RUTA, self.restante())   # lo que le quedó a la corrida después de esperar
+                if limite < shodan.MIN_INTENTO:
+                    raise SinTiempo('api_docs: se acabó el tiempo de la corrida antes de pedir %s' % url)
+            self.pedidas += 1
+            self.consultas += 1
+            crudo = (self.visitar or _visitar)(url, limite)
+        datos = limpiar(crudo)
         if datos.get('sin_respuesta') == 'tiempo' and limite < TIMEOUT_RUTA:
             # No tuvo sus TIMEOUT_RUTA segundos: lo que se acabó fue la corrida, no es que el sitio no responda
             raise SinTiempo('api_docs: se acabó el tiempo de la corrida mientras se pedía %s' % url)
@@ -917,7 +933,8 @@ def _main(argv=None, hoy=None):
     if motivo:
         print(motivo + ': solo se puede --reproducir', file=sys.stderr)
         return 1
-    res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
+    with turno.con_candado(turno.de_la_linea(elegido)):   # el mismo turno por host que los análisis
+        res = contrato.ejecutar(sys.modules[__name__], dominio, elegido)
     print(resumen(res))
     return codigo_salida(res)
 

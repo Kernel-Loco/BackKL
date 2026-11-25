@@ -1,0 +1,15 @@
+{
+ "_nota": "Respuesta armada a mano con la forma pública de ASP.NET con customErrors en RemoteOnly, sin traza, no grabada de ningún dominio (RC-228). Los valores falsos llevan CIRDAN_FAKE_.",
+ "estado": 500,
+ "cabeceras": [
+  [
+   "Server",
+   "Microsoft-IIS/10.0"
+  ],
+  [
+   "Content-Type",
+   "text/html; charset=utf-8"
+  ]
+ ],
+ "cuerpo": "<!DOCTYPE html>\n<html>\n    <head>\n        <title>Runtime Error</title>\n        <meta name=\"viewport\" content=\"width=device-width\" />\n    </head>\n    <body bgcolor=\"white\">\n            <span><H1>Server Error in '/' Application.<hr width=100% size=1 color=silver></H1>\n            <h2> <i>Runtime Error</i> </h2></span>\n            <font face=\"Arial, Helvetica, Geneva, SunSans-Regular, sans-serif \">\n            <b> Description: </b>An application error occurred on the server. The current custom error settings for this application prevent the details of the application error from being viewed remotely (for security reasons).\n            </font>\n    </body>\n</html>\n"
+}

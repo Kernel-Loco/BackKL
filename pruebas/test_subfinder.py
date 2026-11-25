@@ -29,6 +29,7 @@ from cirdan.recolectores.contrato import Activo  # noqa: E402
 RAIZ = Path(__file__).resolve().parents[1]
 SEMILLA = RAIZ / 'db' / 'semillas' / '005_subfinder_y_limites.sql'
 SEMILLA_017 = RAIZ / 'db' / 'semillas' / '017_subfinder_commoncrawl.sql'
+SEMILLA_019 = RAIZ / 'db' / 'semillas' / '019_subfinder_apagado.sql'
 
 # 14 índices válidos, más nuevos primero en collinfo.json pero mezclados aquí: el recolector toma los 12 más recientes.
 VALIDOS = ['CC-MAIN-2026-%02d' % s for s in (5, 47, 8, 43, 13, 39, 17, 35, 21, 30, 26)] + \
@@ -455,8 +456,9 @@ class IndiceSaltado(unittest.TestCase):
 
 
 class Reintento(unittest.TestCase):
-    """El 16 nov el nginx del índice cortó a los ~10 s con 504 o 502 y la misma consulta respondió 15 s después: un
-    500, 502 o 504 se pide otra vez tras 15 s y tras 30 s antes de saltar el índice."""
+    """Un 500, 502 o 504 se pide otra vez tras 15 s y tras 30 s antes de saltar el índice. El nginx del índice corta a
+    los ~10 s con 504 o 502 y el reintento casi nunca alcanza: el 17 nov 11 de 12 primeros intentos dieron 504
+    (semilla 019)."""
 
     def test_1_un_504_que_luego_responde_revisa_el_indice(self):
         for fallas, esperas in (([504], [15]), ([502, 500], [15, 30])):
@@ -854,6 +856,65 @@ class Semilla(unittest.TestCase):
         self.assertRegex(texto, r'daily_limit\s*<\s*%d\b' % subfinder.MAX_CONSULTAS)
         self.assertTrue(texto.lstrip().startswith("SET client_encoding = 'UTF8';"))
         self.assertEqual(sorted(p.name[:3] for p in SEMILLA_017.parent.glob('*.sql')).count('017'), 1)
+
+    def test_3_la_019_lo_apaga_sin_tocar_el_limite_y_se_puede_correr_otra_vez(self):
+        texto = sin_comentarios(SEMILLA_019.read_text(encoding='utf-8'))
+        self.assertTrue(texto.lstrip().startswith("SET client_encoding = 'UTF8';"))
+        self.assertLess(texto.index('client_encoding'), texto.index('BEGIN;'))
+        self.assertIn("RAISE EXCEPTION", texto)   # sin la fila de la 005 falla
+        self.assertTrue(texto.rstrip().endswith('COMMIT;'))   # y no en ROLLBACK
+        self.assertNotRegex(texto, r'(?i)\bROLLBACK\b')
+        self.assertEqual([tuple(g.lower() for g in c) for c in cambios_de_subfinder(texto)],
+                         [('enabled', 'false', 'enabled', 'true')])
+        self.assertEqual(len(re.findall(r'\b(?:UPDATE|INSERT|DELETE)\b', texto, re.IGNORECASE)), 1)
+        self.assertEqual(sorted(p.name[:3] for p in SEMILLA_019.parent.glob('*.sql')).count('019'), 1)
+
+    def test_4_con_todas_las_semillas_en_orden_queda_apagado_con_390(self):
+        # Lo que hace db/init/cargar_cirdan.sh con una base nueva: todas las semillas en orden de nombre.
+        fila = fila_de_la_semilla('subfinder')
+        estado = {'enabled': fila['enabled'].lower(), 'daily_limit': fila['daily_limit']}
+        semillas = sorted(SEMILLA.parent.glob('*.sql'))
+
+        def aplicar(ruta):
+            for columna, valor, condicion, antes in cambios_de_subfinder(sin_comentarios(
+                    ruta.read_text(encoding='utf-8'))):
+                if estado[condicion] == antes.lower():
+                    estado[columna] = valor.lower()
+
+        for ruta in semillas:
+            aplicar(ruta)
+        self.assertEqual(estado, {'enabled': 'false', 'daily_limit': '390'})
+        aplicar(SEMILLA_019)   # correrla otra vez no cambia nada
+        self.assertEqual(estado, {'enabled': 'false', 'daily_limit': '390'})
+        # Ninguna semilla cambia la fila de subfinder de otra forma que la que lee cambios_de_subfinder: todo UPDATE
+        # o DELETE de data_sources (con public. o sin él) es un cambio de subfinder que lee RE_CAMBIO o va a una
+        # sola fuente que no es subfinder (WHERE code = '<otra>' AND ...), y ningún INSERT a data_sources lleva
+        # ON CONFLICT ... DO UPDATE. Sin comentarios -- ni /* */.
+        for ruta in semillas:
+            sql = sin_comentarios(ruta.read_text(encoding='utf-8'))
+            sueltos = [s for s in RE_ESCRITURA.findall(sql) if not RE_CAMBIO.fullmatch(s.strip())
+                       and not (RE_OTRA_FUENTE.search(s) and 'subfinder' not in s.lower())]
+            self.assertEqual(sueltos, [], ruta.name)
+            upserts = [s for s in RE_INSERT.findall(sql) if re.search(r'(?i)\bDO\s+UPDATE\b', s)]
+            self.assertEqual(upserts, [], ruta.name)
+
+
+# 'subfinder' va sin IGNORECASE: en Postgres code = 'Subfinder' no coincide con la fila.
+RE_CAMBIO = re.compile(r"UPDATE\s+(?:public\.)?data_sources\s+SET\s+(\w+)\s*=\s*(\w+)\s+WHERE\s+code\s*=\s*"
+                       r"(?-i:'subfinder')\s+AND\s+(\w+)\s*=\s*(\w+)\s*;", re.IGNORECASE)
+RE_ESCRITURA = re.compile(r'\b(?:UPDATE|DELETE\s+FROM)\s+(?:public\.)?data_sources\b[^;]*;', re.IGNORECASE)
+RE_OTRA_FUENTE = re.compile(r"\bWHERE\s+code\s*=\s*'\w+'\s+AND\b", re.IGNORECASE)
+RE_INSERT = re.compile(r'\bINSERT\s+INTO\s+(?:public\.)?data_sources\b[^;]*;', re.IGNORECASE)
+
+
+def sin_comentarios(sql):
+    """El SQL sin comentarios -- ni /* */ (primero los de línea, para que un /* dentro de uno no se coma el resto)."""
+    return re.sub(r'/\*.*?\*/', '', re.sub(r'--[^\n]*', '', sql), flags=re.DOTALL)
+
+
+def cambios_de_subfinder(sql):
+    """[(columna, valor, columna de la condición, valor de antes)] de los UPDATE de subfinder, sin comentarios."""
+    return [m.groups() for m in RE_CAMBIO.finditer(sql)]
 
 
 @unittest.skipUnless((RAIZ / 'Dockerfile').exists(), 'sin Dockerfile: dentro de la imagen no se copia')
