@@ -14,6 +14,7 @@
 | [`hallazgos_esperados.md`](hallazgos_esperados.md) | Hallazgos esperados del dominio de prueba olmardo.com, por fuente, con código, severidad, fecha y estado | #10b |
 | [`medicion_cobertura.md`](medicion_cobertura.md) | Cobertura por regla y superficie moderna, método de medición y límites para falsos positivos | #84 |
 | [`reto_hackeo.md`](reto_hackeo.md) | Reto de hackeo para el grupo: permiso, alcance, reglas, cómo reportar, clasificación y registro de reportes con su arreglo | #85 |
+| [`pentest.md`](pentest.md) | Vulnerabilidades y remediación con pruebas de penetración: alcance, 32 casos de aislamiento, autorización y sesión, nmap, hallazgos con CVSS 3.1 y su respuesta, y la sección para el documento integrado | #58b |
 | [`pruebas_usuarios.md`](pruebas_usuarios.md) | Pruebas con usuarios en la VM: 3 personas ajenas al equipo, 5 tareas con guion, consentimiento, protocolo, cuestionario SUS y resultados con su tarjeta por cada tarea no completada | #50 |
 | [`asvs_nivel1.md`](asvs_nivel1.md) | LowTide revisado con OWASP ASVS 5.0 nivel 1: los 70 requisitos con su estado y evidencia, y los pendientes con su arreglo. La lista oficial fijada está en `asvs/` | #75 |
 | [`servicios_externos.md`](servicios_externos.md) | Servicios externos: cuenta y dueño, plan, costo, límite, vencimiento de la llave y plan B de cada uno, las licencias y el gasto real | #8 |
