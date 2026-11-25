@@ -233,7 +233,8 @@ class JsonDe(unittest.TestCase):
         # T3 y T5: también estos cierres guardan un motivo de la lista.
         sql = []
         conn = SimpleNamespace(execute=lambda q, p=None: sql.append((q, p)))
-        with mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(conn)),                 self.assertLogs('cirdan.orquestador', 'ERROR'):
+        with (mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(conn)),
+              self.assertLogs('cirdan.orquestador', 'ERROR')):
             orquestador.marcar_fallido('11111111-1111-4111-8111-111111111111', SCAN, RuntimeError('x'),
                                        motivos.INTERRUMPIDO)
             orquestador.marcar_fallido('11111111-1111-4111-8111-111111111111', SCAN, RuntimeError('x'), 'texto suelto')
@@ -241,16 +242,22 @@ class JsonDe(unittest.TestCase):
         self.assertEqual([sql[2][1][0].obj, sql[3][1][0]], [{'error': 'error interno'}, 'error interno'])
         from cirdan import programador
         vivo = SimpleNamespace(is_alive=lambda: True)
-        with mock.patch.dict(programador._hilos, {SCAN: ('org', vivo)}, clear=True),                 mock.patch.object(orquestador, 'marcar_fallido') as marcar:
+        # _reintentar_pronto abriría una conexión real a la base: aquí solo importa el motivo.
+        with (mock.patch.dict(programador._hilos, {SCAN: ('org', vivo)}, clear=True),
+              mock.patch.object(programador, '_reintentar_pronto') as reintentar,
+              mock.patch.object(orquestador, 'marcar_fallido') as marcar):
             programador.detener()
         self.assertEqual(marcar.call_args.args[3], motivos.INTERRUMPIDO)
+        reintentar.assert_called_once()
         cerradas = []
         fila = SimpleNamespace(fetchone=lambda: {'status': 'failed', 'stats': None})
         c = SimpleNamespace(execute=lambda q, p=None: fila)
-        with mock.patch.object(orquestador, '_tx', lambda org, conn: contextlib.nullcontext(c)),                 mock.patch.object(orquestador, '_cerrar_corridas', lambda c, ids, texto: cerradas.append(texto)):
+        with (mock.patch.object(orquestador, '_tx', lambda org, conn: contextlib.nullcontext(c)),
+              mock.patch.object(orquestador, '_cerrar_corridas', lambda c, ids, texto: cerradas.append(texto))):
             orquestador._ya_no_corre('org', SCAN, None, [])
         self.assertEqual(cerradas, [motivos.INTERRUMPIDO])
         self.assertIn(motivos.INTERRUMPIDO, motivos.MOTIVOS)
+
 
 if __name__ == '__main__':
     unittest.main()
