@@ -31,6 +31,7 @@ ENV_FALSO = {
     'TOTP_ENCRYPTION_KEY': 'CIRDAN_FAKE_totp',
     'ALLOWED_ORIGINS': ORIGEN,
     'TUNNEL_TOKEN': 'CIRDAN_FAKE_tunel',
+    'CARTA_KEY_VAULT_SECRET_URL': 'https://fake-vault.vault.azure.net/secrets/carta-key/0123456789abcdef0123456789abcdef',
     # Lo que un .env copiado de una PC de desarrollo traería: el despliegue tiene que ganarle.
     'DEMO_ACCOUNTS': 'true',
     'DEMO_EXPLORER': 'true',
@@ -49,7 +50,8 @@ def _config(env, proyecto='prueba-despliegue', archivos=ARCHIVOS, perfiles=()):
         # Sin las variables del compose que traiga la terminal: le ganarían al archivo de valores falsos.
         base = {k: v for k, v in os.environ.items()
                 if k.upper() not in ENV_FALSO and not k.upper().startswith(('COMPOSE_', 'PG', 'POSTGRES_', 'VALKEY_',
-                                                                          'PORTAL_', 'DOMINIOS_', 'ORGS_', 'TOTP_'))}
+                                                                          'PORTAL_', 'DOMINIOS_', 'ORGS_', 'TOTP_',
+                                                                          'CARTA_'))}
         cmd = ['docker', 'compose', '--project-directory', str(RAIZ)] + (['-p', proyecto] if proyecto else []) + [
             '--env-file', str(archivo)]
         for a in archivos:
@@ -95,6 +97,24 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(self.svc['api']['environment']['ALLOWED_ORIGINS'], ORIGEN)
         self.assertEqual(self.svc['demo-accounts']['environment']['ALLOWED_ORIGINS'], ORIGEN)
         self.assertEqual(self.svc['api']['environment']['COOKIE_SECURE'], 'true')
+        self.assertEqual(self.svc['api']['environment']['CARTA_KEY_VAULT_SECRET_URL'],
+                         ENV_FALSO['CARTA_KEY_VAULT_SECRET_URL'])
+
+    def test_3c_el_alta_solo_se_enciende_desde_el_env(self):
+        # RC-339: apagada hasta que el .env la encienda tras una restauración completa validada.
+        self.assertEqual(self.svc['api']['environment']['CARTA_ALTA_ENABLED'], 'false')
+        rc, salida = _config(dict(ENV_FALSO, CARTA_ALTA_ENABLED='true'))
+        self.assertEqual(rc, 0, salida[-500:])
+        self.assertEqual(json.loads(salida)['services']['api']['environment']['CARTA_ALTA_ENABLED'], 'true')
+
+    def test_3d_el_plan_b_va_con_la_llave_directa(self):
+        # Sin IMDS, el plan B no lleva la URL de Key Vault: la llave de cartas va en CARTA_ENCRYPTION_KEY.
+        env = {k: v for k, v in ENV_FALSO.items() if k != 'CARTA_KEY_VAULT_SECRET_URL'}
+        env['CARTA_ENCRYPTION_KEY'] = 'CIRDAN_FAKE_carta'
+        rc, salida = _config(env)
+        self.assertEqual(rc, 0, salida[-500:])
+        api = json.loads(salida)['services']['api']['environment']
+        self.assertEqual((api['CARTA_KEY_VAULT_SECRET_URL'], api['CARTA_ENCRYPTION_KEY']), ('', 'CIRDAN_FAKE_carta'))
 
     def test_4_variables_obligatorias(self):
         for falta in ('ALLOWED_ORIGINS', 'TUNNEL_TOKEN'):
@@ -102,6 +122,17 @@ class Despliegue(unittest.TestCase):
             rc, salida = _config(env)
             self.assertNotEqual(rc, 0, falta)
             self.assertIn('Falta ' + falta, salida)
+
+    def test_4b_el_volumen_de_cartas_se_puede_cambiar_al_restaurar(self):
+        carta = self.svc['api']['volumes'][0]
+        self.assertEqual(carta['type'], 'volume')
+        self.assertIn(carta['source'], ('cirdan-cartas', 'prueba-despliegue_cirdan-cartas'))
+        self.assertEqual(self.cfg['volumes']['cirdan-cartas']['name'], 'prueba-despliegue_cirdan-cartas')
+        rc, salida = _config(dict(ENV_FALSO, CARTA_VOLUME_NAME='cartas-restauradas'))
+        self.assertEqual(rc, 0, salida[-500:])
+        cfg = json.loads(salida)
+        self.assertIn(cfg['services']['api']['volumes'][0]['source'], ('cirdan-cartas', 'cartas-restauradas'))
+        self.assertEqual(cfg['volumes']['cirdan-cartas']['name'], 'cartas-restauradas')
 
     def test_5_ningun_puerto_publicado_en_el_host(self):
         # Ni en 127.0.0.1: docker-compose.yml publica db, valkey y api en loopback y el despliegue los quita.

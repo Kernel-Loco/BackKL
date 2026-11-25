@@ -57,8 +57,10 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Falta ALLOWED_ORIGINS en .env, ver docs/despliegue.md}
       # El despliegue siempre va con HTTPS (Cloudflare): la cookie de sesión solo viaja cifrada.
       COOKIE_SECURE: "true"
-      # El respaldo del volumen de cartas aún no existe; nunca habilitar el alta en este despliegue.
-      CARTA_ALTA_ENABLED: "false"
+      # RC-339: el alta sigue apagada hasta poner CARTA_ALTA_ENABLED=true en el .env, y eso va solo después de una
+      # restauración completa validada (docs/despliegue.md). La llave de cartas sale del compose base: en la VM,
+      # CARTA_KEY_VAULT_SECRET_URL versionada. En el plan B, sin IMDS, CARTA_ENCRYPTION_KEY.
+      CARTA_ALTA_ENABLED: ${CARTA_ALTA_ENABLED:-false}
       # Las passkeys quedan amarradas a lowtidesec.com (RC-331): sirven en https://lowtidesec.com y en su www, que vienen
       # de ALLOWED_ORIGINS. Si el dominio cambia, dejan de servir y se entra con contraseña y TOTP.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-lowtidesec.com}

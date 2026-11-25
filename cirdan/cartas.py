@@ -18,8 +18,7 @@ _vault_key = None
 
 
 def habilitado():
-    # Hasta que exista el respaldo, no se acepta alta con cookies de producción.
-    return config('CARTA_ALTA_ENABLED', 'false').lower() == 'true' and config('COOKIE_SECURE', 'false').lower() != 'true'
+    return config('CARTA_ALTA_ENABLED', 'false').lower() == 'true'
 
 
 def _key():
@@ -36,7 +35,8 @@ def _key():
     else:
         value = direct
     try:
-        key = base64.b64decode(value.encode('ascii'), altchars=b'-_', validate=True)
+        # Key Vault guarda el secreto tal cual: un salto de línea final del archivo de origen no es parte de la llave.
+        key = base64.b64decode(value.strip().encode('ascii'), altchars=b'-_', validate=True)
     except (ValueError, UnicodeEncodeError, binascii.Error):
         raise RuntimeError('La llave de cartas debe ser de 32 bytes en base64 url-safe.') from None
     if len(key) != 32:

@@ -57,6 +57,10 @@ jobs:
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
           sed -i "s|^PASSWORD_HASH_ENCRYPTION_KEY=.*|PASSWORD_HASH_ENCRYPTION_KEY=$llave|" .env
           grep -q '^PASSWORD_HASH_ENCRYPTION_KEY=.\{44\}$' .env
+          # Llave de las cartas: el CI prueba que el respaldo la incluye cifrada y la restaura sin mostrarla.
+          llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
+          sed -i "s|^CARTA_ENCRYPTION_KEY=.*|CARTA_ENCRYPTION_KEY=$llave|" .env
+          grep -q '^CARTA_ENCRYPTION_KEY=.\{44\}$' .env
           # Otra para las llaves de API de las fuentes (RC-54). Ninguna fuente tiene llave en el CI: HIBP queda sin
           # cobertura por falta de llave y nunca sale a la red.
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
@@ -107,7 +111,7 @@ jobs:
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
           pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_bitacora.py pruebas/test_bitacora_descargas.py pruebas/test_inventario_activos.py pruebas/test_llaves_api.py
           pruebas/test_superadmin.py pruebas/test_operador.py
-          pruebas/test_respaldo.py
+          pruebas/test_respaldo.py pruebas/test_respaldo_cartas.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
       # porque no trae gitleaks. Aquí INTEGRACION_GITHUB=1 hace que falle si a la imagen le faltan.
