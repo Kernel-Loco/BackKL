@@ -314,7 +314,7 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
                 'observed_values, resolver_ip, result, checked_at) VALUES (%s, %s, %s, %s, %s, %s, %s, now()) '
                 'RETURNING id::text',
                 (org, domain['id'], 'pre_scan', dns_txt.esperado(domain['txt_token']),
-                 list(consulta.valores) if consulta.valores else None, consulta.resolver_ip, txt_resultado)).fetchone()['id']
+                 dns_txt.guardables(consulta.valores) if consulta.valores else None, consulta.resolver_ip, txt_resultado)).fetchone()['id']
             if txt_resultado != 'match':
                 motivos.append('txt_not_verified')
 

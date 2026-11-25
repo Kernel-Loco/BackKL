@@ -47,8 +47,9 @@ INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, 
 
 -- Verificación del alta: la consulta manual de verified_at. Antes de cada
 -- escaneo el orquestador hace una nueva con check_reason = 'pre_scan'.
+-- El SPF del dominio va como su huella sha256 (RC-272, migración 036).
 INSERT INTO dns_txt_verifications (id, organization_id, domain_id, check_reason, expected_value, observed_values, resolver_ip, result, checked_at) VALUES
  ('42000000-0000-4000-8000-000000000008', '20000000-0000-4000-8000-000000000004', '40000000-0000-4000-8000-000000000008', 'onboarding',
-  'cirdan-verification=be92b38a1634', '{"v=spf1 include:_spf.mx.cloudflare.net -all",cirdan-verification=be92b38a1634}', '8.8.8.8', 'match', '2026-11-15 16:33:25+00');
+  'cirdan-verification=be92b38a1634', '{sha256:4f88df0aee5ae3b699e9554518943da6118bf28aab0480c3d55a8f64691eb6d1,cirdan-verification=be92b38a1634}', '8.8.8.8', 'match', '2026-11-15 16:33:25+00');
 
 COMMIT;

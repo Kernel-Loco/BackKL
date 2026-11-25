@@ -1,7 +1,7 @@
 """Bitácora de la empresa y verificación de su cadena de hashes (#86, RC-130).
 
 `audit_log` es de solo inserción y cada fila encadena su `row_hash` con el de la anterior de la misma empresa, con la
-fórmula del trigger `audit_log_chain()` (migración 001). Aquí está el SQL que comparten la API
+fórmula del trigger `audit_log_chain()` (migraciones 001 y 035). Aquí está el SQL que comparten la API
 (cirdan/api/bitacora.py) y las pruebas (pruebas/test_bitacora.py). Va sin dependencias para que las pruebas del host
 lo importen sin fastapi ni psycopg.
 
@@ -12,14 +12,26 @@ Lo que la cadena sola no detecta: que alguien borre las últimas filas, porque l
 cadena de la plataforma (`organization_id` NULL) no la ve ninguna empresa.
 """
 
-# El row_hash que le toca a una fila de audit_log según su contenido: la fórmula del trigger audit_log_chain() de la
-# 001 (también CADENA en pruebas/test_superadmin.py). Si el trigger cambia, esto cambia con él.
-HASH_FILA = '''sha256(prev_hash || convert_to(concat_ws(chr(31),
+# El row_hash que le toca a una fila de audit_log según su contenido y su chain_version: la fórmula del trigger
+# audit_log_chain() (también CADENA en pruebas/test_superadmin.py). Si el trigger cambia, esto cambia con él.
+#   1  la de la 001, sin ip_address: las filas de antes de la migración 035.
+#   2  la de la 035 (RC-294): la versión al principio e ip_address, como texto de inet, antes de details.
+# Una fila de la 2 que alguien pasa a la 1 no cuadra: su row_hash se calculó con la fórmula 2.
+HASH_FILA = '''sha256(prev_hash || convert_to(CASE chain_version
+         WHEN 1 THEN concat_ws(chr(31),
            coalesce(organization_id::text, ''), chain_seq::text, id::text,
            (extract(epoch FROM occurred_at) * 1000000)::bigint::text,
            actor_type, coalesce(actor_user_id::text, ''), coalesce(actor_api_key_id::text, ''),
            action, coalesce(entity_type, ''), coalesce(entity_id::text, ''),
-           details::text), 'UTF8'))'''
+           details::text)
+         ELSE concat_ws(chr(31),
+           chain_version::text,
+           coalesce(organization_id::text, ''), chain_seq::text, id::text,
+           (extract(epoch FROM occurred_at) * 1000000)::bigint::text,
+           actor_type, coalesce(actor_user_id::text, ''), coalesce(actor_api_key_id::text, ''),
+           action, coalesce(entity_type, ''), coalesce(entity_id::text, ''),
+           coalesce(ip_address::text, ''),
+           details::text) END, 'UTF8'))'''
 
 # Una fila con lo revisado y el primer eslabón roto, si hay. Cada fila se revisa en este orden:
 #   chain_seq  la posición no es la que toca: falta una fila antes o se repite su número.

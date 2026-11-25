@@ -337,7 +337,7 @@ def _aceptar(request_id, body, request, session):
             if body['confirm_fqdn'].strip().lower().removesuffix('.') != r['fqdn']:
                 raise HTTPException(422, 'El dominio que escribiste no es el de la carta.')
             domain_id, _ = _dominio_para_carta(conn, session, request, r['fqdn'], r['valid_until'],
-                                               secrets.token_hex(16), renovar=True)
+                                               secrets.token_hex(16), renovar=True, start=r['valid_from'])
             authorization_id = conn.execute(
                 'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
                 'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, '
@@ -391,7 +391,8 @@ def _subir(body, request, session):
         raise HTTPException(422, 'El XML de Mifiel no es válido.')
     try:
         with transaction(session.org_id) as conn:
-            domain_id, _ = _dominio_para_carta(conn, session, request, fqdn, end, secrets.token_hex(16), renovar=True)
+            domain_id, _ = _dominio_para_carta(conn, session, request, fqdn, end, secrets.token_hex(16), renovar=True,
+                                               start=start)
             pdf_key, pdf_sha = cartas.guardar(pdf, session.org_id, domain_id)
             xml_key, xml_sha = cartas.guardar(evidencia, session.org_id, domain_id)
             authorization_id = conn.execute(

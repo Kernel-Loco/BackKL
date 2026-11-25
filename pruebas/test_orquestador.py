@@ -14,6 +14,7 @@ POSTGRES_PASSWORD. Para correrla, agrega -e POSTGRES_PASSWORD al docker compose 
 exportada antes en la terminal (sin escribir su valor en el comando).
 """
 import contextlib
+import hashlib
 import io
 import tempfile
 import threading
@@ -208,7 +209,9 @@ class Orquestador(unittest.TestCase):
         evidencia = self.uno('SELECT check_reason, result, observed_values FROM dns_txt_verifications WHERE id = %s',
                              scan['txt_verification_id'])
         self.assertEqual((evidencia['check_reason'], evidencia['result']), ('pre_scan', 'match'))
-        self.assertIn(TXT_ACME, evidencia['observed_values'])
+        # RC-272: el SPF no se guarda, solo su huella, y el token va tal cual, en el orden de la consulta.
+        self.assertEqual(evidencia['observed_values'],
+                         ['sha256:' + hashlib.sha256(b'v=spf1 -all').hexdigest(), TXT_ACME])
 
     def carta_con_alcance(self, actividades):
         """Una carta vigente que vence después de la de renovar_carta(), así es la que toma el escaneo (RC-59)."""
