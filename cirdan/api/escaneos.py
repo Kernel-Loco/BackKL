@@ -34,7 +34,8 @@ def _scan(conn, scan_id, session):
         return None  # fuera del alcance de la llave se ve igual que uno que no existe
     if scan:
         scan['stats'] = orquestador.stats_publicas(scan['stats'])  # sin el costo interno (RC-87)
-        scan['sources'] = conn.execute(RUNS_SQL, (scan_id,)).fetchall()
+        # el error de cada fuente, solo si es un motivo fijo (RC-300)
+        scan['sources'] = orquestador.fuentes_publicas(conn.execute(RUNS_SQL, (scan_id,)).fetchall())
     return scan
 
 

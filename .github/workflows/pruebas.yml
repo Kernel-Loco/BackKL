@@ -134,6 +134,7 @@ jobs:
           pruebas/test_alta_dominio.py pruebas/test_verificacion_txt_api.py pruebas/test_alta_dominio_integracion.py
           pruebas/test_firma.py pruebas/test_firma_base.py
           pruebas/test_enlace_sin_red.py pruebas/test_recuperar_sin_red.py pruebas/test_programador.py pruebas/test_llave_fuentes.py
+          pruebas/test_motivos_falla.py
 
       - name: Pruebas sin base ni red
         run: >-
