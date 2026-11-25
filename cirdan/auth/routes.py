@@ -31,6 +31,9 @@ INVALID = 'Correo o contraseña incorrectos.'
 LOCKED = 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.'
 MFA_EXPIRED = 'Tu verificación expiró. Inicia sesión de nuevo.'
 MFA_INVALID = 'El código no es válido o ya expiró.'
+# Ni la llave del MFA ni la anterior abren el secreto guardado (RC-295): el código no se puede revisar.
+MFA_KEY_UNAVAILABLE = ('No pudimos revisar tu código porque la verificación en dos pasos de tu cuenta no se puede leer. '
+                       'Habla con el Admin.')
 OPERATOR_MFA_REQUIRED = 'Las cuentas de operador deben tener MFA activo antes de iniciar sesión.'
 # RC-5: el Admin entra solo con TOTP. Sin él, /login responde 403 sin sesión y con un token para activarlo ahí mismo.
 ADMIN_MFA_REQUIRED = ('Las cuentas de administrador deben activar la verificación en dos pasos antes de entrar. '
@@ -373,27 +376,46 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
         if not row or not row['totp_secret_enc'] or sessions.password_tag(row['password_hash']) != pending['tag']:
             sessions.delete_mfa(body.mfa_token)
             raise HTTPException(401, MFA_EXPIRED)
-        step = totp.verify_code(totp.decrypt_secret(row['totp_secret_enc'], user_id), body.code, row['last_totp_step'])
+        try:
+            secreto, con_anterior = totp.descifrar(row['totp_secret_enc'], user_id)
+        except totp.LlaveNoAbre:
+            secreto = con_anterior = None
+        step = totp.verify_code(secreto, body.code, row['last_totp_step']) if secreto else None
         # El UPDATE solo guarda el paso si ninguna otra petición (otro /mfa/verify o el registro de una passkey) gastó ese
-        # código o uno posterior. Si no cambia nada, es un código usado.
-        if step is not None and not conn.execute(
-                'UPDATE users SET last_totp_step = %s WHERE id = %s AND (last_totp_step IS NULL OR last_totp_step < %s)',
-                (step, user_id, step)).rowcount:
+        # código o uno posterior. Si no cambia nada, es un código usado. Con un secreto que solo abrió con la llave
+        # anterior, el mismo UPDATE lo deja cifrado con la actual (RC-295).
+        if step is not None and not _guardar_paso(conn, user_id, step, secreto if con_anterior else None):
             step = None
-        if step is None:
+        if secreto is None:
+            # Ninguna llave abre el secreto: cuenta como fallo, con su evento, y nunca 500 (RC-295).
+            audit(conn, org, 'auth.mfa_failed', user_id, ip, 'user', user_id, {'reason': 'key'})
+            fail = MFA_KEY_UNAVAILABLE
+        elif step is None:
             audit(conn, org, 'auth.mfa_failed', user_id, ip, 'user', user_id)
-            fail = True
+            fail = MFA_INVALID
         else:
-            fail = False
+            fail = None
             sessions.delete_mfa(body.mfa_token)
             # Después de un enlace al correo (#28, RC-63) la bitácora dice link_totp; si no, totp.
             via = 'link_totp' if pending.get('via') == 'link_totp' else 'totp'
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, via)
     if fail:
         sessions.register_mfa_fail(ip)
-        raise HTTPException(401, MFA_INVALID)
+        raise HTTPException(401, fail)
     _clear_fails(email)
     return {'user': user}
+
+
+def _guardar_paso(conn, user_id, step, recifrar=None):
+    """Guarda el paso del código si ninguna otra petición gastó ese código o uno posterior. Con `recifrar`, el secreto en
+    claro que abrió con la llave anterior, también lo guarda cifrado con la actual en el mismo UPDATE (RC-295). True si
+    guardó."""
+    if recifrar is None:
+        return conn.execute('UPDATE users SET last_totp_step = %s WHERE id = %s AND '
+                            '(last_totp_step IS NULL OR last_totp_step < %s)', (step, user_id, step)).rowcount > 0
+    return conn.execute('UPDATE users SET last_totp_step = %s, totp_secret_enc = %s WHERE id = %s AND '
+                        '(last_totp_step IS NULL OR last_totp_step < %s)',
+                        (step, totp.encrypt_secret(recifrar, user_id), user_id, step)).rowcount > 0
 
 
 # ------------------------------------------------------------------ enlace al correo (#28, RC-63)
@@ -782,7 +804,15 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
     if not pending:
         raise HTTPException(400, MFA_SETUP_EXPIRED)
     ip = client_ip(request)
-    secret = totp.decrypt_secret(base64.b64decode(pending['secret_enc']), session.user_id)
+    try:
+        secret = totp.decrypt_secret(pending['secret_enc'], session.user_id)
+    except totp.LlaveNoAbre:
+        # El QR se cifró con una llave que ya no está (RC-295): se pide otro, sin 500.
+        sessions.delete_mfa_setup(session.user_id)
+        with transaction(session.own_org_id) as conn:
+            audit(conn, session.own_org_id, 'auth.mfa_enable_failed', session.user_id, ip, 'user', session.user_id,
+                  {'reason': 'key'})
+        raise HTTPException(400, MFA_SETUP_EXPIRED) from None
     removed = []
     with transaction(session.own_org_id) as conn:
         # FOR UPDATE: dos códigos válidos a la vez no guardan dos secretos; el segundo ve la cuenta ya activa.
@@ -893,7 +923,14 @@ def mfa_enroll_enable(body: MfaEnrollEnableIn, request: Request, response: Respo
         raise HTTPException(401, MFA_SETUP_EXPIRED)
     if not sessions.take_mfa_attempt(email, ip):
         raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
-    secret = totp.decrypt_secret(base64.b64decode(pending['secret_enc']), user_id)
+    try:
+        secret = totp.decrypt_secret(pending['secret_enc'], user_id)
+    except totp.LlaveNoAbre:
+        # El QR se cifró con una llave que ya no está (RC-295): cuenta como fallo y se pide otro QR, sin 500.
+        with transaction(org) as conn:
+            audit(conn, org, 'auth.mfa_enable_failed', user_id, ip, 'user', user_id, {'via': 'login', 'reason': 'key'})
+        sessions.register_mfa_fail(ip)
+        raise HTTPException(401, MFA_SETUP_EXPIRED) from None
     with transaction(org) as conn:
         # FOR UPDATE OF u, como /mfa/enable: dos códigos válidos a la vez no guardan dos secretos ni abren dos sesiones;
         # el segundo ve la cuenta ya activa.
@@ -1148,12 +1185,16 @@ def passkey_register_options(body: PasskeyRegisterOptionsIn, request: Request, r
             # El código cuenta como fallo del correo antes de revisarlo, como en /mfa/verify.
             if not sessions.take_mfa_attempt(session.email, ip):
                 raise HTTPException(429, LOCKED, headers={'Retry-After': str(sessions.LOCK_SECONDS)})
-            step = totp.verify_code(totp.decrypt_secret(row['totp_secret_enc'], session.user_id), body.code,
-                                    row['last_totp_step'])
-            if step is None or not conn.execute(
-                    'UPDATE users SET last_totp_step = %s WHERE id = %s AND (last_totp_step IS NULL OR last_totp_step < %s)',
-                    (step, session.user_id, step)).rowcount:
-                fail = 'code'
+            try:
+                secreto, con_anterior = totp.descifrar(row['totp_secret_enc'], session.user_id)
+            except totp.LlaveNoAbre:
+                # Ninguna llave abre el secreto (RC-295): fallo del código con su evento, sin 500.
+                fail = 'key'
+            else:
+                step = totp.verify_code(secreto, body.code, row['last_totp_step'])
+                # Con un secreto que solo abrió con la llave anterior, el mismo UPDATE lo deja con la actual.
+                if step is None or not _guardar_paso(conn, session.user_id, step, secreto if con_anterior else None):
+                    fail = 'code'
         if fail:
             audit(conn, session.own_org_id, 'auth.passkey_registration_failed', session.user_id, ip, 'user',
                   session.user_id, {'reason': fail})
@@ -1163,9 +1204,10 @@ def passkey_register_options(body: PasskeyRegisterOptionsIn, request: Request, r
     if fail == 'password':
         sessions.register_fail(session.email, ip)
         raise HTTPException(400, WRONG_PASSWORD)
-    if fail == 'code':
+    if fail in ('code', 'key'):
         sessions.register_mfa_fail(ip)
-        raise HTTPException(400, MFA_INVALID)
+        # 400 como el código malo: un 401 aquí el portal lo toma como sesión cerrada.
+        raise HTTPException(400, MFA_INVALID if fail == 'code' else MFA_KEY_UNAVAILABLE)
     if row['mfa_enabled']:
         _clear_fails(session.email)  # el código fue correcto, como en /mfa/verify
     options, challenge = webauthn.registration_options(session.user_id, row['email'], row['full_name'], existing)
