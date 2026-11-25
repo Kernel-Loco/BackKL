@@ -1,4 +1,7 @@
-"""Pruebas offline del plan de acción y el simulador (#42, #70)."""
+"""Pruebas offline del plan de acción y el simulador (#42, #70), por activo y en orden acumulado (RC-263)."""
+import csv
+import io
+import itertools
 import json
 import unittest
 
@@ -134,6 +137,155 @@ class PlanAccion(unittest.TestCase):
         json_exportado = json.loads(plan.exportar_json(data))
         accion = next(item for item in json_exportado['actions'] if item['id'] == 'spf_missing')
         self.assertTrue(accion['recommendation'].startswith("'="))
+
+
+# RC-263: un riesgo aceptado crítico deja el piso de 60 que el plan no puede quitar, y www tiene dos reglas que
+# juntas pasan el tope de 100 de infraestructura.
+REGLAS_TOPE = {
+    'secret': {'id': 'r1', 'category': 'data_leaks', 'weight': 1, 'max_penalty': 100, 'recommendation': 'Revoca.'},
+    'old_tls': {'id': 'r3', 'category': 'infrastructure', 'weight': 1, 'max_penalty': 100,
+                'recommendation': '=HYPERLINK("tls")'},
+    'open_port': {'id': 'r4', 'category': 'infrastructure', 'weight': 1, 'max_penalty': 100,
+                  'recommendation': 'Cierra el puerto.'},
+    'spf_missing': {'id': 'r2', 'category': 'configuration', 'weight': 1, 'max_penalty': 100,
+                    'recommendation': 'Publica SPF.'},
+}
+DOM = {'asset_id': 'a-dom', 'asset_type': 'domain', 'asset_value': 'acme-demo.mx'}
+WWW = {'asset_id': 'a-www', 'asset_type': 'subdomain', 'asset_value': '=www.acme-demo.mx'}
+HALLAZGOS_TOPE = [
+    {'id': 'f1', 'rule_code': 'secret', 'severity': 'critical', 'status': 'accepted_risk', **DOM},
+    {'id': 'f2', 'rule_code': 'old_tls', 'severity': 'high', 'status': 'open', **WWW},
+    {'id': 'f3', 'rule_code': 'open_port', 'severity': 'medium', 'status': 'open', **WWW},
+    {'id': 'f4', 'rule_code': 'spf_missing', 'severity': 'high', 'status': 'open', **DOM},
+]
+CAMPOS_DE_HOY = ('id', 'rule_code', 'category', 'recommendation', 'finding_ids', 'finding_count', 'score_after',
+                 'score_reduction')
+
+
+def resolver(hallazgos, finding_ids):
+    return [{**h, 'status': 'resolved'} if h['id'] in finding_ids else dict(h) for h in hallazgos]
+
+
+class PlanAcumulado(unittest.TestCase):
+    """RC-263: plan por activo y en orden acumulado."""
+
+    def test_suma_de_reducciones_sueltas_pasa_de_la_acumulada_por_un_tope(self):
+        data = plan.construir_plan('acme-demo.mx', HALLAZGOS_TOPE, REGLAS_TOPE, PESOS)
+        self.assertEqual(data['score_before'], 75)
+        self.assertEqual([(a['id'], a['score_reduction'], a['score_reduction_acumulado'], a['score_after_acumulado'])
+                          for a in data['actions']],
+                         [('spf_missing', 15, 15, 60), ('old_tls', 15, 0, 60), ('open_port', 7, 0, 60)])
+        sueltas = sum(a['score_reduction'] for a in data['actions'])
+        acumulada = sum(a['score_reduction_acumulado'] for a in data['actions'])
+        self.assertEqual((sueltas, acumulada), (37, 15))
+        self.assertGreater(sueltas, acumulada)
+
+    def test_la_ultima_acumulada_deja_el_score_de_resolver_todo(self):
+        casos = (('reglas', HALLAZGOS_TOPE, REGLAS_TOPE, None, None), ('reglas', HALLAZGOS, REGLAS, None, None),
+                 ('ml', HALLAZGOS_TOPE, REGLAS_TOPE, {'f2': 'low', 'f4': 'critical'}, None),
+                 ('cortes', HALLAZGOS_TOPE, REGLAS_TOPE, None, {'medium': 50, 'high': 70, 'critical': 85}))
+        for nombre, hallazgos, reglas, severidades, cortes in casos:
+            for agrupar in plan.AGRUPACIONES:
+                if agrupar == 'activo' and hallazgos is HALLAZGOS:
+                    continue   # HALLAZGOS no trae activo
+                with self.subTest(caso=nombre, agrupar=agrupar):
+                    data = plan.construir_plan('acme-demo.mx', hallazgos, reglas, PESOS, severidades=severidades,
+                                               cortes=cortes, agrupar=agrupar)
+                    abiertos = {h['id'] for h in hallazgos if h['status'] == 'open'}
+                    preparados = plan._hallazgos_con_severidad(hallazgos, severidades)
+                    todo = motor.calcular(resolver(preparados, abiertos), reglas, PESOS, cortes)['score']
+                    vigente = motor.calcular(preparados, reglas, PESOS, cortes)['score']
+                    self.assertEqual(data['actions'][-1]['score_after_acumulado'], todo)
+                    self.assertEqual(sum(a['score_reduction_acumulado'] for a in data['actions']), vigente - todo)
+                    # Cada acumulado es lo que baja el motor al resolverla después de todas las de arriba.
+                    resueltos, antes = set(), vigente
+                    for accion in data['actions']:
+                        resueltos |= set(accion['finding_ids'])
+                        despues = motor.calcular(resolver(preparados, resueltos), reglas, PESOS, cortes)['score']
+                        self.assertEqual((accion['score_after_acumulado'], accion['score_reduction_acumulado']),
+                                         (despues, antes - despues), accion['id'])
+                        self.assertGreaterEqual(accion['score_reduction_acumulado'], 0)
+                        antes = despues
+
+    def test_orden_voraz_y_empate_por_categoria_e_id(self):
+        # Con el piso: solas, spf_missing y old_tls bajan 15 cada una y gana la de configuración (el desempate de
+        # hoy). Después nadie baja nada y el empate sigue categoría e id (prueba anterior).
+        # Sin el piso: old_tls sola baja 15, spf_missing 10 y open_port 7 (la categoría sigue topada). Después de
+        # old_tls, open_port baja 15 y spf_missing 10, así que open_port sube al segundo lugar.
+        sin_piso = [h for h in HALLAZGOS_TOPE if h['id'] != 'f1']
+        sin_piso = [dict(h, severity='medium') if h['id'] == 'f4' else h for h in sin_piso]
+        data = plan.construir_plan('acme-demo.mx', sin_piso, REGLAS_TOPE, PESOS)
+        self.assertEqual(data['score_before'], 40)
+        self.assertEqual([(a['id'], a['score_reduction'], a['score_reduction_acumulado']) for a in data['actions']],
+                         [('old_tls', 15, 15), ('open_port', 7, 15), ('spf_missing', 10, 10)])
+
+    def test_por_activo_junta_dos_reglas_del_mismo_host(self):
+        data = plan.construir_plan('acme-demo.mx', HALLAZGOS_TOPE, REGLAS_TOPE, PESOS, agrupar='activo')
+        self.assertEqual(data['grouping'], 'activo')
+        www = next(a for a in data['actions'] if a['id'] == 'a-www')
+        self.assertEqual((www['asset_value'], www['asset_type'], www['finding_ids'], www['finding_count']),
+                         ('=www.acme-demo.mx', 'subdomain', ['f2', 'f3'], 2))
+        self.assertEqual(www['rule_codes'], ['old_tls', 'open_port'])
+        self.assertEqual([r['recommendation'] for r in www['recommendations']],
+                         ['=HYPERLINK("tls")', 'Cierra el puerto.'])
+        self.assertEqual(www['categories'], ['infrastructure'])
+        # Solo resolver los dos hallazgos de www: infraestructura baja de 100 a 0 y el piso de 60 la frena en 60.
+        self.assertEqual((www['score_after'], www['score_reduction']), (60, 15))
+        dominio = next(a for a in data['actions'] if a['id'] == 'a-dom')
+        self.assertEqual(dominio['finding_ids'], ['f4'])   # el riesgo aceptado no es una acción
+        self.assertEqual([a['id'] for a in data['actions']], ['a-dom', 'a-www'])   # empate: configuración primero
+        self.assertEqual([a['score_reduction_acumulado'] for a in data['actions']], [15, 0])
+
+    def test_por_regla_conserva_lo_de_hoy_y_suma_la_acumulada(self):
+        data = plan.construir_plan('acme-demo.mx', HALLAZGOS_TOPE, REGLAS_TOPE, PESOS)
+        for accion in data['actions']:
+            solo = plan.simular(HALLAZGOS_TOPE, REGLAS_TOPE, PESOS, [accion['id']])
+            self.assertEqual((accion['score_after'], accion['score_reduction']),
+                             (solo['score_after'], solo['score_reduction']))
+            self.assertEqual(set(accion) - set(CAMPOS_DE_HOY), {'score_reduction_acumulado', 'score_after_acumulado'})
+        self.assertEqual(data['grouping'], 'regla')
+        with self.assertRaisesRegex(ValueError, 'agrupar'):
+            plan.construir_plan('acme-demo.mx', HALLAZGOS_TOPE, REGLAS_TOPE, PESOS, agrupar='host')
+        with self.assertRaisesRegex(ValueError, 'sin activo'):
+            plan.construir_plan('acme-demo.mx', HALLAZGOS, REGLAS, PESOS, agrupar='activo')
+
+    def test_exportaciones_suman_la_acumulada_y_escapan_formulas(self):
+        por_regla = plan.construir_plan('acme-demo.mx', HALLAZGOS_TOPE, REGLAS_TOPE, PESOS)
+        filas = list(csv.reader(io.StringIO(plan.exportar_csv(por_regla).lstrip('﻿'))))
+        self.assertEqual(filas[0], ['dominio', 'accion', 'categoria', 'recomendacion', 'hallazgos', 'ids_hallazgo',
+                                    'score_antes', 'score_despues', 'reduccion_score', 'reduccion_acumulada',
+                                    'score_despues_acumulado'])
+        self.assertEqual([f[1] for f in filas[1:]], ['spf_missing', 'old_tls', 'open_port'])
+        self.assertEqual([f[9:] for f in filas[1:]], [['15', '60'], ['0', '60'], ['0', '60']])
+        self.assertEqual(filas[2][3], '\'=HYPERLINK("tls")')
+
+        por_activo = plan.construir_plan('acme-demo.mx', HALLAZGOS_TOPE, REGLAS_TOPE, PESOS, agrupar='activo')
+        filas = list(csv.reader(io.StringIO(plan.exportar_csv(por_activo).lstrip('﻿'))))
+        self.assertEqual(filas[0][-5:], ['reduccion_acumulada', 'score_despues_acumulado', 'activo', 'tipo_activo',
+                                         'reglas'])
+        www = filas[2]
+        self.assertEqual(www[1], 'a-www')
+        self.assertEqual((www[3], www[11], www[12], www[13]),
+                         ('\'=HYPERLINK("tls") | Cierra el puerto.', "'=www.acme-demo.mx", 'subdomain',
+                          'old_tls;open_port'))
+        exportado = json.loads(plan.exportar_json(por_activo))
+        www = next(a for a in exportado['actions'] if a['id'] == 'a-www')
+        self.assertEqual((www['asset_value'], www['score_reduction_acumulado']), ("'=www.acme-demo.mx", 0))
+        self.assertTrue(www['recommendations'][0]['recommendation'].startswith("'="))
+
+    def test_el_calculo_rapido_coincide_con_el_motor(self):
+        # El orden voraz no llama al motor por cada candidato: _Puntaje tiene que dar lo mismo en todo subconjunto.
+        severidades = {'f2': 'critical', 'f3': 'critical'}
+        for sev, cortes in ((None, None), (severidades, {'medium': 50, 'high': 70, 'critical': 85})):
+            preparados = plan._hallazgos_con_severidad(HALLAZGOS_TOPE, sev)
+            puntaje = plan._Puntaje(preparados, REGLAS_TOPE, PESOS, cortes)
+            ids = [h['id'] for h in preparados]
+            for n in range(len(ids) + 1):
+                for subconjunto in itertools.combinations(ids, n):
+                    with self.subTest(sev=bool(sev), resueltos=subconjunto):
+                        esperado = motor.calcular(resolver(preparados, set(subconjunto)), REGLAS_TOPE, PESOS,
+                                                  cortes)['score']
+                        self.assertEqual(puntaje.sin(subconjunto), esperado)
 
 
 if __name__ == '__main__':

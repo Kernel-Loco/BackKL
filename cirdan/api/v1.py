@@ -931,9 +931,11 @@ def _leer_contexto_plan(conn, session, domain_id):
         'ON t.code = r.code WHERE r.rule_set_id = %s',
         (rule_set_id,),
     ).fetchall()}
+    # El activo de cada hallazgo es para el plan por activo (RC-263): el motor y simular() no lo leen.
     hallazgos = conn.execute(
-        'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status '
-        'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id '
+        'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status, f.asset_id::text AS asset_id, '
+        'a.asset_type, a.value AS asset_value '
+        'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id JOIN assets a ON a.id = f.asset_id '
         'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
         (domain_id, list(motor.ESTADOS_PUNTUABLES)),
     ).fetchall()
@@ -955,7 +957,11 @@ def _leer_contexto_plan(conn, session, domain_id):
     return domain_id, reglas, pesos, hallazgos, method, severidades, parcial, guardado, cortes
 
 
-def _plan_data(session, fqdn, descargar=None):
+Agrupar = Literal['regla', 'activo']
+AGRUPAR = Query(default='regla', description="'regla' (por omisión) o 'activo': una acción por host o IP (RC-263)")
+
+
+def _plan_data(session, fqdn, descargar=None, agrupar='regla'):
     """El plan de acción. Con `descargar(conn, data, domain_id)` devuelve lo que esa función arme dentro de la
     transacción que leyó los datos, como en _comparacion()."""
     domain_id = _domain_id(session, fqdn)
@@ -966,15 +972,15 @@ def _plan_data(session, fqdn, descargar=None):
             conn, session, domain_id)
         try:
             data = plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial, guardado,
-                                              cortes)
+                                              cortes, agrupar)
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return descargar(conn, data, domain_id) if descargar else data
 
 
 @router.get('/domains/{fqdn}/action-plan', summary='Plan de acción con el impacto estimado por acción')
-def action_plan(fqdn: str, session: Session = Depends(session_or_api_key)):
-    return _plan_data(session, fqdn)
+def action_plan(fqdn: str, agrupar: Agrupar = AGRUPAR, session: Session = Depends(session_or_api_key)):
+    return _plan_data(session, fqdn, agrupar=agrupar)
 
 
 @router.post('/domains/{fqdn}/action-plan/simulate', summary='Simula una o varias acciones sin guardar cambios')
@@ -995,7 +1001,7 @@ def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
 
 
 @router.get('/domains/{fqdn}/action-plan/export', summary='Descarga el plan de acción en CSV o JSON')
-def export_action_plan(request: Request, fqdn: str, formato: str = Query(default='json'),
+def export_action_plan(request: Request, fqdn: str, formato: str = Query(default='json'), agrupar: Agrupar = AGRUPAR,
                        session: Session = Depends(session_or_api_key)):
     formato = _formato(formato)
     _dominio_autorizado(session, fqdn)  # 404 de otra empresa y 403 sin carta vigente, antes de leer el plan (RC-307)
@@ -1009,7 +1015,7 @@ def export_action_plan(request: Request, fqdn: str, formato: str = Query(default
         _registrar_descarga(conn, session, request, 'action_plan', formato, domain_id, len(data['actions']))
         return respuesta
 
-    return _plan_data(session, fqdn, descargar)
+    return _plan_data(session, fqdn, descargar, agrupar)
 
 
 # ---------------------------------------------------------------- salida a SIEM (#98, RC-212)
