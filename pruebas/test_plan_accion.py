@@ -206,6 +206,11 @@ class PlanAcumulado(unittest.TestCase):
                                          (despues, antes - despues), accion['id'])
                         self.assertGreaterEqual(accion['score_reduction_acumulado'], 0)
                         antes = despues
+                    if agrupar == 'regla':   # y es lo mismo que simular() con las acciones de arriba
+                        for n in range(1, len(data['actions']) + 1):
+                            arriba = [a['id'] for a in data['actions'][:n]]
+                            simulado = plan.simular(hallazgos, reglas, PESOS, arriba, severidades, None, cortes)
+                            self.assertEqual(simulado['score_after'], data['actions'][n - 1]['score_after_acumulado'])
 
     def test_orden_voraz_y_empate_por_categoria_e_id(self):
         # Con el piso: solas, spf_missing y old_tls bajan 15 cada una y gana la de configuración (el desempate de
