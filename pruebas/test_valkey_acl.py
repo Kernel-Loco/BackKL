@@ -115,7 +115,10 @@ class EnVivo(unittest.TestCase):
         self.assertEqual(self.cli('DEL', 'sess:rc292-prueba'), '1')
         self.assertIn('NOPERM', self.cli('SET', 'rc292:fuera', 'x'))
         # KEYS sí se deja llamar desde un script (CONFIG no: daría 'not allowed from script' antes de la ACL).
-        self.assertIn('NOPERM', self.cli('EVAL', "return redis.call('KEYS', '*')", '0'))
+        # Un comando prohibido dentro de un EVAL no da NOPERM sino 'ERR ACL failure in script: ... no permissions'.
+        # Una llave ajena dentro del EVAL sí da 'NOPERM No permissions to access a key'.
+        self.assertRegex(self.cli('EVAL', "return redis.call('KEYS', '*')", '0'),
+                         r'^ERR ACL failure in script: User cirdan_api has no permissions')
         self.assertIn('NOPERM', self.cli('EVAL', "return redis.call('SET', KEYS[1], 'x')", '1', 'rc292:fuera'))
 
     def test_3_default_no_entra_ni_con_la_contrasena_de_la_api(self):
