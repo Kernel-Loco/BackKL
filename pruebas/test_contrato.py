@@ -237,10 +237,10 @@ class Alcance(unittest.TestCase):
         fuera = [Activo('subdomain', 'acme-demo.mx.evil.com'), Activo('domain', 'xacme-demo.mx'),
                  Activo('email', 'ana@gmail.com'), Activo('ip', '203.0.113.5'),
                  Activo('service', '203.0.113.5:22/tcp', {'host': 'otro.mx'})]
-        for a in dentro:
-            self.assertTrue(contrato.en_alcance(a, d), a)
-        for a in fuera:
-            self.assertFalse(contrato.en_alcance(a, d), a)
+        for activo in dentro:
+            self.assertTrue(contrato.en_alcance(activo, d), activo)
+        for activo in fuera:
+            self.assertFalse(contrato.en_alcance(activo, d), activo)
 
     def test_2_filtrar_quita_el_activo_y_sus_hallazgos(self):
         res = resultado(hallazgo(activo='acme-demo.mx.evil.com', huella='b' * 64), hallazgo(),

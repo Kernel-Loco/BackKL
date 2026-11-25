@@ -409,7 +409,8 @@ class Orquestador(Base):
             self.assertEqual(self.correos(s.domain_id, modo='vivo'), ['ana@acme-demo.mx', 'carla@acme-demo.mx'])
         self.assertEqual(self.correos(s.domain_id), ['ana@acme-demo.mx', 'carla@acme-demo.mx', 'eva@acme-demo.mx'])
         # orden-4: sin la actividad 8 no van los de identidad, sin la 4 no van los de GitHub
-        sin = lambda *quitar: [a for a in TODAS if a not in quitar]
+        def sin(*quitar):
+            return [a for a in TODAS if a not in quitar]
         self.assertEqual(self.correos(s.domain_id, actividades=sin(8)), ['ana@acme-demo.mx'])
         self.assertEqual(self.correos(s.domain_id, actividades=sin(4)), ['carla@acme-demo.mx', 'eva@acme-demo.mx'])
         self.assertEqual(self.correos(s.domain_id, actividades=sin(4, 8)), [])
@@ -425,7 +426,8 @@ class Orquestador(Base):
         self.assertEqual((extras['correos'], extras['correos_total']), (['carla@acme-demo.mx'], 3))
 
     def test_18_cobertura_de_la_corrida(self):
-        r = lambda **k: Resultado('acme-demo.mx', 'identity', **k)
+        def r(**k):
+            return Resultado('acme-demo.mx', 'identity', **k)
         self.assertEqual(orquestador.cobertura(r(), identidad), 'complete')
         # Un código sin llave no la hace parcial: revisó todas sus partes
         self.assertEqual(orquestador.cobertura(r(sin_cobertura=['personal_email_exposed']), identidad), 'complete')

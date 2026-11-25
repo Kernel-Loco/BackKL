@@ -464,7 +464,7 @@ class GrabarYReproducir(unittest.TestCase):
         lineas = crtsh.resumen(grabado, cliente)
         self.assertIn('acme-demo.mx · Cert Spotter (crt.sh no respondió) · succeeded · sin red, respuestas grabadas el',
                       lineas[0])
-        self.assertFalse([l for l in lineas if l.startswith('Falta')])
+        self.assertFalse([linea for linea in lineas if linea.startswith('Falta')])
 
     def test_2_si_tampoco_responde_cert_spotter_la_grabacion_anterior_queda_intacta(self):
         with tempfile.TemporaryDirectory() as d:

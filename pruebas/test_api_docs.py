@@ -19,7 +19,6 @@ import tempfile
 import time
 import types
 import unittest
-import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock

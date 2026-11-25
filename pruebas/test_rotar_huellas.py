@@ -25,7 +25,7 @@ from unittest import mock
 
 from argon2 import PasswordHasher
 
-from cirdan.auth import keyvault, passwords, rotar_huellas, totp
+from cirdan.auth import passwords, rotar_huellas
 from pruebas import test_llave_huellas as llave
 from pruebas.test_llave_huellas import ALEX, CLAVE, LLAVE, LLAVE_TOTP, MAYA, ORG, URL, URL_TOTP, Base
 

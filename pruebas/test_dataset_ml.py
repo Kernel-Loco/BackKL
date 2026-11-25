@@ -792,7 +792,7 @@ class EtiquetadorLlm(ConLote):
         self.assertTrue((self.carpeta / 'dataset.csv').exists())
         texto = self.salida_de_main()
         # sin personas, la línea del LLM no da un kappa None: dice que no hay contra quién medirlo
-        linea_llm = [l for l in texto.splitlines() if l.startswith('Etiquetador LLM')]
+        linea_llm = [linea for linea in texto.splitlines() if linea.startswith('Etiquetador LLM')]
         self.assertEqual(linea_llm, ['Etiquetador LLM (no vota): no hay personas contra quién medirlo. Filas que '
                                      'cubre: etiquetador_2 %d, etiquetador_3 %d, etiquetador_4 %d, bloque_comun %d.' % (
                                          *(x['filas_cubiertas'][e] for e in acuerdo.CIEGOS), len(COMUN))])

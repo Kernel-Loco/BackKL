@@ -268,7 +268,8 @@ class PorDominio(unittest.TestCase):
         self.assertEqual(reciente.huella, vieja.huella)
 
     def test_8_codigo_por_clases_y_fecha(self):
-        de = lambda b: hibp.codigo_de(hibp.limpiar_brecha(b), AHORA)
+        def de(b):
+            return hibp.codigo_de(hibp.limpiar_brecha(b), AHORA)
         self.assertEqual(de(BRECHAS['Preguntas']), 'breach_exposure')   # preguntas de seguridad son datos de acceso
         self.assertEqual(de(brecha('SinFecha', fecha=None)), 'breach_exposure')   # sin fecha cuenta como reciente
         self.assertEqual(de(brecha('Rota', fecha='no-es-fecha')), 'breach_exposure')

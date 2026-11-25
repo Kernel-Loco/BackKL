@@ -524,7 +524,8 @@ class Login(Base):
         no_abren = self._no_abren()
         for caso in ('otra llave', 'base64 mala'):
             with self.subTest(caso=caso):
-                no_abre = lambda: passwords.verify_password(no_abren[caso], 'Otra-Clave-Larga-99', ALEX)
+                def no_abre():
+                    return passwords.verify_password(no_abren[caso], 'Otra-Clave-Larga-99', ALEX)
                 diferencia, inexistente, tiempo = self.comparar_tiempos(no_abre)
                 self.assertLess(abs(diferencia), 0.35, (diferencia, inexistente, tiempo))
                 self.tardan_lo_mismo_sin_argon2id(no_abre)
@@ -532,7 +533,8 @@ class Login(Base):
     def test_5b_y_tardan_lo_mismo(self):
         huella = passwords.hash_password(CLAVE, ALEX)
         passwords.comprobar_llave()
-        equivocada = lambda: passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX)
+        def equivocada():
+            return passwords.verify_password(huella, 'Otra-Clave-Larga-99', ALEX)
         diferencia, inexistente, tiempo = self.comparar_tiempos(equivocada)
         self.assertGreater(inexistente, 0.01, 'el correo inexistente también debe gastar el tiempo de argon2id')
         self.assertLess(abs(diferencia), 0.35, (diferencia, inexistente, tiempo))

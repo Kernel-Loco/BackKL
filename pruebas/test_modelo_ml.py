@@ -12,7 +12,6 @@ import pandas as pd
 
 from cirdan.ml import inferencia, modelo
 from cirdan import orquestador
-from psycopg.types.json import Jsonb
 
 
 class ModeloMl(unittest.TestCase):
