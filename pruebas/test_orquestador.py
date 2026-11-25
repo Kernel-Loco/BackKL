@@ -1657,7 +1657,8 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.cupo('ct_logs')[1], usadas + FALLA.consultas)  # lo gastado de más se registra igual
 
     def test_3o_la_reserva_y_el_ajuste_dejan_en_daily_used_lo_que_se_gasto(self):
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         reservadas = crtsh.MAX_CONSULTAS
         _, usadas = self.exige_cupo('ct_logs', 2 + reservadas)  # 2 intentos de 1 consulta y la reserva del tercero
         durante = []

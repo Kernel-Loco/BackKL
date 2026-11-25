@@ -991,7 +991,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                     status, attempt, next_retry_at = 'failed', intento, None
                     sin_reintento = [SIN_REINTENTO % codigo]
             gastadas += res.consultas
-            avisos = previos + res.avisos + sin_reintento
+            avisos = previos + sin_reintento + res.avisos  # antes de los de la fuente, que avisos[:10] puede cortar
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
                        'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura, 'sin_llave': res.sin_llave,
                        'cobertura_parcial': res.estado == 'succeeded' and res.revisados is not None}

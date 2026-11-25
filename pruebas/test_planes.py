@@ -252,7 +252,7 @@ class Tope(unittest.TestCase):
             with self.subTest(fuente=codigo, trigger='on_demand'):
                 self.assertEqual((filas[codigo]['status'], filas[codigo]['attempt']), ('failed', 1))
                 if filas[codigo]['raw_payload']:   # whois y shodan no guardan raw_payload (keep_raw_payload)
-                    self.assertEqual(filas[codigo]['raw_payload']['avisos'][-1], orquestador.SIN_REINTENTO % codigo)
+                    self.assertIn(orquestador.SIN_REINTENTO % codigo, filas[codigo]['raw_payload']['avisos'])
         programado = self.pedir(trigger='scheduled')
         self.assertTrue(programado.aceptada, programado.detalle)
         filas, espera = self.correr_en_vivo(programado, [FALLA] * 4 * len(planes.FUENTES_DEL_TOPE))
