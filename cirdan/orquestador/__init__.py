@@ -152,6 +152,8 @@ CORREOS_SQL = (
     "AND x.asset_type = 'email' AND lower(x.value) = c.correo) NULLS FIRST, correo LIMIT %(tope)s")
 MAX_CORREOS = 200   # el recolector consulta menos (hibp.MAX_CORREOS) y avisa de los que sobran
 SIN_CUPO = 'Sin cupo diario: %s no tiene cupo para una corrida completa hoy (día UTC).'
+# RC-297: en un escaneo a mano, una fuente del tope (planes.FUENTES_DEL_TOPE) que ya gastó consultas no se reintenta.
+SIN_REINTENTO = 'Sin reintento: un escaneo a mano no vuelve a gastar el cupo diario de %s.'
 
 # Costo medido del escaneo (#52, RC-87): se guarda en scans.stats para el costo interno, pero GET /api/v1/scans y
 # GET /api/v1/scans/{id} no lo entregan al portal ni a las llaves de API. Las demás llaves de stats salen igual.
@@ -316,9 +318,15 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
         # Tope de escaneos a mano por empresa, por dominio y enfriamiento (RC-297), antes del DNS: si se pasa, ni
         # consulta TXT ni fila en dns_txt_verifications. Toma el candado de la empresa hasta el final de esta
         # transacción, que es la que inserta el escaneo. Los programados (RC-52) no pasan por aquí.
+        # El candado va antes de _en_curso: abandonar_vencidos() puede escribir scan.abandoned, y el trigger de
+        # audit_log toma el candado de la cadena de la empresa. Al revés, una petición con la cadena tomada esperaría el
+        # tope y otra con el tope esperaría la cadena para su audit: interbloqueo (RC-297-B2.1). Así, además, dos
+        # peticiones a la vez del mismo dominio dan 409 y no 429.
         limite = None
-        if not motivos and trigger != 'scheduled' and _en_curso(c, org, domain['id']):
-            motivos.append('scan_in_progress')  # 409 como antes, no el 429 del enfriamiento, y sin consulta DNS
+        if not motivos and trigger != 'scheduled':
+            planes.tomar_candado(c, org)
+            if _en_curso(c, org, domain['id']):
+                motivos.append('scan_in_progress')  # 409 como antes, no el 429 del enfriamiento, y sin consulta DNS
         if not motivos and trigger != 'scheduled':
             limite = planes.check_plan_limits(org, 'on_demand_scan', c, domain_id=domain['id'])
             if limite:
@@ -880,7 +888,10 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     que sigue vivo y, si alguien lo dio por caído, deja de correr. Al reproducir no se reintenta, porque la
     respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la
     fuente queda en 'failed'. Las consultas de la fila suman las de todos sus intentos y los errores de los
-    intentos anteriores quedan en sus avisos.
+    intentos anteriores quedan en sus avisos. En un escaneo a mano (trigger 'on_demand' o 'api', RC-297), ct_logs,
+    whois y shodan solo se reintentan si el intento fallido no gastó consultas: así cada escaneo a mano gasta a lo
+    más un MAX_CONSULTAS de cada una y vale la cuenta del tope de cirdan/planes.py. Si no, quedan en 'failed' con el
+    aviso SIN_REINTENTO. Los programados se reintentan como siempre.
     En vivo y al grabar, antes de cada corrida (también de cada reintento) reserva en data_sources el máximo de
     consultas del recolector (MAX_CONSULTAS) y al terminar ajusta a las que gastó. Si la fuente ya no tiene cupo
     hoy (día UTC), queda en 'failed' sin llamar al recolector y sin reintento, porque esperar 1, 5 o 25 minutos no
@@ -932,6 +943,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         alcance = c.execute('SELECT a.activities FROM scans s JOIN domain_authorizations a ON a.id = s.authorization_id '
                             'WHERE s.id = %s', (scan_id,)).fetchone()
         actividades = alcance['activities'] if alcance else None
+        disparo = c.execute('SELECT trigger_type FROM scans WHERE id = %s', (scan_id,)).fetchone()
+        a_mano = bool(disparo) and disparo['trigger_type'] in planes.A_MANO   # RC-297: sin reintento tras gastar
 
     if modo == 'vivo' and not en_vivo_permitido(fqdn):
         modo = 'reproducir'  # nunca consultar en vivo un dominio fuera de DOMINIOS_EN_VIVO
@@ -948,7 +961,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         while True:
             if not _latido(org, scan_id, conn):
                 return _ya_no_corre(org, scan_id, conn, corridas)
-            reservadas, dia = 0, None
+            reservadas, dia, sin_reintento = 0, None, []
             if con_cupo and permitida:
                 reservadas = getattr(modulo, 'MAX_CONSULTAS')
                 dia = _reservar(org, codigo, reservadas, conn)
@@ -972,8 +985,13 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 momento = datetime.now(timezone.utc)
                 status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta
                                                   else (res.estado, 0, None))
+                if (status == 'retrying' and a_mano and codigo in planes.FUENTES_DEL_TOPE
+                        and gastadas + res.consultas > 0):
+                    # Otro intento reservaría otra vez MAX_CONSULTAS del cupo de toda la plataforma (RC-297-B1.1).
+                    status, attempt, next_retry_at = 'failed', intento, None
+                    sin_reintento = [SIN_REINTENTO % codigo]
             gastadas += res.consultas
-            avisos = previos + res.avisos
+            avisos = previos + res.avisos + sin_reintento
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
                        'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura, 'sin_llave': res.sin_llave,
                        'cobertura_parcial': res.estado == 'succeeded' and res.revisados is not None}

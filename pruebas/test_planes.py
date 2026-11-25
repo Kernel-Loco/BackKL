@@ -24,9 +24,10 @@ from cirdan.api import escaneos
 from cirdan.db import DSN, transaction
 from cirdan.orquestador import Solicitud
 from cirdan.recolectores import REGISTRO, cargar
-from pruebas.test_orquestador import ACME, BETA, TXT_ACME, renovar_carta, responde
+from pruebas.test_orquestador import ACME, BETA, FALLA, TXT_ACME, renovar_carta, responde
 
 TXT_BETA = 'cirdan-verification=b7e1d0c4a9f2'   # token de beta-corp.mx en la semilla
+TXT_TIENDA = 'cirdan-verification=5e9a1f3c7d28'  # token de acme-tienda.mx en la semilla
 CARTA_BETA = '41000000-0000-4000-8000-000000000006'
 
 
@@ -222,6 +223,44 @@ class Tope(unittest.TestCase):
             s = self.pedir(fqdn='partner-example.com')
         self.assertEqual((s.motivos, s.retry_after), (['authorization_missing'], None))
 
+    def correr_en_vivo(self, s, resultados):
+        """Corre las fuentes del tope en vivo con estos resultados seguidos, sin red ni esperas reales. Cada corrida
+        reserva 1 consulta (MAX_CONSULTAS parchado), así la prueba no depende del cupo que le quede hoy a esta base."""
+        seguidos, esperas = iter(resultados), []
+        with mock.patch.object(orquestador, 'ejecutar', lambda *a, **k: next(seguidos)), \
+                mock.patch.object(orquestador, 'en_vivo_permitido', lambda fqdn: True), \
+                mock.patch.object(cargar('ct_logs'), 'MAX_CONSULTAS', 1), \
+                mock.patch.object(cargar('whois'), 'MAX_CONSULTAS', 1), \
+                mock.patch.object(cargar('shodan'), 'MAX_CONSULTAS', 1):
+            orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=list(planes.FUENTES_DEL_TOPE), conn=self.conn,
+                               dormir=esperas.append)
+        filas = self.conn.execute(
+            'SELECT d.code, r.status, r.attempt, r.raw_payload FROM scan_source_runs r JOIN data_sources d '
+            'ON d.id = r.source_id WHERE r.scan_id = %s', (s.scan_id,)).fetchall()
+        return {f['code']: f for f in filas}, sum(esperas)
+
+    def test_9_a_mano_una_fuente_del_tope_no_se_reintenta_si_ya_gasto(self):
+        """B1.1: cada reintento reserva otra vez MAX_CONSULTAS. A mano, ct_logs, whois y shodan solo se reintentan si
+        el intento fallido no gastó nada, así un escaneo gasta a lo más un MAX_CONSULTAS de cada una y la cuenta de
+        planes.py vale con reintentos. Un programado se sigue reintentando a 1, 5 y 25 minutos."""
+        nada = SimpleNamespace(**dict(vars(FALLA), consultas=0))
+        a_mano = self.pedir()
+        self.assertTrue(a_mano.aceptada, a_mano.detalle)
+        filas, espera = self.correr_en_vivo(a_mano, [nada, FALLA] * len(planes.FUENTES_DEL_TOPE))
+        self.assertEqual(espera, len(planes.FUENTES_DEL_TOPE) * 60)   # solo el reintento del intento que no gastó
+        for codigo in planes.FUENTES_DEL_TOPE:
+            with self.subTest(fuente=codigo, trigger='on_demand'):
+                self.assertEqual((filas[codigo]['status'], filas[codigo]['attempt']), ('failed', 1))
+                if filas[codigo]['raw_payload']:   # whois y shodan no guardan raw_payload (keep_raw_payload)
+                    self.assertEqual(filas[codigo]['raw_payload']['avisos'][-1], orquestador.SIN_REINTENTO % codigo)
+        programado = self.pedir(trigger='scheduled')
+        self.assertTrue(programado.aceptada, programado.detalle)
+        filas, espera = self.correr_en_vivo(programado, [FALLA] * 4 * len(planes.FUENTES_DEL_TOPE))
+        self.assertEqual(espera, len(planes.FUENTES_DEL_TOPE) * 31 * 60)
+        for codigo in planes.FUENTES_DEL_TOPE:
+            with self.subTest(fuente=codigo, trigger='scheduled'):
+                self.assertEqual((filas[codigo]['status'], filas[codigo]['attempt']), ('failed', 3))
+
 
 class Paralelo(unittest.TestCase):
     """N peticiones a la vez de la misma empresa no pasan del tope (el candado de planes._candado).
@@ -241,8 +280,9 @@ class Paralelo(unittest.TestCase):
                 'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, '
                 "activities) SELECT organization_id, domain_id, signer_name, signer_title, signer_email, "
                 "signed_document_key || '.prueba', signed_document_sha256, current_date - 1, current_date + 30, "
-                "accepted_by, template_version, activities FROM domain_authorizations a WHERE id = "
-                "'41000000-0000-4000-8000-000000000001' AND NOT EXISTS (SELECT 1 FROM domain_authorizations v "
+                "accepted_by, template_version, activities FROM domain_authorizations a WHERE id IN "
+                "('41000000-0000-4000-8000-000000000001', '41000000-0000-4000-8000-000000000002') "   # y acme-tienda.mx
+                'AND NOT EXISTS (SELECT 1 FROM domain_authorizations v '
                 'WHERE v.domain_id = a.domain_id AND v.revoked_at IS NULL AND current_date BETWEEN v.valid_from AND '
                 'v.valid_until)')
 
@@ -304,6 +344,67 @@ class Paralelo(unittest.TestCase):
         with mock.patch.object(planes, '_candado', lambda conn, org: None):
             aceptadas = [s for s in self.a_la_vez() if s.aceptada]
         self.assertGreater(len(aceptadas), planes.TOPE_EMPRESA)
+
+    ESPERA_DNS = 1.5   # más que deadlock_timeout (1 s por omisión)
+
+    def caido_y_dos_dominios(self):
+        """B2.1: un escaneo caído de acme-tienda.mx y dos peticiones a la vez. La de acme-demo.mx toma el tope y tarda en
+        el DNS. Mientras, la de acme-tienda.mx da por caído el viejo (scan.abandoned toma el candado de la cadena de
+        audit_log) y pide el tope. Si la primera pide la cadena para su audit con el orden al revés, hay interbloqueo."""
+        with transaction(ACME) as c:
+            viejo = orquestador.solicitar(ACME, 'acme-tienda.mx', trigger='scheduled', consultar=responde(TXT_TIENDA),
+                                          conn=c)
+            self.assertTrue(viejo.aceptada, viejo.detalle)
+            c.execute("UPDATE scans SET updated_at = now() - interval '31 minutes' WHERE id = %s", (viejo.scan_id,))
+        self.ids.append(viejo.scan_id)
+        en_dns = threading.Event()
+
+        def dns_lento(fqdn):   # con el candado del tope tomado
+            en_dns.set()
+            time.sleep(self.ESPERA_DNS)
+            return responde(TXT_ACME)(fqdn)
+
+        salida, errores = {}, []
+
+        def peticion(fqdn, consultar, antes=None):
+            try:
+                if antes:
+                    antes.wait(10)
+                with transaction(ACME) as c:
+                    s = orquestador.solicitar(ACME, fqdn, consultar=consultar, conn=c)
+                    if s.aceptada:
+                        c.execute("UPDATE scans SET status = 'completed', finished_at = now() WHERE id = %s",
+                                  (s.scan_id,))
+                salida[fqdn] = s
+            except Exception as e:  # noqa: BLE001 - la prueba lo muestra abajo
+                errores.append(repr(e))
+
+        with mock.patch.object(planes, 'TOPE_EMPRESA', 99), mock.patch.object(planes, 'TOPE_DOMINIO_SIN_PLAN', 99), \
+                mock.patch.object(planes, 'ENFRIAMIENTO', timedelta(minutes=-5)):
+            hilos = [threading.Thread(target=peticion, args=('acme-demo.mx', dns_lento), daemon=True),
+                     threading.Thread(target=peticion, args=('acme-tienda.mx', responde(TXT_TIENDA), en_dns),
+                                      daemon=True)]
+            for h in hilos:
+                h.start()
+            for h in hilos:
+                h.join(60)
+        self.ids += [s.scan_id for s in salida.values() if s.aceptada]
+        with transaction(ACME) as c:
+            estado = c.execute('SELECT status FROM scans WHERE id = %s', (viejo.scan_id,)).fetchone()['status']
+        return salida, errores, estado
+
+    def test_3_un_escaneo_caido_no_traba_a_dos_dominios_a_la_vez(self):
+        salida, errores, viejo = self.caido_y_dos_dominios()
+        self.assertEqual(errores, [])
+        self.assertEqual({f: s.aceptada for f, s in salida.items()}, {'acme-demo.mx': True, 'acme-tienda.mx': True})
+        self.assertEqual(viejo, 'failed')   # lo dio por caído la petición de acme-tienda.mx
+
+    def test_4_sin_el_candado_antes_de_en_curso_hay_interbloqueo(self):
+        """Mutación: con el candado del tope solo dentro de check_plan_limits (el orden de antes), PostgreSQL aborta
+        una de las dos con DeadlockDetected."""
+        with mock.patch.object(planes, 'tomar_candado', lambda conn, org: None):
+            _, errores, _ = self.caido_y_dos_dominios()
+        self.assertTrue(any('DeadlockDetected' in e for e in errores), errores)
 
 
 class Respuesta(unittest.TestCase):

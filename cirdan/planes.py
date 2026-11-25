@@ -13,8 +13,10 @@ que reserva una corrida (MAX_CONSULTAS de su recolector), con los cupos de las s
     shodan  2140 / 2 = 1070, 1070 / 214 = 5
 
 El menor es whois: 3 escaneos a mano por empresa y día UTC (decisión 2 de Ernesto, 24 nov). Cada reintento de una
-fuente reserva otra vez su MAX_CONSULTAS y al terminar devuelve lo que no gastó, así que la cuenta vale por corrida sin
-reintentos. Las pruebas de test_planes.py revisan que TOPE_EMPRESA siga cuadrando si cambia un recolector.
+fuente reserva otra vez su MAX_CONSULTAS, así que en un escaneo a mano estas 3 fuentes solo se reintentan si el intento
+fallido no gastó nada (orquestador.correr, SIN_REINTENTO, elegido por Ernesto el 25 nov): cada escaneo a mano gasta a lo
+más un MAX_CONSULTAS de cada una y la cuenta vale también con reintentos. Dividir entre los 4 intentos dejaría whois
+en 30 / 40 = 0. Las pruebas de test_planes.py revisan que TOPE_EMPRESA siga cuadrando si cambia un recolector.
 
 Con plans.on_demand_scans = false (Starter y Business, también Grupo Olmardo y LowTide), cada dominio tiene además 1
 escaneo a mano por día UTC. Con true (Enterprise), el mismo dominio se puede volver a pedir tras ENFRIAMIENTO (decisión
@@ -71,6 +73,14 @@ def _segundos(hasta, ahora):
 def _candado(conn, org):
     """Candado de la empresa hasta el final de la transacción (pg_advisory_xact_lock con dos llaves)."""
     conn.execute('SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s::uuid::text))', (CANDADO, org))
+
+
+def tomar_candado(conn, org):
+    """El candado de la empresa antes de cualquier otro de la transacción, sobre todo el de la cadena de audit_log.
+
+    orquestador.solicitar() lo toma antes de _en_curso(), que puede escribir scan.abandoned. check_plan_limits lo vuelve a
+    pedir y PostgreSQL lo apila en la misma transacción sin esperar."""
+    _candado(conn, org)
 
 
 def check_plan_limits(org, action, conn, domain_id=None):
