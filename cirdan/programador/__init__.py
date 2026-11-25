@@ -35,6 +35,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 from cirdan import orquestador
+from cirdan.orquestador import motivos
 from cirdan.config import config
 from cirdan.db import transaction
 
@@ -151,7 +152,7 @@ def detener(motivo='El programador se detuvo antes de terminar el escaneo'):
         vivos = [(scan_id, org) for scan_id, (org, hilo) in _hilos.items() if hilo.is_alive()]
     for scan_id, org in vivos:
         try:
-            orquestador.marcar_fallido(org, scan_id, RuntimeError(motivo))
+            orquestador.marcar_fallido(org, scan_id, RuntimeError(motivo), motivos.INTERRUMPIDO)
         except Exception:
             log.exception('no se pudo cerrar el escaneo %s', scan_id)
         _reintentar_pronto(org, scan_id)
