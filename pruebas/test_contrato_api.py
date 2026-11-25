@@ -218,8 +218,8 @@ class Dominios(unittest.TestCase):
 
     def test_4_motivos_como_en_el_contrato_y_el_orquestador(self):
         # Los de docs/contrato_api_v1.md, y el orquestador tiene el texto de cada uno
-        fila = next(l for l in (EJEMPLOS.parent / 'contrato_api_v1.md').read_text(encoding='utf-8').splitlines()
-                    if l.startswith('| `scan_eligibility`'))
+        fila = next(linea for linea in (EJEMPLOS.parent / 'contrato_api_v1.md').read_text(encoding='utf-8').splitlines()
+                    if linea.startswith('| `scan_eligibility`'))
         self.assertEqual(set(fila.split('dice por qué:')[1].split('.')[0].split('`')[1::2]), set(MOTIVOS_BLOQUEO))
         orquestador = (EJEMPLOS.parents[1] / 'cirdan' / 'orquestador' / '__init__.py').read_text(encoding='utf-8')
         for motivo in MOTIVOS_BLOQUEO:

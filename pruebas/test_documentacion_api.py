@@ -34,7 +34,7 @@ def cmd_del_dockerfile():
     if not DOCKERFILE.exists():
         return list(CMD_ESPERADO)
     texto = re.sub(r'\\\n\s*', '', DOCKERFILE.read_text(encoding='utf-8'))
-    cmds = [l[len('CMD'):].strip() for l in texto.splitlines() if l.startswith('CMD ')]
+    cmds = [linea[len('CMD'):].strip() for linea in texto.splitlines() if linea.startswith('CMD ')]
     return json.loads(cmds[-1])
 
 
@@ -82,7 +82,7 @@ class Api:
 def api_docs_en_env_local():
     """Si el .env de la raíz trae API_DOCS: cirdan/config.py lo lee cuando la variable no está en el entorno. En el
     contenedor no hay .env (.dockerignore)."""
-    return ENV_LOCAL.exists() and any(l.startswith('API_DOCS=') for l in ENV_LOCAL.read_text(encoding='utf-8').split())
+    return ENV_LOCAL.exists() and any(linea.startswith('API_DOCS=') for linea in ENV_LOCAL.read_text(encoding='utf-8').split())
 
 
 @unittest.skipIf(api_docs_en_env_local(), 'el .env de la raíz trae API_DOCS: no se puede ver el valor por omisión')

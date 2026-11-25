@@ -153,7 +153,7 @@ class EnvDeLaVm(unittest.TestCase):
         salida = self.correr()
         self.assertEqual(salida.returncode, 0, salida.stderr)
         env = leer(self.carpeta / '.env')
-        valores = dict(l.split('=', 1) for l in env.splitlines() if l and not l.startswith('#') and '=' in l)
+        valores = dict(linea.split('=', 1) for linea in env.splitlines() if linea and not linea.startswith('#') and '=' in linea)
         self.assertNotIn('cambia_esta_clave', env)
         self.assertNotIn('genera_tu_llave', env)
         for nombre in ('POSTGRES_PASSWORD', 'CIRDAN_APP_PASSWORD', 'VALKEY_PASSWORD'):

@@ -47,7 +47,7 @@ class Letras(unittest.TestCase):
         bandas = {'A': 'low', 'B': 'low', 'C': 'medium', 'D': 'high', 'F': 'critical'}
         for score in range(101):
             self.assertEqual(bandas[c.letra(score)], c.banda(score), score)
-        self.assertEqual([l for _, _, l in c.LETRAS], ['A', 'B', 'C', 'D', 'F'])   # no hay E
+        self.assertEqual([letra for _, _, letra in c.LETRAS], ['A', 'B', 'C', 'D', 'F'])   # no hay E
 
     def test_3_regla_de_piso(self):
         limpio = notas(0, 0, 0, 0)

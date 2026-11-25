@@ -110,5 +110,6 @@ def db_rows(table: str, session: Session = Depends(require_roles('admin'))):
         orgs = {r['id']: r['name'] for r in conn.execute('SELECT id, name FROM organizations')}
         rows = conn.execute(sql.SQL('SELECT {} FROM {} LIMIT 8').format(
             sql.SQL(', ').join(map(sql.Identifier, cols)), _source(table))).fetchall()
-    show = lambda c, v: orgs.get(v, _short(v)) if c == 'organization_id' else _short(v)
+    def show(c, v):
+        return orgs.get(v, _short(v)) if c == 'organization_id' else _short(v)
     return {'table': table, 'columns': cols, 'rows': [[show(c, r[c]) for c in cols] for r in rows]}

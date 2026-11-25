@@ -125,27 +125,27 @@ class Verificacion(unittest.TestCase):
         llamadas = self.llamadas()
         self.assertEqual(len(llamadas), 4)
         for repo, imagen in (('BackKL', API), ('FrontKL', PORTAL)):
-            de_esta = [l for l in llamadas if l.endswith(imagen)]
+            de_esta = [linea for linea in llamadas if linea.endswith(imagen)]
             self.assertEqual(len(de_esta), 2, repo)
-            self.assertTrue(any(' verify --certificate-oidc-issuer ' in l for l in de_esta), repo)
-            self.assertTrue(any(' verify-attestation --type spdxjson ' in l for l in de_esta), repo)
-            for l in de_esta:
-                self.assertIn('https://token.actions.githubusercontent.com', l)
-                self.assertIn('Kernel-Loco/%s/\\.github/workflows/imagenes\\.yml@refs/heads/(main|dev)$' % repo, l)
-        self.assertFalse(any('compose' in l for l in llamadas))
+            self.assertTrue(any(' verify --certificate-oidc-issuer ' in linea for linea in de_esta), repo)
+            self.assertTrue(any(' verify-attestation --type spdxjson ' in linea for linea in de_esta), repo)
+            for linea in de_esta:
+                self.assertIn('https://token.actions.githubusercontent.com', linea)
+                self.assertIn('Kernel-Loco/%s/\\.github/workflows/imagenes\\.yml@refs/heads/(main|dev)$' % repo, linea)
+        self.assertFalse(any('compose' in linea for linea in llamadas))
 
     def test_2_por_etiqueta_no_pasa_ni_llama_a_cosign(self):
         for api in ('ghcr.io/kernel-loco/backkl:main', 'ghcr.io/otro/backkl@sha256:' + 'a' * 64, ''):
             r = self.correr('--levantar', LOWTIDE_API_IMAGEN=api, LOWTIDE_PORTAL_IMAGEN=PORTAL)
             self.assertNotEqual(r.returncode, 0, api)
             self.assertIn('no se levanta nada', r.stderr)
-            self.assertFalse(any(API[:30] in l or 'compose' in l for l in self.llamadas()), api)
+            self.assertFalse(any(API[:30] in linea or 'compose' in linea for linea in self.llamadas()), api)
 
     def test_3_si_cosign_falla_no_se_levanta_nada(self):
         r = self.correr('--levantar', salida_docker=1, LOWTIDE_API_IMAGEN=API, LOWTIDE_PORTAL_IMAGEN=PORTAL)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('no se levanta nada', r.stderr)
-        self.assertFalse(any('compose' in l for l in self.llamadas()))
+        self.assertFalse(any('compose' in linea for linea in self.llamadas()))
 
     def test_4_con_levantar_baja_y_levanta_sin_compilar(self):
         r = self.correr('--levantar', LOWTIDE_API_IMAGEN=API, LOWTIDE_PORTAL_IMAGEN=PORTAL)

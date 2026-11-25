@@ -25,7 +25,7 @@ import unittest
 import urllib.error
 import urllib.parse
 from contextlib import redirect_stdout
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1343,11 +1343,11 @@ class Contrato(unittest.TestCase):
         BuildKit la salta porque ninguna otra la usa. Un ARG TARGETARCH con valor le ganaría a la plataforma que pone
         BuildKit (PR 79)."""
         # Como Docker: primero se quitan los comentarios y las líneas vacías, y después se juntan las que terminan en \
-        lineas = [l for l in (RAIZ / 'Dockerfile').read_text(encoding='utf-8-sig').splitlines()
-                  if l.strip() and not l.lstrip().startswith('#')]
-        instrucciones = [l.strip() for l in re.sub(r'\\[ \t]*\n', ' ', '\n'.join(lineas)).splitlines()]
+        lineas = [linea for linea in (RAIZ / 'Dockerfile').read_text(encoding='utf-8-sig').splitlines()
+                  if linea.strip() and not linea.lstrip().startswith('#')]
+        instrucciones = [linea.strip() for linea in re.sub(r'\\[ \t]*\n', ' ', '\n'.join(lineas)).splitlines()]
         self.assertEqual(instrucciones[:2], ['FROM scratch AS pide-buildkit', 'COPY --chmod=0644 requirements.txt /'])
-        self.assertEqual([l for l in instrucciones if 'pide-buildkit' in l], ['FROM scratch AS pide-buildkit'])
+        self.assertEqual([linea for linea in instrucciones if 'pide-buildkit' in linea], ['FROM scratch AS pide-buildkit'])
         for linea in instrucciones:
             if re.match(r'(?i)ARG\s', linea):
                 self.assertFalse([a for a in linea.split()[1:] if a.startswith('TARGETARCH=')], linea)

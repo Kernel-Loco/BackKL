@@ -183,7 +183,8 @@ class ExploradorEncendido(Explorador):
             with transaction(ACME) as conn:
                 conn.execute('UPDATE findings SET cve_id = NULL WHERE id = %s', (hallazgo,))
         self.addCleanup(limpiar)
-        de = lambda sesion, org: [f['cve_id'] for f in self.filas('cves', sesion, org)]
+        def de(sesion, org):
+            return [f['cve_id'] for f in self.filas('cves', sesion, org)]
         self.assertEqual(de(self.acme, BETA), [de_acme])
         self.assertEqual(de(self.beta, ACME), [])
         for sesion, cuantas in ((self.acme, 1), (self.beta, 0)):
