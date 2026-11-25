@@ -84,12 +84,15 @@ class ApiV1(unittest.TestCase):
         # el reloj de la API ya va en el día siguiente: una carta que empieza ese día salía 'expired'. Dos renovaciones
         # empiezan mañana en México y vencen después que su carta de la semilla. La de old-example.net (41...05,
         # vencida) es la que se muestra y sale 'missing' en /api/v1/domains y 'Not authorized' en GET /domains. La de
-        # acme-demo.mx (41...01, vigente) no le quita la vigencia en ninguna de las dos. La tabla es inmutable: las filas
-        # se borran al final sin triggers, solo en esa transacción.
+        # acme-demo.mx (41...01, vigente) no le quita la vigencia en ninguna de las dos. Desde la 036 (RC-272) la base
+        # rechaza esa renovación mientras la 41...01 siga vigente y una carta nueva revoca las anteriores, pero las filas
+        # de antes de la 036 siguen ahí: las dos se insertan sin triggers, solo en esa transacción, así no revocan las
+        # de la semilla. La tabla es inmutable: las filas se borran al final igual.
         cartas = (('41000000-0000-4000-8000-0000000000f1', '41000000-0000-4000-8000-000000000005', 60),
                   ('41000000-0000-4000-8000-0000000000f2', '41000000-0000-4000-8000-000000000001', 400))
         hoy = "(now() AT TIME ZONE 'America/Mexico_City')::date"
-        sql = ("BEGIN; SELECT %s, (now() AT TIME ZONE 'UTC')::date, valid_from, valid_until, "
+        sql = ("BEGIN; SET LOCAL session_replication_role = replica; "
+               "SELECT %s, (now() AT TIME ZONE 'UTC')::date, valid_from, valid_until, "
                '%s BETWEEN valid_from AND valid_until AND revoked_at IS NULL FROM domain_authorizations '
                "WHERE id = '41000000-0000-4000-8000-000000000001';" % (hoy, hoy))
         for nueva, base, dias in cartas:
@@ -139,7 +142,9 @@ class ApiV1(unittest.TestCase):
         # siga vigente la 41...01 de la semilla (vence 2026-12-31). acme-demo.mx suma una vigente propia que vence
         # después que la de la semilla, una vencida y una revocada que vence después que la vigente, así la vigente gana
         # aunque no sea la de valid_until más lejano. partner-example.com, sin carta en la semilla, suma solo una
-        # revocada. old-example.net sigue con su carta vencida de la semilla.
+        # revocada. old-example.net sigue con su carta vencida de la semilla. Desde la 036 (RC-272) cada carta sin
+        # revocar revoca las anteriores del dominio, así que la vencida revocaría a la vigente y las cuatro a las de la
+        # semilla: se insertan sin triggers, como filas de antes de la 036, y se borran al final igual.
         hoy = "(now() AT TIME ZONE 'America/Mexico_City')::date"
         acme_dom, partner_dom = '40000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000004'
         cartas = (('41000000-0000-4000-8000-0000000000f6', acme_dom, 'vigente.rc274@acme-demo.mx',
@@ -150,7 +155,7 @@ class ApiV1(unittest.TestCase):
                    '%s - 10' % hoy, '%s + 800' % hoy, 'now()'),
                   ('41000000-0000-4000-8000-0000000000f5', partner_dom, 'revocada.rc274@partner-example.com',
                    '%s - 10' % hoy, '%s + 100' % hoy, 'now()'))
-        sql = 'BEGIN;'
+        sql = 'BEGIN; SET LOCAL session_replication_role = replica;'
         for nueva, dominio, correo, desde, hasta, revocada in cartas:
             sql += ('INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, '
                     'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, revoked_at, '

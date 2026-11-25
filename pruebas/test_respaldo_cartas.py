@@ -56,9 +56,15 @@ UPDATE signature_requests SET status = 'accepted', decided_by = '%(usuario)s', d
 COMMIT;
 """
 # Las dos tablas no se borran (sus guardias). Solo para limpiar la prueba se apagan los disparadores en la sesión.
+# Desde la 036 (RC-272) cada carta de la prueba revocó la de la semilla de su dominio (evento authorization.superseded
+# con replaced_by): esas vuelven a quedar sin revocar antes de borrar las de la prueba.
 SQL_LIMPIEZA = """
 BEGIN;
 SET LOCAL session_replication_role = replica;
+UPDATE domain_authorizations SET revoked_at = NULL
+ WHERE id IN (SELECT l.entity_id FROM audit_log l JOIN domain_authorizations n ON n.id::text = l.details->>'replaced_by'
+               WHERE l.action = 'authorization.superseded'
+                 AND n.signed_document_key IN ('%(k_mano_pdf)s', '%(k_firmado)s'));
 DELETE FROM domain_authorizations WHERE signed_document_key IN ('%(k_mano_pdf)s', '%(k_firmado)s');
 DELETE FROM signature_requests WHERE id = '%(sol)s';
 COMMIT;
