@@ -31,7 +31,7 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from cirdan import orquestador
+from cirdan import orquestador, planes
 from cirdan.api import v1 as api_v1
 from cirdan.config import config
 from cirdan.db import DSN
@@ -154,6 +154,11 @@ class Orquestador(unittest.TestCase):
         self.tx.__enter__()
         self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
         renovar_carta(self.conn)
+        # Sin el tope de escaneos a mano (RC-297): aquí se piden varios del mismo dominio en una prueba. El tope y
+        # su lugar en solicitar() los prueba pruebas/test_planes.py.
+        sin_tope = mock.patch.object(planes, 'check_plan_limits', return_value=None)
+        sin_tope.start()
+        self.addCleanup(sin_tope.stop)
 
     def tearDown(self):
         self.tx.__exit__(None, None, None)
