@@ -255,6 +255,24 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['status'], 'failed')
         self.assertEqual(resumen['stats']['sources_unauthorized'], ['ct_logs', 'dns'])
 
+    def test_2d_el_escaneo_usa_la_carta_nueva(self):
+        # RC-272: la carta nueva vence antes que la de renovar_carta() y que la 41...01 de la semilla. Antes de la 036
+        # el escaneo tomaba la vigente de valid_until más lejano. Ahora la carga revoca las otras y el escaneo usa la
+        # nueva.
+        nueva = self.uno(
+            'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
+            'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, '
+            "activities) SELECT organization_id, domain_id, signer_name, signer_title, signer_email, "
+            "signed_document_key || '.rc272', signed_document_sha256, current_date, current_date + 5, accepted_by, "
+            'template_version, activities FROM domain_authorizations WHERE id = %s RETURNING id', CARTA_ACME_DEMO)['id']
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(s.aceptada, s.detalle)
+        self.assertEqual(self.uno('SELECT authorization_id FROM scans WHERE id = %s', s.scan_id)['authorization_id'],
+                         nueva)
+        otras = self.uno('SELECT count(*) AS n FROM domain_authorizations a JOIN domains d ON d.id = a.domain_id '
+                         "WHERE d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL AND a.id <> %s", nueva)
+        self.assertEqual(otras['n'], 0)
+
     def test_2_corre_el_recolector_grabado_y_cierra_el_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)
