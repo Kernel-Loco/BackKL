@@ -23,7 +23,7 @@ import pyotp
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import HTTPException, Response
 
-from cirdan.auth import contar_totp, keyvault, routes, sessions, totp
+from cirdan.auth import contar_totp, keyvault, restablecer_mfa, routes, sessions, totp
 
 ACTUAL = base64.urlsafe_b64encode(b'CIRDAN_FAKE_llave_mfa_actual_32b').decode()
 ANTERIOR = base64.urlsafe_b64encode(b'CIRDAN_FAKE_llave_mfa_anterior_b').decode()
@@ -331,8 +331,10 @@ class Rutas(Base):
         self.assertEqual((e.exception.status_code, e.exception.detail), (400, routes.MFA_SETUP_EXPIRED))
         self.assertEqual(borrados, [USUARIO])
         self.assertEqual(self.eventos, [('auth.mfa_enable_failed', {'reason': 'key'})])
+        self.assertEqual(self.fallos_ip, [self.IP])
 
         self.eventos.clear()
+        self.fallos_ip.clear()
         pend = {'user_id': USUARIO, 'org_id': ORG, 'email': 'mfa@ejemplo.test', 'tag': 'marca', 'secret_enc': pendiente}
         with mock.patch.object(sessions, 'take_mfa_enroll', lambda _: dict(pend)):
             with self.assertRaises(HTTPException) as e:
@@ -373,11 +375,15 @@ class ContarTotp(Base):
         super().setUp()
         self.env(TOTP_ENCRYPTION_KEY=ACTUAL, TOTP_PREVIOUS_ENCRYPTION_KEY=ANTERIOR)
         otro = '30000000-0000-4000-8000-000000000009'
+        inactiva = '30000000-0000-4000-8000-00000000000a'
         self.filas = {
-            ORG: [{'id': USUARIO, 'totp_secret_enc': cifrar_con(ACTUAL)},
-                  {'id': otro, 'totp_secret_enc': cifrar_con(ANTERIOR, user_id=otro)}],
-            self.ORG_B: [{'id': USUARIO, 'totp_secret_enc': cifrar_con(OTRA)},
-                         {'id': otro, 'totp_secret_enc': cifrar_con(ANTERIOR, user_id=otro)}],
+            ORG: [{'id': USUARIO, 'totp_secret_enc': cifrar_con(ACTUAL), 'puede_entrar': True},
+                  {'id': otro, 'totp_secret_enc': cifrar_con(ANTERIOR, user_id=otro), 'puede_entrar': True}],
+            self.ORG_B: [{'id': USUARIO, 'totp_secret_enc': cifrar_con(OTRA), 'puede_entrar': True},
+                         {'id': otro, 'totp_secret_enc': cifrar_con(ANTERIOR, user_id=otro), 'puede_entrar': True},
+                         # Inactiva o de una empresa suspendida: nunca vuelve a cifrar y va aparte (hallazgos 2 y 7).
+                         {'id': inactiva, 'totp_secret_enc': cifrar_con(ANTERIOR, user_id=inactiva),
+                          'puede_entrar': False}],
         }
         self.sql = []
 
@@ -395,17 +401,21 @@ class ContarTotp(Base):
     def test_1_cuenta_por_empresa_y_total_sin_ids_ni_secretos(self):
         lineas = []
         total = contar_totp.contar([ORG, '', '  ' + self.ORG_B + '  ', ORG], salida=lineas.append)
-        self.assertEqual(total, {'actual': 1, 'anterior': 2, 'ninguna': 1})
-        self.assertEqual(lineas, [
-            'empresa %s: 1 con la actual, 1 con la anterior, 0 con ninguna' % ORG,
-            'empresa %s: 0 con la actual, 1 con la anterior, 1 con ninguna' % self.ORG_B,
-            'Total: 1 con la actual, 2 con la anterior, 1 con ninguna'])
+        self.assertEqual(total, {'actual': 1, 'anterior': 2, 'ninguna': 1, 'sin_acceso': 1})
+        self.assertEqual(lineas[:3], [
+            'empresa %s: 1 con la actual, 1 con la anterior, 0 con ninguna, 0 sin acceso' % ORG,
+            'empresa %s: 0 con la actual, 1 con la anterior, 1 con ninguna, 1 sin acceso' % self.ORG_B,
+            'Total: 1 con la actual, 2 con la anterior, 1 con ninguna, 1 sin acceso'])
+        self.assertIn('no cuentan para quitar la anterior', lineas[3])
+        self.assertIn('corrige el paso 2', lineas[4])
         salida = '\n'.join(lineas)
         self.assertNotIn('30000000', salida)
         self.assertNotIn(SECRETO, salida)
         # Solo lee, con RLS de cada empresa y una vez por empresa.
         self.assertEqual([o for o, _ in self.sql], [ORG, self.ORG_B])
         self.assertTrue(all(re.match(r'\s*SELECT ', s) for _, s in self.sql))
+        # Las mismas condiciones que /login para saber si la cuenta puede entrar.
+        self.assertTrue(all("u.is_active AND o.status IN ('trial', 'active')" in s for _, s in self.sql))
 
     def test_2_una_linea_que_no_es_uuid_sale_sin_tocar_la_base(self):
         with self.assertRaisesRegex(SystemExit, 'La línea 2'):
@@ -416,20 +426,109 @@ class ContarTotp(Base):
         with mock.patch('builtins.print') as imprime:
             contar_totp.main(['contar_totp'], entrada=io.StringIO(ORG + '\n'))
         self.assertEqual(imprime.call_args_list[-1].args[0],
-                         'Total: 1 con la actual, 1 con la anterior, 0 con ninguna')
+                         'Total: 1 con la actual, 1 con la anterior, 0 con ninguna, 0 sin acceso')
         with self.assertRaises(SystemExit):
             contar_totp.main(['contar_totp', '--recifrar'])
 
     def test_4_sin_la_anterior_lo_dice_y_lo_de_la_anterior_cuenta_como_ninguna(self):
         self.env(TOTP_ENCRYPTION_KEY=ACTUAL)
         lineas = []
-        self.assertEqual(contar_totp.contar([ORG], salida=lineas.append), {'actual': 1, 'anterior': 0, 'ninguna': 1})
+        self.assertEqual(contar_totp.contar([ORG], salida=lineas.append),
+                         {'actual': 1, 'anterior': 0, 'ninguna': 1, 'sin_acceso': 0})
         self.assertIn('Sin llave anterior', lineas[0])
+        # Sin la anterior puesta (el conteo de antes de rotar) no hay aviso de llave anterior equivocada.
+        self.assertFalse(any('corrige el paso 2' in x for x in lineas))
 
     def test_5_llave_mal_puesta_sale_con_el_mensaje(self):
         self.env(TOTP_ENCRYPTION_KEY=ACTUAL, TOTP_PREVIOUS_ENCRYPTION_KEY=ACTUAL)
         with self.assertRaisesRegex(SystemExit, 'misma llave'):
             contar_totp.main(['contar_totp'], entrada=io.StringIO(ORG))
+
+    def test_6_entrada_vacia_sale_con_error_y_no_da_cero(self):
+        # Un psql que falla deja la entrada vacía: no puede leerse como '0 con la anterior' (hallazgo 6).
+        for entrada in ('', '\n  \n'):
+            with self.subTest(entrada=entrada), self.assertRaises(SystemExit) as e:
+                contar_totp.main(['contar_totp'], entrada=io.StringIO(entrada))
+            self.assertEqual(e.exception.code, contar_totp.SIN_EMPRESAS)
+        self.assertEqual(self.sql, [])
+
+    def test_7_sin_ninguna_no_avisa_de_la_anterior(self):
+        self.filas[ORG] = [self.filas[ORG][1]]
+        lineas = []
+        self.assertEqual(contar_totp.contar([ORG], salida=lineas.append)['anterior'], 1)
+        self.assertEqual(len(lineas), 2)
+
+
+class RestablecerMfa(Base):
+    """El MFA de una cuenta cuyo secreto no abre con ninguna llave (hallazgos 3 y 8 de la revisión de RC-295)."""
+
+    def setUp(self):
+        super().setUp()
+        self.env(TOTP_ENCRYPTION_KEY=ACTUAL, TOTP_PREVIOUS_ENCRYPTION_KEY=ANTERIOR)
+        self.fila, self.sql, self.eventos, self.orgs = None, [], [], []
+
+        @contextlib.contextmanager
+        def transaccion(org=None):
+            self.orgs.append(org)
+
+            def execute(sql, params=()):
+                self.sql.append((sql, params))
+                return SimpleNamespace(fetchone=lambda: self.fila, rowcount=1)
+            yield SimpleNamespace(execute=execute)
+
+        def auditar(conn, org, accion, user_id=None, ip=None, entity_type=None, entity_id=None, details=None):
+            self.eventos.append((org, accion, user_id, entity_type, entity_id, details))
+
+        for parche in (mock.patch.object(restablecer_mfa, 'transaction', transaccion),
+                       mock.patch.object(restablecer_mfa, 'audit', auditar)):
+            parche.start()
+            self.addCleanup(parche.stop)
+
+    def correr(self, *args):
+        lineas = []
+        return restablecer_mfa.main(['restablecer_mfa', ORG, USUARIO, *args], salida=lineas.append), lineas
+
+    def updates(self):
+        return [s for s, _ in self.sql if s.lstrip().startswith('UPDATE')]
+
+    def test_1_sin_si_solo_revisa(self):
+        self.fila = {'totp_secret_enc': cifrar_con(OTRA)}
+        hecho, lineas = self.correr()
+        self.assertFalse(hecho)
+        self.assertIn('--si', lineas[0])
+        self.assertEqual((self.updates(), self.eventos), ([], []))
+        self.assertIn('FOR UPDATE', self.sql[0][0])
+
+    def test_2_con_si_restablece_con_rls_y_evento(self):
+        self.fila = {'totp_secret_enc': cifrar_con(OTRA)}
+        hecho, lineas = self.correr('--si')
+        self.assertTrue(hecho)
+        sql, = self.updates()
+        for columna in ('totp_secret_enc = NULL', 'mfa_enabled_at = NULL', 'last_totp_step = NULL'):
+            self.assertIn(columna, sql)
+        self.assertEqual(self.orgs, [ORG])
+        self.assertEqual(self.eventos, [(ORG, 'auth.mfa_reset', None, 'user', USUARIO, {'reason': 'key'})])
+        self.assertNotIn(SECRETO, '\n'.join(lineas))
+
+    def test_3_un_secreto_que_abre_no_se_toca(self):
+        for llave, cual in ((ACTUAL, 'actual'), (ANTERIOR, 'anterior')):
+            self.fila = {'totp_secret_enc': cifrar_con(llave)}
+            with self.subTest(cual=cual), self.assertRaisesRegex(SystemExit, 'abre con la %s' % cual):
+                self.correr('--si')
+        self.assertEqual((self.updates(), self.eventos), ([], []))
+
+    def test_4_sin_cuenta_o_sin_secreto_no_hace_nada(self):
+        for fila, texto in ((None, 'No hay un usuario'), ({'totp_secret_enc': None}, 'no tiene secreto')):
+            self.fila = fila
+            with self.subTest(texto=texto), self.assertRaisesRegex(SystemExit, texto):
+                self.correr('--si')
+        self.assertEqual((self.updates(), self.eventos), ([], []))
+
+    def test_5_argumentos_que_no_son_uuid_salen_sin_tocar_la_base(self):
+        for args in ([ORG], [ORG, "x' OR 1=1"], ['otra', USUARIO, '--si'], [ORG, USUARIO, 'extra']):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                restablecer_mfa.main(['restablecer_mfa', *args])
+        self.assertEqual(self.sql, [])
 
 
 if __name__ == '__main__':

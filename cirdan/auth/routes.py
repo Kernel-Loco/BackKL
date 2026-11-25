@@ -807,11 +807,13 @@ def mfa_enable(body: MfaEnableIn, request: Request, session: Session = Depends(c
     try:
         secret = totp.decrypt_secret(pending['secret_enc'], session.user_id)
     except totp.LlaveNoAbre:
-        # El QR se cifró con una llave que ya no está (RC-295): se pide otro, sin 500.
+        # El QR se cifró con una llave que ya no está (RC-295): se pide otro, sin 500. Cuenta como fallo de la IP, como
+        # el código malo de esta ruta y el mismo caso en /mfa/enroll/enable (punto 2 de RC-295).
         sessions.delete_mfa_setup(session.user_id)
         with transaction(session.own_org_id) as conn:
             audit(conn, session.own_org_id, 'auth.mfa_enable_failed', session.user_id, ip, 'user', session.user_id,
                   {'reason': 'key'})
+        sessions.register_mfa_fail(ip)
         raise HTTPException(400, MFA_SETUP_EXPIRED) from None
     removed = []
     with transaction(session.own_org_id) as conn:
