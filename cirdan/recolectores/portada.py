@@ -75,8 +75,10 @@ _ETIQUETA = re.compile(r'<[^<>]{0,500}>')
 _MARCA = re.compile(r'<(?:(!--)|(/?)(svg|title|h[1-6]|script|style)\b[^<>]{0,500}>)', re.I)
 _CIERRE_CRUDO = {n: re.compile(r'</%s\s*>' % n, re.I) for n in ('script', 'style')}
 _ESPACIOS = re.compile(r'\s+')
-# Lo que contrato.validar y la base no aceptan (el nulo y un surrogate suelto), el resto de los de control y el BOM
-_CONTROL = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\x7f﻿\ud800-\udfff]')
+# Lo que contrato.validar y la base no aceptan (el nulo y un surrogate suelto), el resto de los de control y el BOM.
+# Es una tabla de str.translate y no una clase de regex: CodeQL marcaba el tramo de \x0e a \x1f (alerta 8, RC-347).
+_CONTROL = dict.fromkeys(
+    (*range(0x00, 0x09), 0x0b, 0x0c, *range(0x0e, 0x20), 0x7f, 0xfeff, *range(0xd800, 0xe000)), ' ')
 # Lo que no va en la evidencia aunque salga en el título. El mensaje de un error puede traer la cadena de conexión:
 # - de una URL, todo lo que va de '//' al último '@' (la contraseña puede traer '/' o '@'), y un 'usuario:contraseña'
 #   que quedó sin su '@' al cortar la zona.
@@ -94,7 +96,7 @@ _MARCAS_HTML = re.compile('[<>]')
 
 
 def _limpio(texto):
-    return _ESPACIOS.sub(' ', _CONTROL.sub(' ', texto)).strip()[:MAX_ZONA]
+    return _ESPACIOS.sub(' ', texto.translate(_CONTROL)).strip()[:MAX_ZONA]
 
 
 def _texto_de(cuerpo, desde, hasta):

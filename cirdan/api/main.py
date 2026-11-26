@@ -24,6 +24,7 @@ from cirdan.api.bitacora import router as audit_log_router
 from cirdan.api.escaneos import router as scans_router
 from cirdan.api.explorer import router as explorer_router
 from cirdan.api.firmas import MAX_SUBIDA_BODY, router as signatures_router
+from cirdan.api.fuentes import router as sources_router
 from cirdan.api.llaves import router as api_keys_router
 from cirdan.api.operador import router as operator_router
 from cirdan.api.plataforma import router as platform_router
@@ -32,6 +33,7 @@ from cirdan.auth import passwords, totp
 from cirdan.auth.routes import router as auth_router
 from cirdan.config import config, origenes_permitidos
 from cirdan.db import audit, transaction
+from cirdan.proceso import no_volcable
 from cirdan.version import VERSION
 
 
@@ -43,6 +45,8 @@ async def _arranque(app):
     # Vault.
     # Antes que las llaves, que pueden tardar con Key Vault: publicada por HTTPS, la cookie de sesión va con Secure
     # o la API no arranca (RC-286).
+    # Primero: git y gitleaks corren con el mismo uid y sin esto leerían el entorno de la API en /proc (RC-324).
+    no_volcable()
     comprobar_cookie_segura()
     passwords.comprobar_llave(totp.comprobar_llave())
     yield
@@ -310,6 +314,7 @@ async def error_no_manejado(request: Request, exc: Exception):
 app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(api_keys_router)
+app.include_router(sources_router)
 app.include_router(platform_router)
 app.include_router(operator_router)
 app.include_router(v1_router)

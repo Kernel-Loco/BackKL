@@ -31,7 +31,7 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from cirdan import orquestador
+from cirdan import orquestador, planes
 from cirdan.api import v1 as api_v1
 from cirdan.config import config
 from cirdan.db import DSN
@@ -154,13 +154,18 @@ class Orquestador(unittest.TestCase):
         self.tx.__enter__()
         self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
         renovar_carta(self.conn)
+        # Sin el tope de escaneos a mano (RC-297): aquí se piden varios del mismo dominio en una prueba. El tope y
+        # su lugar en solicitar() los prueba pruebas/test_planes.py.
+        sin_tope = mock.patch.object(planes, 'check_plan_limits', return_value=None)
+        sin_tope.start()
+        self.addCleanup(sin_tope.stop)
 
     def tearDown(self):
         self.tx.__exit__(None, None, None)
         self.conn.close()
 
-    def solicitar(self, fqdn, dns, conn=None):
-        return orquestador.solicitar(ACME, fqdn, consultar=dns, conn=conn or self.conn)
+    def solicitar(self, fqdn, dns, conn=None, trigger='on_demand'):
+        return orquestador.solicitar(ACME, fqdn, consultar=dns, conn=conn or self.conn, trigger=trigger)
 
     def uno(self, sql, *params):
         return self.conn.execute(sql, params).fetchone()
@@ -251,6 +256,56 @@ class Orquestador(unittest.TestCase):
         ejecutar.assert_not_called()
         self.assertEqual(resumen['status'], 'failed')
         self.assertEqual(resumen['stats']['sources_unauthorized'], ['ct_logs', 'dns'])
+
+    def apagar_para_acme(self, codigo):
+        """Acme apaga la fuente (org_source_settings, #117, RC-235), en la transacción de la prueba."""
+        self.conn.execute(
+            'INSERT INTO org_source_settings (organization_id, source_id, enabled, changed_by) '
+            "SELECT %s, d.id, false, u.id FROM data_sources d, users u WHERE d.code = %s "
+            "AND u.email = 'alex.morgan@acme-demo.mx'", (ACME, codigo))
+
+    def test_235a_la_fuente_que_la_organizacion_apago_no_corre_y_el_score_es_parcial(self):
+        self.apagar_para_acme('ct_logs')
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), ['ct_logs'])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(s.aceptada, s.detalle)
+        with mock.patch.object(orquestador, 'ejecutar', wraps=orquestador.ejecutar) as ejecutar:
+            # Sin `fuentes`: las de fuentes_activas() menos las apagadas.
+            with mock.patch.object(orquestador, 'fuentes_activas', return_value=['ct_logs', 'ejemplo']):
+                resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', modo='reproducir', conn=self.conn)
+        self.assertEqual([c.args[0].FUENTE for c in ejecutar.call_args_list], ['ejemplo'])
+        self.assertEqual(resumen['status'], 'partial')
+        self.assertEqual(resumen['stats']['sources_disabled_by_org'], ['ct_logs'])
+        self.assertEqual([r['source'] for r in resumen['sources']], ['ejemplo'])
+        self.assertIsNone(self.corrida_de(s.scan_id, 'ct_logs'))
+        scan = self.uno('SELECT status, stats FROM scans WHERE id = %s', s.scan_id)
+        self.assertEqual((scan['status'], scan['stats']['sources_disabled_by_org']), ('partial', ['ct_logs']))
+        score = self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertIs(score['partial_coverage'], True)
+
+    def test_235b_la_apagada_tampoco_corre_si_viene_en_fuentes_y_otra_empresa_no_la_ve(self):
+        self.apagar_para_acme('ejemplo')
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with mock.patch.object(orquestador, 'ejecutar') as ejecutar:
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        ejecutar.assert_not_called()
+        self.assertEqual(resumen['status'], 'failed')   # no corrió ninguna: nada que comparar
+        self.assertEqual(resumen['stats']['sources_disabled_by_org'], ['ejemplo'])
+        # Con RLS, Beta no ve lo que apagó Acme.
+        self.conn.execute("SELECT set_config('app.current_org', %s, true)", (BETA,))
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), [])
+        self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+
+    def test_235c_una_fila_encendida_es_lo_mismo_que_no_tenerla(self):
+        self.apagar_para_acme('ejemplo')
+        self.conn.execute("UPDATE org_source_settings SET enabled = true")
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), [])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                     conn=self.conn)
+        self.assertEqual(resumen['status'], 'completed')
+        self.assertNotIn('sources_disabled_by_org', resumen['stats'])
 
     def test_2_corre_el_recolector_grabado_y_cierra_el_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
@@ -1304,7 +1359,8 @@ class Orquestador(unittest.TestCase):
             antes.append(len(red.de('api.certspotter.com')))
             red.certspotter_caido = False
         self.exige_cupo('ct_logs', 2 * crtsh.MAX_CONSULTAS)
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
                 mock.patch.object(transporte, 'descargar', descargar), \
                 mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
@@ -1628,7 +1684,8 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.cupo('ct_logs')[1], usadas)  # la reserva que no cupo no dejó nada
 
     def test_3n2_si_el_cupo_se_acaba_entre_reintentos_la_fuente_queda_fallida(self):
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         limite, usadas, _ = self.cupo('ct_logs')
         self.assertIsNotNone(limite)
         if limite - usadas < 0:  # el ajuste registra lo gastado de más: lo usado hoy puede pasar del límite
@@ -1650,7 +1707,8 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.cupo('ct_logs')[1], usadas + FALLA.consultas)  # lo gastado de más se registra igual
 
     def test_3o_la_reserva_y_el_ajuste_dejan_en_daily_used_lo_que_se_gasto(self):
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         reservadas = crtsh.MAX_CONSULTAS
         _, usadas = self.exige_cupo('ct_logs', 2 + reservadas)  # 2 intentos de 1 consulta y la reserva del tercero
         durante = []

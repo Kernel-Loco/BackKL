@@ -29,16 +29,82 @@ services:
   valkey:
     image: valkey/valkey:8.1.11
     container_name: cirdan-valkey
-    command: ["valkey-server", "--requirepass", "${VALKEY_PASSWORD:?Falta VALKEY_PASSWORD en .env}", "--save", "", "--appendonly", "no"]
+    # Usuarios de Valkey (RC-292). default apagado: sin usuario y contraseña no entra nadie. cirdan_api, el de la API,
+    # solo con los comandos y los prefijos de llave que usa cirdan/auth/sessions.py (también los de sus EVAL, que
+    # Valkey revisa con la misma lista) y sin pub/sub, así que CONFIG, MODULE, DEBUG, FLUSHALL o KEYS dan NOPERM.
+    # cirdan_admin, con todo, para operar y para las pruebas: su contraseña solo llega a este contenedor.
+    # Cada palabra va como argumento aparte: un solo texto llegaría a Valkey como un solo argumento.
+    # pruebas/test_valkey_acl.py compara esta lista con sessions.py: un comando nuevo va en las dos.
+    command:
+      - valkey-server
+      - --user
+      - default
+      - "off"
+      - --user
+      - cirdan_api
+      - reset
+      - "on"
+      - ">${VALKEY_PASSWORD:?Falta VALKEY_PASSWORD en .env}"
+      - resetchannels
+      - "~sess:*"
+      - "~sess-user:*"
+      - "~mfa:*"
+      - "~link:*"
+      - "~link-user:*"
+      - "~link-rastro:*"
+      - "~pwreset:*"
+      - "~pwreset-user:*"
+      - "~login:*"
+      - "~pw:*"
+      - "~webauthn:*"
+      - "~captcha:*"
+      - "~assistant:*"
+      - -@all
+      - +get
+      - +set
+      - +mget
+      - +getdel
+      - +del
+      - +exists
+      - +expire
+      - +incr
+      # redis-py manda pipe.incr(k) como INCRBY k 1.
+      - +incrby
+      - +decr
+      - +hset
+      - +hsetnx
+      - +hmget
+      - +sadd
+      - +smembers
+      - +pexpiretime
+      - +eval
+      - +multi
+      - +exec
+      - +ping
+      - +client|setinfo
+      - --user
+      - cirdan_admin
+      - reset
+      - "on"
+      - ">${VALKEY_ADMIN_PASSWORD:?Falta VALKEY_ADMIN_PASSWORD en .env}"
+      - "~*"
+      - "&*"
+      - +@all
+      - --save
+      - ""
+      - --appendonly
+      - "no"
     ports:
       - "127.0.0.1:${VALKEY_PORT:-6379}:6379"
     healthcheck:
-      test: ["CMD-SHELL", "valkey-cli -a \"$$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      test: ["CMD-SHELL", "valkey-cli --user cirdan_api -a \"$$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 3s
       timeout: 3s
       retries: 20
     environment:
       VALKEY_PASSWORD: ${VALKEY_PASSWORD}
+      # Solo aquí: ni la API, ni el programador, ni demo-accounts la reciben.
+      VALKEY_ADMIN_PASSWORD: ${VALKEY_ADMIN_PASSWORD}
     restart: unless-stopped
 
   api:
@@ -49,12 +115,15 @@ services:
       PGPORT: "5432"
       PGDATABASE: ${PGDATABASE:-cirdan}
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
-      VALKEY_URL: redis://:${VALKEY_PASSWORD}@valkey:6379/0
+      VALKEY_URL: redis://cirdan_api:${VALKEY_PASSWORD}@valkey:6379/0
       # Llave del MFA: la llave misma en .env (desarrollo, CI y plan B) o, en la VM, la URL del secreto de
       # Azure Key Vault, que la API lee con la identidad administrada (docs/despliegue.md). Una de las dos,
       # nunca las dos: la API lo revisa al arrancar y sin llave no arranca (cirdan/auth/totp.py).
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
       TOTP_KEY_VAULT_SECRET_URL: ${TOTP_KEY_VAULT_SECRET_URL:-}
+      # Solo mientras se rota la llave del MFA (RC-295): la de antes, en una de las dos. Vacías fuera de una rotación.
+      TOTP_PREVIOUS_ENCRYPTION_KEY: ${TOTP_PREVIOUS_ENCRYPTION_KEY:-}
+      TOTP_PREVIOUS_KEY_VAULT_SECRET_URL: ${TOTP_PREVIOUS_KEY_VAULT_SECRET_URL:-}
       # Llave de las huellas de contraseña (RC-330), otra que la del MFA y con la misma regla: la llave misma o la URL
       # de su secreto en Key Vault, una de las dos (cirdan/auth/passwords.py).
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
@@ -142,8 +211,8 @@ services:
         condition: service_healthy
       demo-accounts:
         condition: service_completed_successfully
-    # tini como PID 1: recoge los procesos que deja git cuando el recolector de GitHub lo mata por tiempo (#16).
-    init: true
+    # Sin init: true. El PID 1 es cirdan.init (ENTRYPOINT del Dockerfile): recoge los procesos que deja git cuando el
+    # recolector de GitHub lo mata por tiempo (#16) y, a diferencia de tini, su entorno no se lee en /proc (RC-324).
     restart: unless-stopped
 
   # Escaneos programados (#27, RC-52): cada PROGRAMADOR_INTERVALO segundos pide el escaneo de los dominios a los que
@@ -173,8 +242,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # tini como PID 1, como la API: recoge los git que el recolector de GitHub mata por tiempo y pasa SIGTERM.
-    init: true
+    # Sin init: true, como la API: cirdan.init es el PID 1, recoge los git que el recolector de GitHub mata por tiempo y
+    # pasa SIGTERM, sin dejar el entorno legible en /proc (RC-324).
     # Con SIGTERM no empieza otro dominio, pero el que está consultando su TXT termina, y detener() cierra en la base
     # los escaneos que siguen corriendo. Los 10 s de Docker no siempre alcanzan.
     stop_grace_period: 60s
@@ -199,6 +268,9 @@ services:
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
       TOTP_KEY_VAULT_SECRET_URL: ${TOTP_KEY_VAULT_SECRET_URL:-}
+      # Solo mientras se rota la llave del MFA (RC-295): la de antes, en una de las dos. Vacías fuera de una rotación.
+      TOTP_PREVIOUS_ENCRYPTION_KEY: ${TOTP_PREVIOUS_ENCRYPTION_KEY:-}
+      TOTP_PREVIOUS_KEY_VAULT_SECRET_URL: ${TOTP_PREVIOUS_KEY_VAULT_SECRET_URL:-}
       PASSWORD_HASH_ENCRYPTION_KEY: ${PASSWORD_HASH_ENCRYPTION_KEY:-}
       PASSWORD_HASH_KEY_VAULT_SECRET_URL: ${PASSWORD_HASH_KEY_VAULT_SECRET_URL:-}
       PASSWORD_HASH_KEY_VERSION: ${PASSWORD_HASH_KEY_VERSION:-}

@@ -144,8 +144,24 @@ class Huecos(unittest.TestCase):
         corridas = [corrida('ct_logs', 'failed'), corrida('shodan', sin_cobertura=['exposed_ot_device'],
                                                           sin_llave=['exposed_ot_device']),
                     corrida('dns', sin_cobertura=['spf_missing']), corrida('web')]
-        motivos = {h['reason'] for h in cobertura.huecos(corridas, (), ['web'])}
+        motivos = {h['reason'] for h in cobertura.huecos(corridas, (), ['web'], apagadas=['github'])}
         self.assertEqual(motivos, set(cobertura.MOTIVOS))
+
+    def test_fuente_apagada_por_la_organizacion_va_con_su_motivo(self):
+        # #117, RC-235: no corrió porque la empresa la apagó, no porque esté apagada en la plataforma.
+        huecos = cobertura.huecos([corrida(f) for f in TODAS if f != 'github'], apagadas=['github'])
+        self.assertEqual(de(huecos, 'source_disabled_by_org'), [(c, 'github') for c in sorted(github.CODIGOS)])
+        self.assertEqual(de(huecos, 'source_not_run'), [])
+
+    def test_apagada_que_si_corrio_no_cambia_su_motivo(self):
+        huecos = cobertura.huecos([corrida(f, 'failed' if f == 'github' else 'succeeded') for f in TODAS],
+                                  apagadas=['github'])
+        self.assertEqual({h['reason'] for h in huecos}, {'source_failed'})
+
+    def test_todo_apagado_sin_corridas_si_dice_que_falto(self):
+        huecos = cobertura.huecos([], apagadas=TODAS)
+        self.assertEqual({h['reason'] for h in huecos}, {'source_disabled_by_org'})
+        self.assertEqual({h['source'] for h in huecos}, {f for f in TODAS if cobertura.codigos_de(f)})
 
 
 if __name__ == '__main__':

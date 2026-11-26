@@ -1764,6 +1764,21 @@ class Portada(unittest.TestCase):
                 self.assertEqual(portada.revisar(200, cuerpo), [])
         self.assertEqual(portada.zonas('<svg/><title>Index of /</title>')['titulo'], 'Index of /')
 
+    def test_16_los_caracteres_de_control_que_se_quitan_rc_347(self):
+        """RC-347: la tabla de _CONTROL quita lo mismo que la clase de regex de antes (alerta 8 de CodeQL)."""
+        # Los dos extremos de cada tramo de la clase de antes: [\x00-\x08\x0b\x0c\x0e-\x1f\x7f BOM \ud800-\udfff]
+        for codigo in (0x00, 0x08, 0x0b, 0x0c, 0x0e, 0x1f, 0x7f, 0xfeff, 0xd800, 0xdfff):
+            with self.subTest(codigo=hex(codigo)):
+                self.assertEqual(('a%sb' % chr(codigo)).translate(portada._CONTROL), 'a b')
+                self.assertEqual(portada._limpio('a%sb' % chr(codigo)), 'a b')
+        # Los vecinos de cada tramo y el texto normal se quedan
+        for codigo in (0x09, 0x0a, 0x0d, 0x20, 0x7e, 0x80, 0xa0, 0xd7ff, 0xe000, 0xfefe, 0xff00, 0x1f600):
+            with self.subTest(codigo=hex(codigo)):
+                self.assertEqual(('a%sb' % chr(codigo)).translate(portada._CONTROL), 'a%sb' % chr(codigo))
+        self.assertEqual(portada._limpio('Índice\tde /año'), 'Índice de /año')
+        # 9 de \x00 a \x08, \x0b, \x0c, 18 de \x0e a \x1f, \x7f, el BOM y los 2048 surrogates
+        self.assertEqual(len(portada._CONTROL), 2079)
+
 
 class TurnoHost(unittest.TestCase):
     """Una petición a la vez por host también entre escaneos (comentario 10281.2 de RC-46, turno.py): cada petición a un

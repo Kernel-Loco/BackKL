@@ -55,7 +55,8 @@ services:
       PGPORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD en .env}
-      VALKEY_URL: redis://:${VALKEY_PASSWORD}@valkey:6379/0
+      # La prueba revisa llaves con SCAN, TTL y HGETALL, que cirdan_api no tiene (RC-292): entra como cirdan_admin.
+      VALKEY_URL: redis://cirdan_admin:${VALKEY_ADMIN_PASSWORD:?Falta VALKEY_ADMIN_PASSWORD en .env}@valkey:6379/0
     depends_on:
       api:
         condition: service_healthy

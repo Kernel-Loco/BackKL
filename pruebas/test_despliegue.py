@@ -23,11 +23,14 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[1]
 ARCHIVOS = ['docker-compose.yml', 'docker-compose.despliegue.yml']
 ORIGEN = 'https://lowtidesec.com'
+# Un token falso nuevo vive en pruebas/fixtures/ (AGENTS regla 7): el job de seguridad marca uno fuera de ahí.
+FALSOS = json.loads((RAIZ / 'pruebas' / 'fixtures' / 'tokens' / 'despliegue.json').read_text('utf-8'))
 
 ENV_FALSO = {
     'POSTGRES_PASSWORD': 'CIRDAN_FAKE_pg',
     'CIRDAN_APP_PASSWORD': 'CIRDAN_FAKE_app',
     'VALKEY_PASSWORD': 'CIRDAN_FAKE_valkey',
+    'VALKEY_ADMIN_PASSWORD': FALSOS['valkey_admin'],
     'TOTP_ENCRYPTION_KEY': 'CIRDAN_FAKE_totp',
     'ALLOWED_ORIGINS': ORIGEN,
     'TUNNEL_TOKEN': 'CIRDAN_FAKE_tunel',
@@ -288,7 +291,10 @@ class Despliegue(unittest.TestCase):
         self.assertNotIn('ipv4_address', (s.get('networks') or {}).get('default') or {})
         self.assertIn('NET_RAW', s.get('cap_drop') or [])
         self.assertEqual(s['logging'], cfg['services']['db']['logging'])
-        self.assertTrue(s['init'])
+        # RC-324: sin init: true en api y programador. Con init: true el PID 1 sería tini, volcable y con todo el
+        # entorno, y cirdan.init (que sí se marca no volcable) quedaría como PID 2.
+        for nombre in ('api', 'programador'):
+            self.assertNotIn('init', list(cfg['services'][nombre]), nombre)
         self.assertEqual(s['stop_grace_period'], '1m0s')  # tiempos-3: detener() alcanza a cerrar los escaneos
         for llave in ('TOTP', 'PASSWORD_HASH', 'CARTA', 'IA_', 'CORREO'):
             self.assertEqual([k for k in s['environment'] if k.startswith(llave)], [], llave)
@@ -300,7 +306,10 @@ class Despliegue(unittest.TestCase):
         rc, salida = _config(con_imagenes, archivos=ARCHIVOS + ['docker-compose.imagenes.yml'],
                              perfiles=('programador',))
         self.assertEqual(rc, 0, salida[-500:])
-        self.assertEqual(json.loads(salida)['services']['programador'].get('healthcheck'), {'disable': True})
+        firmadas = json.loads(salida)['services']
+        self.assertEqual(firmadas['programador'].get('healthcheck'), {'disable': True})
+        for nombre in ('api', 'programador'):
+            self.assertNotIn('init', list(firmadas[nombre]), nombre)
         # En la VM va COMPOSE_PROFILES=programador en el .env (docs/despliegue.md, 'Escaneos programados'): así cada
         # `up -d --build` también lo recrea con el código nuevo.
         rc, salida = _config(dict(ENV_FALSO, COMPOSE_PROFILES='programador'))

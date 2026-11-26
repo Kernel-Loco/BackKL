@@ -100,6 +100,10 @@ EXPOSE 8000
 # no retrasa un arranque normal.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=200s --retries=5 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+# PID 1 propio en lugar de tini (RC-324): recoge los git que el recolector de GitHub mata por tiempo y pasa SIGTERM,
+# como tini, pero no es volcable, así que un hijo con el mismo uid ya no lee el entorno del contenedor en /proc/1/environ.
+# Por eso los servicios de docker-compose.yml ya no llevan init: true. Vale también para el `command:` del programador.
+ENTRYPOINT ["python", "-m", "cirdan.init"]
 # --proxy-headers: X-Forwarded-For solo se toma en cuenta si quien conecta está en FORWARDED_ALLOW_IPS
 # (ver docker-compose.yml). Por omisión nadie de fuera, porque el portal (Next) no lo limpia: reenvía el que mande el
 # navegador y solo pone la IP de quien le conecta si no viene. En el despliegue, Cloudflare agrega la IP real al final y
