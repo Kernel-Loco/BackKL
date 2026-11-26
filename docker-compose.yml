@@ -29,16 +29,82 @@ services:
   valkey:
     image: valkey/valkey:8.1.11
     container_name: cirdan-valkey
-    command: ["valkey-server", "--requirepass", "${VALKEY_PASSWORD:?Falta VALKEY_PASSWORD en .env}", "--save", "", "--appendonly", "no"]
+    # Usuarios de Valkey (RC-292). default apagado: sin usuario y contraseña no entra nadie. cirdan_api, el de la API,
+    # solo con los comandos y los prefijos de llave que usa cirdan/auth/sessions.py (también los de sus EVAL, que
+    # Valkey revisa con la misma lista) y sin pub/sub, así que CONFIG, MODULE, DEBUG, FLUSHALL o KEYS dan NOPERM.
+    # cirdan_admin, con todo, para operar y para las pruebas: su contraseña solo llega a este contenedor.
+    # Cada palabra va como argumento aparte: un solo texto llegaría a Valkey como un solo argumento.
+    # pruebas/test_valkey_acl.py compara esta lista con sessions.py: un comando nuevo va en las dos.
+    command:
+      - valkey-server
+      - --user
+      - default
+      - "off"
+      - --user
+      - cirdan_api
+      - reset
+      - "on"
+      - ">${VALKEY_PASSWORD:?Falta VALKEY_PASSWORD en .env}"
+      - resetchannels
+      - "~sess:*"
+      - "~sess-user:*"
+      - "~mfa:*"
+      - "~link:*"
+      - "~link-user:*"
+      - "~link-rastro:*"
+      - "~pwreset:*"
+      - "~pwreset-user:*"
+      - "~login:*"
+      - "~pw:*"
+      - "~webauthn:*"
+      - "~captcha:*"
+      - "~assistant:*"
+      - -@all
+      - +get
+      - +set
+      - +mget
+      - +getdel
+      - +del
+      - +exists
+      - +expire
+      - +incr
+      # redis-py manda pipe.incr(k) como INCRBY k 1.
+      - +incrby
+      - +decr
+      - +hset
+      - +hsetnx
+      - +hmget
+      - +sadd
+      - +smembers
+      - +pexpiretime
+      - +eval
+      - +multi
+      - +exec
+      - +ping
+      - +client|setinfo
+      - --user
+      - cirdan_admin
+      - reset
+      - "on"
+      - ">${VALKEY_ADMIN_PASSWORD:?Falta VALKEY_ADMIN_PASSWORD en .env}"
+      - "~*"
+      - "&*"
+      - +@all
+      - --save
+      - ""
+      - --appendonly
+      - "no"
     ports:
       - "127.0.0.1:${VALKEY_PORT:-6379}:6379"
     healthcheck:
-      test: ["CMD-SHELL", "valkey-cli -a \"$$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      test: ["CMD-SHELL", "valkey-cli --user cirdan_api -a \"$$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 3s
       timeout: 3s
       retries: 20
     environment:
       VALKEY_PASSWORD: ${VALKEY_PASSWORD}
+      # Solo aquí: ni la API, ni el programador, ni demo-accounts la reciben.
+      VALKEY_ADMIN_PASSWORD: ${VALKEY_ADMIN_PASSWORD}
     restart: unless-stopped
 
   api:
@@ -49,7 +115,7 @@ services:
       PGPORT: "5432"
       PGDATABASE: ${PGDATABASE:-cirdan}
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD}
-      VALKEY_URL: redis://:${VALKEY_PASSWORD}@valkey:6379/0
+      VALKEY_URL: redis://cirdan_api:${VALKEY_PASSWORD}@valkey:6379/0
       # Llave del MFA: la llave misma en .env (desarrollo, CI y plan B) o, en la VM, la URL del secreto de
       # Azure Key Vault, que la API lee con la identidad administrada (docs/despliegue.md). Una de las dos,
       # nunca las dos: la API lo revisa al arrancar y sin llave no arranca (cirdan/auth/totp.py).

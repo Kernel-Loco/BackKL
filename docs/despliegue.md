@@ -44,6 +44,7 @@ empresas y con los respaldos.
    - La llave del MFA. En la VM va `TOTP_KEY_VAULT_SECRET_URL` y no va `TOTP_ENCRYPTION_KEY` (sección 'Llave del MFA en Azure Key Vault'). En el plan B es al revés (paso 3 de 'Carpeta y volumen'). Con las dos puestas, o con ninguna, la API no arranca.
    - La llave de las huellas de contraseña, con la misma regla: en la VM `PASSWORD_HASH_KEY_VAULT_SECRET_URL` y no `PASSWORD_HASH_ENCRYPTION_KEY`, y en el plan B al revés (sección 'Llave de las huellas de contraseña').
    - `CARTA_KEY_VAULT_SECRET_URL`, con versión, para la llave de las cartas. En producción no pongas `CARTA_ENCRYPTION_KEY`; la API pide la llave con la identidad administrada y el respaldo guarda una copia protegida con age.
+   - `VALKEY_ADMIN_PASSWORD`, la contraseña de `cirdan_admin` en Valkey, distinta de `VALKEY_PASSWORD` (sección 'Usuarios de Valkey'). Sin ella ningún `docker compose` de esa carpeta corre.
    - `PWNED_PASSWORDS_ENABLED` vacía, como viene en `.env.example`, o en `true`. Así `docker-compose.despliegue.yml` prende la revisión de contraseñas filtradas (RC-334). Con `false` queda apagada y solo se revisa la lista local.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
@@ -62,6 +63,29 @@ docker compose logs demo-accounts
 ```
 
 La segunda línea tiene que decir 'DEMO_ACCOUNTS no es true: se apagan las cuentas de demo.' y luego 'cuenta de demo apagada:' con cada una de las 5 cuentas de `CUENTAS` de `cirdan/auth/demo.py`. El script les vuelve a poner el hash de relleno de la semilla y les quita el secreto TOTP en cada `up`. Así, aunque el volumen de la base ya trajera la contraseña y el MFA públicos (por ejemplo el de una PC de desarrollo), esas cuentas dejan de entrar (comentario 10420 de RC-91). Una cuenta inactiva o de una empresa que no está activa también sale 'apagada', porque el cambio va por su id. Si no hay fila con ese id en esa empresa (borrada o con otro id), sale 'cuenta de demo que no puede iniciar sesión, nada que apagar:' cuando ese correo no puede iniciar sesión, y 'cuenta de demo con otro id y sin la contraseña de demo, no se toca:' cuando puede, pero no con la contraseña pública. Si no llega a la base, o si ese correo todavía entra con la contraseña pública, el servicio termina con error y la API, que lo espera, no arranca. Lo mismo pasa si esa otra fila trae una huella cifrada (`lt1$`) y la llave de las huellas está en Key Vault, porque demo-accounts no llega a IMDS: el error dice 'No se revisó si entran con la contraseña pública' y nombra los correos. Se arregla con esa fila de la base: desactivarla (`is_active = false`) o cambiarle el correo a uno que no esté en `CUENTAS`, y volver a correr `up`.
+
+## Usuarios de Valkey (RC-292)
+
+Valkey ya no tiene una sola contraseña para todos. `docker-compose.yml` arranca `valkey-server` con tres usuarios:
+
+- `default` apagado: sin usuario y contraseña nadie entra.
+- `cirdan_api`, con `VALKEY_PASSWORD`. Es el de la API (`VALKEY_URL`) y del healthcheck. Solo corre los comandos de `cirdan/auth/sessions.py` y solo sobre sus prefijos de llave (`sess:`, `mfa:`, `login:` y los demás), también dentro de sus EVAL, sin pub/sub. CONFIG, MODULE, DEBUG, FLUSHALL, KEYS, SCAN y ACL le dan NOPERM. Un comando o un prefijo nuevo en `sessions.py` va también en la lista del compose: `pruebas/test_valkey_acl.py` falla si no.
+- `cirdan_admin`, con `VALKEY_ADMIN_PASSWORD`, con todos los comandos, para operar a mano y para las pruebas. Esa variable solo llega al contenedor de Valkey: ni la API, ni el programador, ni demo-accounts la reciben.
+
+Para entrar a mano: `docker exec -it cirdan-valkey sh -c 'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning'`. La contraseña la lee el shell del contenedor y no queda en la línea de comandos de la VM.
+
+### Pasar la VM y las PC de desarrollo (una vez)
+
+`${VALKEY_ADMIN_PASSWORD:?}` hace que cualquier `docker compose` de esa carpeta falle hasta que el `.env` la traiga, también `ps` y `logs`. El cambio del `command` recrea `cirdan-valkey`, y Valkey no guarda nada en disco (`--save ""`, `--appendonly no`): se pierden todas las sesiones, los MFA pendientes, los enlaces y restablecimientos sin usar y los bloqueos por intentos fallidos. Todos vuelven a entrar. Por eso va con el OK de quien administra la VM y fuera de una demo.
+
+1. (VM) Respaldo del `.env` como en los demás pasos (`install -m 600`), y agregar `VALKEY_ADMIN_PASSWORD` con un valor nuevo al azar, sin que pase por la línea de comandos ni por el historial: `umask 077; python3 -c "import secrets;print('VALKEY_ADMIN_PASSWORD=' + secrets.token_urlsafe(24))" >> .env` y `stat -c %a .env` da 600. Se guarda en el gestor de contraseñas ('LowTide vm-lowtide VALKEY_ADMIN_PASSWORD').
+2. (VM) `git pull` con `umask 022` y `docker compose --dry-run up -d --build`. Tiene que recrear `cirdan-valkey` y la API, y no `cirdan-pg16`. Si sale `cirdan-pg16`, no se sigue.
+3. (VM) `docker compose up -d --build`. `docker compose ps` da `healthy` en `cirdan-valkey` y en la API, y una cuenta real entra con contraseña y MFA.
+4. (VM) Comprobar: `docker exec cirdan-valkey sh -c 'valkey-cli --user cirdan_api -a "$VALKEY_PASSWORD" --no-auth-warning CONFIG GET maxmemory'` da NOPERM, `docker exec cirdan-valkey valkey-cli PING` da NOAUTH, y `docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' cirdan-api | grep -c '^VALKEY_ADMIN_PASSWORD='` da 0.
+
+En una PC de desarrollo es lo mismo en su `.env`, y `docker compose up -d` recrea `cirdan-valkey` (las sesiones locales se pierden). El plan B y el plan B de pruebas también la necesitan en su `.env` (paso 3 de 'Carpeta y volumen').
+
+Para regresar, se vuelve al commit anterior (`git checkout` del commit de antes) y se repite el paso 3: `--requirepass` con `VALKEY_PASSWORD` y `VALKEY_URL` sin usuario. `VALKEY_ADMIN_PASSWORD` puede quedarse en el `.env`, nadie la lee. Se vuelven a perder las sesiones.
 
 ## Lo que fija el archivo del despliegue
 
