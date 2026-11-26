@@ -298,7 +298,8 @@ class PlanAcumulado(unittest.TestCase):
             solo = plan.simular(HALLAZGOS_TOPE, REGLAS_TOPE, PESOS, [accion['id']])
             self.assertEqual((accion['score_after'], accion['score_reduction']),
                              (solo['score_after'], solo['score_reduction']))
-            self.assertEqual(set(accion) - set(CAMPOS_DE_HOY), {'score_reduction_acumulado', 'score_after_acumulado'})
+            self.assertEqual(set(accion) - set(CAMPOS_DE_HOY), {'score_reduction_acumulado', 'score_after_acumulado',
+                                                              'cve_ids', 'in_kev', 'epss_max', 'threat_note'})  # RC-127
         self.assertEqual(data['grouping'], 'regla')
         with self.assertRaisesRegex(ValueError, 'agrupar'):
             plan.construir_plan('acme-demo.mx', HALLAZGOS_TOPE, REGLAS_TOPE, PESOS, agrupar='host')

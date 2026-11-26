@@ -253,6 +253,23 @@ services:
     healthcheck:
       disable: true
 
+  inteligencia:
+    build: .
+    command: ["python", "-m", "cirdan.inteligencia"]
+    profiles: ["inteligencia"]
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: cirdan
+      CIRDAN_INTEL_PASSWORD: ${CIRDAN_INTEL_PASSWORD:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+
   # Corre una vez en cada `up`: con DEMO_ACCOUNTS=true pone contraseña y MFA a las cuentas
   # de la semilla (cirdan/auth/demo.py). Con false las apaga: les vuelve a poner el hash de relleno
   # y les quita el secreto TOTP (#49, RC-91). Nunca true en producción.

@@ -301,7 +301,11 @@ class ApiV1(unittest.TestCase):
             COMMIT;""", user='postgres')
         self.assertTrue(ok, err)
         try:
-            lista = {i['id']: i for i in self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')['items']}
+            orden = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')['items']
+            ids = [i['id'] for i in orden]
+            self.assertLess(ids.index(completo), ids.index(fuera))
+            self.assertLess(ids.index(fuera), ids.index(stub))
+            lista = {i['id']: i for i in orden}
             campos = ('cve_id', 'cvss', 'epss', 'in_kev')
             self.assertEqual(tuple(lista[completo][c] for c in campos), (cve_completo, 9.8, 0.00043, True))
             self.assertEqual(tuple(lista[stub][c] for c in campos), (cve_stub, 7.5, None, None))
