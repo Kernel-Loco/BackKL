@@ -7,7 +7,8 @@
 # Un token falso nuevo va en pruebas/fixtures/ y una huella sha256 nueva va sin forma de secreto o como fixture,
 # no se agregan aquí.
 # Excepción: las huellas de RC-295 (ba8494d) y RC-292 (10eefeb) del final entraron porque esos commits ya estaban
-# subidos cuando el job los marcó. Sus tokens ya pasaron a pruebas/fixtures/tokens/.
+# subidos cuando el job los marcó. Sus tokens ya pasaron a pruebas/fixtures/tokens/. Igual la de RC-114 (c4d4a44): la
+# firma de prueba de la URL de Teams ya no tiene forma de token.
 1795e028bae906e3e30538cff6a269375595aed9:pruebas/test_txt.py:generic-api-key:40
 23d53837666920aa46857e7cd5b81f07bc63a926:pruebas/test_llave_totp.py:lowtide-token-falso-fuera-de-fixtures:177
 23d53837666920aa46857e7cd5b81f07bc63a926:pruebas/test_llave_totp.py:lowtide-token-falso-fuera-de-fixtures:25
@@ -85,3 +86,4 @@ ba8494de2a008ea28d3d7644291b72a6683cfdef:pruebas/test_rotar_totp.py:lowtide-toke
 ba8494de2a008ea28d3d7644291b72a6683cfdef:pruebas/test_rotar_totp.py:lowtide-token-falso-fuera-de-fixtures:30
 ba8494de2a008ea28d3d7644291b72a6683cfdef:pruebas/test_rotar_totp.py:lowtide-token-falso-fuera-de-fixtures:293
 10eefeb1c044acc3247697f443d5318e4c44f596:pruebas/test_despliegue.py:lowtide-token-falso-fuera-de-fixtures:31
+c4d4a44e318b4ae9d2d6275b0591b86b09e8f87b:pruebas/test_integracion_teams.py:lowtide-token-falso-fuera-de-fixtures:15

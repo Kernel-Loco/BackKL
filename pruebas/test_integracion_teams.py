@@ -12,7 +12,7 @@ from pruebas.test_aislamiento import ACME, BETA, psql, scalar
 
 ALEX, MAYA, DANA = 'alex.morgan@acme-demo.mx', 'maya.reed@acme-demo.mx', 'dana.cruz@beta-corp.mx'
 RUTA = '/api/v1/integrations/teams'
-FIRMA = 'CIRDAN_FAKE_firma_rc114'
+FIRMA = 'firma-de-prueba-rc114'   # sin forma de token (regla lowtide-token-falso-fuera-de-fixtures)
 URL = ('https://prod-12.westus.logic.azure.com/workflows/abc/triggers/manual/paths/invoke?api-version=1&sig=' + FIRMA)
 HOST = 'prod-12.westus.logic.azure.com'
 
