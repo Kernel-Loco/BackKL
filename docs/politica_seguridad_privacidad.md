@@ -238,7 +238,7 @@ El texto basta para la búsqueda por dominio y para los demás datos de la secci
 
 ### 5.5 Minimización
 
-1. Nunca se guardan contraseñas, hashes de contraseñas filtradas, tokens completos ni el valor de un secreto, salvo la excepción del punto 5. De un secreto, solo tipo, repositorio, ruta y huella. De una brecha, solo el hecho (sección 4 de #6).
+1. Nunca se guardan contraseñas, hashes de contraseñas filtradas, tokens completos ni el valor de un secreto. De un secreto, solo tipo, repositorio, ruta y huella. De una brecha, solo el hecho (sección 4 de #6).
 2. La base no tiene columna para contraseñas, hashes ni tokens de brechas (`breach_exposures`) y rechaza guardar la respuesta cruda de Have I Been Pwned.
 3. Las fuentes que pueden traer secretos o correos van con `keep_raw_payload = false`.
 4. El proveedor de IA recibe el título, la categoría y la severidad de los hallazgos, sin correos, y la pregunta que escribe el usuario (sección 5.8).
