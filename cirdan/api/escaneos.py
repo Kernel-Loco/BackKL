@@ -52,8 +52,11 @@ def request_scan(fqdn: str, request: Request, session: Session = Depends(require
     solicitud = orquestador.solicitar(session.org_id, fqdn, user_id=session.audit_user_id, ip=client_ip(request),
                                       platform=session.audit_platform)
     if not solicitud.aceptada:
+        cuerpo = {'accepted': False, 'detail': solicitud.detalle, 'reasons': solicitud.motivos}
+        if solicitud.retry_after is not None:  # tope de escaneos a mano (RC-297)
+            return JSONResponse(cuerpo, status_code=429, headers={'Retry-After': str(solicitud.retry_after)})
         status = 404 if solicitud.motivos == ['domain_not_found'] else 409
-        return JSONResponse({'accepted': False, 'detail': solicitud.detalle, 'reasons': solicitud.motivos}, status_code=status)
+        return JSONResponse(cuerpo, status_code=status)
     threading.Thread(target=_correr, args=(session.org_id, solicitud.scan_id, solicitud.fqdn),
                      name='escaneo-' + solicitud.scan_id, daemon=True).start()
     with transaction(session.org_id) as conn:
