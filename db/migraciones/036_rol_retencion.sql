@@ -13,6 +13,8 @@
 -- retention_orgs(), SECURITY DEFINER como password_hash_version_orgs() de
 -- la 026: solo devuelve ids.
 --
+-- También corrige block_mutation(): ver el comentario junto a la función.
+--
 -- Sin superusuario ni BYPASSRLS. Solo SELECT y DELETE en las tablas que
 -- purga, y SELECT e INSERT en audit_log para dejar su evento. No toca
 -- audit_log, domain_authorizations ni dns_txt_verifications (van en #140,
@@ -30,6 +32,29 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cirdan_retention') THEN
     CREATE ROLE cirdan_retention LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
   END IF;
+END $$;
+
+-- La excepción de retención de block_mutation() (001) nunca había corrido: no existía el rol. PL/pgSQL no corta un
+-- AND, así que 'TG_TABLE_NAME = ... AND OLD.computed_at ...' fallaba en score_contributions, que no tiene
+-- computed_at (y al revés con score_id). Las mismas reglas, con IF anidados que solo leen la columna de su tabla.
+CREATE OR REPLACE FUNCTION block_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  -- Excepción de retención: solo DELETE, solo cirdan_retention, solo filas de más de 12 meses.
+  IF TG_OP = 'DELETE' AND current_user = 'cirdan_retention' THEN
+    IF TG_TABLE_NAME = 'domain_scores' THEN
+      IF OLD.computed_at < now() - interval '12 months' THEN
+        RETURN OLD;
+      END IF;
+    ELSIF TG_TABLE_NAME = 'score_contributions' THEN
+      IF EXISTS (SELECT 1 FROM domain_scores s
+                  WHERE s.id = OLD.score_id AND s.computed_at < now() - interval '12 months') THEN
+        RETURN OLD;
+      END IF;
+    END IF;
+  END IF;
+  RAISE EXCEPTION '% es de solo inserción: % bloqueado por trigger', TG_TABLE_NAME, TG_OP
+    USING ERRCODE = 'insufficient_privilege';
 END $$;
 
 GRANT USAGE ON SCHEMA public TO cirdan_retention;
