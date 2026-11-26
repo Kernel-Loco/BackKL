@@ -325,7 +325,7 @@ class Respaldo(unittest.TestCase):
 
     def test_9_solo_se_guarda_el_token_y_la_huella_de_lo_demas(self):
         """RC-272: guardables() deja tal cual los valores cirdan-verification=<hex> y pasa cualquier otro a
-        sha256:<hex> de su texto en UTF-8, en el mismo orden, como el CHECK de la migración 036."""
+        sha256:<hex> de su texto en UTF-8, en el mismo orden, como el CHECK de la migración 037."""
         def huella(v):
             return 'sha256:' + hashlib.sha256(v.encode('utf-8')).hexdigest()
         otro = 'cirdan-verification=0123456789abcdef0123456789abcdef'

@@ -1,7 +1,7 @@
 """Bitácora de la empresa y verificación de su cadena de hashes (#86, RC-130).
 
 `audit_log` es de solo inserción y cada fila encadena su `row_hash` con el de la anterior de la misma empresa, con la
-fórmula del trigger `audit_log_chain()` (migraciones 001 y 035). Aquí está el SQL que comparten la API
+fórmula del trigger `audit_log_chain()` (migraciones 001 y 036). Aquí está el SQL que comparten la API
 (cirdan/api/bitacora.py) y las pruebas (pruebas/test_bitacora.py). Va sin dependencias para que las pruebas del host
 lo importen sin fastapi ni psycopg.
 
@@ -14,8 +14,8 @@ cadena de la plataforma (`organization_id` NULL) no la ve ninguna empresa.
 
 # El row_hash que le toca a una fila de audit_log según su contenido y su chain_version: la fórmula del trigger
 # audit_log_chain() (también CADENA en pruebas/test_superadmin.py). Si el trigger cambia, esto cambia con él.
-#   1  la de la 001, sin ip_address: las filas de antes de la migración 035.
-#   2  la de la 035 (RC-294): la versión al principio e ip_address, como texto de inet, antes de details.
+#   1  la de la 001, sin ip_address: las filas de antes de la migración 036.
+#   2  la de la 036 (RC-294): la versión al principio e ip_address, como texto de inet, antes de details.
 # Una fila de la 2 que alguien pasa a la 1 no cuadra: su row_hash se calculó con la fórmula 2.
 HASH_FILA = '''sha256(prev_hash || convert_to(CASE chain_version
          WHEN 1 THEN concat_ws(chr(31),
@@ -101,7 +101,7 @@ def actor(r):
 
 def fila(r):
     """Una fila de LISTA_SQL con la forma de AuditEntry del portal (FrontKL, src/types/api.ts), más chain_seq,
-    entity_id, ip_address y chain_version (RC-294): con la 1 (filas de antes de la migración 035) la ip_address no
+    entity_id, ip_address y chain_version (RC-294): con la 1 (filas de antes de la migración 036) la ip_address no
     entra en la cadena y /verify no detecta que alguien la cambie."""
     return {'id': r['id'], 'occurred_at': r['occurred_at'], 'actor_type': r['actor_type'], 'actor': actor(r),
             'action': r['action'], 'entity_type': r['entity_type'], 'details': r['details'],
@@ -111,7 +111,7 @@ def fila(r):
 
 def resultado(r):
     """La fila de VERIFICAR_SQL como respuesta de GET /api/v1/audit-log/verify. checked_v1 dice cuántas de las
-    filas revisadas son de la fórmula 1 (antes de la migración 035, RC-294): en esas la ip_address no está protegida
+    filas revisadas son de la fórmula 1 (antes de la migración 036, RC-294): en esas la ip_address no está protegida
     por la cadena."""
     roto = None
     if r['broken_id']:

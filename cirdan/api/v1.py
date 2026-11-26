@@ -29,8 +29,8 @@ from psycopg.types.json import Jsonb
 from cirdan import alcance_carta, cartas, orquestador, reporte, reporte_tecnico, siem
 from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
-from cirdan.auth.deps import (Session, api_key_or_roles, client_ip, current_session, in_scope, require_roles,
-                              session_or_api_key)
+from cirdan.auth.deps import (ROL_LLAVE, SIN_PERMISO, Session, api_key_or_roles, client_ip, current_session, in_scope,
+                              require_roles, session_or_api_key)
 from cirdan.exportar import ATRIBUCION_POR_FUENTE, csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.orquestador import txt as dns_txt
@@ -41,7 +41,8 @@ router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
 # Lista, CSV, explicación y comparación de hallazgos: como en el portal (src/config/permissions.ts), el gerente no los ve y se
 # queda con los conteos por severidad de GET /domains (RC-280). Una llave de API entra igual.
-LEE_HALLAZGOS = api_key_or_roles('analyst', 'admin')
+ROLES_HALLAZGOS = ('analyst', 'admin')
+LEE_HALLAZGOS = api_key_or_roles(*ROLES_HALLAZGOS)
 
 # ---------------------------------------------------------------- características del reto
 # Desde #23 vienen guardadas en la evidencia. Para los hallazgos de la semilla, que no las traen, se calculan
@@ -294,7 +295,7 @@ def _revisar_empresa_y_carta(conn, session, end):
 
 # Una carta que empieza después de hoy no entra mientras el dominio tenga otra vigente (RC-272): al cargarse revocaría
 # la vigente y el dominio quedaría sin carta hasta su inicio. Es la misma regla que el trigger
-# domain_authorizations_una_vigente() de la migración 036, que queda de segundo candado.
+# domain_authorizations_una_vigente() de la migración 037, que queda de segundo candado.
 CARTA_FUTURA = ('El dominio ya tiene una carta vigente. Una carta que empieza después de hoy se carga el día que '
                 'empieza.')
 CARTA_FUTURA_SQL = (
@@ -553,6 +554,8 @@ def _score_base(row, critical_open):
         'reason': row['reason'], 'partial_coverage': row['partial_coverage'], 'computed_at': row['computed_at'],
         'floor_message': motor.mensaje_piso(calc, critical_open),
         'model_version': row['model_version'], 'model_fallback_reason': row['model_fallback_reason'],
+        # Fuentes que la organización tenía apagadas en el escaneo del score (#117, RC-235): explican partial_coverage.
+        'disabled_sources': list((row['stats'] or {}).get('sources_disabled_by_org') or []),
     }, weights
 
 
@@ -595,7 +598,8 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
                                        stats.get('sources_partial') or ())
     # Los códigos que el escaneo del score no revisó, con su fuente y su motivo, para que el portal los nombre (RC-229).
     huecos = cobertura.huecos(filas_corridas, stats.get('rules_without_coverage') or (),
-                              stats.get('sources_partial') or (), sin_llave=stats.get('rules_without_key') or ())
+                              stats.get('sources_partial') or (), sin_llave=stats.get('rules_without_key') or (),
+                              apagadas=stats.get('sources_disabled_by_org') or ())
     cortes = configuracion.cortes_de_fila(rows[-1])
     categories = [{'category': c, 'score': rows[-1]['category_scores'][c],
                    'band': criterio.banda(rows[-1]['category_scores'][c], cortes),
@@ -945,9 +949,11 @@ def _leer_contexto_plan(conn, session, domain_id):
         'ON t.code = r.code WHERE r.rule_set_id = %s',
         (rule_set_id,),
     ).fetchall()}
+    # El activo de cada hallazgo es para el plan por activo (RC-263): el motor y simular() no lo leen.
     hallazgos = conn.execute(
-        'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status '
-        'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id '
+        'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status, f.asset_id::text AS asset_id, '
+        'a.asset_type, a.value AS asset_value '
+        'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id JOIN assets a ON a.id = f.asset_id '
         'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
         (domain_id, list(motor.ESTADOS_PUNTUABLES)),
     ).fetchall()
@@ -969,7 +975,21 @@ def _leer_contexto_plan(conn, session, domain_id):
     return domain_id, reglas, pesos, hallazgos, method, severidades, parcial, guardado, cortes
 
 
-def _plan_data(session, fqdn, descargar=None):
+Agrupar = Literal['regla', 'activo']
+AGRUPAR = Query(default='regla', description="'regla' (por omisión) o 'activo': una acción por activo, sea dominio, "
+                                            "subdominio, IP, servicio u otro (RC-263). 'activo' es solo para analyst, "
+                                            "admin y llaves de API, como los hallazgos.")
+
+
+def _puede_agrupar(session, agrupar):
+    """Por activo el plan dice qué reglas tiene cada activo (por ejemplo el correo de un empleado con
+    email_in_public_commits), lo mismo que GET /findings, así que pide sus roles (RC-280): el gerente se queda con el
+    plan por regla."""
+    if agrupar == 'activo' and session.role != ROL_LLAVE and session.role not in ROLES_HALLAZGOS:
+        raise HTTPException(403, SIN_PERMISO)
+
+
+def _plan_data(session, fqdn, descargar=None, agrupar='regla'):
     """El plan de acción. Con `descargar(conn, data, domain_id)` devuelve lo que esa función arme dentro de la
     transacción que leyó los datos, como en _comparacion()."""
     domain_id = _domain_id(session, fqdn)
@@ -980,15 +1000,16 @@ def _plan_data(session, fqdn, descargar=None):
             conn, session, domain_id)
         try:
             data = plan_accion.construir_plan(fqdn, hallazgos, reglas, pesos, method, severidades, parcial, guardado,
-                                              cortes)
+                                              cortes, agrupar)
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return descargar(conn, data, domain_id) if descargar else data
 
 
 @router.get('/domains/{fqdn}/action-plan', summary='Plan de acción con el impacto estimado por acción')
-def action_plan(fqdn: str, session: Session = Depends(session_or_api_key)):
-    return _plan_data(session, fqdn)
+def action_plan(fqdn: str, agrupar: Agrupar = AGRUPAR, session: Session = Depends(session_or_api_key)):
+    _puede_agrupar(session, agrupar)
+    return _plan_data(session, fqdn, agrupar=agrupar)
 
 
 @router.post('/domains/{fqdn}/action-plan/simulate', summary='Simula una o varias acciones sin guardar cambios')
@@ -1009,9 +1030,10 @@ def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
 
 
 @router.get('/domains/{fqdn}/action-plan/export', summary='Descarga el plan de acción en CSV o JSON')
-def export_action_plan(request: Request, fqdn: str, formato: str = Query(default='json'),
+def export_action_plan(request: Request, fqdn: str, formato: str = Query(default='json'), agrupar: Agrupar = AGRUPAR,
                        session: Session = Depends(session_or_api_key)):
     formato = _formato(formato)
+    _puede_agrupar(session, agrupar)
     _dominio_autorizado(session, fqdn)  # 404 de otra empresa y 403 sin carta vigente, antes de leer el plan (RC-307)
 
     def descargar(conn, data, domain_id):
@@ -1023,7 +1045,7 @@ def export_action_plan(request: Request, fqdn: str, formato: str = Query(default
         _registrar_descarga(conn, session, request, 'action_plan', formato, domain_id, len(data['actions']))
         return respuesta
 
-    return _plan_data(session, fqdn, descargar)
+    return _plan_data(session, fqdn, descargar, agrupar)
 
 
 # ---------------------------------------------------------------- salida a SIEM (#98, RC-212)

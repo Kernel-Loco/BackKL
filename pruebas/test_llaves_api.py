@@ -367,6 +367,8 @@ class LlavesApi(unittest.TestCase):
             ('POST', LLAVES, {'own_use': True, 'name': 'CIRDAN_FAKE_con-llave'}),
             ('DELETE', LLAVES + '/' + llave_id, None),
             ('GET', '/api/v1/domains/txt', None),
+            ('GET', '/api/v1/sources', None),
+            ('PUT', '/api/v1/sources/ct_logs', {'enabled': False}),
             ('PUT', '/api/v1/scoring/weights', {'category_weights': {}}),
             ('POST', '/api/v1/domains/beta-corp.mx/action-plan/simulate', {'action_ids': ['x']}),
             ('POST', '/api/v1/domains/beta-corp.mx/scans', None),
@@ -384,7 +386,7 @@ class LlavesApi(unittest.TestCase):
         self.assertGreaterEqual(len(escrituras), 5)
         for metodo, ruta in escrituras:
             url = (ruta.replace('{fqdn}', 'beta-corp.mx').replace('{key_id}', llave_id)
-                   .replace('{request_id}', '00000000-0000-4000-8000-000000000000'))
+                   .replace('{request_id}', '00000000-0000-4000-8000-000000000000').replace('{code}', 'ct_logs'))
             self.assertNotIn('{', url, 'ruta con un parámetro que esta prueba no conoce')
             code, _ = cliente.request(metodo, url, {}, encabezados)
             self.assertEqual(code, 401, '%s %s' % (metodo, ruta))

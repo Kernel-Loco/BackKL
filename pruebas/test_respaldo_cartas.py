@@ -19,7 +19,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 RESPALDO = RAIZ / 'db' / 'respaldo'
 PDF = b'%PDF-1.4\nCIRDAN_TEST_CARTA\n%%EOF\n'
 # Empresa y usuario de db/semillas/001_datos_demo.sql. Los dos dominios los crea la prueba y no tienen carta de semilla:
-# desde la 036 (RC-272) una carta nueva revoca la anterior del dominio y deja authorization.superseded en audit_log,
+# desde la 037 (RC-272) una carta nueva revoca la anterior del dominio y deja authorization.superseded en audit_log,
 # que no se borra. DOMINIO_MANO lleva una carta subida a mano (AAD con el domain_id) y DOMINIO_MIFIEL una que salió de
 # la API de Mifiel (AAD con el id de la solicitud, migración 031).
 ORG_ID = '20000000-0000-4000-8000-000000000001'

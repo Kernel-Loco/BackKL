@@ -211,8 +211,8 @@ services:
         condition: service_healthy
       demo-accounts:
         condition: service_completed_successfully
-    # tini como PID 1: recoge los procesos que deja git cuando el recolector de GitHub lo mata por tiempo (#16).
-    init: true
+    # Sin init: true. El PID 1 es cirdan.init (ENTRYPOINT del Dockerfile): recoge los procesos que deja git cuando el
+    # recolector de GitHub lo mata por tiempo (#16) y, a diferencia de tini, su entorno no se lee en /proc (RC-324).
     restart: unless-stopped
 
   # Escaneos programados (#27, RC-52): cada PROGRAMADOR_INTERVALO segundos pide el escaneo de los dominios a los que
@@ -242,8 +242,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # tini como PID 1, como la API: recoge los git que el recolector de GitHub mata por tiempo y pasa SIGTERM.
-    init: true
+    # Sin init: true, como la API: cirdan.init es el PID 1, recoge los git que el recolector de GitHub mata por tiempo y
+    # pasa SIGTERM, sin dejar el entorno legible en /proc (RC-324).
     # Con SIGTERM no empieza otro dominio, pero el que está consultando su TXT termina, y detener() cierra en la base
     # los escaneos que siguen corriendo. Los 10 s de Docker no siempre alcanzan.
     stop_grace_period: 60s

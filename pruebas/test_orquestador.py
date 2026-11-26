@@ -261,7 +261,7 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['stats']['sources_unauthorized'], ['ct_logs', 'dns'])
 
     def test_2d_el_escaneo_usa_la_carta_nueva(self):
-        # RC-272: la carta nueva vence antes que la de renovar_carta() y que la 41...01 de la semilla. Antes de la 036
+        # RC-272: la carta nueva vence antes que la de renovar_carta() y que la 41...01 de la semilla. Antes de la 037
         # el escaneo tomaba la vigente de valid_until más lejano. Ahora la carga revoca las otras y el escaneo usa la
         # nueva.
         nueva = self.uno(
@@ -277,6 +277,56 @@ class Orquestador(unittest.TestCase):
         otras = self.uno('SELECT count(*) AS n FROM domain_authorizations a JOIN domains d ON d.id = a.domain_id '
                          "WHERE d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL AND a.id <> %s", nueva)
         self.assertEqual(otras['n'], 0)
+
+    def apagar_para_acme(self, codigo):
+        """Acme apaga la fuente (org_source_settings, #117, RC-235), en la transacción de la prueba."""
+        self.conn.execute(
+            'INSERT INTO org_source_settings (organization_id, source_id, enabled, changed_by) '
+            "SELECT %s, d.id, false, u.id FROM data_sources d, users u WHERE d.code = %s "
+            "AND u.email = 'alex.morgan@acme-demo.mx'", (ACME, codigo))
+
+    def test_235a_la_fuente_que_la_organizacion_apago_no_corre_y_el_score_es_parcial(self):
+        self.apagar_para_acme('ct_logs')
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), ['ct_logs'])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(s.aceptada, s.detalle)
+        with mock.patch.object(orquestador, 'ejecutar', wraps=orquestador.ejecutar) as ejecutar:
+            # Sin `fuentes`: las de fuentes_activas() menos las apagadas.
+            with mock.patch.object(orquestador, 'fuentes_activas', return_value=['ct_logs', 'ejemplo']):
+                resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', modo='reproducir', conn=self.conn)
+        self.assertEqual([c.args[0].FUENTE for c in ejecutar.call_args_list], ['ejemplo'])
+        self.assertEqual(resumen['status'], 'partial')
+        self.assertEqual(resumen['stats']['sources_disabled_by_org'], ['ct_logs'])
+        self.assertEqual([r['source'] for r in resumen['sources']], ['ejemplo'])
+        self.assertIsNone(self.corrida_de(s.scan_id, 'ct_logs'))
+        scan = self.uno('SELECT status, stats FROM scans WHERE id = %s', s.scan_id)
+        self.assertEqual((scan['status'], scan['stats']['sources_disabled_by_org']), ('partial', ['ct_logs']))
+        score = self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertIs(score['partial_coverage'], True)
+
+    def test_235b_la_apagada_tampoco_corre_si_viene_en_fuentes_y_otra_empresa_no_la_ve(self):
+        self.apagar_para_acme('ejemplo')
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with mock.patch.object(orquestador, 'ejecutar') as ejecutar:
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        ejecutar.assert_not_called()
+        self.assertEqual(resumen['status'], 'failed')   # no corrió ninguna: nada que comparar
+        self.assertEqual(resumen['stats']['sources_disabled_by_org'], ['ejemplo'])
+        # Con RLS, Beta no ve lo que apagó Acme.
+        self.conn.execute("SELECT set_config('app.current_org', %s, true)", (BETA,))
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), [])
+        self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+
+    def test_235c_una_fila_encendida_es_lo_mismo_que_no_tenerla(self):
+        self.apagar_para_acme('ejemplo')
+        self.conn.execute("UPDATE org_source_settings SET enabled = true")
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), [])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                     conn=self.conn)
+        self.assertEqual(resumen['status'], 'completed')
+        self.assertNotIn('sources_disabled_by_org', resumen['stats'])
 
     def test_2_corre_el_recolector_grabado_y_cierra_el_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
@@ -642,7 +692,7 @@ class Orquestador(unittest.TestCase):
             self.assertTrue(s.aceptada, s.detalle)
             return s.scan_id
         # Un escaneo caído (sin score) pedido antes del más viejo de los dos scores y que terminó después: cuenta por
-        # finished_at. queued_at (hoy, antes de los scores de 2098 y 2099) no cuenta, y desde la 034 (RC-285) no cambia.
+        # finished_at. queued_at (hoy, antes de los scores de 2098 y 2099) no cuenta, y desde la 035 (RC-285) no cambia.
         caido = solicitar()
         self.conn.execute("UPDATE scans SET status = 'failed', finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s",
                           (caido,))
@@ -1725,7 +1775,7 @@ class Orquestador(unittest.TestCase):
 
     def test_3r_el_cupo_de_un_dia_viejo_se_reinicia(self):
         """Como postgres deja ct_logs lleno ayer. Después corre como cirdan_app en la misma transacción, que se deshace."""
-        # Deshace la carta de setUp: desde la 036 (RC-272) dos cartas sin confirmar del mismo dominio en dos conexiones
+        # Deshace la carta de setUp: desde la 037 (RC-272) dos cartas sin confirmar del mismo dominio en dos conexiones
         # se esperan una a otra (candado del dominio y la revocación de la anterior), y esta prueba quedaría colgada.
         self.tx.__exit__(None, None, None)
         self.tx = self.conn.transaction(force_rollback=True)
