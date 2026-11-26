@@ -330,6 +330,15 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(lecturas, 2)
         self.assertGreater(inicio, lecturas * plazo + 10)
 
+    def test_16_antes_de_levantar_pide_las_bases_de_db_ip(self):
+        # RC-49: sin las bases en datos/geo/ Shodan no consulta InternetDB y la demo no da exposed_service.
+        doc = (RAIZ / 'docs' / 'despliegue.md').read_text(encoding='utf-8')
+        antes = doc[doc.index('## Antes de levantar'):doc.index('## Levantar')]
+        for texto in ('datos/geo/', 'dbip-asn-lite-AAAA-MM.mmdb', 'dbip-country-lite-AAAA-MM.mmdb',
+                      'python -m cirdan.recolectores.geoip'):
+            self.assertIn(texto, antes)
+        self.assertIn('COPY datos/geo/ datos/geo/', (RAIZ / 'Dockerfile').read_text(encoding='utf-8'))
+
 
 class ImagenDeLaApi(unittest.TestCase):
     def test_1_uvicorn_sin_encabezado_server(self):
