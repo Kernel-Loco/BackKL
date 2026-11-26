@@ -33,5 +33,5 @@ joblib==1.6.0
 # viajan dentro de modelo_v1.joblib: se fijan a lo que instala hoy la imagen. scipy 1.18.1 pide
 # numpy<2.8. Dependabot los sube fuera del grupo pip, como a scikit-learn y joblib. Si un numpy
 # nuevo necesita un scipy nuevo, los dos PR se juntan a mano.
-numpy==2.5.4
+numpy==2.5.5
 scipy==1.18.1
