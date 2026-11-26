@@ -71,8 +71,8 @@ def reset():
     exigir_desechable()
     subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey'), 'sh', '-c',
                     'for p in "login:fail:*" "pw:fail:*"; do '
-                    'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "$p" '
-                    '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del; done'],
+                    'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning --scan --pattern "$p" '
+                    '| xargs -r valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning del; done'],
                    check=True, capture_output=True)
     _last_step.clear()
 
@@ -81,7 +81,7 @@ def valkey(*argumentos):
     """Corre valkey-cli en el contenedor de Valkey y da su salida, una línea por valor."""
     exigir_desechable()
     r = subprocess.run(['docker', 'exec', os.environ.get('CIRDAN_TEST_VALKEY', 'cirdan-valkey'), 'sh', '-c',
-                        'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning "$@"', 'sh', *argumentos],
+                        'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning "$@"', 'sh', *argumentos],
                        check=True, capture_output=True, text=True)
     return r.stdout.splitlines()
 

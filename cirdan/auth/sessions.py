@@ -59,7 +59,8 @@ MAX_RESETS_IP = 20     # y por IP
 
 @cache
 def _valkey():
-    url = config('VALKEY_URL') or 'redis://:%s@%s:%s/0' % (
+    # cirdan_api es el usuario de Valkey de la API, solo con sus comandos y prefijos (RC-292, docker-compose.yml).
+    url = config('VALKEY_URL') or 'redis://cirdan_api:%s@%s:%s/0' % (
         config('VALKEY_PASSWORD', ''), config('VALKEY_HOST', '127.0.0.1'), config('VALKEY_PORT', '6379'))
     # Si Valkey no contesta, falla a los 3 s. Con redis 8.1 el tiempo para conectar ya no
     # sale de socket_timeout (serían 5 s), por eso va aparte.

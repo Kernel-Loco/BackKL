@@ -55,6 +55,7 @@ import email.utils
 import functools
 import http.client
 import ipaddress
+import json
 import re
 import socket
 import ssl
@@ -75,6 +76,10 @@ IPV4_COMPATIBLE = ipaddress.ip_network('::/96')
 IPV6_INTERNAS = (ipaddress.ip_network('fec0::/10'), ipaddress.ip_network('::ffff:0:0:0/96'))
 PUERTOS = frozenset({443})   # los únicos puertos a los que se conecta _conectar por https (#181, RC-299)
 PUERTOS_HTTP = frozenset({80})   # los únicos por http, solo en visitar() (RC-46 y RC-165)
+# Niveles de anidación que json_de acepta en la respuesta de una fuente (RC-300). crt.sh y Cert Spotter mandan 2 y
+# Shodan menos de 10. Desde Python 3.14 json.loads lee 10 000 niveles sin RecursionError (el tope es la pila de C),
+# así que el tope no se deja a la recursión.
+MAX_NIVELES_JSON = 64
 
 
 class PlazoVencido(Exception):
@@ -420,6 +425,39 @@ def visitar(req, plazo, tope, cronometro=None):
         raise
     cuerpo = b''.join(partes)
     return estado, cabeceras, cuerpo[:tope], len(cuerpo) > tope
+
+
+class JsonProfundo(ValueError):
+    """La respuesta trae más niveles de anidación de los que se leen (json_de)."""
+
+
+def json_de(cuerpo, tope=MAX_NIVELES_JSON):
+    """json.loads de la respuesta de una fuente, con a lo más `tope` niveles de anidación (RC-300). Con más, o si
+    json.loads se queda sin pila (RecursionError), JsonProfundo, que es un ValueError: 'respuesta que no se puede leer'.
+    Un cuerpo que no es JSON da el JSONDecodeError de siempre.
+    Primero lee json.loads (en C y lineal, también con UTF-16 o UTF-32) y luego cuenta los niveles de lo leído sin
+    recursión. Contarlos antes sobre el texto con una expresión regular tardaba en forma cuadrática con una cadena sin
+    cerrar llena de comillas escapadas y congelaba la API con el GIL tomado (revisión de riesgo de RC-300, D1)."""
+    try:
+        datos = json.loads(cuerpo)
+    except RecursionError:
+        raise JsonProfundo('respuesta que no se puede leer: más niveles de anidación de los que caben') from None
+    if _niveles_de_mas(datos, tope):
+        raise JsonProfundo('respuesta que no se puede leer: más de %d niveles de anidación' % tope)
+    return datos
+
+
+def _niveles_de_mas(datos, tope):
+    """Si alguna lista u objeto de `datos` queda a más de `tope` niveles. El de afuera es el nivel 1. Con una pila
+    propia, sin recursión, y se corta en el primero que pasa del tope."""
+    pila = [(datos, 1)] if isinstance(datos, (list, dict)) else []
+    while pila:
+        valor, nivel = pila.pop()
+        if nivel > tope:
+            return True
+        hijos = valor.values() if isinstance(valor, dict) else valor
+        pila.extend((hijo, nivel + 1) for hijo in hijos if isinstance(hijo, (list, dict)))
+    return False
 
 
 def retry_after(cabeceras, ahora=None):

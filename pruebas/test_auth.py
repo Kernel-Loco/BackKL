@@ -592,11 +592,13 @@ class Login(unittest.TestCase):
             's.refund_login_attempt(e, ip, t)\n'
             'sin = v.exists(*llaves)\n'
             't = s.take_login_attempt(e, ip)\n'
-            'for k in llaves: v.pexpire(k, 1)\n'
-            'time.sleep(0.05)\n'
+            # Con los comandos de cirdan_api (RC-292): EXPIRE de 1 s en vez de PEXPIRE y PEXPIRETIME en vez de TTL.
+            'for k in llaves: v.expire(k, 1)\n'
+            'time.sleep(1.1)\n'
             's.register_fail(e, ip)\n'
             's.refund_login_attempt(e, ip, t)\n'
-            'print(json.dumps([sin] + [int(v.get(k) or 0) for k in llaves] + [v.ttl(k) for k in llaves]))')
+            'resta = lambda k: -(-(v.pexpiretime(k) - int(time.time() * 1000)) // 1000)\n'
+            'print(json.dumps([sin] + [int(v.get(k) or 0) for k in llaves] + [resta(k) for k in llaves]))')
         sin, correo, ip, *ttl = json.loads(salida)
         self.assertEqual(sin, 0, 'sin contadores, la devolución no los crea')
         self.assertEqual((correo, ip), (1, 1), 'el fallo de la ventana nueva sigue contando')

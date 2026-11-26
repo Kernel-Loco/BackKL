@@ -1478,4 +1478,5 @@ def scans(domain: str | None = Query(default=None, min_length=1, max_length=253,
         ''' + filtro + ' ORDER BY s.queued_at DESC, s.id DESC LIMIT %(limit)s OFFSET %(offset)s', params).fetchall()
     for row in rows:
         row['stats'] = orquestador.stats_publicas(row['stats'])  # sin el costo interno (RC-87)
+        orquestador.fuentes_publicas(row['sources'])  # el error, solo si es un motivo fijo (RC-300)
     return {'items': rows, 'total': total, 'limit': limit, 'offset': offset}

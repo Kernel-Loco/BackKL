@@ -156,7 +156,7 @@ class EnvDeLaVm(unittest.TestCase):
         valores = dict(linea.split('=', 1) for linea in env.splitlines() if linea and not linea.startswith('#') and '=' in linea)
         self.assertNotIn('cambia_esta_clave', env)
         self.assertNotIn('genera_tu_llave', env)
-        for nombre in ('POSTGRES_PASSWORD', 'CIRDAN_APP_PASSWORD', 'VALKEY_PASSWORD'):
+        for nombre in ('POSTGRES_PASSWORD', 'CIRDAN_APP_PASSWORD', 'VALKEY_PASSWORD', 'VALKEY_ADMIN_PASSWORD'):
             self.assertEqual(len(valores[nombre]), 32, nombre)
         for nombre in ('TOTP_ENCRYPTION_KEY', 'PASSWORD_HASH_ENCRYPTION_KEY'):
             self.assertEqual(len(valores[nombre]), 44, nombre)

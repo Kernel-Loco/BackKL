@@ -64,6 +64,39 @@ class EscaneosApi(unittest.TestCase):
         self.assertEqual(self.beta.get('/api/v1/scans/60000000-0000-4000-8000-000000000001')[0], 404)
         self.assertEqual(self.beta.get('/api/v1/scans/no-es-un-id')[0], 404)
 
+    def test_6b_un_error_viejo_con_el_texto_de_una_excepcion_sale_como_error_interno(self):
+        """RC-300: una fila de antes que guardó el texto de una excepción de psycopg en scans.stats.error y en
+        scan_source_runs.error sale como 'error interno' en GET /scans y en /scans/{id}, para cualquier rol, sin
+        migración. Un motivo de la lista sale tal cual. Las filas de la semilla vuelven a como estaban."""
+        viejo = ('duplicate key value violates unique constraint "assets_organization_id_kind_value_key" '
+                 'DETAIL:  Key (organization_id, kind, value)=(20000000-0000-4000-8000-000000000001, subdomain, '
+                 'secreto-rc300.acme-demo.mx) already exists.')
+        scan, run = '60000000-0000-4000-8000-000000000001', '61000000-0000-4000-8000-000000000005'
+        try:
+            sesion.psql("UPDATE scans SET stats = stats || jsonb_build_object('error', '%s') WHERE id = '%s'"
+                        % (viejo.replace("'", "''"), scan))
+            sesion.psql("UPDATE scan_source_runs SET error = '%s' WHERE id = '%s'" % (viejo.replace("'", "''"), run))
+            sesion.psql("UPDATE scan_source_runs SET error = 'no respondió (HTTP 503)' "
+                        "WHERE id = '61000000-0000-4000-8000-000000000004'")
+            for quien in (self.analista, self.gerente):
+                code, uno = quien.get('/api/v1/scans/' + scan)
+                self.assertEqual(code, 200)
+                code, lista = quien.get('/api/v1/scans?domain=acme-demo.mx&limit=100')
+                self.assertEqual(code, 200)
+                del_listado = next(s for s in lista['items'] if s['id'] == scan)
+                for visto in (uno, del_listado):
+                    with self.subTest(ruta='lista' if visto is del_listado else 'uno'):
+                        self.assertNotIn('secreto-rc300', repr(visto))
+                        self.assertNotIn('duplicate key', repr(visto))
+                        self.assertEqual(visto['stats']['error'], 'error interno')
+                        errores = sorted((f['error'] or '') for f in visto['sources'])
+                        self.assertIn('error interno', errores)
+                        self.assertIn('no respondió (HTTP 503)', errores)
+        finally:
+            sesion.psql("UPDATE scans SET stats = stats - 'error' WHERE id = '%s'" % scan)
+            sesion.psql("UPDATE scan_source_runs SET error = NULL WHERE id IN ('%s', "
+                        "'61000000-0000-4000-8000-000000000004')" % run)
+
     @unittest.skipUnless(os.environ.get('EN_VIVO') == '1', 'consulta olmardo.com en vivo: corre con EN_VIVO=1')
     def test_7_en_vivo_acepta_olmardo_y_termina_el_escaneo(self):
         admin = sesion.login('admin@olmardo.com')

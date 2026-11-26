@@ -36,6 +36,7 @@ from psycopg.types.json import Jsonb
 from cirdan import alcance_carta, db
 from cirdan.config import config
 from cirdan.db import audit, transaction
+from cirdan.orquestador import motivos
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar, certspotter, turno
 from cirdan.recolectores.contrato import COLUMNAS_CVES, CVE_VALIDA, Resultado, ejecutar, siguiente_estado
@@ -75,10 +76,9 @@ FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
 LATIDO = 60                           # segundos entre marcas
 TOPE_CORRIDA = timedelta(minutes=20)  # una corrida no marca vida más allá de esto
 ABANDONO = timedelta(minutes=30)      # sin marca en ese tiempo, el escaneo se da por caído
-ERROR_ABANDONO = 'El escaneo se cortó: pasaron más de 30 minutos sin marca de vida'
+ERROR_ABANDONO = motivos.INTERRUMPIDO  # pasaron más de 30 minutos sin marca de vida (RC-300: un motivo fijo)
 ACCION_HALLAZGO_RESUELTO = 'finding.resolved'
 MOTIVO_SECRETO_ROTADO = 'secret_rotated'
-ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta fuente'
 
 # Límite diario por fuente (#13b, RC-184): vive en data_sources (daily_limit, daily_used, daily_used_on) y solo
 # lo mueven reserve_source_quota() y adjust_source_quota() de la migración 008, con el día en UTC. Se reserva
@@ -157,10 +157,23 @@ STATS_INTERNAS = frozenset({'queries', 'queries_by_source', 'seconds_by_source',
 
 
 def stats_publicas(stats):
-    """scans.stats sin las llaves de STATS_INTERNAS. Un stats en NULL se queda en None."""
+    """scans.stats sin las llaves de STATS_INTERNAS y con `error` solo si es un motivo fijo (RC-300): el de una fila de
+    antes sale como 'error interno'. Un stats en NULL se queda en None."""
     if stats is None:
         return None
-    return {k: v for k, v in stats.items() if k not in STATS_INTERNAS}
+    publicas = {k: v for k, v in stats.items() if k not in STATS_INTERNAS}
+    if 'error' in publicas:
+        publicas['error'] = motivos.publico(publicas['error'])
+    return publicas
+
+
+def fuentes_publicas(fuentes):
+    """Las corridas que devuelven las rutas de escaneos, con `error` solo si es un motivo fijo (RC-300)."""
+    for fuente in fuentes or ():
+        if isinstance(fuente, dict) and 'error' in fuente:
+            fuente['error'] = motivos.publico(fuente['error'])
+    return fuentes
+
 
 # Los hallazgos de una empresa se guardan de una fuente a la vez (RC-55). Dos dominios de la misma empresa pueden dar
 # la misma huella (un repo de GitHub declarado en los dos, el certificado de un subdominio) y escanearse a la vez:
@@ -777,7 +790,7 @@ def _ajustar(org, codigo, dia, delta, conn):
 def _ya_no_corre(org, scan_id, conn, corridas):
     """El escaneo dejó de estar en 'running' a mitad: no se toca su estado, solo se cierran sus fuentes."""
     with _tx(org, conn) as c:
-        _cerrar_corridas(c, [scan_id], ERROR_YA_NO_CORRE)
+        _cerrar_corridas(c, [scan_id], motivos.INTERRUMPIDO)  # dejó de estar en curso (RC-300)
         scan = c.execute('SELECT status, stats FROM scans WHERE id = %s', (scan_id,)).fetchone()
     return {'scan_id': scan_id, 'status': scan['status'], 'stats': scan['stats'] or {}, 'sources': corridas}
 
@@ -951,6 +964,11 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 momento = datetime.now(timezone.utc)
                 status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta
                                                   else (res.estado, 0, None))
+            # RC-300: en la base, en los avisos de los intentos y en el resumen solo va un motivo fijo
+            # (motivos.MOTIVOS). El texto completo de la falla va al log con el id del escaneo, en una línea (%r).
+            error = motivos.motivo(res.error)
+            if res.error and res.error != error:
+                log.warning('Escaneo %s, fuente %s, intento %d: %r', scan_id, codigo, intento + 1, res.error)
             gastadas += res.consultas
             avisos = previos + res.avisos
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
@@ -971,7 +989,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                         'finished_at = EXCLUDED.finished_at, coverage = EXCLUDED.coverage, mode = EXCLUDED.mode, '
                         'updated_at = now()',
                         (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
-                         Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None,
+                         Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, error,
                          cobertura(res, modulo), modo))
                     if res.estado == 'succeeded':
                         cambios = _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas,
@@ -988,12 +1006,12 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 resueltos -= abiertos
             if status != 'retrying':
                 break
-            previos.append('Intento %d: %s' % (attempt, (res.error or '')[:300]))
+            previos.append('Intento %d: %s' % (attempt, error or ''))
             if not _esperar(org, scan_id, (next_retry_at - momento).total_seconds(), conn, dormir):
                 return _ya_no_corre(org, scan_id, conn, corridas)
             certspotter.nuevo_intento()  # el reintento vuelve a pedir lo que falló en Cert Spotter, salvo un 429
             intento = attempt
-        corridas.append({'source': codigo, 'status': status, 'error': res.error or None, 'no_autorizada': not permitida,
+        corridas.append({'source': codigo, 'status': status, 'error': error, 'no_autorizada': not permitida,
                          'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})
         tiempos[codigo] = segundos
         if res.estado == 'succeeded':
@@ -1057,9 +1075,18 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     return {'scan_id': scan_id, 'status': estado, 'stats': stats, 'sources': corridas}
 
 
-def marcar_fallido(org, scan_id, error):
-    """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando."""
-    texto = (str(error) or type(error).__name__)[:300]  # Ctrl+C (KeyboardInterrupt) no trae texto
+def marcar_fallido(org, scan_id, error, motivo=motivos.INTERNO):
+    """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando.
+
+    En la base solo queda `motivo`, de motivos.MOTIVOS (RC-300): 'error interno' por omisión, porque el texto de la
+    excepción puede traer tabla, restricción y valores de una fila, y 'escaneo interrumpido' al apagar el servicio
+    (programador.detener). El texto completo va al log con el id del escaneo."""
+    try:
+        detalle = '%s: %s' % (type(error).__name__, error)
+    except Exception:  # una excepción cuyo texto también falla
+        detalle = type(error).__name__
+    log.error('El escaneo %s falló: %r', scan_id, detalle)
+    texto = motivo if motivo in motivos.MOTIVOS else motivos.INTERNO
     with transaction(org) as c:
         c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
                   "WHERE id = %s AND status = 'running'", (Jsonb({'error': texto}), scan_id))

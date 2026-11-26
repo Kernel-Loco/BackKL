@@ -38,8 +38,8 @@ def _sin_alta_pendiente():
     """Borra el QR pendiente que haya dejado otra prueba: cada prueba empieza sin alta en curso."""
     exigir_desechable()
     subprocess.run(['docker', 'exec', VALKEY, 'sh', '-c',
-                    'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "mfa:setup:*" '
-                    '| xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del'], check=True, capture_output=True)
+                    'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning --scan --pattern "mfa:setup:*" '
+                    '| xargs -r valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning del'], check=True, capture_output=True)
 
 
 def _codigo(secreto, delta=0):
@@ -158,9 +158,9 @@ class AltaTotp(unittest.TestCase):
         exigir_desechable()
         valores = subprocess.run(
             ['docker', 'exec', VALKEY, 'sh', '-c',
-             'for k in $(valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "mfa:setup:*"); do '
-             'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning ttl "$k"; '
-             'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning get "$k"; done'],
+             'for k in $(valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning --scan --pattern "mfa:setup:*"); do '
+             'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning ttl "$k"; '
+             'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning get "$k"; done'],
             check=True, capture_output=True, text=True).stdout
         self.assertIn('secret_enc', valores)
         self.assertNotIn(body['secret'], valores)
@@ -186,7 +186,7 @@ class AltaTotp(unittest.TestCase):
         indice = 'sess-user:' + hashlib.sha256(user_id.encode()).hexdigest()
         exigir_desechable()
         miembros = subprocess.run(['docker', 'exec', VALKEY, 'sh', '-c',
-                                   'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning scard ' + indice],
+                                   'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning scard ' + indice],
                                   check=True, capture_output=True, text=True).stdout.strip()
         self.assertEqual(miembros, '1')
 

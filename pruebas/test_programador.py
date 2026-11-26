@@ -145,8 +145,8 @@ class Base(unittest.TestCase):
         self.conn.execute("UPDATE scans SET status = 'completed', finished_at = now() "
                           "WHERE domain_id = %s AND status IN ('queued', 'running')", (dominio,))
 
-    def fallido(self, org, scan_id, error):
-        """marcar_fallido() en la conexión de la prueba."""
+    def fallido(self, org, scan_id, error, motivo=None):
+        """marcar_fallido() en la conexión de la prueba. detener() pasa el motivo (RC-300)."""
         self.uno(org, "UPDATE scans SET status = 'failed', finished_at = now() WHERE id = %s AND status = 'running' "
                       'RETURNING id', scan_id)
 
@@ -446,6 +446,7 @@ class TrasLanzar(Base):
         with mock.patch.object(orquestador, 'marcar_fallido', side_effect=self.fallido) as marcar:
             programador.detener()
         self.assertEqual(marcar.call_args.args[:2], (ACME, self.scan_id))
+        self.assertEqual(marcar.call_args.args[3], 'escaneo interrumpido')  # RC-300
         self.assertEqual(self.estado(), 'failed')
         self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1))
         # Un escaneo que ya no corre no se toca.

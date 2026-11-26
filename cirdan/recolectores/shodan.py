@@ -828,7 +828,10 @@ class ClienteShodan:
                 raise
             if not cuerpo or not cuerpo.strip():
                 raise RespuestaIlegible(self.PREFIJO + '%s respondió sin cuerpo' % que)
-            datos = json.loads(cuerpo)
+            try:
+                datos = transporte.json_de(cuerpo)
+            except transporte.JsonProfundo:  # más de transporte.MAX_NIVELES_JSON niveles (RC-300)
+                raise RespuestaIlegible(self.PREFIJO + '%s respondió JSON que no se puede leer' % que) from None
             if datos is None:
                 raise RespuestaIlegible(self.PREFIJO + '%s respondió null' % que)
             return datos
