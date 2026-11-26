@@ -158,6 +158,11 @@ HALLAZGOS_TOPE = [
     {'id': 'f3', 'rule_code': 'open_port', 'severity': 'medium', 'status': 'open', **WWW},
     {'id': 'f4', 'rule_code': 'spf_missing', 'severity': 'high', 'status': 'open', **DOM},
 ]
+# Sin el riesgo aceptado ni el piso, con spf_missing en medio: el ponderado es 40.
+SIN_PISO = [dict(h, severity='medium') if h['id'] == 'f4' else h for h in HALLAZGOS_TOPE if h['id'] != 'f1']
+# Lo mismo con open_port en otro activo, para que por activo cada regla sea su propia acción.
+SIN_PISO_SEPARADO = [dict(h, asset_id='a-api', asset_value='api.acme-demo.mx') if h['id'] == 'f3' else h
+                     for h in SIN_PISO]
 CAMPOS_DE_HOY = ('id', 'rule_code', 'category', 'recommendation', 'finding_ids', 'finding_count', 'score_after',
                  'score_reduction')
 
@@ -169,7 +174,9 @@ def resolver(hallazgos, finding_ids):
 class PlanAcumulado(unittest.TestCase):
     """RC-263: plan por activo y en orden acumulado."""
 
-    def test_suma_de_reducciones_sueltas_pasa_de_la_acumulada_por_un_tope(self):
+    def test_suma_de_reducciones_sueltas_pasa_de_la_acumulada_por_el_piso(self):
+        # Las sueltas no se suman: con el piso de 60 del riesgo aceptado, spf_missing y old_tls bajan 15 cada una
+        # solas, pero después de la primera la otra ya no baja nada.
         data = plan.construir_plan('acme-demo.mx', HALLAZGOS_TOPE, REGLAS_TOPE, PESOS)
         self.assertEqual(data['score_before'], 75)
         self.assertEqual([(a['id'], a['score_reduction'], a['score_reduction_acumulado'], a['score_after_acumulado'])
@@ -180,8 +187,22 @@ class PlanAcumulado(unittest.TestCase):
         self.assertEqual((sueltas, acumulada), (37, 15))
         self.assertGreater(sueltas, acumulada)
 
+    def test_suma_de_reducciones_sueltas_no_da_la_acumulada_por_un_tope(self):
+        # Con el tope de 100 de infraestructura (old_tls y open_port juntas pasan de 100) pasa al revés: open_port
+        # sola baja 7, pero después de old_tls baja 15. Las sueltas suman 32 y la acumulada 40, el score completo.
+        data = plan.construir_plan('acme-demo.mx', SIN_PISO, REGLAS_TOPE, PESOS)
+        self.assertEqual(data['score_before'], 40)
+        self.assertEqual([(a['id'], a['score_reduction'], a['score_reduction_acumulado'], a['score_after_acumulado'])
+                          for a in data['actions']],
+                         [('old_tls', 15, 15, 25), ('spf_missing', 10, 10, 15), ('open_port', 7, 15, 0)])
+        sueltas = sum(a['score_reduction'] for a in data['actions'])
+        acumulada = sum(a['score_reduction_acumulado'] for a in data['actions'])
+        self.assertEqual((sueltas, acumulada), (32, 40))
+        self.assertLess(sueltas, acumulada)
+
     def test_la_ultima_acumulada_deja_el_score_de_resolver_todo(self):
         casos = (('reglas', HALLAZGOS_TOPE, REGLAS_TOPE, None, None), ('reglas', HALLAZGOS, REGLAS, None, None),
+                 ('sin piso', SIN_PISO_SEPARADO, REGLAS_TOPE, None, None),
                  ('ml', HALLAZGOS_TOPE, REGLAS_TOPE, {'f2': 'low', 'f4': 'critical'}, None),
                  ('cortes', HALLAZGOS_TOPE, REGLAS_TOPE, None, {'medium': 50, 'high': 70, 'critical': 85}))
         for nombre, hallazgos, reglas, severidades, cortes in casos:
@@ -212,17 +233,47 @@ class PlanAcumulado(unittest.TestCase):
                             simulado = plan.simular(hallazgos, reglas, PESOS, arriba, severidades, None, cortes)
                             self.assertEqual(simulado['score_after'], data['actions'][n - 1]['score_after_acumulado'])
 
-    def test_orden_voraz_y_empate_por_categoria_e_id(self):
-        # Con el piso: solas, spf_missing y old_tls bajan 15 cada una y gana la de configuración (el desempate de
-        # hoy). Después nadie baja nada y el empate sigue categoría e id (prueba anterior).
-        # Sin el piso: old_tls sola baja 15, spf_missing 10 y open_port 7 (la categoría sigue topada). Después de
-        # old_tls, open_port baja 15 y spf_missing 10, así que open_port sube al segundo lugar.
-        sin_piso = [h for h in HALLAZGOS_TOPE if h['id'] != 'f1']
-        sin_piso = [dict(h, severity='medium') if h['id'] == 'f4' else h for h in sin_piso]
-        data = plan.construir_plan('acme-demo.mx', sin_piso, REGLAS_TOPE, PESOS)
+    def test_por_activo_el_orden_es_voraz_y_empata_por_categoria_e_id(self):
+        # Un activo por hallazgo y sin el piso: www (old_tls) sola baja 15, dom (spf_missing) 10 y api (open_port) 7
+        # (la categoría sigue topada). Después de www, api baja 15 y dom 10, así que api sube al segundo lugar.
+        data = plan.construir_plan('acme-demo.mx', SIN_PISO_SEPARADO, REGLAS_TOPE, PESOS, agrupar='activo')
         self.assertEqual(data['score_before'], 40)
         self.assertEqual([(a['id'], a['score_reduction'], a['score_reduction_acumulado']) for a in data['actions']],
-                         [('old_tls', 15, 15), ('open_port', 7, 15), ('spf_missing', 10, 10)])
+                         [('a-www', 15, 15), ('a-api', 7, 15), ('a-dom', 10, 10)])
+
+    def test_por_regla_el_orden_es_el_de_hoy_aunque_el_voraz_sea_otro(self):
+        # Los mismos tres hallazgos por regla: se quedan en el orden de lo que baja cada una sola (RC-72), aunque el
+        # voraz pondría open_port en segundo lugar.
+        data = plan.construir_plan('acme-demo.mx', SIN_PISO_SEPARADO, REGLAS_TOPE, PESOS)
+        self.assertEqual([a['id'] for a in data['actions']], ['old_tls', 'spf_missing', 'open_port'])
+        self.assertEqual([a['id'] for a in data['actions']],
+                         [a['id'] for a in sorted(data['actions'],
+                                                  key=lambda a: (-a['score_reduction'], a['category'], a['id']))])
+
+    def test_el_voraz_coincide_con_el_motor_con_muchos_activos(self):
+        # 40 activos repartidos en las cuatro categorías, varios topados y dos críticos: cada acumulado del voraz es
+        # lo que baja el motor al resolverlo después de los de arriba, y nadie de abajo bajaba más en su turno.
+        reglas = {'r%d' % n: {'id': 'r%d' % n, 'category': c, 'weight': 1, 'max_penalty': 100, 'recommendation': 'x'}
+                  for n, c in enumerate(plan.criterio.CATEGORIAS)}
+        severidad = ('low', 'medium', 'high')
+        hallazgos = [{'id': 'f%02d' % n, 'rule_code': 'r%d' % (n % 4), 'severity': severidad[n * 7 % 3],
+                      'status': 'open', 'asset_id': 'a%02d' % (n % 40), 'asset_type': 'subdomain',
+                      'asset_value': 'h%d.acme-demo.mx' % (n % 40)} for n in range(60)]
+        hallazgos[3]['severity'] = hallazgos[17]['severity'] = 'critical'
+        data = plan.construir_plan('acme-demo.mx', hallazgos, reglas, PESOS, agrupar='activo')
+        self.assertEqual(data['total'], 40)
+        resueltos = set()
+        antes = motor.calcular(hallazgos, reglas, PESOS)['score']
+        for n, accion in enumerate(data['actions']):
+            ahora = resueltos | set(accion['finding_ids'])
+            despues = motor.calcular(resolver(hallazgos, ahora), reglas, PESOS)['score']
+            self.assertEqual((accion['score_after_acumulado'], accion['score_reduction_acumulado']),
+                             (despues, antes - despues), accion['id'])
+            for otra in data['actions'][n + 1:]:
+                otro = motor.calcular(resolver(hallazgos, resueltos | set(otra['finding_ids'])), reglas, PESOS)['score']
+                self.assertGreaterEqual(otro, despues, (accion['id'], otra['id']))
+            resueltos |= set(accion['finding_ids'])
+            antes = despues
 
     def test_por_activo_junta_dos_reglas_del_mismo_host(self):
         data = plan.construir_plan('acme-demo.mx', HALLAZGOS_TOPE, REGLAS_TOPE, PESOS, agrupar='activo')

@@ -29,8 +29,8 @@ from psycopg.types.json import Jsonb
 from cirdan import alcance_carta, cartas, orquestador, reporte, reporte_tecnico, siem
 from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
-from cirdan.auth.deps import (Session, api_key_or_roles, client_ip, current_session, in_scope, require_roles,
-                              session_or_api_key)
+from cirdan.auth.deps import (ROL_LLAVE, SIN_PERMISO, Session, api_key_or_roles, client_ip, current_session, in_scope,
+                              require_roles, session_or_api_key)
 from cirdan.exportar import ATRIBUCION_POR_FUENTE, csv_con_bom
 from cirdan.orquestador.txt import esperado as txt_esperado
 from cirdan.orquestador import txt as dns_txt
@@ -41,7 +41,8 @@ router = APIRouter(prefix='/api/v1', tags=['portal'])
 SEVERIDADES = ('critical', 'high', 'medium', 'low')
 # Lista, CSV, explicación y comparación de hallazgos: como en el portal (src/config/permissions.ts), el gerente no los ve y se
 # queda con los conteos por severidad de GET /domains (RC-280). Una llave de API entra igual.
-LEE_HALLAZGOS = api_key_or_roles('analyst', 'admin')
+ROLES_HALLAZGOS = ('analyst', 'admin')
+LEE_HALLAZGOS = api_key_or_roles(*ROLES_HALLAZGOS)
 
 # ---------------------------------------------------------------- características del reto
 # Desde #23 vienen guardadas en la evidencia. Para los hallazgos de la semilla, que no las traen, se calculan
@@ -958,7 +959,17 @@ def _leer_contexto_plan(conn, session, domain_id):
 
 
 Agrupar = Literal['regla', 'activo']
-AGRUPAR = Query(default='regla', description="'regla' (por omisión) o 'activo': una acción por host o IP (RC-263)")
+AGRUPAR = Query(default='regla', description="'regla' (por omisión) o 'activo': una acción por activo, sea dominio, "
+                                            "subdominio, IP, servicio u otro (RC-263). 'activo' es solo para analyst, "
+                                            "admin y llaves de API, como los hallazgos.")
+
+
+def _puede_agrupar(session, agrupar):
+    """Por activo el plan dice qué reglas tiene cada activo (por ejemplo el correo de un empleado con
+    email_in_public_commits), lo mismo que GET /findings, así que pide sus roles (RC-280): el gerente se queda con el
+    plan por regla."""
+    if agrupar == 'activo' and session.role != ROL_LLAVE and session.role not in ROLES_HALLAZGOS:
+        raise HTTPException(403, SIN_PERMISO)
 
 
 def _plan_data(session, fqdn, descargar=None, agrupar='regla'):
@@ -980,6 +991,7 @@ def _plan_data(session, fqdn, descargar=None, agrupar='regla'):
 
 @router.get('/domains/{fqdn}/action-plan', summary='Plan de acción con el impacto estimado por acción')
 def action_plan(fqdn: str, agrupar: Agrupar = AGRUPAR, session: Session = Depends(session_or_api_key)):
+    _puede_agrupar(session, agrupar)
     return _plan_data(session, fqdn, agrupar=agrupar)
 
 
@@ -1004,6 +1016,7 @@ def simulate_action_plan(fqdn: str, action_ids: list[str] = Body(embed=True),
 def export_action_plan(request: Request, fqdn: str, formato: str = Query(default='json'), agrupar: Agrupar = AGRUPAR,
                        session: Session = Depends(session_or_api_key)):
     formato = _formato(formato)
+    _puede_agrupar(session, agrupar)
     _dominio_autorizado(session, fqdn)  # 404 de otra empresa y 403 sin carta vigente, antes de leer el plan (RC-307)
 
     def descargar(conn, data, domain_id):
