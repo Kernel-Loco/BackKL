@@ -808,7 +808,10 @@ def export_findings(request: Request, fqdn: str, formato: str = Query(default='j
     domain_id = _dominio_autorizado(session, fqdn)
     with transaction(session.org_id) as conn:
         _carta_vigente(conn, domain_id)
-        items = [_finding(f) for f in conn.execute(FINDINGS_SQL, (fqdn,)).fetchall()]
+        filas = conn.execute(FINDINGS_SQL, (fqdn,)).fetchall()
+        # El JSON es igual a GET /findings, con el último triage de cada hallazgo (RC-133).
+        eventos = _ultimo_triage(conn, [f['id'] for f in filas])
+        items = [{**_finding(f), 'triage': _triage_de(eventos.get(f['id']))} for f in filas]
         if formato == 'json':
             respuesta = _descarga(_json({'domain': fqdn, 'items': items, 'total': len(items)}),
                                   'application/json; charset=utf-8', '%s-hallazgos.json' % fqdn)
