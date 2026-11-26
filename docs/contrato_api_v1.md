@@ -49,6 +49,17 @@ Comparación y exportaciones (#24, RC-57). Las reglas del CSV de este párrafo t
 
 La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`. `action_ids` usa los ids de acciones devueltos por el plan, en este momento códigos de regla. La respuesta incluye score y banda antes/después, reducción y notas por categoría. Las acciones desconocidas o sin hallazgos abiertos responden 422. La simulación no escribe hallazgos, scores ni bitácora. En el plan y en la simulación, el score, la banda y las notas 'antes' son las del último score guardado, las mismas de `/score`. Si el dominio no tiene score guardado, salen del motor. El 'después' se recalcula con el motor (#31) y la reducción es lo que baja el motor al resolver esas acciones, así que nunca es negativa. Si el score guardado no cuadra con los hallazgos de ese momento (un escaneo en curso o caído), 'antes' menos la reducción puede no dar 'después'.
 
+## Usuarios de la empresa (#141, RC-259)
+
+Solo el Admin, con la sesión del portal (una llave de API recibe 401). Otro rol recibe 403 y una cuenta de otra empresa responde 404, igual que una que no existe. Cada cambio queda en `audit_log` con quién, a quién, qué y el motivo.
+
+| Método y ruta | Qué hace |
+|---|---|
+| `GET /api/v1/users` | Las cuentas de la empresa: `id`, `email`, `full_name`, `role`, `is_active`, `mfa_enabled`, `last_login_at`, `created_at` y `active_api_keys`. Suma `last_access_review` (la última revisión, o `null`) y `access_review_due` (`true` si no hay o pasó más de un mes) |
+| `PATCH /api/v1/users/{id}` | Cambia `role` (`analyst`, `manager` o `admin`) o `is_active`, con `reason` obligatorio (3 a 300 caracteres). Desactivar revoca las llaves de API que creó la cuenta (`revoked_api_keys`), y desactivar o cambiar el rol cierra sus sesiones abiertas (`sessions_closed`). 409 si el Admin se quita su propio rol o se desactiva, si deja a la empresa sin Admin activo o si la cuenta es de un integrador (`operator`). 422 con un campo de más o sin motivo. Eventos `user.role_changed`, `user.deactivated` y `user.reactivated` |
+| `POST /api/v1/users/access-review` | Registra la revisión de accesos con `notes` opcional (hasta 1000 caracteres). Guarda en el evento `users.access_reviewed` la foto de las cuentas: `users`, `active`, `admins`, `without_mfa` y `unused_90d`. Responde 201 con la revisión y `next_due` |
+| `GET /api/v1/users/access-reviews` | Las últimas 24 revisiones, de la más nueva a la más vieja, con `next_due` |
+
 ## Llaves de API (#87)
 
 Para que un sistema de la propia empresa lea la API sin la sesión del portal. Es solo para los sistemas de la propia empresa: no se da a un integrador ni a otra empresa hasta que la carta tenga dónde nombrarlo ([`politica_uso_etico.md`](politica_uso_etico.md), sección 6, punto 1). Las crea, lista y revoca el Administrador, con su sesión.

@@ -385,6 +385,7 @@ class LlavesApi(unittest.TestCase):
                       if m in ('post', 'put', 'patch', 'delete') and not ruta.startswith('/api/v1/auth/')]
         self.assertGreaterEqual(len(escrituras), 5)
         for metodo, ruta in escrituras:
+            ruta = ruta.replace('{user_id}', '00000000-0000-4000-8000-000000000000')   # RC-259
             url = (ruta.replace('{fqdn}', 'beta-corp.mx').replace('{key_id}', llave_id)
                    .replace('{request_id}', '00000000-0000-4000-8000-000000000000').replace('{code}', 'ct_logs'))
             self.assertNotIn('{', url, 'ruta con un parámetro que esta prueba no conoce')
