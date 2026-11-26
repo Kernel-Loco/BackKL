@@ -168,7 +168,7 @@ Los controles 7.1 a 7.6, 7.11 y 7.12 (perímetro, entradas, oficinas, vigilancia
 | 8.26 Requisitos de seguridad | OWASP ASVS para sesiones y autenticación, y la revisión completa del nivel 1 de ASVS en [`asvs_nivel1.md`](asvs_nivel1.md) (#75) | Existe |
 | 8.27 Arquitectura segura | RLS con FORCE en las tablas por cliente, rol de la API sin privilegios y base y Valkey sin puertos públicos | Existe |
 | 8.28 Codificación segura | CodeQL y revisión de PR | Existe |
-| 8.29 Pruebas de seguridad | ZAP activo, pentest y reto de hackeo solo contra el propio despliegue. Las reglas, el alcance y el registro del reto están en [`reto_hackeo.md`](reto_hackeo.md) (#85) | Falta. Llegan con #51, #58b y #85. El reto espera el permiso escrito del profesor |
+| 8.29 Pruebas de seguridad | ZAP activo, pentest y reto de hackeo solo contra el propio despliegue. Las reglas, el alcance y el registro del reto están en [`reto_hackeo.md`](reto_hackeo.md) (#85), y el pentest con sus casos y hallazgos en [`pentest.md`](pentest.md) (#58b) | Falta. Llegan con #51, #58b y #85. El reto espera el permiso escrito del profesor |
 | 8.31 Separación de entornos | El CI corre las pruebas de base y API en una base desechable, y en la PC corren en el compose desechable `docker-compose.pruebas.yml`. El candado de `pruebas/pila.py` no las deja correr contra `cirdan-pg16`, `cirdan-valkey` ni `cirdan-api` (RC-254). `dev` y `main` separados | Existe |
 | 8.32 Gestión de cambios | Migraciones numeradas que no se editan, PR con la clave de Jira y congelamiento desde el 25 nov | Existe |
 | 8.33 Información de prueba | Empresas ficticias (Acme Demo, Beta Corp y Grupo Olmardo) y tokens `CIRDAN_FAKE_` | Existe |
