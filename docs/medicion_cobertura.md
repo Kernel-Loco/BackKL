@@ -44,10 +44,27 @@ Las cinco tienen al menos un código declarado por algún recolector, pero **eso
 
 Para medir la detección de la siembra, definir antes el conjunto de casos esperados vigentes y dentro del alcance del escaneo. Un **verdadero positivo (VP)** es un caso confirmado como detectado en su activo; un **falso negativo (FN)** es un caso no detectado cuya fuente y parte se revisaron suficientemente. Contar aparte los casos sin cobertura, fuera de vigencia y sin evidencia; no convertirlos en FN. Reportar `VP / (VP + FN)` como proporción detectada entre los casos evaluables, junto con los conteos de VP, FN y casos no evaluables. Con denominador cero es **no evaluable**. Una proporción con casos pendientes describe solo los evaluados y no la detección completa de la siembra.
 
+## Medir con `cirdan.medicion` (RC-143)
+
+`cirdan/medicion.py` aplica este método al último escaneo terminado de olmardo.com (o al que se le pase con `--scan`), sin lanzar escaneos y con RLS de la empresa:
+
+```bash
+docker compose exec api python -m cirdan.medicion
+```
+
+- Toma los casos con código de la lista por fuente de [`hallazgos_esperados.md`](hallazgos_esperados.md) (filas 3, 5, 6, 8, 9, 10, 11 y 12) y cuenta cada uno como VP, FN, sin cobertura (la fuente falló, quedó parcial o no corrió) o fuera de vigencia (fila 5, después del 31 oct). Un código igual en otro activo no es acierto.
+- Da VP, FN, no evaluables y la proporción detectada por fuente y en total, y «no evaluable» en vez de 0 cuando no hay casos evaluables.
+- Los falsos positivos salen del triage (#80, RC-133): los marcados `false_positive` entre los revisados (`resolved`, `accepted_risk` y `false_positive`). Antes de medir hay que revisar los hallazgos del escaneo y marcarlos en el portal.
+- Lista aparte lo que el escaneo vio y no está en la lista: posibles falsos positivos para revisar a mano.
+
+La salida es Markdown para pegar abajo, en «Resultado», y en el deck (#59b). `pruebas/test_medicion.py` la prueba sin base ni red.
+
 ## Falsos positivos
 
 [`hallazgos_esperados.md`](hallazgos_esperados.md) enumera lo que no debe salir y las condiciones bajo las que esa expectativa vale. Una coincidencia es **posible falso positivo**, no un error confirmado: contrastar el activo, el tiempo, la fuente y el alcance con una revisión humana y registrar la justificación. No clasificar automáticamente como falso el puerto 50000 histórico de InternetDB ni como acierto un dominio parecido de terceros, según las notas de esa lista.
 
 Para una muestra revisada del mismo escaneo, reportar el número de hallazgos **confirmados falsos** sobre el total de hallazgos de la muestra que fueron revisados y clasificados (confirmados verdaderos o falsos): `FP / (VP + FP)`. Informar ambos conteos, la selección de la muestra, fecha y casos pendientes. Este porcentaje es la **proporción de falsos entre alertas revisadas**, no la tasa estadística `FP / (FP + VN)`, que requiere conocer también los verdaderos negativos. No contar como verdaderos los no revisados, ni inferir verdaderos negativos en fuentes sin cobertura. Si el denominador es cero, el porcentaje es **no evaluable**, no 0 %.
 
-**Resultado real pendiente:** no se dispone aquí del identificador y evidencia del último escaneo de producción ni de una revisión de sus hallazgos. Hasta cotejarlos con la siembra vigente no se puede afirmar detección, cobertura de la meta ni una cifra de falsos positivos.
+## Resultado
+
+**Resultado real pendiente:** no se dispone aquí del identificador y evidencia del último escaneo de producción ni de una revisión de sus hallazgos. Hasta cotejarlos con la siembra vigente no se puede afirmar detección, cobertura de la meta ni una cifra de falsos positivos. Cuando se corra, pegar aquí la salida de `python -m cirdan.medicion` con la fecha y el escaneo.
