@@ -1036,6 +1036,10 @@ class ApiV1(unittest.TestCase):
                  '/api/v1/domains/acme-demo.mx/findings/export?formato=csv',
                  '/api/v1/findings/%s/explanation' % hallazgo, '/domains/acme-demo.mx/findings', comparar,
                  exportar_comparacion % 'json', exportar_comparacion % 'csv')
+        # RC-263: el plan por activo dice qué reglas tiene cada activo, así que también es de analista y admin.
+        por_activo = '/api/v1/domains/acme-demo.mx/action-plan?agrupar=activo'
+        rutas += (por_activo, '/api/v1/domains/acme-demo.mx/action-plan/export?formato=json&agrupar=activo',
+                  '/api/v1/domains/acme-demo.mx/action-plan/export?formato=csv&agrupar=activo')
         acme = '20000000-0000-4000-8000-000000000001'
         descargas = ("SELECT count(*) FROM audit_log WHERE organization_id = '%s' AND action = 'report.downloaded';"
                      % acme)
@@ -1068,7 +1072,7 @@ class ApiV1(unittest.TestCase):
             self.assertEqual(code, 201, body)
             llave = {'Authorization': 'Bearer ' + body['key']}
             mala = {'Authorization': 'Bearer ' + body['key'] + 'x'}
-            for url in (rutas[0], rutas[3], comparar):
+            for url in (rutas[0], rutas[3], comparar, por_activo):
                 self.assertEqual(sesion.Client().get(url, headers=llave)[0], 200, url)
                 self.assertEqual(gerente.get(url, headers=llave)[0], 200, url)
                 self.assertEqual(gerente.get(url, headers=mala)[0], 401, url)
@@ -1080,7 +1084,8 @@ class ApiV1(unittest.TestCase):
         dominio = next(d for d in self.get(gerente, '/api/v1/domains')['items'] if d['fqdn'] == 'acme-demo.mx')
         self.assertEqual(set(dominio['open_findings']), {'critical', 'high', 'medium', 'low'})
         for url in ('/api/v1/domains/acme-demo.mx/score', '/api/v1/domains/acme-demo.mx/score/history',
-                    '/api/v1/domains/acme-demo.mx/action-plan', '/api/v1/domains/acme-demo.mx/report'):
+                    '/api/v1/domains/acme-demo.mx/action-plan',
+                    '/api/v1/domains/acme-demo.mx/action-plan?agrupar=regla', '/api/v1/domains/acme-demo.mx/report'):
             self.assertEqual(gerente.get(url)[0], 200, url)
 
     def test_8_plan_y_simulacion_no_modifican_hallazgos_ni_score(self):
@@ -1120,6 +1125,25 @@ class ApiV1(unittest.TestCase):
                 self.assertEqual([(a['id'], a['score_after'], a['score_reduction']) for a in action_plan['actions']],
                                  [('breach_exposure', 16, 44), ('dmarc_missing', 60, 0), ('cert_expired', 60, 0),
                                   ('outdated_software', 60, 0)])
+                # RC-263: por regla el orden sigue igual y solo se suma la acumulada, que al final deja el score de
+                # resolver todo. Por activo cada acción junta los hallazgos abiertos de un activo.
+                antes = action_plan['score_before']
+                for n, accion in enumerate(action_plan['actions'], 1):
+                    arriba = [x['id'] for x in action_plan['actions'][:n]]
+                    code, simulado = self.acme.post('/api/v1/domains/%s/action-plan/simulate' % fqdn,
+                                                    {'action_ids': arriba})
+                    self.assertEqual(code, 200, simulado)
+                    self.assertEqual((accion['score_after_acumulado'], accion['score_reduction_acumulado']),
+                                     (simulado['score_after'], antes - simulado['score_after']), arriba)
+                    antes = simulado['score_after']
+                por_activo = self.get(self.acme, '/api/v1/domains/%s/action-plan?agrupar=activo' % fqdn)
+                self.assertEqual(por_activo['grouping'], 'activo')
+                self.assertEqual(sorted(f for a in por_activo['actions'] for f in a['finding_ids']),
+                                 sorted(f for a in action_plan['actions'] for f in a['finding_ids']))
+                self.assertEqual(por_activo['actions'][-1]['score_after_acumulado'],
+                                 action_plan['actions'][-1]['score_after_acumulado'])
+                code, error = self.acme.get('/api/v1/domains/%s/action-plan?agrupar=host' % fqdn)
+                self.assertEqual(code, 422, error)
             else:
                 self.assertEqual(action_plan['actions'], [], fqdn)
             for formato, tipo in (('csv', 'text/csv'), ('json', 'application/json')):
