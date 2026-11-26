@@ -20,7 +20,7 @@
 -- audit_log, domain_authorizations ni dns_txt_verifications (van en #140,
 -- RC-258). La contraseña la pone db/init/cargar_cirdan.sh con
 -- CIRDAN_RETENTION_PASSWORD del .env; en una base que ya existe, con
--- \password (docs/despliegue.md). Se puede correr otra vez sin error.
+-- la orden password de psql (docs/despliegue.md). Se puede correr otra vez sin error.
 -- =====================================================================
 
 SET client_encoding = 'UTF8';
