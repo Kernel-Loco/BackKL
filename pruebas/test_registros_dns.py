@@ -7,7 +7,6 @@ import contextlib
 import importlib.util
 import io
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -116,9 +115,10 @@ class Olmardo(unittest.TestCase):
         self.c = correr(zona_olmardo(), 'olmardo.com')
         self.res = self.c.res
 
-    def test_1_solo_sale_dmarc_missing(self):
+    def test_1_salen_dmarc_missing_y_un_solo_proveedor_de_nombres(self):
         self.assertEqual((self.res.estado, self.res.fuente, self.res.error), ('succeeded', 'dns', ''))
-        self.assertEqual(codigos_de(self.res), ['dmarc_missing'])
+        # Los dos NS son de cloudflare.com: dns_single_provider (RC-221).
+        self.assertEqual(codigos_de(self.res), ['dmarc_missing', 'dns_single_provider'])
         self.assertEqual((self.res.hallazgos[0].severidad, self.res.hallazgos[0].activo), ('medium', 'olmardo.com'))
         self.assertEqual((self.res.avisos, self.res.sin_cobertura), ([], []))
         self.assertEqual(contrato.validar(self.res, codigos=REGISTRADOS), [])
@@ -162,7 +162,7 @@ class Olmardo(unittest.TestCase):
     def test_6_ejecutar_lo_deja_succeeded_con_el_catalogo(self):
         with mock.patch.object(registros_dns, '_consultar', DnsSimulado(zona_olmardo())):
             res = contrato.ejecutar(registros_dns, 'olmardo.com', ahora=AHORA, codigos=REGISTRADOS)
-        self.assertEqual((res.estado, res.error, codigos_de(res)), ('succeeded', '', ['dmarc_missing']))
+        self.assertEqual((res.estado, res.error, codigos_de(res)), ('succeeded', '', ['dmarc_missing', 'dns_single_provider']))
 
 
 CASOS_SPF = [  # (caso, TXT de la raíz, código esperado o None)
@@ -668,7 +668,7 @@ class GrabarYReproducir(unittest.TestCase):
         self.assertTrue(res.avisos[0].startswith(contrato.SIN_GRABACION))
         self.assertEqual((codigos_de(res), res.sin_cobertura), (['spf_allow_all'], ['dmarc_missing', 'dmarc_policy_none']))
         self.assertEqual(registros_dns.codigo_salida(res), 2)
-        self.assertTrue(any(l.startswith('Falta 1 respuesta grabada') for l in lineas), lineas)
+        self.assertTrue(any(linea.startswith('Falta 1 respuesta grabada') for linea in lineas), lineas)
 
     def test_7_un_archivo_ilegible_es_un_aviso(self):
         with tempfile.TemporaryDirectory() as d:
@@ -751,7 +751,9 @@ class GrabarYReproducir(unittest.TestCase):
                     dns = res.activos[0].atributos['dns']
                     self.assertNotIn(tipo, dns)  # sin saber: no existe la llave, no es una lista vacía
                     self.assertEqual(sorted(set(dns) - {tipo}), sorted({'a', 'aaaa', 'mx', 'ns', 'spf', 'txt_otros', 'dmarc'} - {tipo}))
-                    self.assertEqual((res.sin_cobertura, codigos_de(res)), ([], ['spf_allow_all', 'dmarc_policy_none']))
+                    # Sin saber los NS, dns_single_provider queda sin cobertura (RC-221).
+                    sin_cobertura = ['dns_single_provider'] if tipo == 'ns' else []
+                    self.assertEqual((res.sin_cobertura, codigos_de(res)), (sin_cobertura, ['spf_allow_all', 'dmarc_policy_none']))
 
     def test_11_un_estado_valido_con_su_forma_se_lee_igual_que_antes(self):
         """Lo que graba el cliente para cada tipo pasa la revisión de forma, incluidos los vacíos."""
@@ -882,9 +884,9 @@ class Registro(unittest.TestCase):
         self.assertEqual(registros_dns.CARPETA_GRABADAS, contrato.CARPETA_GRABADAS / 'dns')
         self.assertTrue((registros_dns.CARPETA_GRABADAS / '.gitkeep').exists())
 
-    def test_2_declara_sus_cuatro_codigos_con_la_severidad_del_catalogo(self):
+    def test_2_declara_sus_cinco_codigos_con_la_severidad_del_catalogo(self):
         self.assertEqual(registros_dns.CODIGOS, {'spf_missing': 'low', 'spf_allow_all': 'medium', 'dmarc_missing': 'medium',
-                                                 'dmarc_policy_none': 'medium'})
+                                                 'dmarc_policy_none': 'medium', 'dns_single_provider': 'low'})
 
     def test_3_max_consultas_es_un_entero_y_ninguna_corrida_lo_pasa(self):
         self.assertIs(type(registros_dns.MAX_CONSULTAS), int)
@@ -928,9 +930,10 @@ class Registro(unittest.TestCase):
             'spf_missing': 'Sin lista válida de servidores de correo en acme-demo.mx',
             'spf_allow_all': 'La lista de servidores de correo de acme-demo.mx acepta a cualquiera',
             'dmarc_missing': 'Sin regla contra correos falsos en acme-demo.mx',
-            'dmarc_policy_none': 'La regla contra correos falsos de acme-demo.mx solo observa'})
+            'dmarc_policy_none': 'La regla contra correos falsos de acme-demo.mx solo observa',
+            'dns_single_provider': 'Todos los servidores de nombres de acme-demo.mx son de un solo proveedor'})
         for codigo, titulo in registros_dns.TITULOS.items():
-            self.assertNotRegex(titulo, r'SPF|DMARC', codigo)
+            self.assertNotRegex(titulo, r'SPF|DMARC|DNS|NS\b', codigo)
 
 
 class Terminal(unittest.TestCase):
@@ -970,7 +973,7 @@ class Terminal(unittest.TestCase):
         codigo, texto, _ = self.correr('olmardo.com', '--json', dns=DnsSimulado(zona_olmardo()))
         datos = json.loads(texto)
         self.assertEqual((codigo, datos['fuente'], datos['estado'], [h['codigo'] for h in datos['hallazgos']]),
-                         (0, 'dns', 'succeeded', ['dmarc_missing']))
+                         (0, 'dns', 'succeeded', ['dmarc_missing', 'dns_single_provider']))
 
     def test_3_grabar_y_reproducir_no_van_juntos(self):
         codigo, _, errores = self.correr('olmardo.com', '--grabar', '--reproducir')
@@ -1000,7 +1003,7 @@ class Terminal(unittest.TestCase):
         self.assertEqual(codigo, 2)
         self.assertIn('Cobertura parcial: no se revisaron DMARC válido (dmarc_missing) ni política DMARC (dmarc_policy_none).', texto)
         self.assertIn('aviso: El DNS no respondió a TXT de _dmarc.olmardo.com después de 3 intentos', texto)
-        self.assertIn('Sin hallazgos.', texto)
+        self.assertIn('[baja] Todos los servidores de nombres de olmardo.com son de un solo proveedor', texto)
 
     def test_8_una_grabacion_rota_no_suelta_un_traceback(self):
         self.correr('olmardo.com', '--grabar', dns=DnsSimulado(zona_olmardo()))
@@ -1033,6 +1036,60 @@ class Terminal(unittest.TestCase):
                 self.assertNotIn('Traceback', texto)
                 codigo, texto, _ = self.correr('olmardo.com', '--reproducir', '--json')
                 self.assertEqual(json.loads(texto)['sin_cobertura'], ['spf_missing', 'spf_allow_all'])
+
+class UnSoloProveedor(unittest.TestCase):
+    """RC-221: dns_single_provider con los NS que ya se consultan, sin consulta nueva."""
+
+    def test_1_dos_ns_del_mismo_proveedor_dan_el_hallazgo_con_su_evidencia(self):
+        res = correr(zona(ns=['ada.ns.cloudflare.com.', 'bob.ns.cloudflare.com.'])).res
+        self.assertEqual(contrato.validar(res, codigos=REGISTRADOS), [])
+        [h] = [h for h in res.hallazgos if h.codigo == 'dns_single_provider']
+        self.assertEqual((h.severidad, h.activo, h.titulo),
+                         ('low', 'acme-demo.mx', 'Todos los servidores de nombres de acme-demo.mx son de un solo proveedor'))
+        self.assertEqual(h.evidencia, {
+            'title': h.titulo, 'consulta': 'acme-demo.mx', 'ns': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'],
+            'proveedor': 'cloudflare.com', 'observado': 'cloudflare.com: ada.ns.cloudflare.com, bob.ns.cloudflare.com'})
+        self.assertNotIn('dns_single_provider', res.sin_cobertura)
+
+    def test_2_ns_de_dos_proveedores_no_dan_el_hallazgo(self):
+        res = correr(zona(ns=['ada.ns.cloudflare.com.', 'ns-1.awsdns-01.org.'])).res
+        self.assertEqual(codigos_de(res, 'dns_'), [])
+        self.assertNotIn('dns_single_provider', res.sin_cobertura)
+
+    def test_3_route_53_reparte_sus_ns_y_no_cuenta(self):
+        # Falso negativo aceptado en la tarjeta: los 4 NS de Route 53 son de un proveedor, pero en dominios distintos.
+        ns = ['ns-1.awsdns-01.org.', 'ns-2.awsdns-02.co.uk.', 'ns-3.awsdns-03.com.', 'ns-4.awsdns-04.net.']
+        self.assertEqual(codigos_de(correr(zona(ns=ns)).res, 'dns_'), [])
+
+    def test_4_com_mx_usa_los_sufijos_de_dos_niveles(self):
+        dominio = 'acme-demo.com.mx'
+        propios = correr(zona(dominio, ns=['ns1.acme-demo.com.mx.', 'ns2.acme-demo.com.mx.']), dominio).res
+        self.assertEqual([h.evidencia['proveedor'] for h in propios.hallazgos if h.codigo == 'dns_single_provider'],
+                         ['acme-demo.com.mx'])
+        dos = correr(zona(dominio, ns=['ns1.acme-demo.com.mx.', 'ns1.otro-proveedor.com.mx.']), dominio).res
+        self.assertEqual(codigos_de(dos, 'dns_'), [])
+        self.assertEqual(registros_dns.proveedores_ns(['a.ns.ejemplo.com.mx', 'b.ns.ejemplo.com.mx']), ['ejemplo.com.mx'])
+
+    def test_5_un_solo_ns_tambien_cuenta(self):
+        self.assertEqual(codigos_de(correr(zona(ns=['ns1.proveedor.example.'])).res, 'dns_'), ['dns_single_provider'])
+
+    def test_6_sin_respuesta_al_ns_queda_sin_cobertura_y_sin_ns_no(self):
+        caido = correr(zona(ns=['ada.ns.cloudflare.com.']), caidas={('acme-demo.mx', 'NS'): 3}).res
+        self.assertEqual((codigos_de(caido, 'dns_'), 'dns_single_provider' in caido.sin_cobertura), ([], True))
+        vacio = correr(zona()).res
+        self.assertEqual((codigos_de(vacio, 'dns_'), 'dns_single_provider' in vacio.sin_cobertura), ([], False))
+
+    def test_7_la_huella_no_cambia_al_cambiar_de_proveedor(self):
+        uno = correr(zona(ns=['ada.ns.cloudflare.com.', 'bob.ns.cloudflare.com.'])).res
+        otro = correr(zona(ns=['ns1.digitalocean.com.', 'ns2.digitalocean.com.'])).res
+        huella = [h.huella for h in uno.hallazgos if h.codigo == 'dns_single_provider']
+        self.assertEqual(huella, [h.huella for h in otro.hallazgos if h.codigo == 'dns_single_provider'])
+        self.assertEqual(len(huella), 1)
+
+    def test_8_la_grabacion_de_olmardo_da_el_hallazgo_sin_red(self):
+        res = registros_dns.recolectar('olmardo.com', registros_dns.crear_cliente('reproducir', 'olmardo.com'), AHORA)
+        self.assertEqual((res.estado, res.consultas, codigos_de(res)), ('succeeded', 0, ['dmarc_missing', 'dns_single_provider']))
+
 
 
 if __name__ == '__main__':

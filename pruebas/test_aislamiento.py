@@ -341,11 +341,11 @@ class MapeoMarcos(unittest.TestCase):
                 raise AssertionError(err)
             return out.splitlines()
 
-        # Los 40 textos y los 40 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 40 son
+        # Los 43 textos y los 43 mapeos con los mismos códigos, y toda regla de scoring_rules con su mapeo. El 43 son
         # las reglas de docs/codigos_reglas.md: una regla nueva lo sube.
         self.assertEqual(scalar("SELECT (SELECT count(*) FROM scoring_rule_texts) || ',' ||"
                                 " (SELECT count(*) FROM scoring_rule_framework_mappings) || ',' ||"
-                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '40,40,40')
+                                " (SELECT count(DISTINCT code) FROM scoring_rules);", user='postgres'), '43,43,43')
         self.assertEqual(filas("SELECT coalesce(t.code, m.rule_code) FROM scoring_rule_texts t"
                                " FULL JOIN scoring_rule_framework_mappings m ON m.rule_code = t.code"
                                " WHERE t.code IS NULL OR m.rule_code IS NULL"
@@ -353,13 +353,13 @@ class MapeoMarcos(unittest.TestCase):
                                " LEFT JOIN scoring_rule_framework_mappings m ON m.rule_code = r.code"
                                " WHERE m.rule_code IS NULL ORDER BY 1;"), [],
                          'códigos con texto y sin mapeo, con mapeo y sin texto, o reglas sin mapeo')
-        # Las 31 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
+        # Las 34 reglas OSINT (recolectores #14 a #20 en docs/codigos_reglas.md) con su texto firmado por ErnestoDL,
         # como quedan después de todos los UPDATE. test_10 de pruebas/test_catalogo_reglas.py lo lee del SQL sin saber
         # qué corre.
         doc = (Path(__file__).resolve().parent.parent / 'docs' / 'codigos_reglas.md').read_text(encoding='utf-8')
         filas_doc = re.findall(r'^\|\s*\d{2}\s*\|\s*`([a-z0-9_]+)`\s*\|(?:[^|\n]*\|){3}\s*#(\d+)', doc, re.MULTILINE)
         osint = [code for code, recolector in filas_doc if 14 <= int(recolector) <= 20]
-        self.assertEqual(len(osint), 31, 'docs/codigos_reglas.md ya no tiene 31 reglas de #14 a #20')
+        self.assertEqual(len(osint), 34, 'docs/codigos_reglas.md ya no tiene 34 reglas de #14 a #20')
         self.assertEqual(filas("SELECT unnest(ARRAY[%s]) EXCEPT SELECT code FROM scoring_rule_texts"
                                " WHERE reviewed_by = 'ErnestoDL' ORDER BY 1;" % ', '.join("'%s'" % c for c in osint)),
                          [], 'reglas OSINT sin texto o con un texto que no firmó ErnestoDL')
@@ -553,6 +553,46 @@ ROLLBACK;""" % (ACME, BETA, codigos, codigos))
                           '%s false cert_new_issuer infrastructure medium 1.000 10.00' % BETA,
                           'sin las 3: 0'])
 
+
+    def test_21_la_semilla_028_llega_a_cada_juego(self):
+        # RC-221, como la 025 en test_20: la 028 agrega las 3 reglas de higiene del registro del dominio (whois y dns)
+        # a cada juego que no es v1, activo o no, con la severidad, el peso y el tope de v1. Los juegos de ACME
+        # (activo) y BETA (inactivo) se arman con las reglas de v1 sin esas 3, la 028 corre otra vez y el ROLLBACK lo
+        # deshace.
+        semilla = (Path(__file__).resolve().parent.parent / 'db' / 'semillas'
+                   / '028_reglas_higiene_registro.sql').read_text(encoding='utf-8')
+        cuerpo = '\n'.join(fila for fila in semilla.splitlines() if fila.strip() not in ('BEGIN;', 'COMMIT;'))
+        codigos = "('domain_transfer_unlocked', 'dnssec_missing', 'dns_single_provider')"
+        juego = """
+UPDATE scoring_rule_sets SET is_active = false WHERE organization_id = '%(org)s';
+WITH j AS (
+  INSERT INTO scoring_rule_sets (organization_id, version, category_weights, is_active)
+  SELECT '%(org)s', COALESCE((SELECT max(version) FROM scoring_rule_sets WHERE organization_id = '%(org)s'), 0) + 1,
+         category_weights, %(activo)s FROM scoring_rule_sets WHERE id = '90000000-0000-4000-8000-000000000001'
+  RETURNING id)
+INSERT INTO scoring_rules (rule_set_id, code, category, base_severity, weight, max_penalty)
+SELECT j.id, r.code, r.category, r.base_severity, r.weight, r.max_penalty FROM j CROSS JOIN scoring_rules r
+ WHERE r.rule_set_id = '90000000-0000-4000-8000-000000000001' AND r.code NOT IN %(codigos)s;"""
+        sql = ('BEGIN;' + juego % {'org': ACME, 'activo': 'true', 'codigos': codigos}
+               + juego % {'org': BETA, 'activo': 'false', 'codigos': codigos}
+               + '\n' + cuerpo + """
+SELECT s.organization_id || ' ' || s.is_active || ' ' || r.code || ' ' || r.category || ' ' || r.base_severity
+       || ' ' || r.weight || ' ' || r.max_penalty
+  FROM scoring_rules r JOIN scoring_rule_sets s ON s.id = r.rule_set_id
+ WHERE s.organization_id IN ('%s', '%s') AND r.code IN %s ORDER BY 1;
+SELECT 'sin las 3: ' || count(*) FROM scoring_rule_sets s
+   WHERE (SELECT count(*) FROM scoring_rules r WHERE r.rule_set_id = s.id AND r.code IN %s) <> 3;
+ROLLBACK;""" % (ACME, BETA, codigos, codigos))
+        ok, out, err = psql(sql, user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(out.splitlines()[-7:],
+                         ['%s true dnssec_missing infrastructure low 1.000 8.00' % ACME,
+                          '%s true dns_single_provider infrastructure low 1.000 8.00' % ACME,
+                          '%s true domain_transfer_unlocked infrastructure medium 1.000 10.00' % ACME,
+                          '%s false dnssec_missing infrastructure low 1.000 8.00' % BETA,
+                          '%s false dns_single_provider infrastructure low 1.000 8.00' % BETA,
+                          '%s false domain_transfer_unlocked infrastructure medium 1.000 10.00' % BETA,
+                          'sin las 3: 0'])
 
 
 # RC-237, migración 024: cada juego de reglas guarda dónde empiezan sus bandas medio, alto y crítico. Todo corre en

@@ -38,6 +38,10 @@ el TXT de la raíz o el de _dmarc sus códigos quedan en sin_cobertura y no sale
 fallan las 6 consultas, la fuente se cae con FuenteNoResponde para que el orquestador la reintente. Si la raíz no
 existe (NXDOMAIN), no hay activos ni hallazgos, solo un aviso, y los 4 códigos quedan en sin_cobertura.
 
+dns_single_provider (baja, RC-221) sale cuando todos los NS de la raíz comparten el mismo dominio registrable
+(hallazgo_un_proveedor), con los mismos NS que ya se consultan: sin consulta nueva. Sin respuesta al NS el código queda
+en sin_cobertura.
+
 Solo se consulta el dominio raíz y _dmarc.<dominio>, con consultas DNS normales a 1.1.1.1 y 8.8.8.8 (carta de
 autorización, Anexo A, actividad 2). Sin transferencias de zona, sin preguntar a los servidores autoritativos y sin
 adivinar nombres. Los subdominios de otras fuentes no se resuelven: eso necesita pasar datos entre fuentes (#23).
@@ -91,7 +95,9 @@ ESTADOS = ('ok', 'vacio', 'nxdomain')       # ok: hay registros. vacio: el nombr
 POLITICAS = ('none', 'quarantine', 'reject')
 
 # Código de regla -> severidad base. Los cuatro deben existir en el catálogo de reglas (#30).
-CODIGOS = {'spf_missing': 'low', 'spf_allow_all': 'medium', 'dmarc_missing': 'medium', 'dmarc_policy_none': 'medium'}
+CODIGOS = {'spf_missing': 'low', 'spf_allow_all': 'medium', 'dmarc_missing': 'medium', 'dmarc_policy_none': 'medium',
+           'dns_single_provider': 'low'}
+SIN_COBERTURA_NS = ('dns_single_provider',)
 MX_SIN_SABER = ('(no se supo)',)           # solo para la rúbrica del ML: un MX que no se supo nunca baja la sensibilidad
 SIN_COBERTURA_SPF = ('spf_missing', 'spf_allow_all')
 SIN_COBERTURA_DMARC = ('dmarc_missing', 'dmarc_policy_none')
@@ -102,6 +108,7 @@ TITULOS = {
     'spf_allow_all': 'La lista de servidores de correo de %s acepta a cualquiera',
     'dmarc_missing': 'Sin regla contra correos falsos en %s',
     'dmarc_policy_none': 'La regla contra correos falsos de %s solo observa',
+    'dns_single_provider': 'Todos los servidores de nombres de %s son de un solo proveedor',
 }
 
 ES_SPF = re.compile(r'v=spf1( |\Z)', re.IGNORECASE)   # RFC 7208, 4.5: sobre el texto sin recortar, seguido de un espacio o del fin
@@ -115,7 +122,8 @@ CONTROL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')               # Postgres no ac
 SEVERIDAD_ES = {'critical': 'crítica', 'high': 'alta', 'medium': 'media', 'low': 'baja'}
 EXPOSICION_ES = {'publica': 'pública', 'directa': 'directa'}
 CODIGO_ES = {'spf_missing': 'SPF válido', 'spf_allow_all': 'SPF que no acepta a todos',
-             'dmarc_missing': 'DMARC válido', 'dmarc_policy_none': 'política DMARC'}
+             'dmarc_missing': 'DMARC válido', 'dmarc_policy_none': 'política DMARC',
+             'dns_single_provider': 'NS en más de un proveedor'}
 MESES = ('ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic')
 
 Veredicto = namedtuple('Veredicto', 'codigo observado aviso')   # codigo None: ningún hallazgo
@@ -434,6 +442,29 @@ def _hallazgo(codigo, dominio, nombre, registros, veredicto, contexto, ahora):
                     rubrica.calcular(codigo, 'domain', para_rubrica, ahora), _huella(codigo, dominio))
 
 
+def proveedores_ns(ns):
+    """Los dominios registrables de los NS, sin repetir, con los sufijos de dos niveles de crtsh.registrable (RC-221).
+    Se importa aquí porque crtsh importa este módulo."""
+    from cirdan.recolectores.crtsh import registrable
+    return sorted({registrable(h) for h in ns})
+
+
+def hallazgo_un_proveedor(dominio, ns, ahora):
+    """dns_single_provider si todos los NS de la raíz comparten un dominio registrable (kehlani.ns.cloudflare.com y
+    wilson.ns.cloudflare.com), o None. Route 53 reparte sus NS en varios dominios (awsdns-01.org, awsdns-02.net) y no
+    sale: es un falso negativo aceptado (RC-221). La huella no lleva los NS, así cambiar de un proveedor a otro sigue
+    siendo el mismo hallazgo."""
+    proveedores = proveedores_ns(ns)
+    if len(proveedores) != 1:
+        return None
+    codigo = 'dns_single_provider'
+    titulo = TITULOS[codigo] % dominio
+    evidencia = {'title': titulo, 'consulta': dominio, 'ns': list(ns), 'proveedor': proveedores[0],
+                 'observado': '%s: %s' % (proveedores[0], ', '.join(ns))}
+    return Hallazgo(codigo, CODIGOS[codigo], dominio, titulo, evidencia,
+                    rubrica.calcular(codigo, 'domain', evidencia, ahora), _huella(codigo, dominio))
+
+
 # ---------------------------------------------------------------- punto de entrada
 
 def recolectar(dominio, cliente=None, ahora=None, propios=()):
@@ -499,6 +530,14 @@ def recolectar(dominio, cliente=None, ahora=None, propios=()):
             res.hallazgos.append(_hallazgo(veredicto.codigo, dominio, DMARC + dominio, dns['dmarc'], veredicto, contexto, ahora))
     else:
         res.sin_cobertura += SIN_COBERTURA_DMARC
+    # Sin respuesta al NS no se sabe quién publica el dominio: no es 0 hallazgos. Una respuesta sin NS (NoAnswer) sí se
+    # revisó: no hay proveedor que contar.
+    if 'ns' in dns:
+        h = hallazgo_un_proveedor(dominio, dns['ns'], ahora) if dns['ns'] else None
+        if h:
+            res.hallazgos.append(h)
+    else:
+        res.sin_cobertura += SIN_COBERTURA_NS
     return res
 
 
