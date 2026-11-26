@@ -30,7 +30,6 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPMessage
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # también corre como python pruebas/test_rdap.py
@@ -46,6 +45,10 @@ DOMINIO = 'olmardo.com'
 VERISIGN = 'https://rdap.verisign.com/com/v1/'
 REGISTRADO, VENCE, CAMBIO = '2026-10-14T00:38:02Z', '2027-10-14T00:38:02Z', '2026-10-14T00:40:11Z'
 NO = rdap.NO_DISPONIBLE
+# Sin el registro no se sabe ni el vencimiento, ni el candado de transferencia ni DNSSEC (RC-221).
+SIN_REGISTRO = list(rdap.CODIGOS)
+# Con el registro pero sin una fecha de vencimiento que sirva, solo queda sin cobertura domain_expiring_soon.
+VENCIMIENTO = ['domain_expiring_soon']
 BOOTSTRAP = {
     'version': '1.0', 'publication': '2026-10-20T19:00:01Z', 'description': 'RDAP bootstrap file for DNS',
     'services': [
@@ -82,7 +85,7 @@ def respuesta(dominio=DOMINIO, vence=VENCE, registrado=REGISTRADO, cambio=CAMBIO
                           'vcardArray': vcard(['fn', {}, 'text', ''], ['email', {}, 'text', 'abuso@registrador.example'],
                                               ['tel', {'type': 'voice'}, 'uri', 'tel:+52.8180000000'])}]}],
         'events': eventos,
-        'secureDNS': {'delegationSigned': False},
+        'secureDNS': {'delegationSigned': True},   # firmado: las pruebas de higiene (RC-221) lo cambian
         'nameservers': [{'objectClassName': 'nameserver', 'ldhName': 'ADA.NS.CLOUDFLARE.COM'},
                         {'objectClassName': 'nameserver', 'ldhName': 'BOB.NS.CLOUDFLARE.COM'}],
         'rdapConformance': ['rdap_level_0', 'icann_rdap_technical_implementation_guide_1'],
@@ -201,7 +204,7 @@ WHOIS_VERISIGN = '''   Domain Name: OLMARDO.COM
    Domain Status: clientTransferProhibited https://icann.org/epp#clientTransferProhibited
    Name Server: ADA.NS.CLOUDFLARE.COM
    Name Server: BOB.NS.CLOUDFLARE.COM
-   DNSSEC: unsigned
+   DNSSEC: signedDelegation
 >>> Last update of whois database: 2026-10-15T11:58:00Z <<<
 '''.replace('\n', '\r\n')
 
@@ -314,7 +317,9 @@ class Rdap(unittest.TestCase):
 
     def test_1_cumple_el_contrato_y_ejecutar_lo_deja_succeeded(self):
         self.assertEqual(REGISTRO['whois'], 'cirdan.recolectores.rdap')
-        self.assertEqual((rdap.FUENTE, rdap.CODIGOS), ('whois', {'domain_expiring_soon': 'medium'}))
+        self.assertEqual((rdap.FUENTE, rdap.CODIGOS), ('whois', {'domain_expiring_soon': 'medium',
+                                                                 'domain_transfer_unlocked': 'medium',
+                                                                 'dnssec_missing': 'low'}))
         http = HttpSimulado()
         res = recolectar(http)
         self.assertEqual(contrato.validar(res, POR_CODIGO), [])
@@ -325,7 +330,7 @@ class Rdap(unittest.TestCase):
             'registrador': 'Registrador de Prueba, Inc.', 'registrador_iana': '9999',
             'registrado': REGISTRADO, 'vence': VENCE, 'ultimo_cambio': CAMBIO,
             'estado_registro': ['client delete prohibited', 'client transfer prohibited'],
-            'servidores_nombre': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'dnssec': False})
+            'servidores_nombre': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'dnssec': True})
         self.assertEqual(res.avisos, [])
         self.assertEqual(rdap.codigo_salida(res), 0)
         json.dumps(res.a_dict())   # el resultado se puede guardar como JSON
@@ -391,7 +396,7 @@ class Rdap(unittest.TestCase):
                 dormidas, whois = [], WhoisSimulado()   # el puerto 43 tampoco responde
                 res = recolectar(http, dormir=dormidas.append, whois=whois)
                 self.assertEqual(contrato.validar(res, POR_CODIGO), [])
-                self.assertEqual((res.estado, res.hallazgos, res.sin_cobertura), ('succeeded', [], ['domain_expiring_soon']))
+                self.assertEqual((res.estado, res.hallazgos, res.sin_cobertura), ('succeeded', [], SIN_REGISTRO))
                 self.assertEqual(el_dominio(res).atributos, datos_no)
                 self.assertTrue(res.avisos[0].startswith(rdap.SIN_RESPUESTA + ' (RDAP: '), res.avisos)
                 self.assertIn('. WHOIS: el WHOIS de IANA no respondió después de 2 intentos (ConnectionRefusedError',
@@ -405,7 +410,7 @@ class Rdap(unittest.TestCase):
 
     def test_5_404_y_tld_sin_rdap_https(self):
         res = recolectar(HttpSimulado(dominios={}))
-        self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', ['domain_expiring_soon'], 2))
+        self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', SIN_REGISTRO, 2))
         self.assertIn(rdap.NO_ENCONTRADO, res.avisos)
         self.assertEqual(el_dominio(res).atributos['vence'], NO)
         for dominio in ('ejemplo.zz', 'ejemplo.qq'):   # zz solo tiene http y qq no está en el bootstrap
@@ -413,7 +418,7 @@ class Rdap(unittest.TestCase):
                 http = HttpSimulado(dominios={dominio: respuesta(dominio)})
                 res = recolectar(http, dominio=dominio)
                 self.assertEqual(contrato.validar(res, POR_CODIGO), [])
-                self.assertEqual((res.sin_cobertura, http.urls), (['domain_expiring_soon'], [rdap.URL_BOOTSTRAP]))
+                self.assertEqual((res.sin_cobertura, http.urls), (SIN_REGISTRO, [rdap.URL_BOOTSTRAP]))
                 self.assertIn('no tiene un servidor RDAP https', res.avisos[0])
                 self.assertEqual(el_dominio(res).atributos['registrador'], NO)
 
@@ -463,11 +468,11 @@ class Rdap(unittest.TestCase):
 
     def test_8_fechas_rotas_ausentes_o_repetidas(self):
         res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(vence=None)}))
-        self.assertEqual((res.sin_cobertura, el_dominio(res).atributos['vence']), (['domain_expiring_soon'], NO))
+        self.assertEqual((res.sin_cobertura, el_dominio(res).atributos['vence']), (VENCIMIENTO, NO))
         self.assertIn(rdap.SIN_VENCIMIENTO % 'RDAP', res.avisos)
         self.assertEqual(el_dominio(res).atributos['registrado'], REGISTRADO)
         res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(vence='mañana')}))
-        self.assertEqual(res.sin_cobertura, ['domain_expiring_soon'])
+        self.assertEqual(res.sin_cobertura, VENCIMIENTO)
         self.assertIn(rdap.VENCIMIENTO_ROTO % 'RDAP', res.avisos)
         self.assertIn('whois: RDAP dio fechas que no se pueden leer (vence) y se ignoraron', res.avisos)
         eventos = [{'eventAction': 'expiration', 'eventDate': '2026-10-20T00:00:00Z'},
@@ -531,7 +536,7 @@ class Rdap(unittest.TestCase):
     def test_12_reproducir_sin_grabacion_o_con_una_rota(self):
         with tempfile.TemporaryDirectory() as d:
             res = recolectar(SinRed(), modo='reproducir', carpeta=Path(d) / DOMINIO)
-            self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 0, ['domain_expiring_soon']))
+            self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 0, SIN_REGISTRO))
             self.assertEqual(res.avisos, [rdap.SIN_GRABACION_DOMINIO])
             self.assertEqual(el_dominio(res).atributos['vence'], NO)
             self.assertEqual(rdap.codigo_salida(res), 2)
@@ -610,7 +615,7 @@ class Rdap(unittest.TestCase):
 
     def test_15_el_tope_de_tiempo_corta_la_corrida(self):
         res = recolectar(HttpSimulado(), cronometro=Cronometro(200))
-        self.assertEqual((res.consultas, res.sin_cobertura), (0, ['domain_expiring_soon']))
+        self.assertEqual((res.consultas, res.sin_cobertura), (0, SIN_REGISTRO))
         self.assertIn('se acabó el tiempo de la corrida', res.avisos[0])
         # Una respuesta lenta que no acaba la corrida es una falla de red y se reintenta
         lenta = HttpSimulado(dominios={DOMINIO: [rdap.SinTiempo('lenta'), respuesta()]})
@@ -672,7 +677,7 @@ class Rdap(unittest.TestCase):
             with self.subTest(caso=caso):
                 res = recolectar(http)
                 self.assertEqual(contrato.validar(res, POR_CODIGO), [])
-                self.assertEqual((res.estado, res.hallazgos, res.sin_cobertura), ('succeeded', [], ['domain_expiring_soon']))
+                self.assertEqual((res.estado, res.hallazgos, res.sin_cobertura), ('succeeded', [], VENCIMIENTO))
                 self.assertEqual(el_dominio(res).atributos['vence'], NO)
                 self.assertIn(rdap.VENCIMIENTO_IMPOSIBLE % 'RDAP', res.avisos)
                 self.assertEqual(rdap.codigo_salida(res), 2)
@@ -690,7 +695,7 @@ class Rdap(unittest.TestCase):
         self.assertEqual((res.estado, res.sin_cobertura, el_dominio(res).atributos['vence']), ('succeeded', [], VENCE))
         # Fechas que se salen del calendario al pasarlas a UTC
         res = ejecutar(HttpSimulado(dominios={DOMINIO: respuesta(vence='9999-12-31T23:59:59-05:00')}))
-        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['domain_expiring_soon']))
+        self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', VENCIMIENTO))
         self.assertIn(rdap.VENCIMIENTO_ROTO % 'RDAP', res.avisos)
         res = ejecutar(HttpSimulado(dominios={DOMINIO: respuesta(registrado='0001-01-01T00:00:00+01:00')}))
         self.assertEqual((res.estado, el_dominio(res).atributos['registrado'], el_dominio(res).atributos['vence']),
@@ -698,7 +703,7 @@ class Rdap(unittest.TestCase):
         self.assertEqual(rdap._iso(datetime(1, 1, 1, 4, tzinfo=timezone.utc)), '0001-01-01T04:00:00Z')
         # Un JSON muy anidado no se reintenta y da No disponible
         res = ejecutar(HttpSimulado(dominios={DOMINIO: b'[' * 200000 + b']' * 200000}))
-        self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 2 + 2, ['domain_expiring_soon']))
+        self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 2 + 2, SIN_REGISTRO))
         self.assertIn('demasiado anidado', res.avisos[0])
         # Texto del servidor con un carácter nulo o un surrogate: no llega a los avisos
         url = VERISIGN + 'domain/' + DOMINIO
@@ -706,7 +711,7 @@ class Rdap(unittest.TestCase):
                       urllib.error.HTTPError(url, 429, 'Too Many', {'Retry-After': '6\x000'}, None)):
             with self.subTest(codigo=error.code):
                 res = ejecutar(HttpSimulado(dominios={DOMINIO: error}))
-                self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['domain_expiring_soon']))
+                self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', SIN_REGISTRO))
                 self.assertTrue(res.avisos[0].startswith(rdap.SIN_RESPUESTA), res.avisos)
                 self.assertTrue(all(contrato._cabe_en_la_base(a) and a.isprintable() for a in res.avisos), res.avisos)
 
@@ -815,7 +820,7 @@ class Rdap(unittest.TestCase):
         reloj[0] = 1000.0
         cliente = rdap.ClienteRdap(descargar=lenta, cronometro=lambda: reloj[0], dormir=lambda s: None)
         res = rdap.recolectar(DOMINIO, cliente, ahora=AHORA)
-        self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 2, ['domain_expiring_soon']))
+        self.assertEqual((res.estado, res.consultas, res.sin_cobertura), ('succeeded', 2, SIN_REGISTRO))
         self.assertIn('se acabó el tiempo de la corrida mientras se leía RDAP (rdap.verisign.com)', res.avisos[0])
 
     def test_24_las_grabaciones_de_whois_no_van_al_repo(self):
@@ -854,7 +859,9 @@ class Rdap(unittest.TestCase):
         self.assertEqual(contrato.validar(res, POR_CODIGO), [])
         self.assertEqual(http.urls, [rdap.URL_BOOTSTRAP])
         self.assertEqual(whois.pedidas, [(rdap.IANA_WHOIS, 'mx'), ('whois.mx', MX)])
-        self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', [], 3))
+        # whois.mx no publica el estado ni DNSSEC: los dos de higiene quedan sin cobertura, no como 0 hallazgos (RC-221)
+        self.assertEqual((res.estado, res.sin_cobertura, res.consultas),
+                         ('succeeded', ['domain_transfer_unlocked', 'dnssec_missing'], 3))
         self.assertEqual(el_dominio(res).atributos, {
             'fuente': 'whois', 'fuente_datos': 'WHOIS', 'servidor_whois': 'whois.mx',
             'registrador': 'Registrador de Prueba MX', 'registrador_iana': NO,
@@ -870,7 +877,7 @@ class Rdap(unittest.TestCase):
             'por_vencer_desde': '2026-10-06T23:59:59Z',
             'registrador': 'Registrador de Prueba MX', 'estado_registro': NO,
             'fuente_datos': 'WHOIS', 'servidor_whois': 'whois.mx'})
-        self.assertEqual(rdap.codigo_salida(res), 0)
+        self.assertEqual(rdap.codigo_salida(res), 2)   # cobertura parcial
         resultado = json.dumps(res.a_dict(), ensure_ascii=False)
         for dato in CONTACTOS:
             self.assertNotIn(dato, resultado)
@@ -908,7 +915,7 @@ class Rdap(unittest.TestCase):
             'registrador': 'Registrador de Prueba, Inc.', 'registrador_iana': '9999',
             'registrado': REGISTRADO, 'vence': VENCE, 'ultimo_cambio': CAMBIO,
             'estado_registro': ['client delete prohibited', 'client transfer prohibited'],
-            'servidores_nombre': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'dnssec': False})
+            'servidores_nombre': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'dnssec': True})
         [aviso] = res.avisos
         self.assertTrue(aviso.startswith(rdap.CON_WHOIS % ('whois.verisign-grs.com', 'RDAP no respondió (RDAP (')), aviso)
         self.assertIn('HTTPError', aviso)
@@ -935,7 +942,7 @@ class Rdap(unittest.TestCase):
         sin_whois = WhoisSimulado({(rdap.IANA_WHOIS, 'mx'): IANA_SIN_WHOIS.replace('ZZ\r\n', 'MX\r\n')})
         res = recolectar(HttpSimulado(bootstrap=SIN_MX), dominio=MX, whois=sin_whois)
         self.assertEqual(contrato.validar(res, POR_CODIGO), [])
-        self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', ['domain_expiring_soon'], 2))
+        self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', SIN_REGISTRO, 2))
         self.assertEqual(res.avisos, [rdap.SIN_WHOIS % (MX, rdap.SIN_RDAP_TLD)])
         self.assertEqual(el_dominio(res).atributos['vence'], NO)
         self.assertEqual(sin_whois.pedidas, [(rdap.IANA_WHOIS, 'mx')])
@@ -945,7 +952,7 @@ class Rdap(unittest.TestCase):
             with self.subTest(caso=caso):
                 res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois_com(texto))
                 self.assertEqual((res.estado, res.sin_cobertura, res.consultas),
-                                 ('succeeded', ['domain_expiring_soon'], 1 + 3 + 2))
+                                 ('succeeded', SIN_REGISTRO, 1 + 3 + 2))
                 self.assertEqual(res.avisos[1], rdap.NO_ENCONTRADO_WHOIS)
                 self.assertEqual(el_dominio(res).atributos['registrador'], NO)
         self.assertEqual(rdap.reducir_whois(no_existe['whois.mx'], MX), {'no_encontrado': True})
@@ -962,7 +969,7 @@ class Rdap(unittest.TestCase):
                 whois = whois_com(texto)
                 res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois)
                 self.assertEqual(contrato.validar(res, POR_CODIGO), [])
-                self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', ['domain_expiring_soon']))
+                self.assertEqual((res.estado, res.sin_cobertura), ('succeeded', SIN_REGISTRO))
                 self.assertTrue(res.avisos[0].startswith(rdap.SIN_RESPUESTA), res.avisos)
                 self.assertIn(motivo, res.avisos[0])
                 self.assertEqual(len(whois.pedidas), 2)   # no se reintenta: el servidor sí respondió
@@ -1035,7 +1042,7 @@ class Rdap(unittest.TestCase):
             vieja = Path(d) / 'vieja' / MX
             contrato.Grabadora(vieja, 'grabar').guardar('bootstrap', rdap.reducir_bootstrap(SIN_MX, MX))
             res = recolectar(SinRed(), modo='reproducir', carpeta=vieja, dominio=MX, whois=SinRed())
-            self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', ['domain_expiring_soon'], 0))
+            self.assertEqual((res.estado, res.sin_cobertura, res.consultas), ('succeeded', SIN_REGISTRO, 0))
             self.assertEqual(res.avisos, ['whois: el bootstrap de IANA no tiene un servidor RDAP https para el TLD de '
                                           'acme-demo.com.mx'])
             self.assertEqual(el_dominio(res).atributos['vence'], NO)
@@ -1080,7 +1087,7 @@ class Rdap(unittest.TestCase):
             raise rdap.SinTiempo('eterna')
         cliente = rdap.ClienteRdap(descargar=eterna, conversar=SinRed(), cronometro=lambda: reloj[0], dormir=lambda s: None)
         res = rdap.recolectar(DOMINIO, cliente, ahora=AHORA)
-        self.assertEqual((res.consultas, res.sin_cobertura), (1, ['domain_expiring_soon']))
+        self.assertEqual((res.consultas, res.sin_cobertura), (1, SIN_REGISTRO))
         self.assertIn('WHOIS: se acabó el tiempo de la corrida antes de consultar el WHOIS de IANA', res.avisos[0])
 
     def test_32_conversar_tiene_plazo_absoluto_tope_y_cierra_el_socket(self):
@@ -1316,23 +1323,23 @@ class Rdap(unittest.TestCase):
             return rdap.EN_BAJA % (fuente, DOMINIO, estado, rdap.ESTADOS_DE_BAJA[estado])
         res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=['redemption period', 'inactive'])}))
         self.assertEqual((res.hallazgos, res.avisos, res.sin_cobertura),
-                         ([], [en_baja('redemption period')], ['domain_expiring_soon']))
+                         ([], [en_baja('redemption period')], VENCIMIENTO))
         self.assertIn('el registrador ya lo borró y se libera si nadie lo restaura', en_baja('redemption period'))
         res = recolectar(con_vencimiento(timedelta(days=12), status=['pending delete', 'redemption period']))
-        self.assertEqual([h.codigo for h in res.hallazgos], ['domain_expiring_soon'])
+        self.assertEqual([h.codigo for h in res.hallazgos], VENCIMIENTO)
         self.assertEqual((res.avisos, res.sin_cobertura), ([en_baja('redemption period')], []))
         for estados, estado in ((['pending restore', 'redemption period'], 'pending restore'),
                                 (['pending delete', 'client hold'], 'pending delete')):
             with self.subTest(estados=estados):
                 res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=estados)}))
-                self.assertEqual((res.avisos, res.sin_cobertura), ([en_baja(estado)], ['domain_expiring_soon']))
+                self.assertEqual((res.avisos, res.sin_cobertura), ([en_baja(estado)], VENCIMIENTO))
         self.assertIn('se pidió restaurarlo', en_baja('pending restore'))
         # Lo mismo cuando el registro sale de WHOIS, con el estado de EPP
         texto = WHOIS_VERISIGN.replace('clientDeleteProhibited https://icann.org/epp#clientDeleteProhibited',
                                        'pendingDelete https://icann.org/epp#pendingDelete')
         res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois_com(texto))
         self.assertEqual((res.avisos[1:], res.sin_cobertura),
-                         ([en_baja('pending delete', 'WHOIS')], ['domain_expiring_soon']))
+                         ([en_baja('pending delete', 'WHOIS')], VENCIMIENTO))
         # Los demás estados no dejan aviso ni quitan la cobertura
         res = recolectar(HttpSimulado())
         self.assertEqual((res.avisos, res.sin_cobertura), ([], []))
@@ -1382,7 +1389,84 @@ class Rdap(unittest.TestCase):
         res = recolectar(HttpSimulado(dominios={DOMINIO: datos}))
         self.assertEqual((res.avisos, res.sin_cobertura),
                          ([rdap.EN_BAJA % ('RDAP', DOMINIO, 'pending delete', rdap.ESTADOS_DE_BAJA['pending delete'])],
-                          ['domain_expiring_soon']))
+                          VENCIMIENTO))
+
+
+class Higiene(unittest.TestCase):
+    """RC-221: candado de transferencia y DNSSEC con los datos que rdap ya lee, sin otra consulta."""
+
+    def codigos(self, res):
+        return [h.codigo for h in res.hallazgos]
+
+    def test_1_sin_candado_sale_domain_transfer_unlocked_con_su_evidencia(self):
+        res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=['client delete prohibited', 'active'])}))
+        self.assertEqual(contrato.validar(res, POR_CODIGO), [])
+        self.assertEqual((self.codigos(res), res.sin_cobertura, res.consultas), (['domain_transfer_unlocked'], [], 2))
+        [h] = res.hallazgos
+        self.assertEqual((h.severidad, h.activo, h.titulo),
+                         ('medium', DOMINIO, 'El dominio olmardo.com se puede transferir a otro registrador sin candado'))
+        self.assertEqual(h.evidencia, {
+            'title': h.titulo, 'estado_registro': ['active', 'client delete prohibited'],
+            'candados_esperados': ['client transfer prohibited', 'server transfer prohibited'],
+            'registrador': 'Registrador de Prueba, Inc.', 'fuente_datos': 'RDAP', 'servidor_rdap': VERISIGN})
+        self.assertEqual(h.caracteristicas['tipo'], 'domain_transfer_unlocked')
+
+    def test_2_el_candado_del_cliente_o_del_registro_basta(self):
+        for estados in (['client transfer prohibited'], ['server transfer prohibited', 'active'],
+                        ['clientTransferProhibited']):
+            with self.subTest(estados=estados):
+                res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=estados)}))
+                self.assertEqual((self.codigos(res), res.sin_cobertura), ([], []))
+
+    def test_3_sin_estado_queda_sin_cobertura_y_no_como_0_hallazgos(self):
+        res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=[])}))
+        self.assertEqual(el_dominio(res).atributos['estado_registro'], NO)
+        self.assertEqual((self.codigos(res), res.sin_cobertura), ([], ['domain_transfer_unlocked']))
+        self.assertEqual(rdap.codigo_salida(res), 2)
+
+    def test_4_dnssec_firmado_sin_firmar_y_no_disponible(self):
+        for firmado, codigos, sin_cobertura in ((True, [], []), (False, ['dnssec_missing'], []),
+                                                ('quizá', [], ['dnssec_missing'])):
+            with self.subTest(firmado=firmado):
+                datos = respuesta(secureDNS={'delegationSigned': firmado})
+                res = recolectar(HttpSimulado(dominios={DOMINIO: datos}))
+                self.assertEqual(contrato.validar(res, POR_CODIGO), [])
+                self.assertEqual((self.codigos(res), res.sin_cobertura), (codigos, sin_cobertura))
+        res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(secureDNS={'delegationSigned': False})}))
+        [h] = res.hallazgos
+        self.assertEqual((h.severidad, h.titulo), ('low', 'La delegación de olmardo.com no está firmada con DNSSEC'))
+        self.assertEqual(h.evidencia, {'title': h.titulo, 'dnssec': False, 'registrador': 'Registrador de Prueba, Inc.',
+                                       'fuente_datos': 'RDAP', 'servidor_rdap': VERISIGN})
+
+    def test_5_desde_whois_la_evidencia_dice_whois(self):
+        texto = WHOIS_VERISIGN.replace('DNSSEC: signedDelegation', 'DNSSEC: unsigned').replace(
+            'Domain Status: clientTransferProhibited https://icann.org/epp#clientTransferProhibited\r\n', '')
+        res = recolectar(HttpSimulado(dominios={DOMINIO: 503}), whois=whois_com(texto))
+        self.assertEqual(sorted(self.codigos(res)), ['dnssec_missing', 'domain_transfer_unlocked'])
+        for h in res.hallazgos:
+            self.assertEqual((h.evidencia['fuente_datos'], h.evidencia['servidor_whois']),
+                             ('WHOIS', 'whois.verisign-grs.com'))
+
+    def test_6_com_mx_sin_estado_ni_dnssec_en_whois_queda_sin_cobertura(self):
+        res = recolectar(HttpSimulado(bootstrap=SIN_MX, dominios={}), dominio=MX, whois=whois_mx())
+        self.assertEqual(self.codigos(res), ['domain_expiring_soon'])
+        self.assertEqual(res.sin_cobertura, ['domain_transfer_unlocked', 'dnssec_missing'])
+
+    def test_7_un_dominio_en_baja_no_sale_como_sin_candado(self):
+        res = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=['redemption period'])}))
+        self.assertNotIn('domain_transfer_unlocked', self.codigos(res))
+
+    def test_8_la_huella_no_cambia_con_lo_observado(self):
+        uno = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=['active'], secureDNS={'delegationSigned': False})}))
+        otro = recolectar(HttpSimulado(dominios={DOMINIO: respuesta(status=['client hold'],
+                                                                     secureDNS={'delegationSigned': False})}))
+        self.assertEqual(sorted(h.huella for h in uno.hallazgos), sorted(h.huella for h in otro.hallazgos))
+        self.assertEqual(len({h.huella for h in uno.hallazgos}), 2)
+
+    def test_9_la_grabacion_de_olmardo_da_dnssec_missing_sin_red(self):
+        res = recolectar(SinRed(), modo='reproducir')
+        self.assertEqual((res.estado, res.consultas, self.codigos(res), res.sin_cobertura),
+                         ('succeeded', 0, ['dnssec_missing'], []))
 
 
 class Extremo(socket.socket):

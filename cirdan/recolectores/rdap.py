@@ -37,6 +37,14 @@ registro suele renovar solo la fecha): queda un aviso con el estado que más dic
 código va a sin_cobertura, porque la fecha ya no dice cuándo se pierde. Un estado en la forma de EPP
 ('pendingDelete') se lee como el de RFC 8056 ('pending delete'), en RDAP y en WHOIS (_estado_rdap).
 
+Higiene del registro (RC-221), con los mismos datos y sin otra consulta, sobre el activo domain:
+- domain_transfer_unlocked (media): estado_registro no trae ninguno de CANDADOS ('client transfer prohibited' ni
+  'server transfer prohibited') ni un estado de baja (ESTADOS_DE_BAJA, que también traban la transferencia), así que el dominio se puede llevar a otro registrador sin pedir antes que lo destraben
+  (ATT&CK T1584.001).
+- dnssec_missing (baja): el registro dice que la delegación no está firmada (dnssec False).
+Si el registro no da el dato ('No disponible'), el código va a sin_cobertura y no sale el hallazgo. La evidencia trae el
+estado o el valor de dnssec, fuente_datos (RDAP o WHOIS) y el servidor que respondió.
+
 Cobertura. Si no se sabe el vencimiento (ni RDAP ni WHOIS respondieron, el TLD no tiene RDAP ni WHOIS, el registro no
 conoce el dominio o no publica la fecha, o la publica rota o imposible), domain_expiring_soon va a sin_cobertura con un
 aviso y el activo sale con 'No disponible'. La fuente queda succeeded y no failed, como pide RC-166: el escaneo termina
@@ -77,7 +85,6 @@ Código de salida: 0 si la corrida fue completa, 1 si queda en 'failed', 2 si la
 import argparse
 import contextlib
 import hashlib
-import ipaddress
 import json
 import re
 import socket
@@ -99,8 +106,13 @@ from cirdan.recolectores.contrato import (NOMBRE_VALIDO, Activo, FuenteNoRespond
 FUENTE = 'whois'             # data_sources.code de la semilla 001: RDAP es el WHOIS de hoy
 CARPETA_GRABADAS = RAIZ_GRABADAS / 'whois'
 
-# Código de regla -> severidad base. Existe en el catálogo de reglas (semilla 004).
-CODIGOS = {'domain_expiring_soon': 'medium'}
+# Código de regla -> severidad base. domain_expiring_soon está en el catálogo desde la semilla 004 y los dos de higiene
+# del registro desde la semilla 026 (RC-221).
+CODIGOS = {'domain_expiring_soon': 'medium', 'domain_transfer_unlocked': 'medium', 'dnssec_missing': 'low'}
+VENCIMIENTO = 'domain_expiring_soon'
+# Estados de RFC 8056 que traban la transferencia del dominio a otro registrador. Con cualquiera de los dos no sale
+# domain_transfer_unlocked.
+CANDADOS = ('client transfer prohibited', 'server transfer prohibited')
 
 URL_BOOTSTRAP = 'https://data.iana.org/rdap/dns.json'
 NOMBRE_RDAP = 'RDAP'         # atribución: va en los atributos y la evidencia
@@ -991,15 +1003,56 @@ def _con_registro(res, dominio, ahora, atributos, rotos, origen):
     if atributos['vence'] == NO_DISPONIBLE:
         res.avisos.append((VENCIMIENTO_IMPOSIBLE if imposible else VENCIMIENTO_ROTO if 'vence' in rotos
                            else SIN_VENCIMIENTO) % nombre)
-        res.sin_cobertura = list(CODIGOS)
+        res.sin_cobertura.append(VENCIMIENTO)
     elif vence < ahora:
         res.avisos.append(_aviso_vencido(dominio, vence, ahora, nombre))
     else:
         h = hallazgo_vencimiento(dominio, vence, atributos, ahora)
         if h:
             res.hallazgos.append(h)
-    if baja and not res.hallazgos:
-        res.sin_cobertura = list(CODIGOS)
+    if baja and not res.hallazgos and VENCIMIENTO not in res.sin_cobertura:
+        res.sin_cobertura.append(VENCIMIENTO)
+    _higiene(res, dominio, atributos, ahora)
+
+
+def _evidencia_higiene(titulo, atributos, **datos):
+    servidor = 'servidor_whois' if 'servidor_whois' in atributos else 'servidor_rdap'
+    return dict({'title': titulo}, **datos, registrador=atributos['registrador'],
+                fuente_datos=atributos['fuente_datos'], **{servidor: atributos[servidor]})
+
+
+def hallazgos_higiene(dominio, atributos, ahora):
+    """(hallazgos, sin_cobertura) de domain_transfer_unlocked y dnssec_missing con los atributos del activo domain. Un
+    dato 'No disponible' manda su código a sin_cobertura. La huella no lleva lo observado: si el candado se quita, se
+    pone y se vuelve a quitar, es el mismo hallazgo que se reabre."""
+    hallazgos, sin_cobertura = [], []
+    estados = atributos['estado_registro']
+    if not isinstance(estados, list):
+        sin_cobertura.append('domain_transfer_unlocked')
+    elif not any(c in estados for c in CANDADOS) and not any(e in estados for e in ESTADOS_DE_BAJA):
+        # Un dominio en baja (ESTADOS_DE_BAJA) tampoco se puede transferir: ese aviso ya lo da _con_registro.
+        codigo = 'domain_transfer_unlocked'
+        titulo = 'El dominio %s se puede transferir a otro registrador sin candado' % dominio
+        evidencia = _evidencia_higiene(titulo, atributos, estado_registro=estados, candados_esperados=list(CANDADOS))
+        hallazgos.append(Hallazgo(codigo, CODIGOS[codigo], dominio, titulo, evidencia,
+                                  rubrica.calcular(codigo, 'domain', evidencia, ahora),
+                                  _huella(codigo, dominio, dominio)))
+    if not isinstance(atributos['dnssec'], bool):
+        sin_cobertura.append('dnssec_missing')
+    elif atributos['dnssec'] is False:
+        codigo = 'dnssec_missing'
+        titulo = 'La delegación de %s no está firmada con DNSSEC' % dominio
+        evidencia = _evidencia_higiene(titulo, atributos, dnssec=False)
+        hallazgos.append(Hallazgo(codigo, CODIGOS[codigo], dominio, titulo, evidencia,
+                                  rubrica.calcular(codigo, 'domain', evidencia, ahora),
+                                  _huella(codigo, dominio, dominio)))
+    return hallazgos, sin_cobertura
+
+
+def _higiene(res, dominio, atributos, ahora):
+    hallazgos, sin_cobertura = hallazgos_higiene(dominio, atributos, ahora)
+    res.hallazgos += hallazgos
+    res.sin_cobertura += sin_cobertura
 
 
 # ---------------------------------------------------------------- punto de entrada

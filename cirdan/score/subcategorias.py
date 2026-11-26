@@ -8,11 +8,12 @@ las corridas de `scan_source_runs` de su escaneo. El documento está en docs/cri
 
 Al cambiar el mapa (una regla nueva, otra subcategoría u otro KRI) sube VERSION.
 """
-VERSION = 7   # 2: exposed_container_api (RC-224). 3: directory_listing y debug_page_exposed en
+VERSION = 8   # 2: exposed_container_api (RC-224). 3: directory_listing y debug_page_exposed en
               # server_configuration (#111, RC-228). 4: tls_certificate_invalid y tls_legacy_only en
               # certificates (RC-239). 5: file_share_link_in_repo en public_storage (RC-247). 6:
               # exposed_ai_service en exposed_services (#144, RC-262). 7: cert_internal_name,
-              # cert_broad_wildcard y cert_new_issuer en certificates (RC-218)
+              # cert_broad_wildcard y cert_new_issuer en certificates (RC-218). 8: domain_transfer_unlocked,
+              # dnssec_missing y dns_single_provider en domain_registration (RC-221)
 
 # (clave, categoría, nombre, códigos de regla). El orden es el que muestra el portal.
 SUBCATEGORIAS = (
@@ -25,7 +26,8 @@ SUBCATEGORIAS = (
     ('exposed_apis', 'infrastructure', 'Documentación de APIs expuesta', ('exposed_api_docs', 'api_auth_not_declared')),
     ('vulnerable_software', 'infrastructure', 'Software vulnerable o sin soporte',
      ('outdated_software', 'known_vulnerability')),
-    ('domain_registration', 'infrastructure', 'Registro del dominio', ('domain_expiring_soon',)),
+    ('domain_registration', 'infrastructure', 'Registro del dominio',
+     ('domain_expiring_soon', 'domain_transfer_unlocked', 'dnssec_missing', 'dns_single_provider')),
     ('impersonation', 'digital_identity', 'Suplantación', ('lookalike_domain',)),
     ('exposed_emails', 'digital_identity', 'Correos expuestos',
      ('email_in_public_commits', 'personal_email_exposed', 'email_pattern_exposed')),

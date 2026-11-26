@@ -157,6 +157,7 @@ HUELLAS_DB = {
     'db/migraciones/031_solicitudes_de_firma.sql': '5297baf5048d8e85774677e2030b0c5bd927813aebca8d2073c95bff9e411a4b',
     'db/migraciones/032_llave_fuentes.sql': '3b8cbb759b3023c7a2d98b972eb8959a970e805f5b8fbfcb3aa33c8b5150a6be',
     'db/migraciones/033_delegaciones_operador.sql': '7c0f88eed859feba24107b269f39026b7ef499068e92fc6c25eaad504ca2663c',
+    'db/migraciones/034_textos_higiene_registro.sql': '2c79365ad7a742a0aa65de5ec6ec7eb36e34c229a0acacaced8c1408f2bfd84b',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',
@@ -165,6 +166,7 @@ HUELLAS_DB = {
     'db/semillas/023_regla_enlaces_nube_repos.sql': '4e0ddb21fde173c25db7b5e1c141db1ca009c71c906cc958f223603ce5280666',
     'db/semillas/024_regla_ia.sql': '6285af52ddd661d21e25cc5d46a8b1fda97c5c0cd3f22ad86394cd7850ec516f',
     'db/semillas/025_reglas_higiene_certificados.sql': 'e83d2c5a8d274d90d51b24cfb75fb12057af687bc9b191ed3842b5e0386fde9b',
+    'db/semillas/028_reglas_higiene_registro.sql': '5696783f924d88a88d20fa224d43e7a5197082b0b8fc92415168d102d764f360',
 }
 
 
@@ -541,7 +543,7 @@ class Reglas(unittest.TestCase):
             self.assertIsNotNone(numero, '%r: su recolector en docs/codigos_reglas.md no empieza con #' % fila[1])
             if 14 <= int(numero.group(1)) <= 20:
                 osint.append(fila[1])
-        self.assertEqual(len(osint), 31, 'docs/codigos_reglas.md ya no tiene 31 reglas de #14 a #20')
+        self.assertEqual(len(osint), 34, 'docs/codigos_reglas.md ya no tiene 34 reglas de #14 a #20')
         self.assertEqual([c for c in sorted(osint) if revisor.get(c) != 'ErnestoDL'], [],
                          'reglas OSINT cuyo texto final no firmó ErnestoDL en las migraciones de db/')
 

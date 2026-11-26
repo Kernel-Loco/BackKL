@@ -61,6 +61,6 @@
     {"code": "tls_certificate_invalid", "source": "web", "reason": "source_not_run"},
     {"code": "tls_legacy_only", "source": "web", "reason": "source_not_run"}
   ],
-  "kri_map_version": 7,
+  "kri_map_version": 8,
   "alert": {"threshold": 60, "triggered": true}
 }
