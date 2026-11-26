@@ -27,6 +27,7 @@ from fastapi import HTTPException
 from cirdan import correo
 from cirdan.auth import routes, sessions
 from cirdan.auth.demo import HASH_DE_RELLENO
+from pruebas import valkey_admin
 
 ENLACE = 'http://portal.prueba/login/enlace#t=TOKEN-DE-PRUEBA-que-no-va-al-log'
 DESTINO = 'alguien@ejemplo.com'
@@ -114,7 +115,7 @@ class TokensEnValkey(unittest.TestCase):
         datos = self.datos()
         token = sessions.create_link(datos)
         self.assertGreaterEqual(len(token), 43)
-        valkey = sessions._valkey()
+        valkey = valkey_admin.cliente()
         self.assertIsNone(valkey.get('link:' + token))
         llave = 'link:' + sessions._digest(token)
         self.assertTrue(valkey.exists(llave))
@@ -147,20 +148,20 @@ class TokensEnValkey(unittest.TestCase):
 
     def test_8_tres_por_correo_y_diez_por_ip(self):
         ip = '203.0.113.%d' % (uuid.uuid4().int % 250)
-        sessions._valkey().delete('link:req:ip:' + ip)
+        valkey_admin.cliente().delete('link:req:ip:' + ip)
         email = _al_azar() + '@ejemplo.com'
         self.assertEqual([sessions.take_link_request(email, ip) for _ in range(4)], [True, True, True, False])
         otros = [sessions.take_link_request(_al_azar() + '@ejemplo.com', ip) for _ in range(8)]
         self.assertEqual(otros, [True] * 7 + [False])   # 3 + 7 = 10 por la IP
-        sessions._valkey().delete('link:req:ip:' + ip)
+        valkey_admin.cliente().delete('link:req:ip:' + ip)
 
     def test_9_tope_diario(self):
         dia = 'prueba-' + _al_azar()
         try:
             self.assertEqual([sessions.reserve_link_send(3, uuid.uuid4(), dia) for _ in range(5)], [1, 2, 3, 0, 0])
         finally:
-            for llave in sessions._valkey().scan_iter('link:day:' + dia + '*'):
-                sessions._valkey().delete(llave)
+            for llave in valkey_admin.cliente().scan_iter('link:day:' + dia + '*'):
+                valkey_admin.cliente().delete(llave)
 
     def test_9b_tope_diario_por_cuenta_sin_gastar_el_del_dia(self):
         # M2: pedir enlaces para un correo que existe y se conoce no deja a los demás sin enlace ese día.
@@ -172,10 +173,10 @@ class TokensEnValkey(unittest.TestCase):
                              list(range(1, tope + 1)) + [-1, -1, -1])
             self.assertEqual(sessions.reserve_link_send(80, otra, dia), tope + 1)   # los -1 no gastaron el del día
             self.assertEqual(sessions.reserve_link_send(tope + 1, uuid.uuid4(), dia), 0)
-            self.assertEqual(sessions._valkey().get('link:day:' + dia), str(tope + 1))
+            self.assertEqual(valkey_admin.cliente().get('link:day:' + dia), str(tope + 1))
         finally:
-            for llave in sessions._valkey().scan_iter('link:day:' + dia + '*'):
-                sessions._valkey().delete(llave)
+            for llave in valkey_admin.cliente().scan_iter('link:day:' + dia + '*'):
+                valkey_admin.cliente().delete(llave)
 
     def test_7b_rastro_del_canje_rechazado(self):
         # M3: de un token que ya no sirve se sabe de qué cuenta era y por qué, sin el correo ni el token.
@@ -189,13 +190,13 @@ class TokensEnValkey(unittest.TestCase):
         vigente = sessions.create_link(datos)
         self.assertIsNone(sessions.take_link(anulado))
         self.assertEqual(sessions.link_trace(anulado), dict(esperado, reason='replaced'))
-        sessions._valkey().delete('link:' + sessions._digest(vigente))   # como si hubiera vencido
+        valkey_admin.cliente().delete('link:' + sessions._digest(vigente))   # como si hubiera vencido
         self.assertIsNone(sessions.take_link(vigente))
         self.assertEqual(sessions.link_trace(vigente), dict(esperado, reason='expired'))
-        rastro = sessions._valkey().hgetall('link-rastro:' + sessions._digest(vigente))
+        rastro = valkey_admin.cliente().hgetall('link-rastro:' + sessions._digest(vigente))
         self.assertNotIn(datos['email'], repr(rastro))
         self.assertNotIn(vigente, repr(rastro))
-        self.assertTrue(sessions.LINK_SECONDS < sessions._valkey().ttl('link-rastro:' + sessions._digest(vigente))
+        self.assertTrue(sessions.LINK_SECONDS < valkey_admin.cliente().ttl('link-rastro:' + sessions._digest(vigente))
                         <= sessions.LINK_TRACE_SECONDS)
         self.assertIsNone(sessions.link_trace(sessions.create_link(self.datos())[::-1]))   # un token que nunca existió
         self.assertIsNone(sessions.link_trace(None))

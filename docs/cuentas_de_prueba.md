@@ -91,7 +91,7 @@ Ojo con lo siguiente:
 Para desbloquear todos los correos bloqueados, desde BackKL:
 
 ```bash
-docker compose exec valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning --scan --pattern "login:fail:*" | xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del'
+docker compose exec valkey sh -c 'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning --scan --pattern "login:fail:*" | xargs -r valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning del'
 ```
 
 ## Lo que no funciona todavía

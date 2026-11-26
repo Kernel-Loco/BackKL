@@ -17,6 +17,7 @@
   "rule_set_version": 1,
   "reason": "correction",
   "partial_coverage": false,
+  "disabled_sources": [],
   "computed_at": "2026-10-29T20:16:09-06:00",
   "categories": [
     {"category": "infrastructure", "score": 45.0, "band": "medium", "weight": 0.30},

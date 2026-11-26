@@ -40,12 +40,12 @@ PASSKEY_LIMIT = 'Ya tienes 10 passkeys. Borra una para registrar otra.'
 def _valkey(*args):
     exigir_desechable()
     return subprocess.run(['docker', 'exec', VALKEY, 'sh', '-c',
-                           'valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning ' + ' '.join(args)],
+                           'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning ' + ' '.join(args)],
                           check=True, capture_output=True, text=True).stdout.strip()
 
 
 def _limpiar_valkey():
-    _valkey('--scan --pattern "webauthn:*" | xargs -r valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning del')
+    _valkey('--scan --pattern "webauthn:*" | xargs -r valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning del')
     sesion.reset()
 
 
@@ -167,7 +167,7 @@ class Entrar(unittest.TestCase):
         self.assertEqual(body['options']['userVerification'], 'required')
         self.assertEqual(body['options'].get('allowCredentials', []), [])
         self.assertEqual(body['expires_in_seconds'], 300)
-        ttl = int(_valkey('--scan --pattern "webauthn:auth:*" | head -1 | xargs valkey-cli -a "$VALKEY_PASSWORD" '
+        ttl = int(_valkey('--scan --pattern "webauthn:auth:*" | head -1 | xargs valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" '
                           '--no-auth-warning ttl'))
         self.assertTrue(0 < ttl <= 300, ttl)
 
