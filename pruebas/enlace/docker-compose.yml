@@ -43,7 +43,7 @@ services:
   pruebas:
     image: backkl-enlace-api   # la imagen que construye `api` en este proyecto: trae psycopg y redis
     profiles: [pruebas]
-    command: ["python", "-m", "unittest", "-v", "pruebas/test_enlace.py", "pruebas/test_recuperar.py"]
+    command: ["python", "-m", "unittest", "-v", "pruebas/test_pentest.py", "pruebas/test_enlace.py", "pruebas/test_recuperar.py"]
     volumes:
       - ./pruebas:/app/pruebas:ro
       - ./cirdan/auth/demo.py:/app/cirdan/auth/demo.py:ro
