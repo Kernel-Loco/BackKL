@@ -23,12 +23,14 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[1]
 ARCHIVOS = ['docker-compose.yml', 'docker-compose.despliegue.yml']
 ORIGEN = 'https://lowtidesec.com'
+# Un token falso nuevo vive en pruebas/fixtures/ (AGENTS regla 7): el job de seguridad marca uno fuera de ahí.
+FALSOS = json.loads((RAIZ / 'pruebas' / 'fixtures' / 'tokens' / 'despliegue.json').read_text('utf-8'))
 
 ENV_FALSO = {
     'POSTGRES_PASSWORD': 'CIRDAN_FAKE_pg',
     'CIRDAN_APP_PASSWORD': 'CIRDAN_FAKE_app',
     'VALKEY_PASSWORD': 'CIRDAN_FAKE_valkey',
-    'VALKEY_ADMIN_PASSWORD': 'CIRDAN_FAKE_valkey_admin',
+    'VALKEY_ADMIN_PASSWORD': FALSOS['valkey_admin'],
     'TOTP_ENCRYPTION_KEY': 'CIRDAN_FAKE_totp',
     'ALLOWED_ORIGINS': ORIGEN,
     'TUNNEL_TOKEN': 'CIRDAN_FAKE_tunel',
