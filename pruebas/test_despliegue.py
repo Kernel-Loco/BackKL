@@ -277,6 +277,19 @@ class Despliegue(unittest.TestCase):
         self.assertEqual(doc.count('iptables -I DOCKER-USER ' + regla), 1)
         self.assertEqual(set(re.findall(r'! -s ([0-9.]+)/32', doc)), {str(api)})
 
+    def test_16c_inteligencia_solo_con_su_profile_y_sin_llaves_de_la_api(self):
+        # RC-127: la carga de KEV y EPSS no se enciende con `up -d` (test_1). Con su profile corre su módulo con el rol
+        # cirdan_intel, sin init: true (RC-324), sin puertos ni NET_RAW y sin las llaves ni la contraseña de la API.
+        rc, salida = _config(ENV_FALSO, perfiles=('inteligencia',))
+        self.assertEqual(rc, 0, salida[-500:])
+        s = json.loads(salida)['services']['inteligencia']
+        self.assertEqual((s['command'], s['profiles']), (['python', '-m', 'cirdan.inteligencia'], ['inteligencia']))
+        self.assertNotIn('init', list(s))
+        self.assertFalse(s.get('ports'))
+        self.assertIn('NET_RAW', s.get('cap_drop') or [])
+        for llave in ('CIRDAN_APP_PASSWORD', 'TOTP', 'PASSWORD_HASH', 'CARTA', 'SOURCE_KEYS', 'IA_', 'CORREO'):
+            self.assertEqual([k for k in s['environment'] if k.startswith(llave)], [], llave)
+
     def test_16_programador_solo_con_su_profile_y_sin_imds(self):
         # RC-52: el programador no se enciende con `up -d` (test_1). Con su profile sale por default, sin puertos, sin
         # la IP fija de la API ni NET_RAW, con el registro rotado y sin las llaves de Key Vault.
