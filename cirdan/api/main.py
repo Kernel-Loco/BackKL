@@ -316,13 +316,13 @@ app.include_router(auth_router)
 app.include_router(scans_router)
 app.include_router(api_keys_router)
 app.include_router(sources_router)
+app.include_router(integrations_router)
 app.include_router(platform_router)
 app.include_router(operator_router)
 app.include_router(v1_router)
 app.include_router(signatures_router)
 app.include_router(assistant_router)
 app.include_router(audit_log_router)
-app.include_router(integrations_router)
 
 # Explorador de la base para la demo (/demo y /db, RC-58). Con false, que es lo de omisión, esas
 # rutas no existen (404). Nunca true en producción.
