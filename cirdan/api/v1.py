@@ -540,6 +540,8 @@ def _score_base(row, critical_open):
         'reason': row['reason'], 'partial_coverage': row['partial_coverage'], 'computed_at': row['computed_at'],
         'floor_message': motor.mensaje_piso(calc, critical_open),
         'model_version': row['model_version'], 'model_fallback_reason': row['model_fallback_reason'],
+        # Fuentes que la organización tenía apagadas en el escaneo del score (#117, RC-235): explican partial_coverage.
+        'disabled_sources': list((row['stats'] or {}).get('sources_disabled_by_org') or []),
     }, weights
 
 
@@ -582,7 +584,8 @@ def domain_score(fqdn: str, session: Session = Depends(session_or_api_key)):
                                        stats.get('sources_partial') or ())
     # Los códigos que el escaneo del score no revisó, con su fuente y su motivo, para que el portal los nombre (RC-229).
     huecos = cobertura.huecos(filas_corridas, stats.get('rules_without_coverage') or (),
-                              stats.get('sources_partial') or (), sin_llave=stats.get('rules_without_key') or ())
+                              stats.get('sources_partial') or (), sin_llave=stats.get('rules_without_key') or (),
+                              apagadas=stats.get('sources_disabled_by_org') or ())
     cortes = configuracion.cortes_de_fila(rows[-1])
     categories = [{'category': c, 'score': rows[-1]['category_scores'][c],
                    'band': criterio.banda(rows[-1]['category_scores'][c], cortes),

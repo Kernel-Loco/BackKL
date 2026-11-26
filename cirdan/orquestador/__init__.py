@@ -404,6 +404,17 @@ def fuentes_activas(conn):
     return sorted(codigos, key=_pide_correos)
 
 
+APAGADAS_SQL = ('SELECT d.code FROM org_source_settings o JOIN data_sources d ON d.id = o.source_id '
+                'WHERE NOT o.enabled ORDER BY d.code')
+
+
+def fuentes_apagadas(conn):
+    """Códigos de las fuentes que la organización de la transacción apagó (org_source_settings, #117, RC-235).
+
+    Lee con RLS: solo ve las filas de su organización. Una fuente sin fila sigue data_sources.enabled."""
+    return [f['code'] for f in conn.execute(APAGADAS_SQL).fetchall()]
+
+
 def _pide_correos(codigo):
     try:
         modulo = cargar(codigo)
@@ -911,6 +922,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     devuelve un cupo diario. Si algo lanza entre la reserva y el ajuste, lo reservado se queda: es lo conservador.
     Al reproducir no reserva ni ajusta: las demos no gastan cupo ni se bloquean.
     Una fuente que no se recupera deja el escaneo 'partial' si otra respondió, o 'failed' si ninguna respondió.
+    Una fuente que la organización apagó (org_source_settings, #117, RC-235) no corre: va en
+    stats.sources_disabled_by_org y deja el escaneo 'partial', o 'failed' si no respondió ninguna otra.
     También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
     se muestran como 0 hallazgos, o si revisó solo una parte de lo suyo (revisados, en stats.sources_partial).
@@ -936,7 +949,12 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     inicio = time.monotonic()
     fqdn = fqdn.strip().lower().rstrip('.')
     with _tx(org, conn) as c:
-        fuentes = fuentes if fuentes is not None else fuentes_activas(c)
+        pedidas = fuentes if fuentes is not None else fuentes_activas(c)
+        # Las que la organización apagó no corren, tampoco si vienen en `fuentes` (#117, RC-235). Quedan en
+        # stats.sources_disabled_by_org y el score sale con cobertura parcial.
+        apagadas = set(fuentes_apagadas(c))
+        fuentes = [f for f in pedidas if f not in apagadas]
+        saltadas = sorted(f for f in set(pedidas) if f in apagadas)
         catalogo = {f['code']: f for f in c.execute(
             'SELECT id::text, code, keep_raw_payload FROM data_sources WHERE code = ANY(%s)', (fuentes,)).fetchall()}
         # Solo los dominios vigentes de la organización cuentan como propios (#109, RC-226). Uno dado de baja
@@ -1062,7 +1080,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                             for c in r['sin_cobertura']})
     no_autorizadas = [r['source'] for r in corridas if r['no_autorizada']]
     a_medias = [r['source'] for r in corridas if r['status'] == 'succeeded' and r['cobertura_parcial']]
-    completo = ok == len(corridas) and not sin_cobertura and not a_medias
+    completo = ok == len(corridas) and not sin_cobertura and not a_medias and not saltadas
     estado = 'completed' if completo else 'failed' if ok == 0 else 'partial'
     stats = {'assets': len(activos), 'findings': hallazgos, 'new_findings': len(nuevos),
              'resolved_findings': len(resueltos), 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
@@ -1077,6 +1095,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         stats['sources_partial'] = a_medias
     if no_autorizadas:
         stats['sources_unauthorized'] = no_autorizadas
+    if saltadas:  # apagadas por la organización (#117, RC-235): coverage_gaps de la API les da 'source_disabled_by_org'
+        stats['sources_disabled_by_org'] = saltadas
     # Costo medido del escaneo (#52, RC-87): consultas de cada fuente con todos sus intentos, también las de una
     # fuente que falló, y segundos. seconds_by_source suma lo que tardó el recolector en cada intento, sin las
     # esperas entre reintentos. duration_seconds va del inicio de correr() hasta antes del score y sí las incluye.

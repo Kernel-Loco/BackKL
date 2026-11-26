@@ -257,6 +257,56 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['status'], 'failed')
         self.assertEqual(resumen['stats']['sources_unauthorized'], ['ct_logs', 'dns'])
 
+    def apagar_para_acme(self, codigo):
+        """Acme apaga la fuente (org_source_settings, #117, RC-235), en la transacción de la prueba."""
+        self.conn.execute(
+            'INSERT INTO org_source_settings (organization_id, source_id, enabled, changed_by) '
+            "SELECT %s, d.id, false, u.id FROM data_sources d, users u WHERE d.code = %s "
+            "AND u.email = 'alex.morgan@acme-demo.mx'", (ACME, codigo))
+
+    def test_235a_la_fuente_que_la_organizacion_apago_no_corre_y_el_score_es_parcial(self):
+        self.apagar_para_acme('ct_logs')
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), ['ct_logs'])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(s.aceptada, s.detalle)
+        with mock.patch.object(orquestador, 'ejecutar', wraps=orquestador.ejecutar) as ejecutar:
+            # Sin `fuentes`: las de fuentes_activas() menos las apagadas.
+            with mock.patch.object(orquestador, 'fuentes_activas', return_value=['ct_logs', 'ejemplo']):
+                resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', modo='reproducir', conn=self.conn)
+        self.assertEqual([c.args[0].FUENTE for c in ejecutar.call_args_list], ['ejemplo'])
+        self.assertEqual(resumen['status'], 'partial')
+        self.assertEqual(resumen['stats']['sources_disabled_by_org'], ['ct_logs'])
+        self.assertEqual([r['source'] for r in resumen['sources']], ['ejemplo'])
+        self.assertIsNone(self.corrida_de(s.scan_id, 'ct_logs'))
+        scan = self.uno('SELECT status, stats FROM scans WHERE id = %s', s.scan_id)
+        self.assertEqual((scan['status'], scan['stats']['sources_disabled_by_org']), ('partial', ['ct_logs']))
+        score = self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertIs(score['partial_coverage'], True)
+
+    def test_235b_la_apagada_tampoco_corre_si_viene_en_fuentes_y_otra_empresa_no_la_ve(self):
+        self.apagar_para_acme('ejemplo')
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with mock.patch.object(orquestador, 'ejecutar') as ejecutar:
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        ejecutar.assert_not_called()
+        self.assertEqual(resumen['status'], 'failed')   # no corrió ninguna: nada que comparar
+        self.assertEqual(resumen['stats']['sources_disabled_by_org'], ['ejemplo'])
+        # Con RLS, Beta no ve lo que apagó Acme.
+        self.conn.execute("SELECT set_config('app.current_org', %s, true)", (BETA,))
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), [])
+        self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+
+    def test_235c_una_fila_encendida_es_lo_mismo_que_no_tenerla(self):
+        self.apagar_para_acme('ejemplo')
+        self.conn.execute("UPDATE org_source_settings SET enabled = true")
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), [])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                     conn=self.conn)
+        self.assertEqual(resumen['status'], 'completed')
+        self.assertNotIn('sources_disabled_by_org', resumen['stats'])
+
     def test_2_corre_el_recolector_grabado_y_cierra_el_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir', conn=self.conn)

@@ -20,7 +20,8 @@ vuelta cada PROGRAMADOR_INTERVALO segundos (60 por omisión). En cada vuelta:
 4. Los aceptados corren en un hilo aparte después de confirmar, como en la API (cirdan/api/escaneos.py). A lo más
    PROGRAMADOR_MAX_ESCANEOS (2 por omisión, comentario 10262) a la vez en el proceso. Si el escaneo termina en
    'failed' (lanzó, ninguna fuente respondió, no se pudo lanzar o lo cerró detener()), el turno reclamado baja a
-   `ahora + 1 hora` (least: nunca lo aleja), en vez de esperar el intervalo entero.
+   `ahora + 1 hora` (least: nunca lo aleja), en vez de esperar el intervalo entero. Si falló porque la organización
+   apagó todas sus fuentes y no corrió ninguna (#117, RC-235), el turno no baja: el reintento fallaría igual.
 
 Un dominio fuera de DOMINIOS_EN_VIVO se salta sin auditar ni consultar: solicitar() lo rechazaría con
 live_scan_not_allowed en cada vuelta. Su turno se pospone un día para que no ocupe el lote de cada vuelta. En la VM
@@ -77,12 +78,17 @@ UPDATE domains SET next_scan_at = coalesce(%(ahora)s::timestamptz, now()) + %(es
                 FOR UPDATE SKIP LOCKED)
 '''
 # El escaneo programado quedó en 'failed': el turno que reclamó baja a `ahora + espera`. least() nunca lo aleja, y si el
-# escaneo terminó bien (completed o partial) no cambia nada.
+# escaneo terminó bien (completed o partial) no cambia nada. Tampoco si falló porque la organización apagó todas las
+# fuentes y no corrió ninguna (#117, RC-235): reintentar en una hora daría el mismo 'failed' y otro score parcial cada
+# hora, así que espera su turno completo.
 REINTENTAR_SQL = '''
 UPDATE domains d
    SET next_scan_at = least(d.next_scan_at, coalesce(%(ahora)s::timestamptz, now()) + %(espera)s::interval)
   FROM scans s
  WHERE s.id = %(scan)s AND s.domain_id = d.id AND s.status = 'failed'
+   AND NOT (coalesce(s.stats, '{}'::jsonb) ? 'sources_disabled_by_org'
+            AND coalesce((s.stats->>'sources_ok')::int, 0) = 0
+            AND coalesce((s.stats->>'sources_failed')::int, 0) = 0)
 '''
 
 _hilos = {}               # scan_id -> (org, hilo) de los escaneos que lanzó este proceso
