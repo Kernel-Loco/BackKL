@@ -18,6 +18,15 @@ psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d cirdan -v pw="$CIRDAN_APP_PASSWOR
 ALTER ROLE cirdan_app PASSWORD :'pw';
 SQL
 
+# Rol de retención (RC-257, migración 036): solo si el .env trae su contraseña. Sin ella el rol queda sin poder
+# entrar y el servicio `retencion` no arranca.
+if [ -n "${CIRDAN_RETENTION_PASSWORD:-}" ]; then
+  echo "cirdan: contraseña del rol cirdan_retention"
+  psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d cirdan -v pw="$CIRDAN_RETENTION_PASSWORD" <<'SQL'
+ALTER ROLE cirdan_retention PASSWORD :'pw';
+SQL
+fi
+
 for f in /cirdan-db/semillas/*.sql; do
   echo "cirdan: semilla $(basename "$f")"
   psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d cirdan -f "$f"

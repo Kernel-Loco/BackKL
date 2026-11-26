@@ -329,6 +329,20 @@ La carga rechaza un catálogo KEV incompleto y un archivo EPSS inválido, con fe
 
 Para apagarlo, quitar `inteligencia` de `COMPOSE_PROFILES` y ejecutar `docker compose --profile inteligencia stop inteligencia`. Volver a encenderlo hace una carga inmediata.
 
+## Retención de 12 meses (RC-257)
+
+El servicio `retencion` borra cada día, empresa por empresa, lo que pasa de 12 meses: entregas y alertas, scores con sus aportes, hallazgos resueltos (con su brecha), activos sin verse ni hallazgos, reportes y escaneos que ya nadie referencia. No borra hallazgos abiertos, en riesgo aceptado ni falsos positivos, ni la bitácora, las cartas o las verificaciones del TXT (#140). Usa el rol `cirdan_retention`, sin superusuario ni BYPASSRLS, y cada corrida deja en la bitácora de cada empresa un evento `retention.purged` con cuántas filas borró por tabla.
+
+1. Aplicar la migración 036 (después de la 035):
+   ```bash
+   docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/036_rol_retencion.sql
+   ```
+2. Elegir una contraseña, guardarla en `CIRDAN_RETENTION_PASSWORD` del `.env` y ponerla al rol sin escribirla en el comando: `docker compose exec db psql -U postgres -d cirdan`, luego `\password cirdan_retention` y `\q`. En una base nueva la pone `db/init/cargar_cirdan.sh`.
+3. Agregar `retencion` a `COMPOSE_PROFILES`, conservando los demás (por ejemplo `COMPOSE_PROFILES=programador,inteligencia,retencion`), y levantar con los archivos de Compose habituales.
+4. Verificar `docker compose logs retencion` (debe decir `retención aplicada`) y, como postgres, `SELECT organization_id, occurred_at, details FROM audit_log WHERE action = 'retention.purged' ORDER BY occurred_at DESC LIMIT 5`.
+
+Para una corrida a mano: `docker compose run --rm retencion python -m cirdan.retencion --una-vez`. Para apagarlo, quitar `retencion` de `COMPOSE_PROFILES` y `docker compose --profile retencion stop retencion`.
+
 ## Respaldo diario (RC-233, RC-28 y RC-339)
 
 Una vez al día, a las 09:00 UTC (03:00 en Monterrey), `lowtide-respaldo.timer` corre `db/respaldo/respaldar.sh`:
