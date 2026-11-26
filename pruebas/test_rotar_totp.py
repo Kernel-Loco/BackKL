@@ -12,10 +12,12 @@ bitácora y Key Vault son falsos. Corren dentro del contenedor, porque cirdan.au
 import base64
 import contextlib
 import io
+import json
 import os
 import re
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -25,9 +27,11 @@ from fastapi import HTTPException, Response
 
 from cirdan.auth import contar_totp, keyvault, restablecer_mfa, routes, sessions, totp
 
-ACTUAL = base64.urlsafe_b64encode(b'CIRDAN_FAKE_llave_mfa_actual_32b').decode()
-ANTERIOR = base64.urlsafe_b64encode(b'CIRDAN_FAKE_llave_mfa_anterior_b').decode()
-OTRA = base64.urlsafe_b64encode(b'CIRDAN_FAKE_llave_mfa_otra_32byt').decode()
+# Los tokens falsos viven en pruebas/fixtures/ (AGENTS regla 7): el job de seguridad marca uno fuera de ahí.
+FALSOS = json.loads((Path(__file__).resolve().parent / 'fixtures' / 'tokens' / 'rotar_totp.json').read_text('utf-8'))
+ACTUAL = base64.urlsafe_b64encode(FALSOS['llave_actual'].encode()).decode()
+ANTERIOR = base64.urlsafe_b64encode(FALSOS['llave_anterior'].encode()).decode()
+OTRA = base64.urlsafe_b64encode(FALSOS['llave_otra'].encode()).decode()
 assert all(len(base64.urlsafe_b64decode(v)) == 32 for v in (ACTUAL, ANTERIOR, OTRA))
 VERSION = '0123456789abcdef0123456789abcdef'
 URL = 'https://kv-lowtide.vault.azure.net/secrets/totp-encryption-key-v2/' + VERSION
@@ -290,7 +294,7 @@ class Rutas(Base):
     def registrar_passkey(self, blob):
         self.conexion = Conexion(self.fila(blob))
         sesion = SimpleNamespace(user_id=USUARIO, own_org_id=ORG, email='mfa@ejemplo.test',
-                                 token='CIRDAN_FAKE_token_sesion')
+                                 token=FALSOS['token_sesion'])
         with mock.patch.object(routes.webauthn, 'configured', lambda: True), \
                 mock.patch.object(sessions, 'is_locked', lambda *_: False), \
                 mock.patch.object(sessions, 'take_password_attempt', lambda _: 1), \
