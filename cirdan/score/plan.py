@@ -11,6 +11,22 @@ from cirdan.score import criterio, motor
 
 ESTADOS_PLAN = {'open'}
 AGRUPACIONES = ('regla', 'activo')
+# RC-127 (#69): un hallazgo con CVE en el catálogo CISA KEV lleva este aviso y su acción encabeza el plan.
+AVISO_KEV = 'Se explota activamente en el mundo (CISA KEV), posible según la versión'
+
+
+def _amenaza(hallazgos):
+    """KEV y EPSS de una acción a partir de sus hallazgos: en KEV si alguno lo está, el EPSS más alto y sus CVE."""
+    cves = sorted({h['cve_id'] for h in hallazgos if h.get('cve_id')})
+    epss = [float(h['epss']) for h in hallazgos if h.get('epss') is not None]
+    en_kev = any(h.get('in_kev') is True for h in hallazgos)
+    return {'cve_ids': cves, 'in_kev': en_kev, 'epss_max': max(epss) if epss else None,
+            'threat_note': AVISO_KEV if en_kev else None}
+
+
+def _kev_primero(acciones):
+    """Las acciones con un hallazgo en KEV van primero, sin cambiar el orden relativo de las demás."""
+    return sorted(acciones, key=lambda accion: not accion['in_kev'])
 
 
 def _hallazgos_con_severidad(hallazgos, severidades):
@@ -277,6 +293,7 @@ def construir_plan(dominio, hallazgos, reglas, pesos_categoria, method='rules', 
     antes = _actual(puntaje.vigente, guardado, cortes)
     grupos = (_grupos_por_regla if agrupar == 'regla' else _grupos_por_activo)(preparados, reglas)
 
+    por_id = {h['id']: h for h in preparados}
     acciones = []
     for grupo in grupos.values():
         if agrupar == 'regla':   # el individual de siempre, con simular()
@@ -290,12 +307,15 @@ def construir_plan(dominio, hallazgos, reglas, pesos_categoria, method='rules', 
             'finding_count': len(grupo['finding_ids']),
             'score_after': despues,
             'score_reduction': reduccion,
+            **_amenaza([por_id[i] for i in grupo['finding_ids']]),
         })
     if agrupar == 'regla':   # el orden de hoy (RC-72): lo que baja sola, categoría e id
         acciones.sort(key=lambda accion: (-accion['score_reduction'], accion['category'], accion['id']))
-        acciones = _acumular(acciones, puntaje)
+        acciones = _acumular(_kev_primero(acciones), puntaje)
     else:
         acciones = _orden_voraz(acciones, puntaje, lambda accion: (accion['category'], accion['id']))
+        if any(accion['in_kev'] for accion in acciones):   # KEV encabeza y la acumulada se recalcula en ese orden
+            acciones = _acumular(_kev_primero(acciones), puntaje)
     return {
         'domain': dominio,
         'score_before': antes['score'],

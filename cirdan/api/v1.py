@@ -469,7 +469,9 @@ SELECT f.id::text, f.evidence, a.value AS asset, a.asset_type, a.first_seen_at A
                         AND x.score_id = (SELECT ds.id FROM domain_scores ds WHERE ds.domain_id = f.domain_id
                                            ORDER BY ds.computed_at DESC LIMIT 1)) sc_score ON true
  WHERE d.fqdn = %s AND f.status = 'open'
- ORDER BY array_position(ARRAY['critical','high','medium','low'], coalesce(sc_score.severity, f.severity)),
+ ORDER BY (c.intel_updated_at IS NOT NULL AND c.in_kev IS TRUE) DESC,
+                    c.epss_score DESC NULLS LAST,
+                    array_position(ARRAY['critical','high','medium','low'], coalesce(sc_score.severity, f.severity)),
                     f.detected_at DESC, f.id
 '''
 
@@ -484,6 +486,7 @@ def _finding(f):
         'base_severity': f['base_severity'], 'status': f['status'], 'recurrence': f['recurrence'],
         'cve_id': f['cve_id'], 'cvss': float(f['cvss']) if f['cvss'] is not None else None,
         'epss': float(f['epss']) if f['epss'] is not None else None, 'in_kev': f['in_kev'],
+        'threat_note': plan_accion.AVISO_KEV if f['in_kev'] else None,
         'evidence': evidence, 'caracteristicas': caracteristicas(f),
         'frameworks': _marcos(f),
         'detected_at': f['detected_at'], 'last_scan_id': f['last_scan_id'],
@@ -522,7 +525,7 @@ def _triage_de(evento):
             'reason': detalles.get('reason'), 'review_date': detalles.get('review_date'), 'note': detalles.get('note')}
 
 
-@router.get('/domains/{fqdn}/findings', summary='Hallazgos del dominio, de más a menos severo (abiertos por omisión)')
+@router.get('/domains/{fqdn}/findings', summary='Hallazgos del dominio por KEV, EPSS y severidad (abiertos por omisión)')
 def domain_findings(fqdn: str, estado: Estado = Query(default='open', description="'open' (por omisión), "
                                                       "'accepted_risk', 'false_positive', 'resolved' o 'all' (RC-133)"),
                     session: Session = Depends(LEE_HALLAZGOS)):
@@ -1034,8 +1037,11 @@ def _leer_contexto_plan(conn, session, domain_id):
     # El activo de cada hallazgo es para el plan por activo (RC-263): el motor y simular() no lo leen.
     hallazgos = conn.execute(
         'SELECT f.id::text AS id, r.code AS rule_code, f.severity, f.status, f.asset_id::text AS asset_id, '
-        'a.asset_type, a.value AS asset_value '
+        'a.asset_type, a.value AS asset_value, f.cve_id, c.epss_score AS epss, '
+        # KEV solo cuenta si el cargador de inteligencia ya revisó la CVE (RC-127), como en FINDINGS_SQL
+        '(c.intel_updated_at IS NOT NULL AND c.in_kev) AS in_kev '
         'FROM findings f JOIN scoring_rules r ON r.id = f.rule_id JOIN assets a ON a.id = f.asset_id '
+        'LEFT JOIN cves c ON c.cve_id = f.cve_id '
         'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
         (domain_id, list(motor.ESTADOS_PUNTUABLES)),
     ).fetchall()

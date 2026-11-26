@@ -307,6 +307,28 @@ El servicio `programador` vuelve a escanear cada dominio autorizado según el pl
 4. (VM) `docker compose --dry-run up -d --build` (sin recrear `cirdan-pg16`) y `docker compose up -d --build`. `docker compose ps programador` dice `running` y `docker compose logs programador` dice 'escaneo programado' con cada escaneo que pidió, sin errores.
 5. Para apagarlo: quitar `COMPOSE_PROFILES` del `.env` y `docker compose --profile programador stop programador`. Tiene 60 s para cerrar: los escaneos que dejó corriendo quedan en 'failed' y su turno queda a una hora, no al siguiente intervalo del plan, así que salen en cuanto se vuelva a encender.
 
+## Inteligencia de amenazas (RC-127)
+
+El servicio `inteligencia` carga el catálogo completo CISA KEV y el archivo diario EPSS de FIRST en `cves`. Descarga el archivo público completo: no envía a FIRST ni a CISA los CVE que encontró en los clientes. Corre al arrancar y cada 24 horas; si falla, conserva la última carga y reintenta en una hora. Un candado de PostgreSQL evita que dos instancias actualicen a la vez. No cambia la severidad ni recalcula el score.
+
+El servicio usa `cirdan_intel`, un rol separado que solo puede leer `cves` y actualizar las columnas de inteligencia. No puede leer hallazgos ni modificar CVSS. La API sigue usando `cirdan_app`, que no puede actualizar esas columnas.
+
+1. Aplicar las migraciones pendientes hasta la 035, antes de encender el servicio. Para la 035:
+   ```bash
+   docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/035_inteligencia_amenazas.sql
+   ```
+2. Elegir una contraseña independiente, guardarla en `CIRDAN_INTEL_PASSWORD` del `.env` y establecer la misma para el rol, sin escribirla en el comando:
+   ```bash
+   docker compose exec db psql -U postgres -d cirdan
+   ```
+   Dentro de `psql`, ejecutar `\password cirdan_intel`, introducirla dos veces y salir con `\q`.
+3. Agregar `inteligencia` a `COMPOSE_PROFILES`, conservando los perfiles existentes; por ejemplo, `COMPOSE_PROFILES=programador,inteligencia`. Reconstruir y levantar con los archivos de Compose habituales del despliegue.
+4. Verificar `docker compose ps inteligencia` y `docker compose logs inteligencia`: debe aparecer `inteligencia actualizada` con los conteos de CVE, KEV y EPSS. Comprobar `SELECT count(*), max(intel_updated_at) FROM cves` como postgres. Vigilar el registro y la antigüedad de esa fecha: un contenedor en ejecución no demuestra que la última descarga haya funcionado.
+
+La carga rechaza un catálogo KEV incompleto y un archivo EPSS inválido, con fecha futura o con más de tres días. Hasta una carga correcta, los CVE nuevos tienen KEV desconocido; si después falla una descarga, los valores anteriores pueden estar desactualizados. No rellena CVSS de NVD: esos datos los aportan los recolectores que ya lo consultan.
+
+Para apagarlo, quitar `inteligencia` de `COMPOSE_PROFILES` y ejecutar `docker compose --profile inteligencia stop inteligencia`. Volver a encenderlo hace una carga inmediata.
+
 ## Respaldo diario (RC-233, RC-28 y RC-339)
 
 Una vez al día, a las 09:00 UTC (03:00 en Monterrey), `lowtide-respaldo.timer` corre `db/respaldo/respaldar.sh`:

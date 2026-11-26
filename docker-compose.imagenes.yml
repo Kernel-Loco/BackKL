@@ -24,6 +24,11 @@ services:
     volumes:
       - ./datos/geo:/app/datos/geo:ro
 
+  inteligencia:
+    image: ${LOWTIDE_API_IMAGEN:?Falta LOWTIDE_API_IMAGEN en .env, ver docs/cadena_de_suministro.md}
+    build: !reset null
+    pull_policy: missing
+
   demo-accounts:
     image: ${LOWTIDE_API_IMAGEN:?Falta LOWTIDE_API_IMAGEN en .env, ver docs/cadena_de_suministro.md}
     build: !reset null

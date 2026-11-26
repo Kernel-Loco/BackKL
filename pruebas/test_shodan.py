@@ -28,6 +28,7 @@ from pruebas.test_subfinder import Cronometro  # noqa: E402
 from pruebas.test_geoip import NOMBRES, LectorFalso, bases, registro_asn, registro_pais  # noqa: E402
 from cirdan.recolectores import REGISTRO, cargar, contrato, geoip, rangos_cdn, shodan  # noqa: E402
 from cirdan.recolectores.contrato import FuenteNoResponde  # noqa: E402
+from cirdan.score import plan as plan_accion  # noqa: E402
 
 SEMILLA = Path(__file__).resolve().parents[1] / 'db' / 'semillas' / '007_shodan.sql'
 DOMINIO = 'olmardo.com'
@@ -2521,6 +2522,58 @@ class Semilla(unittest.TestCase):
         self.assertIn("RAISE WARNING 'shodan tiene un límite diario menor que %d" % shodan.MAX_CONSULTAS, sin_comentarios)
         self.assertEqual(sorted(p.name for p in SEMILLA.parent.glob('*shodan*.sql')),
                          ['007_shodan.sql', '011_shodan_nombres.sql', '018_shodan_host.sql'])
+
+
+class AmenazaReal(unittest.TestCase):
+    """RC-127 (#69): una respuesta grabada de InternetDB con una CVE que está en CISA KEV (Log4Shell) y otra que no.
+    Los datos de KEV y EPSS son los que el cargador diario deja en cves; aquí van fijos, sin red. Nunca se levanta ni
+    se consulta un servicio vulnerable real (retro-10)."""
+
+    KEV, OTRA = 'CVE-2021-44228', 'CVE-2023-1001'
+    INTEL = {KEV: {'in_kev': True, 'epss': 0.94358}, OTRA: {'in_kev': False, 'epss': 0.00043}}
+    REGLAS = {
+        'known_vulnerability': {'id': 'r1', 'category': 'infrastructure', 'weight': 1.0, 'max_penalty': 25,
+                                'recommendation': 'Actualiza el software.'},
+        'secret_in_public_repo': {'id': 'r2', 'category': 'data_leaks', 'weight': 1.0, 'max_penalty': 40,
+                                  'recommendation': 'Revoca la credencial.'},
+    }
+    PESOS = {'infrastructure': 0.30, 'digital_identity': 0.20, 'configuration': 0.20, 'data_leaks': 0.30}
+
+    def hallazgos(self):
+        http = HttpSimulado(ips={CAMARA: internetdb(CAMARA, ports=[8983], vulns=[self.OTRA, self.KEV])})
+        res = recolectar(http, ResolvedorSimulado({DOMINIO: a(CAMARA)}))
+        vulns = [h for h in res.hallazgos if h.codigo == 'known_vulnerability']
+        self.assertEqual(sorted(h.clave for h in vulns), [self.KEV, self.OTRA])
+        filas = [{'id': h.clave, 'rule_code': h.codigo, 'severity': h.severidad, 'status': 'open', 'asset_id': h.activo,
+                  'asset_type': 'ip', 'asset_value': h.activo, 'cve_id': h.clave, **self.INTEL[h.clave]} for h in vulns]
+        # Un secreto crítico baja más el score solo: sin KEV encabezaría el plan
+        filas.append({'id': 's1', 'rule_code': 'secret_in_public_repo', 'severity': 'critical', 'status': 'open',
+                      'asset_id': 'repo', 'asset_type': 'repository', 'asset_value': 'olmardo/sitio'})
+        return filas
+
+    def test_1_la_accion_con_kev_encabeza_el_plan_y_lleva_el_aviso(self):
+        filas = self.hallazgos()
+        for agrupar in plan_accion.AGRUPACIONES:
+            with self.subTest(agrupar=agrupar):
+                resultado = plan_accion.construir_plan(DOMINIO, filas, self.REGLAS, self.PESOS, agrupar=agrupar)
+                primera = resultado['actions'][0]
+                self.assertTrue(primera['in_kev'])
+                self.assertIn(self.KEV, primera['cve_ids'])
+                self.assertEqual(primera['threat_note'], plan_accion.AVISO_KEV)
+                self.assertEqual(primera['epss_max'], 0.94358)
+                self.assertTrue(all(not accion['in_kev'] and accion['threat_note'] is None
+                                    for accion in resultado['actions'][1:]))
+                # La acumulada sigue el orden nuevo: la última deja el mismo score de resolver todo que sin KEV
+                sin_kev = plan_accion.construir_plan(DOMINIO, [dict(f, in_kev=False) for f in filas], self.REGLAS,
+                                                     self.PESOS, agrupar=agrupar)
+                self.assertEqual(resultado['actions'][-1]['score_after_acumulado'],
+                                 sin_kev['actions'][-1]['score_after_acumulado'])
+
+    def test_2_sin_kev_el_orden_es_el_de_siempre(self):
+        filas = [dict(f, in_kev=False) for f in self.hallazgos()]
+        resultado = plan_accion.construir_plan(DOMINIO, filas, self.REGLAS, self.PESOS)
+        self.assertEqual(resultado['actions'][0]['id'], 'secret_in_public_repo')
+        self.assertFalse(any(accion['in_kev'] for accion in resultado['actions']))
 
 
 if __name__ == '__main__':
