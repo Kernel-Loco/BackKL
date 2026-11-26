@@ -38,21 +38,26 @@ COMMENT ON COLUMN public.users.cancelled_at IS
 CREATE OR REPLACE FUNCTION block_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  -- Excepciones de retención: solo DELETE y solo cirdan_retention.
+  -- Excepciones de retención: solo DELETE y solo cirdan_retention. IF anidados: PL/pgSQL no corta un AND, y cada
+  -- tabla solo tiene sus columnas (036).
   IF TG_OP = 'DELETE' AND current_user = 'cirdan_retention' THEN
-    -- Filas de más de 12 meses (001, RC-257)
-    IF TG_TABLE_NAME = 'domain_scores' AND OLD.computed_at < now() - interval '12 months' THEN
-      RETURN OLD;
-    ELSIF TG_TABLE_NAME = 'score_contributions' AND EXISTS (
-            SELECT 1 FROM domain_scores s
-             WHERE s.id = OLD.score_id AND s.computed_at < now() - interval '12 months') THEN
-      RETURN OLD;
+    IF TG_TABLE_NAME IN ('domain_scores', 'score_contributions') THEN
+      -- Fin del servicio de la empresa (RC-258)
+      IF EXISTS (SELECT 1 FROM organizations o
+                  WHERE o.id = OLD.organization_id AND o.service_ended_at IS NOT NULL) THEN
+        RETURN OLD;
+      END IF;
     END IF;
-    -- Fin del servicio de la empresa (RC-258)
-    IF TG_TABLE_NAME IN ('domain_scores', 'score_contributions') AND EXISTS (
-            SELECT 1 FROM organizations o
-             WHERE o.id = OLD.organization_id AND o.service_ended_at IS NOT NULL) THEN
-      RETURN OLD;
+    -- Filas de más de 12 meses (001, RC-257)
+    IF TG_TABLE_NAME = 'domain_scores' THEN
+      IF OLD.computed_at < now() - interval '12 months' THEN
+        RETURN OLD;
+      END IF;
+    ELSIF TG_TABLE_NAME = 'score_contributions' THEN
+      IF EXISTS (SELECT 1 FROM domain_scores s
+                  WHERE s.id = OLD.score_id AND s.computed_at < now() - interval '12 months') THEN
+        RETURN OLD;
+      END IF;
     END IF;
   END IF;
   RAISE EXCEPTION '% es de solo inserción: % bloqueado por trigger', TG_TABLE_NAME, TG_OP
