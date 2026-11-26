@@ -265,7 +265,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    init: true
+    # Sin init: true, como la API y el programador: cirdan.init es el PID 1 y no deja el entorno legible (RC-324).
     restart: unless-stopped
     healthcheck:
       disable: true
