@@ -1,0 +1,147 @@
+{
+  "name": "LowTide: técnicas de reconocimiento que la plataforma detecta",
+  "versions": {
+    "attack": "19",
+    "navigator": "5.1.0",
+    "layer": "4.5"
+  },
+  "domain": "enterprise-attack",
+  "description": "Técnicas de MITRE ATT&CK Enterprise v19 que las reglas de LowTide detectan en la superficie expuesta de un dominio autorizado. El color es el número de reglas. LowTide mide exposición, no compromiso: una técnica aquí es lo que un adversario podría aprovechar, no algo que haya hecho. 10 reglas no tienen técnica porque ninguna la nombra de forma directa. Sale de db/migraciones (cirdan/navigator.py).",
+  "sorting": 3,
+  "layout": {
+    "layout": "side",
+    "showName": true,
+    "showID": true
+  },
+  "hideDisabled": false,
+  "techniques": [
+    {
+      "techniqueID": "T1133",
+      "score": 3,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: exposed_container_api, exposed_rdp, exposed_remote_admin"
+    },
+    {
+      "techniqueID": "T1190",
+      "score": 1,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: known_vulnerability"
+    },
+    {
+      "techniqueID": "T1530",
+      "score": 1,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: public_bucket"
+    },
+    {
+      "techniqueID": "T1552.001",
+      "score": 1,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: secret_in_container_image"
+    },
+    {
+      "techniqueID": "T1583.001",
+      "score": 2,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: domain_expiring_soon, lookalike_domain"
+    },
+    {
+      "techniqueID": "T1584.001",
+      "score": 1,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: subdomain_takeover_risk"
+    },
+    {
+      "techniqueID": "T1588.004",
+      "score": 1,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: cert_new_issuer"
+    },
+    {
+      "techniqueID": "T1589.001",
+      "score": 2,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: breach_exposure, breach_exposure_old"
+    },
+    {
+      "techniqueID": "T1589.002",
+      "score": 3,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: breach_exposure_no_passwords, email_in_public_commits, personal_email_exposed"
+    },
+    {
+      "techniqueID": "T1589.003",
+      "score": 1,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: email_pattern_exposed"
+    },
+    {
+      "techniqueID": "T1592.002",
+      "score": 2,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: debug_page_exposed, server_version_disclosed"
+    },
+    {
+      "techniqueID": "T1593.003",
+      "score": 2,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: file_share_link_in_repo, secret_in_public_repo"
+    },
+    {
+      "techniqueID": "T1596.003",
+      "score": 1,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: cert_internal_name"
+    },
+    {
+      "techniqueID": "T1596.005",
+      "score": 5,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: exposed_database, exposed_file_sharing, exposed_iot_device, exposed_ot_device, exposed_service"
+    },
+    {
+      "techniqueID": "T1684.002",
+      "score": 4,
+      "enabled": true,
+      "showSubtechniques": true,
+      "comment": "Reglas de LowTide: dmarc_missing, dmarc_policy_none, spf_allow_all, spf_missing"
+    }
+  ],
+  "gradient": {
+    "colors": [
+      "#c7e9f1",
+      "#1f7a99"
+    ],
+    "minValue": 0,
+    "maxValue": 5
+  },
+  "legendItems": [
+    {
+      "label": "Más reglas de LowTide la detectan",
+      "color": "#1f7a99"
+    }
+  ],
+  "metadata": [
+    {
+      "name": "reglas_sin_tecnica",
+      "value": "api_auth_not_declared, cert_broad_wildcard, cert_expired, cert_expiring_soon, directory_listing, exposed_ai_service, exposed_api_docs, outdated_software, tls_certificate_invalid, tls_legacy_only"
+    }
+  ],
+  "showTacticRowBackground": false,
+  "selectTechniquesAcrossTactics": true,
+  "selectSubtechniquesWithParent": false
+}
