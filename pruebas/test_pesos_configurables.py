@@ -124,16 +124,27 @@ class RecalculoScores(unittest.TestCase):
         factores = aporte[6].obj
 
         self.assertEqual(recalculados, 1)
-        self.assertIn("'rules_change'", score_sql)
+        # El motivo va como parámetro desde RC-133 (el triage recalcula con 'correction'); por omisión, rules_change.
+        self.assertEqual(score_params[6], 'rules_change')
         self.assertEqual(score_params[1:4], ('domain-1', 'scan-1', 'ruleset-v2'))
-        self.assertEqual(score_params[6:9], ('ml', 'v-test', None))
-        self.assertTrue(score_params[9])
+        self.assertEqual(score_params[7:10], ('ml', 'v-test', None))
+        self.assertTrue(score_params[10])
         self.assertEqual(aporte[5], 'high')
         self.assertEqual(factores['confidence'], .91)
         self.assertEqual(factores['shap'][0]['feature'], 'sensibilidad')
         self.assertFalse(any('UPDATE domain_scores' in sql for sql, _ in conn.consultas))
         self.assertIn('clock_timestamp()', score_sql)  # el orden de computed_at es el del candado de pesos (RC-62)
 
+
+    def test_el_triage_recalcula_un_solo_dominio_con_correction(self):
+        # RC-133: un falso positivo o un hallazgo reabierto recalcula solo su dominio, con reason 'correction'.
+        conn = Recalculo()
+        pesos = {categoria: .25 for categoria in criterio.CATEGORIAS}
+        configuracion.recalcular_scores(conn, 'org-1', 'ruleset-v2', pesos, dominio='domain-1', motivo='correction')
+        anteriores = next(params for sql, params in conn.consultas if sql.startswith('SELECT DISTINCT ON'))
+        self.assertEqual(anteriores, ('org-1', 'domain-1', 'domain-1'))
+        score_params = next(params for sql, params in conn.consultas if sql.startswith('INSERT INTO domain_scores'))
+        self.assertEqual(score_params[6], 'correction')
 
     def test_un_dominio_ml_sin_severidades_congeladas_falla_o_se_salta(self):
         # RC-310: sin lista de saltados lanza ValueError. Con ella, se salta y no inserta nada de ese dominio.
