@@ -3,7 +3,8 @@
 Solo el Administrador y siempre con la sesión del portal. La empresa solo apaga: una fuente corre si está encendida en
 data_sources (lo global, de la plataforma) y la empresa no la apagó (org_source_settings, migración 034). Una fuente
 apagada en lo global (censys, subfinder) no se enciende para un cliente y responde 409. Las fuentes de inteligencia
-(nvd, first_epss, cisa_kev) son de la plataforma: no se listan para cambiar y responden 422. Cada cambio queda en la
+(nvd, first_epss, cisa_kev) son de la plataforma: no se listan para cambiar y responden 422. Apagar la última osint
+que corre para la empresa responde 409: el escaneo no revisaría nada. Cada cambio queda en la
 bitácora con source.disabled o source.enabled. Repetir el mismo estado no la repite.
 Apagar una fuente baja la cobertura: el siguiente escaneo sale con partial_coverage y su score deja de ser comparable
 con los anteriores (el portal lo avisa antes de cambiar).
@@ -22,6 +23,15 @@ FUENTE_PRUEBAS = 'ejemplo'   # solo para pruebas: no se lista ni se cambia
 NO_ENCONTRADA = 'Fuente no encontrada'
 DE_PLATAFORMA = 'Las fuentes de inteligencia son de la plataforma y no se apagan por empresa.'
 APAGADA_GLOBAL = 'La fuente está apagada en la plataforma. Una empresa solo puede apagar fuentes, no encenderlas.'
+ULTIMA = 'Debe quedar al menos una fuente OSINT encendida: sin ninguna, los escaneos no revisarían nada.'
+
+# Las osint que siguen corriendo para la empresa además de `id`: encendidas en lo global y sin apagado suyo. Se filtran
+# después por REGISTRO, como fuentes_activas() del orquestador.
+OTRAS_EFECTIVAS_SQL = '''
+SELECT d.code FROM data_sources d
+ WHERE d.kind = 'osint' AND d.enabled AND d.code <> %s AND d.id <> %s
+   AND NOT EXISTS (SELECT 1 FROM org_source_settings o WHERE o.source_id = d.id AND NOT o.enabled)
+'''
 
 
 class FuenteIn(BaseModel):
@@ -83,6 +93,13 @@ def set_source(code: str, body: FuenteIn, request: Request, session: Session = D
         # está apagada en lo global sería encenderla para el cliente: 409.
         if body.enabled and antes and not fuente['enabled']:
             raise HTTPException(409, APAGADA_GLOBAL)
+        # Apagar la última que corre dejaría cada escaneo en 'failed' sin revisar nada (orq-1 de la revisión). Si esta
+        # no corre hoy (apagada en lo global o sin recolector), apagarla no cambia nada y vale. El candado de arriba
+        # pone en orden dos apagados a la vez, así que los dos no pueden ver a la otra como la que queda.
+        if not body.enabled and antes and fuente['enabled'] and fuente['code'] in REGISTRO:
+            otras = conn.execute(OTRAS_EFECTIVAS_SQL, (FUENTE_PRUEBAS, fuente['id'])).fetchall()
+            if not any(f['code'] in REGISTRO for f in otras):
+                raise HTTPException(409, ULTIMA)
         if antes != body.enabled:
             conn.execute(
                 'INSERT INTO org_source_settings (organization_id, source_id, enabled, changed_by, '

@@ -15,6 +15,7 @@ import unittest
 from pruebas import sesion
 from pruebas.sesion import Client
 from pruebas.test_aislamiento import ACME, BETA, psql, scalar
+from pruebas.test_superadmin import CAMBIO, DANA_ID, hacer_superadmin, quitar_superadmin
 
 JORDAN = 'jordan.tate@acme-demo.mx'   # analista de Acme
 MAYA = 'maya.reed@acme-demo.mx'       # gerente de Acme
@@ -146,6 +147,26 @@ class FuentesPorCliente(unittest.TestCase):
         self.assertEqual((beta['org_enabled'], beta['effective_enabled']), (None, True))
         self.assertEqual(self.fuente(self.alex, 'ct_logs')['org_enabled'], False)
 
+    def test_9_no_se_apaga_la_ultima_osint_que_corre(self):
+        # Acme apaga todas las osint menos ct_logs: apagar esa dejaría cada escaneo en 'failed' sin revisar nada.
+        postgres("INSERT INTO org_source_settings (organization_id, source_id, enabled, changed_by) SELECT '%s', id, "
+                 "false, '%s' FROM data_sources WHERE kind = 'osint' AND code NOT IN ('ct_logs', 'ejemplo');"
+                 % (ACME, usuario(ALEX)))
+        antes = self.bitacora('source.disabled', 'ct_logs')
+        code, body = self.put(self.alex, 'ct_logs', False)
+        self.assertEqual(code, 409, body)
+        self.assertEqual(self.fuente(self.alex, 'ct_logs')['effective_enabled'], True)
+        self.assertEqual(self.bitacora('source.disabled', 'ct_logs'), antes)
+        # Una apagada en la plataforma no cuenta como la que queda, pero apagarla de antemano sí vale.
+        self.assertEqual(self.put(self.alex, 'censys', True)[0], 200)
+        self.assertEqual(self.put(self.alex, 'ct_logs', False)[0], 409)
+        self.assertEqual(self.put(self.alex, 'censys', False)[0], 200)
+        # Con otra encendida, ct_logs sí se apaga. Beta no cuenta para Acme.
+        self.assertEqual(self.put(self.alex, 'dns', True)[0], 200)
+        self.assertEqual(self.put(self.alex, 'ct_logs', False)[0], 200)
+        self.assertEqual(self.put(self.alex, 'dns', False)[0], 409)
+        self.assertEqual(self.fuente(self.dana, 'dns')['effective_enabled'], True)
+
     # ------------------------------------------------------------ base
 
     def test_7_rls_forzada_y_permisos_de_cirdan_app(self):
@@ -187,6 +208,43 @@ class FuentesPorCliente(unittest.TestCase):
                           "VALUES ('%s', '%s', false, '%s');" % (ACME, id_de('dns'), usuario(DANA)), org=ACME)
         self.assertFalse(ok)
         self.assertIn('org_source_settings_changed_by_fk', err)
+
+
+class SuperadminEnOtraEmpresa(unittest.TestCase):
+    """El superadmin de la plataforma (RC-332) apaga una fuente en una empresa ajena: no queda como autor de la empresa
+    (changed_by NULL, las FK compuestas lo piden) sino en changed_by_platform, y la bitácora lo anota con actor
+    platform y su id en details, como las demás acciones de una empresa ajena."""
+
+    @classmethod
+    def setUpClass(cls):
+        # Las limpiezas van antes de nombrar a Dana: corren aunque falle el login, y Dana, con credenciales de demo
+        # públicas, nunca se queda en platform_admins.
+        cls.addClassCleanup(limpiar)
+        cls.addClassCleanup(quitar_superadmin, DANA_ID)
+        sesion.reset()
+        limpiar()
+        hacer_superadmin(DANA_ID)
+        cls.dana = sesion.login(DANA)
+
+    def test_10_apaga_en_acme_como_plataforma(self):
+        self.assertEqual(self.dana.post(CAMBIO, {'organization_id': ACME})[0], 200)
+        code, body = self.dana.request('PUT', '%s/ct_logs' % FUENTES, {'enabled': False})
+        self.assertEqual(code, 200, body)
+        campos = ('org_enabled', 'effective_enabled', 'changed_by', 'changed_by_platform')
+        self.assertEqual(tuple(body[c] for c in campos), (False, False, None, True))
+        fila = postgres("SELECT o.changed_by IS NULL, o.changed_by_platform FROM org_source_settings o "
+                        "WHERE o.organization_id = '%s' AND o.source_id = '%s';" % (ACME, id_de('ct_logs')))
+        self.assertEqual(fila, 't|%s' % DANA_ID)
+        actor = scalar("SELECT actor_type || ',' || coalesce(actor_user_id::text, '-') || ',' || "
+                       "coalesce(details->>'platform_user_id', '-') || ',' || (details->>'code') FROM audit_log "
+                       "WHERE organization_id = '%s' AND action = 'source.disabled' ORDER BY chain_seq DESC LIMIT 1;"
+                       % ACME, user='postgres')
+        self.assertEqual(actor, 'platform,-,%s,ct_logs' % DANA_ID)
+        # En Beta, su empresa, no cambió nada.
+        self.assertEqual(self.dana.post(CAMBIO, {'organization_id': BETA})[0], 200)
+        code, body = self.dana.get(FUENTES)
+        self.assertEqual(code, 200, body)
+        self.assertEqual(next(i for i in body['items'] if i['code'] == 'ct_logs')['org_enabled'], None)
 
 
 if __name__ == '__main__':
