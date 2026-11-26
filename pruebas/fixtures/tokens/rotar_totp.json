@@ -1,0 +1,6 @@
+{
+ "llave_actual": "CIRDAN_FAKE_llave_mfa_actual_32b",
+ "llave_anterior": "CIRDAN_FAKE_llave_mfa_anterior_b",
+ "llave_otra": "CIRDAN_FAKE_llave_mfa_otra_32byt",
+ "token_sesion": "CIRDAN_FAKE_token_sesion"
+}

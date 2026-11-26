@@ -66,8 +66,9 @@ jobs:
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
           sed -i "s|^SOURCE_KEYS_ENCRYPTION_KEY=.*|SOURCE_KEYS_ENCRYPTION_KEY=$llave|" .env
           grep -q '^SOURCE_KEYS_ENCRYPTION_KEY=.\{44\}$' .env
-          # Sin llave anterior de las huellas (RC-333) y sin consultas en vivo a Pwned Passwords (RC-334).
+          # Sin llave anterior de las huellas (RC-333) ni del MFA (RC-295) y sin consultas en vivo a Pwned Passwords (RC-334).
           grep -qx 'PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY=' .env
+          grep -qx 'TOTP_PREVIOUS_ENCRYPTION_KEY=' .env
           grep -qx 'PWNED_PASSWORDS_ENABLED=' .env
           # .env.example la trae en false (#169, RC-287) y las pruebas entran con las cuentas de demo.
           sed -i "s|^DEMO_ACCOUNTS=.*|DEMO_ACCOUNTS=true|" .env
@@ -127,7 +128,7 @@ jobs:
           api python -m unittest pruebas/test_asistente.py pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_anomalias_ml.py pruebas/test_auditoria_humana_ml.py pruebas/test_txt.py
           pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_ip_cliente.py pruebas/test_cookie_segura.py pruebas/test_login_sin_red.py pruebas/test_tope_cuerpo.py pruebas/test_llave_totp.py pruebas/test_llave_huellas.py
           pruebas/test_captcha.py pruebas/test_documentacion_api.py
-          pruebas/test_rotar_huellas.py pruebas/test_contrasenas_filtradas.py
+          pruebas/test_rotar_huellas.py pruebas/test_rotar_totp.py pruebas/test_contrasenas_filtradas.py
           pruebas.test_github.Integracion
           pruebas.test_rdap.Transporte pruebas.test_crtsh.TopeDeBytes pruebas.test_visita.SaludoReal pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
           pruebas.test_subfinder.Integracion pruebas/test_estado_carta.py
