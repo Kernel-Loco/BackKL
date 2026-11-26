@@ -19,7 +19,12 @@ es apuntado. Cada paso borra solo filas que ya nadie referencia, así que una FK
 9. `scan_source_runs` y 10. `scans` de más de 12 meses que ningún score referencia. `findings.last_scan_id` queda
    en NULL por su `ON DELETE SET NULL`.
 
-`audit_log`, `domain_authorizations` y `dns_txt_verifications` no se tocan: van en #140 (RC-258).
+`audit_log`, `domain_authorizations` y `dns_txt_verifications` no se tocan: su plazo queda como riesgo aceptado
+(sección 9 de la política, RC-258).
+
+Además anonimiza el nombre y el correo de las cuentas canceladas (`users.cancelled_at`, RC-258) cuando vence su plazo
+(PLAZO_CANCELADAS). La huella de la contraseña y la semilla TOTP ya se borraron al cancelar (cirdan/fin_servicio.py).
+La cadena de la bitácora no se rompe: solo guarda el id del actor.
 
 Cada corrida deja en `audit_log` de cada empresa un evento `retention.purged` con cuántas filas borró por tabla, sin
 datos de las filas.
@@ -44,6 +49,14 @@ log = logging.getLogger('cirdan.retencion')
 PLAZO = "now() - interval '12 months'"
 LOTE = 500
 ACCION = 'retention.purged'
+# Plazo de las cuentas canceladas antes de anonimizar su nombre y correo. Propuesta de RC-258: el mismo que los
+# análisis (12 meses), mientras el equipo no decida otro [plazo] (sección 9 de la política).
+PLAZO_CANCELADAS = "now() - interval '12 months'"
+DOMINIO_ANONIMO = 'cancelada.invalid'
+ANONIMIZAR_SQL = (
+    "UPDATE users SET full_name = 'Cuenta cancelada', email = 'cancelada-' || id::text || '@" + DOMINIO_ANONIMO + "', "
+    "updated_at = now() WHERE organization_id = %(org)s AND cancelled_at < " + PLAZO_CANCELADAS + " "
+    "AND email::text NOT LIKE '%%@" + DOMINIO_ANONIMO + "'")
 
 # (tabla, condición sobre las filas de la tabla, con alias t). Cada DELETE borra hasta LOTE filas a la vez.
 PASOS = (
@@ -106,6 +119,7 @@ def purgar_empresa(conn, org, lote=LOTE):
                 if borradas < lote:
                     break
             conteos[tabla] = total
+        conteos['users_anonymized'] = conn.execute(ANONIMIZAR_SQL, {'org': str(org)}).rowcount
         # Como cirdan.db.audit() con actor 'system'. No se importa cirdan.db: pide CIRDAN_APP_PASSWORD al cargarse y
         # este servicio no la tiene, a propósito.
         conn.execute("INSERT INTO audit_log (organization_id, actor_type, action, details) VALUES (%s, 'system', %s, %s)",

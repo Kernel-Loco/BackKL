@@ -127,7 +127,7 @@ jobs:
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
           pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_bitacora.py pruebas/test_bitacora_descargas.py pruebas/test_inventario_activos.py pruebas/test_llaves_api.py
           pruebas/test_superadmin.py pruebas/test_operador.py pruebas/test_valkey_acl.py pruebas/test_fuentes_por_cliente.py
-          pruebas/test_respaldo.py pruebas/test_respaldo_cartas.py pruebas/test_retencion.py
+          pruebas/test_respaldo.py pruebas/test_respaldo_cartas.py pruebas/test_retencion.py pruebas/test_fin_servicio.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
       # porque no trae gitleaks. Aquí INTEGRACION_GITHUB=1 hace que falle si a la imagen le faltan.

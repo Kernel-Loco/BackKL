@@ -343,6 +343,24 @@ El servicio `retencion` borra cada día, empresa por empresa, lo que pasa de 12 
 
 Para una corrida a mano: `docker compose run --rm retencion python -m cirdan.retencion --una-vez`. Para apagarlo, quitar `retencion` de `COMPOSE_PROFILES` y `docker compose --profile retencion stop retencion`.
 
+## Fin del servicio y cancelación de cuentas (RC-258)
+
+Después de la migración 037. Los dos comandos corren en el contenedor de la API con un motivo, que queda en la bitácora de la empresa.
+
+**Terminar el servicio de una empresa** (al vencer o revocarse su última carta, al cerrar el curso o cuando lo pide por escrito; hay [30] días para hacerlo). Marca la empresa `cancelled`, pausa sus dominios, desactiva sus cuentas, revoca sus llaves, borra sus hallazgos, activos, scores, alertas y reportes, cierra sus sesiones y manda la confirmación a quien firmó sus cartas. Conserva las cartas, el TXT y la bitácora. Usa el rol de retención, así que se le pasa su contraseña sin escribirla en el historial:
+
+```bash
+docker compose exec -e CIRDAN_RETENTION_PASSWORD="$(sed -n 's/^CIRDAN_RETENTION_PASSWORD=//p' .env)" api   python -m cirdan.fin_servicio terminar <id de la empresa> --motivo "Cierre del curso"
+```
+
+Dice cuántas filas borró y si la confirmación salió (con `CORREO_API_KEY`). Si no salió, se manda a mano a quien firmó.
+
+**Cancelar una cuenta del portal** (cuando la persona lo pide): borra la huella de la contraseña, la semilla TOTP y sus passkeys, desactiva la cuenta, revoca sus llaves y cierra sus sesiones. El nombre y el correo se anonimizan a los 12 meses con el servicio `retencion`:
+
+```bash
+docker compose exec api python -m cirdan.fin_servicio cancelar-usuario <id del usuario> --organizacion <id de la empresa> --motivo "La persona pidió cancelar su cuenta"
+```
+
 ## Respaldo diario (RC-233, RC-28 y RC-339)
 
 Una vez al día, a las 09:00 UTC (03:00 en Monterrey), `lowtide-respaldo.timer` corre `db/respaldo/respaldar.sh`:
