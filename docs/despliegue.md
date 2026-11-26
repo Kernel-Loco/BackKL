@@ -44,6 +44,7 @@ empresas y con los respaldos.
    - La llave del MFA. En la VM va `TOTP_KEY_VAULT_SECRET_URL` y no va `TOTP_ENCRYPTION_KEY` (sección 'Llave del MFA en Azure Key Vault'). En el plan B es al revés (paso 3 de 'Carpeta y volumen'). Con las dos puestas, o con ninguna, la API no arranca.
    - La llave de las huellas de contraseña, con la misma regla: en la VM `PASSWORD_HASH_KEY_VAULT_SECRET_URL` y no `PASSWORD_HASH_ENCRYPTION_KEY`, y en el plan B al revés (sección 'Llave de las huellas de contraseña').
    - `CARTA_KEY_VAULT_SECRET_URL`, con versión, para la llave de las cartas. En producción no pongas `CARTA_ENCRYPTION_KEY`; la API pide la llave con la identidad administrada y el respaldo guarda una copia protegida con age.
+   - `VALKEY_ADMIN_PASSWORD`, la contraseña de `cirdan_admin` en Valkey, distinta de `VALKEY_PASSWORD` (sección 'Usuarios de Valkey'). Sin ella ningún `docker compose` de esa carpeta corre.
    - `PWNED_PASSWORDS_ENABLED` vacía, como viene en `.env.example`, o en `true`. Así `docker-compose.despliegue.yml` prende la revisión de contraseñas filtradas (RC-334). Con `false` queda apagada y solo se revisa la lista local.
 3. En Cloudflare:
    - Zero Trust: el túnel publica `lowtidesec.com` y `www.lowtidesec.com` hacia `http://portal:3000`.
@@ -62,6 +63,29 @@ docker compose logs demo-accounts
 ```
 
 La segunda línea tiene que decir 'DEMO_ACCOUNTS no es true: se apagan las cuentas de demo.' y luego 'cuenta de demo apagada:' con cada una de las 5 cuentas de `CUENTAS` de `cirdan/auth/demo.py`. El script les vuelve a poner el hash de relleno de la semilla y les quita el secreto TOTP en cada `up`. Así, aunque el volumen de la base ya trajera la contraseña y el MFA públicos (por ejemplo el de una PC de desarrollo), esas cuentas dejan de entrar (comentario 10420 de RC-91). Una cuenta inactiva o de una empresa que no está activa también sale 'apagada', porque el cambio va por su id. Si no hay fila con ese id en esa empresa (borrada o con otro id), sale 'cuenta de demo que no puede iniciar sesión, nada que apagar:' cuando ese correo no puede iniciar sesión, y 'cuenta de demo con otro id y sin la contraseña de demo, no se toca:' cuando puede, pero no con la contraseña pública. Si no llega a la base, o si ese correo todavía entra con la contraseña pública, el servicio termina con error y la API, que lo espera, no arranca. Lo mismo pasa si esa otra fila trae una huella cifrada (`lt1$`) y la llave de las huellas está en Key Vault, porque demo-accounts no llega a IMDS: el error dice 'No se revisó si entran con la contraseña pública' y nombra los correos. Se arregla con esa fila de la base: desactivarla (`is_active = false`) o cambiarle el correo a uno que no esté en `CUENTAS`, y volver a correr `up`.
+
+## Usuarios de Valkey (RC-292)
+
+Valkey ya no tiene una sola contraseña para todos. `docker-compose.yml` arranca `valkey-server` con tres usuarios:
+
+- `default` apagado: sin usuario y contraseña nadie entra.
+- `cirdan_api`, con `VALKEY_PASSWORD`. Es el de la API (`VALKEY_URL`) y del healthcheck. Solo corre los comandos de `cirdan/auth/sessions.py` y solo sobre sus prefijos de llave (`sess:`, `mfa:`, `login:` y los demás), también dentro de sus EVAL, sin pub/sub. CONFIG, MODULE, DEBUG, FLUSHALL, KEYS, SCAN y ACL le dan NOPERM. Un comando o un prefijo nuevo en `sessions.py` va también en la lista del compose: `pruebas/test_valkey_acl.py` falla si no.
+- `cirdan_admin`, con `VALKEY_ADMIN_PASSWORD`, con todos los comandos, para operar a mano y para las pruebas. Esa variable solo llega al contenedor de Valkey: ni la API, ni el programador, ni demo-accounts la reciben.
+
+Para entrar a mano: `docker exec -it cirdan-valkey sh -c 'valkey-cli --user cirdan_admin -a "$VALKEY_ADMIN_PASSWORD" --no-auth-warning'`. La contraseña la lee el shell del contenedor y no queda en la línea de comandos de la VM.
+
+### Pasar la VM y las PC de desarrollo (una vez)
+
+`${VALKEY_ADMIN_PASSWORD:?}` hace que cualquier `docker compose` de esa carpeta falle hasta que el `.env` la traiga, también `ps` y `logs`. El cambio del `command` recrea `cirdan-valkey`, y Valkey no guarda nada en disco (`--save ""`, `--appendonly no`): se pierden todas las sesiones, los MFA pendientes, los enlaces y restablecimientos sin usar y los bloqueos por intentos fallidos. Todos vuelven a entrar. Por eso va con el OK de quien administra la VM y fuera de una demo.
+
+1. (VM) Respaldo del `.env` como en los demás pasos (`install -m 600`), y agregar `VALKEY_ADMIN_PASSWORD` con un valor nuevo al azar, sin que pase por la línea de comandos ni por el historial: `umask 077; python3 -c "import secrets;print('VALKEY_ADMIN_PASSWORD=' + secrets.token_urlsafe(24))" >> .env` y `stat -c %a .env` da 600. Se guarda en el gestor de contraseñas ('LowTide vm-lowtide VALKEY_ADMIN_PASSWORD').
+2. (VM) `git pull` con `umask 022` y `docker compose --dry-run up -d --build`. Tiene que recrear `cirdan-valkey` y la API, y no `cirdan-pg16`. Si sale `cirdan-pg16`, no se sigue.
+3. (VM) `docker compose up -d --build`. `docker compose ps` da `healthy` en `cirdan-valkey` y en la API, y una cuenta real entra con contraseña y MFA.
+4. (VM) Comprobar: `docker exec cirdan-valkey sh -c 'valkey-cli --user cirdan_api -a "$VALKEY_PASSWORD" --no-auth-warning CONFIG GET maxmemory'` da NOPERM, `docker exec cirdan-valkey valkey-cli PING` da NOAUTH, y `docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' cirdan-api | grep -c '^VALKEY_ADMIN_PASSWORD='` da 0.
+
+En una PC de desarrollo es lo mismo en su `.env`, y `docker compose up -d` recrea `cirdan-valkey` (las sesiones locales se pierden). El plan B y el plan B de pruebas también la necesitan en su `.env` (paso 3 de 'Carpeta y volumen').
+
+Para regresar, se vuelve al commit anterior (`git checkout` del commit de antes) y se repite el paso 3: `--requirepass` con `VALKEY_PASSWORD` y `VALKEY_URL` sin usuario. `VALKEY_ADMIN_PASSWORD` puede quedarse en el `.env`, nadie la lee. Se vuelven a perder las sesiones.
 
 ## Lo que fija el archivo del despliegue
 
@@ -86,7 +110,7 @@ La API tiene IP fija en `default` (10.249.93.20). Por eso en la VM los comandos 
 
 - Desde la migración la llave no se escribe en el disco de la VM ni aparece en `docker inspect`, que sí muestra las variables de entorno: queda solo en la memoria del proceso. La migración no la cambia, así que los respaldos y snapshots de la VM de antes, los bloques del `.env` borrado y cualquier copia vieja del `.env` la siguen trayendo mientras no se rote. La copia del gestor de contraseñas también.
 - La API pide el token al servicio de metadatos de Azure (169.254.169.254), sin proxy. Solo manda el token a una URL `https://<bóveda>.vault.azure.net/secrets/<nombre>/<versión>` y no sigue redirecciones.
-- La URL lleva la versión del secreto, y la API no acepta una sin versión. Así cargar otro valor en la bóveda, por error o pensando que es una rotación, no cambia la llave que lee la API en el siguiente reinicio: hace falta editar el `.env`. La API solo revisa que la llave mida 32 bytes, no que descifre los secretos de la base. Con otra llave arranca `healthy` y nadie pasa la verificación en dos pasos.
+- La URL lleva la versión del secreto, y la API no acepta una sin versión. Así cargar otro valor en la bóveda, por error o pensando que es una rotación, no cambia la llave que lee la API en el siguiente reinicio: hace falta editar el `.env`. La API solo revisa que la llave mida 32 bytes, no que descifre los secretos de la base. Con otra llave arranca `healthy` y nadie pasa la verificación en dos pasos: `/mfa/verify` responde 401 con 'Habla con el Admin.', cuenta un fallo y deja `auth.mfa_failed` con `reason: key` en la bitácora (RC-295).
 - Si Key Vault o la identidad fallan, la API no arranca y `docker compose logs api` dice por qué (HTTP 403 es que falta el rol y HTTP 404, que el nombre o la versión de la URL no existen, y ese no se reintenta). Ningún mensaje lleva el token ni la llave. Cada lectura reintenta hasta 90 s en total, para aguantar un IMDS que se está actualizando, y el HEALTHCHECK del Dockerfile le da 200 s antes de contar fallos, porque con la llave de las huellas también en Key Vault (RC-330) son dos lecturas seguidas, cada una con sus 90 s. Si se rinde, uvicorn sale y `restart: unless-stopped` la vuelve a levantar.
 - Lo que no cambia: quien sea root en la VM puede pedir el mismo token. Un contenedor que no sea la API no puede, por la regla de 'Solo la API llega a IMDS'. Lo que se gana es que cada lectura queda en el registro de la bóveda y que quitar el rol corta el acceso.
 - Costo: Key Vault Standard cobra 0.03 USD por cada 10 mil operaciones, sin cuota por bóveda. Por cada llave en Key Vault la API hace dos peticiones por arranque, una a la identidad y otra a la bóveda, y solo la de la bóveda cuenta como operación. Con la del MFA y la de las huellas son cuatro peticiones y dos operaciones.
@@ -174,7 +198,39 @@ Los pasos marcados (Azure) van en la terminal de quien administra Azure y los ma
 10. (VM) `docker compose --dry-run up -d --build` para ver qué contenedores recrea y luego `docker compose up -d --build`, que recrea la API con el `.env` nuevo.
 11. (VM) `docker compose ps api` dice `healthy`. Además, `docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' cirdan-api | grep -c '^TOTP_ENCRYPTION_KEY=.'` da 0, `sudo iptables -S DOCKER-USER` sigue mostrando la regla de IMDS y una cuenta real entra con contraseña y MFA.
 
-Para regresar, se pone otra vez `TOTP_ENCRYPTION_KEY` en el `.env` con la copia del gestor de contraseñas, se borra `TOTP_KEY_VAULT_SECRET_URL` y se repite el paso 10. La copia del gestor se queda siempre: el plan B la usa y, sin ella o sin la bóveda, los secretos TOTP de la base ya no se descifran. Rotar la llave pide volver a cifrar los secretos TOTP de todas las cuentas, y no hay herramienta para eso: una versión nueva en la bóveda no se usa hasta que alguien cambie la URL del `.env`.
+Para regresar, se pone otra vez `TOTP_ENCRYPTION_KEY` en el `.env` con la copia del gestor de contraseñas, se borra `TOTP_KEY_VAULT_SECRET_URL` y se repite el paso 10. La copia del gestor se queda siempre: el plan B la usa y, sin ella o sin la bóveda, los secretos TOTP de la base ya no se descifran. Una versión nueva en la bóveda no se usa hasta que alguien cambie la URL del `.env`. Para rotar la llave, los pasos de abajo.
+
+### Rotar la llave del MFA (RC-295)
+
+Se rota si la llave se filtra o cuando se decida, siempre con el OK de quien administra la VM. Nadie vuelve a dar de alta su app autenticadora. Mientras se rota, la llave de antes va en `TOTP_PREVIOUS_KEY_VAULT_SECRET_URL` (en la VM) o en `TOTP_PREVIOUS_ENCRYPTION_KEY` (desarrollo y plan B), una de las dos. El secreto guardado no lleva versión: la API lo prueba con la actual y, si no abre, con la anterior. El que abre con la anterior se guarda cifrado con la actual en el mismo UPDATE que gasta el primer código bueno de esa cuenta, en `/mfa/verify` o al registrar una passkey. La API no arranca si la anterior es la misma llave que la actual, aunque una venga del `.env` y la otra de Key Vault, ni con las dos formas de la anterior puestas. Un secreto que no abre con ninguna da 401 con 'Habla con el Admin.' (400 al registrar una passkey, para que el portal no cierre la sesión), cuenta como fallo y deja `auth.mfa_failed` (o `auth.passkey_registration_failed`) con `reason: key` en la bitácora. Nunca 500. Un QR pedido antes de rotar sigue sirviendo con la anterior y se guarda con la actual.
+
+Antes del paso 1 se cuenta una vez como en el paso 4 (sin la anterior puesta) y se anota el total de 'con ninguna': los pasos 4 y 5 lo comparan.
+
+1. (Azure) Generar la llave nueva y guardarla en el gestor de contraseñas ('LowTide vm-lowtide TOTP_ENCRYPTION_KEY v2') como en el paso 3 de 'Armarla y pasar la VM', pero como un secreto nuevo, `totp-encryption-key-v2`, y darle a la identidad de la VM 'Key Vault Secrets User' sobre ese secreto como en el paso 7. Tiene que ser otra que la de las huellas y la de las cartas. El secreto de antes no se borra.
+2. (VM) En el `.env`: `TOTP_PREVIOUS_KEY_VAULT_SECRET_URL=<la URL con versión que hoy está en TOTP_KEY_VAULT_SECRET_URL>` y `TOTP_KEY_VAULT_SECRET_URL=<el $r.id del secreto nuevo>`.
+3. (VM) Reconstruir: `docker compose --dry-run up -d --build api` (sin recrear `cirdan-pg16` ni `cirdan-valkey`) y `docker compose up -d --build api`. `docker compose ps api` dice `healthy`. Un 403 en `docker compose logs api` es que falta el rol del paso 1.
+4. (VM) Contar, sin cambiar nada, cuántos secretos siguen con la anterior. postgres da las empresas con MFA, porque la API entra con RLS y no las puede listar, y la API prueba cada secreto con las dos llaves:
+
+   ```bash
+   set -o pipefail; docker exec cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 -Atc "SELECT DISTINCT organization_id FROM users WHERE totp_secret_enc IS NOT NULL" | docker compose exec -T api python -m cirdan.auth.contar_totp; echo "salida $?"
+   ```
+
+   Imprime por empresa y en total cuántos abren con la actual, cuántos solo con la anterior, cuántos con ninguna y cuántos 'sin acceso'. Solo vale con `salida 0`: si el psql falla o no da ninguna empresa, el comando termina con error y no hay conteo. Solo lee: no bloquea filas ni escribe en la bitácora, y la salida no lleva secretos, correos ni ids de usuario. Cada cuenta que entra con su código pasa de 'con la anterior' a 'con la actual'. 'sin acceso' son cuentas inactivas o de una empresa fuera de trial y active: no entran, su secreto no se vuelve a cifrar y no cuentan para el paso 5. Justo después del paso 3, 'con ninguna' tiene que dar lo mismo que en el conteo de antes del paso 1. Si subió, la anterior no es la llave de antes (otra URL u otra versión): se corrige el paso 2 y se cuenta otra vez, sin seguir al paso 5. Las cuentas que no entran se quedan con la anterior: se les pide que entren una vez o se acepta que, al quitar la anterior, haya que restablecerles el MFA como se dice abajo.
+5. (VM) Con `0 con la anterior` en el total y 'con ninguna' igual que en el conteo de antes del paso 1, quitar `TOTP_PREVIOUS_KEY_VAULT_SECRET_URL` del `.env` y reconstruir como en el paso 3. Después se puede quitar el rol de la identidad sobre el secreto de antes. El secreto de antes y su copia del gestor se quedan al menos 33 días después de este paso, porque los respaldos de antes de rotar ('Respaldo diario') traen secretos que solo abren con esa llave. Para restaurar uno, se vuelve a poner la anterior como en el paso 2, con su rol.
+
+En desarrollo y en el plan B es lo mismo con `TOTP_PREVIOUS_ENCRYPTION_KEY` y `TOTP_ENCRYPTION_KEY`, sin Key Vault, y `docker compose exec -T api` como en la VM. Con `DEMO_ACCOUNTS=true` las cuentas de demo se vuelven a cifrar con la actual en cada arranque.
+
+#### Restablecer el MFA de una cuenta
+
+Una cuenta cuyo secreto no abre con ninguna llave (la llave se perdió, o se quitó la anterior con cuentas pendientes o 'sin acceso' que después se activaron) recibe 'Habla con el Admin.' en cada intento. El Admin de su empresa no lo puede arreglar desde el portal: avisa a quien administra la VM, que con el correo de la cuenta saca sus ids y la restablece. El comando solo lo hace si de verdad ninguna llave abre ese secreto, deja `auth.mfa_reset` en la bitácora y no toca las passkeys:
+
+```bash
+docker exec cirdan-pg16 psql -U postgres -d cirdan -Atc "SELECT organization_id, id FROM users WHERE email = '<correo>'"
+docker compose exec -T api python -m cirdan.auth.restablecer_mfa <organization_id> <id>
+docker compose exec -T api python -m cirdan.auth.restablecer_mfa <organization_id> <id> --si
+```
+
+El primero solo revisa y dice si la cuenta se puede restablecer. El segundo, con `--si`, borra su secreto TOTP. Después la cuenta activa otra vez su app autenticadora: un Admin en el mismo inicio de sesión, un operador por fuera como en su alta y las demás en su perfil. Si la cuenta llegó a 5 intentos, su correo sigue bloqueado hasta 15 minutos.
 
 ## Llave de las huellas de contraseña (RC-330)
 
@@ -411,4 +467,4 @@ En cada ventana de prueba:
 
 ## Pruebas
 
-`python -m unittest pruebas/test_despliegue.py` arma la config con valores falsos y revisa todo lo de arriba, sin crear nada. El CI la corre con las pruebas sin base ni red. `pruebas/test_llave_totp.py` revisa la lectura de Key Vault con una identidad y una bóveda falsas, sin red: la URL con versión, el token, los reintentos y el plazo de IMDS y de la bóveda, que el token no quede en el traceback, una sola lectura por proceso aunque lleguen muchas peticiones juntas y que la API no arranque sin llave. `pruebas/test_despliegue.py` también revisa que la IP de la API en la regla de IMDS sea la del compose y que el HEALTHCHECK le dé más tiempo que ese plazo. `pruebas/test_demo_cuentas.py` revisa que el script de demo apague las cuentas y que no termine bien sin llave del MFA, y `pruebas/test_bloqueo_ip.py` el contador por /64, las dos dentro del contenedor.
+`python -m unittest pruebas/test_despliegue.py` arma la config con valores falsos y revisa todo lo de arriba, sin crear nada. El CI la corre con las pruebas sin base ni red. `pruebas/test_llave_totp.py` revisa la lectura de Key Vault con una identidad y una bóveda falsas, sin red: la URL con versión, el token, los reintentos y el plazo de IMDS y de la bóveda, que el token no quede en el traceback, una sola lectura por proceso aunque lleguen muchas peticiones juntas y que la API no arranque sin llave. `pruebas/test_despliegue.py` también revisa que la IP de la API en la regla de IMDS sea la del compose y que el HEALTHCHECK le dé más tiempo que ese plazo. `pruebas/test_rotar_totp.py` revisa la rotación de la llave del MFA sin red: que la anterior abra y el secreto se vuelva a cifrar con la actual tras un código bueno, el 401 con 'Habla con el Admin.' y su evento cuando ninguna abre, las variables, el conteo de `contar_totp` (con 'sin acceso' y error con la entrada vacía) y `restablecer_mfa`, que solo restablece un secreto que no abre con ninguna. `pruebas/test_demo_cuentas.py` revisa que el script de demo apague las cuentas y que no termine bien sin llave del MFA, y `pruebas/test_bloqueo_ip.py` el contador por /64, las dos dentro del contenedor.

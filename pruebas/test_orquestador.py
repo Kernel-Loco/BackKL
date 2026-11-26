@@ -31,7 +31,7 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from cirdan import orquestador
+from cirdan import orquestador, planes
 from cirdan.api import v1 as api_v1
 from cirdan.config import config
 from cirdan.db import DSN
@@ -154,13 +154,18 @@ class Orquestador(unittest.TestCase):
         self.tx.__enter__()
         self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
         renovar_carta(self.conn)
+        # Sin el tope de escaneos a mano (RC-297): aquí se piden varios del mismo dominio en una prueba. El tope y
+        # su lugar en solicitar() los prueba pruebas/test_planes.py.
+        sin_tope = mock.patch.object(planes, 'check_plan_limits', return_value=None)
+        sin_tope.start()
+        self.addCleanup(sin_tope.stop)
 
     def tearDown(self):
         self.tx.__exit__(None, None, None)
         self.conn.close()
 
-    def solicitar(self, fqdn, dns, conn=None):
-        return orquestador.solicitar(ACME, fqdn, consultar=dns, conn=conn or self.conn)
+    def solicitar(self, fqdn, dns, conn=None, trigger='on_demand'):
+        return orquestador.solicitar(ACME, fqdn, consultar=dns, conn=conn or self.conn, trigger=trigger)
 
     def uno(self, sql, *params):
         return self.conn.execute(sql, params).fetchone()
@@ -1354,7 +1359,8 @@ class Orquestador(unittest.TestCase):
             antes.append(len(red.de('api.certspotter.com')))
             red.certspotter_caido = False
         self.exige_cupo('ct_logs', 2 * crtsh.MAX_CONSULTAS)
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
                 mock.patch.object(transporte, 'descargar', descargar), \
                 mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
@@ -1678,7 +1684,8 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.cupo('ct_logs')[1], usadas)  # la reserva que no cupo no dejó nada
 
     def test_3n2_si_el_cupo_se_acaba_entre_reintentos_la_fuente_queda_fallida(self):
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         limite, usadas, _ = self.cupo('ct_logs')
         self.assertIsNotNone(limite)
         if limite - usadas < 0:  # el ajuste registra lo gastado de más: lo usado hoy puede pasar del límite
@@ -1700,7 +1707,8 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(self.cupo('ct_logs')[1], usadas + FALLA.consultas)  # lo gastado de más se registra igual
 
     def test_3o_la_reserva_y_el_ajuste_dejan_en_daily_used_lo_que_se_gasto(self):
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         reservadas = crtsh.MAX_CONSULTAS
         _, usadas = self.exige_cupo('ct_logs', 2 + reservadas)  # 2 intentos de 1 consulta y la reserva del tercero
         durante = []

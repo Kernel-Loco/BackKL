@@ -21,6 +21,7 @@ from fastapi import HTTPException, Response
 from cirdan import correo
 from cirdan.auth import routes, sessions
 from cirdan.auth.demo import HASH_DE_RELLENO
+from pruebas import valkey_admin
 
 ENLACE = 'http://portal.prueba/forgot-password/reset#t=TOKEN-DE-PRUEBA-que-no-va-al-log'
 DESTINO = 'alguien@ejemplo.com'
@@ -91,7 +92,7 @@ class TokensEnValkey(unittest.TestCase):
         datos = self.datos()
         token = sessions.create_reset(datos)
         self.assertGreaterEqual(len(token), 43)
-        valkey = sessions._valkey()
+        valkey = valkey_admin.cliente()
         llave = 'pwreset:' + sessions._digest(token)
         self.assertTrue(valkey.exists(llave))
         self.assertIsNone(valkey.get('pwreset:' + token))
@@ -124,7 +125,7 @@ class TokensEnValkey(unittest.TestCase):
         sessions.activate_reset(datos['user_id'], viejo)
         nuevo = sessions.create_reset(datos)
         # El nuevo todavía no salió: el anterior sigue vivo (H4 de la revisión).
-        self.assertTrue(sessions._valkey().exists('pwreset:' + sessions._digest(viejo)))
+        self.assertTrue(valkey_admin.cliente().exists('pwreset:' + sessions._digest(viejo)))
         sessions.activate_reset(datos['user_id'], nuevo)
         self.assertIsNone(sessions.take_reset(viejo))
         self.assertEqual(sessions.take_reset(nuevo), datos)
@@ -148,12 +149,12 @@ class TokensEnValkey(unittest.TestCase):
         nuevo = sessions.create_reset(datos)
         self.assertEqual(sessions.take_reset(nuevo), datos)
         sessions.activate_reset(datos['user_id'], nuevo)
-        self.assertTrue(sessions._valkey().exists('pwreset:' + sessions._digest(viejo)))
+        self.assertTrue(valkey_admin.cliente().exists('pwreset:' + sessions._digest(viejo)))
         sessions.delete_reset(viejo)
 
     def test_8_tres_por_correo_y_veinte_por_ip_en_una_hora(self):
         ip = '203.0.113.%d' % (uuid.uuid4().int % 250)
-        valkey = sessions._valkey()
+        valkey = valkey_admin.cliente()
         valkey.delete('pwreset:req:ip:' + ip)
         email = _al_azar() + '@ejemplo.com'
         try:
@@ -175,12 +176,12 @@ class TokensEnValkey(unittest.TestCase):
             self.assertEqual(sessions.reserve_link_send(80, cuenta, dia, tipo='reset'), -1)
             self.assertEqual(sessions.reserve_link_send(80, cuenta, dia), -1)
             self.assertEqual(sessions.reserve_link_send(80, cuenta, dia, tipo='aviso'), tope + 1)
-            self.assertEqual(sessions._valkey().get('link:day:' + dia), str(tope + 1))   # un solo cupo de Resend
+            self.assertEqual(valkey_admin.cliente().get('link:day:' + dia), str(tope + 1))   # un solo cupo de Resend
             with self.assertRaises(ValueError):
                 sessions.reserve_link_send(80, cuenta, dia, tipo='otro')
         finally:
-            for llave in sessions._valkey().scan_iter('link:day:' + dia + '*'):
-                sessions._valkey().delete(llave)
+            for llave in valkey_admin.cliente().scan_iter('link:day:' + dia + '*'):
+                valkey_admin.cliente().delete(llave)
 
     def test_9b_el_aviso_sale_con_el_dia_agotado_hasta_la_reserva(self):
         dia = 'prueba-' + _al_azar()
@@ -192,8 +193,8 @@ class TokensEnValkey(unittest.TestCase):
             self.assertEqual(avisos, list(range(2, sessions.AVISO_RESERVA + 2)) + [0])
             self.assertEqual(sessions.reserve_link_send(0, uuid.uuid4(), dia, tipo='aviso'), 0)   # tope 0: nada sale
         finally:
-            for llave in sessions._valkey().scan_iter('link:day:' + dia + '*'):
-                sessions._valkey().delete(llave)
+            for llave in valkey_admin.cliente().scan_iter('link:day:' + dia + '*'):
+                valkey_admin.cliente().delete(llave)
 
 
 class Rutas(unittest.TestCase):
