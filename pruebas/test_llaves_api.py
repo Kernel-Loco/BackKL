@@ -386,7 +386,8 @@ class LlavesApi(unittest.TestCase):
         self.assertGreaterEqual(len(escrituras), 5)
         for metodo, ruta in escrituras:
             url = (ruta.replace('{fqdn}', 'beta-corp.mx').replace('{key_id}', llave_id)
-                   .replace('{request_id}', '00000000-0000-4000-8000-000000000000').replace('{code}', 'ct_logs'))
+                   .replace('{request_id}', '00000000-0000-4000-8000-000000000000').replace('{code}', 'ct_logs')
+                   .replace('{finding_id}', HALLAZGO_ACME_DEMO))
             self.assertNotIn('{', url, 'ruta con un parámetro que esta prueba no conoce')
             code, _ = cliente.request(metodo, url, {}, encabezados)
             self.assertEqual(code, 401, '%s %s' % (metodo, ruta))

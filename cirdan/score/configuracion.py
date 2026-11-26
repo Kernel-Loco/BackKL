@@ -77,8 +77,10 @@ def cortes_del_juego(conn, rule_set_id):
     return cortes_de_fila(fila)
 
 
-def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False, saltados=None):
-    """Inserta un snapshot rules_change por dominio con score previo, sin modificar históricos. Devuelve cuántos.
+def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False, saltados=None, dominio=None,
+                      motivo='rules_change'):
+    """Inserta un snapshot `motivo` (rules_change por omisión) por dominio con score previo, sin modificar históricos.
+    Devuelve cuántos. Con `dominio` recalcula solo ese: el triage de un hallazgo (RC-133) lo usa con 'correction'.
 
     El piso y la banda salen de los cortes del juego `rule_set_id` (RC-237), así un cambio de cortes también cambia
     el número. Con `solo_otro_juego` deja fuera los dominios cuyo último snapshot ya usa `rule_set_id` (RC-310).
@@ -88,9 +90,9 @@ def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False, salt
     anteriores = conn.execute(
         'SELECT DISTINCT ON (domain_id) domain_id::text, scan_id::text, id::text AS score_id, '
         'rule_set_id::text, partial_coverage, method, model_version, model_fallback_reason '
-        'FROM domain_scores WHERE organization_id = %s '
+        'FROM domain_scores WHERE organization_id = %s AND (%s::uuid IS NULL OR domain_id = %s::uuid) '
         'ORDER BY domain_id, computed_at DESC, created_at DESC, id DESC',
-        (org,),
+        (org, dominio, dominio),
     ).fetchall()
     if solo_otro_juego:
         anteriores = [anterior for anterior in anteriores if anterior['rule_set_id'] != str(rule_set_id)]
@@ -140,9 +142,9 @@ def recalcular_scores(conn, org, rule_set_id, pesos, solo_otro_juego=False, salt
             'INSERT INTO domain_scores (organization_id, domain_id, scan_id, rule_set_id, score, category_scores, '
             'reason, method, model_version, model_fallback_reason, partial_coverage, computed_at) '
             # clock_timestamp(), como el score del escaneo: el orden de computed_at es el del candado de pesos.
-            "VALUES (%s, %s, %s, %s, %s, %s, 'rules_change', %s, %s, %s, %s, clock_timestamp()) RETURNING id::text",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp()) RETURNING id::text",
             (org, anterior['domain_id'], anterior['scan_id'], rule_set_id, calculo['score'],
-             Jsonb(calculo['category_scores']), anterior['method'], anterior['model_version'],
+             Jsonb(calculo['category_scores']), motivo, anterior['method'], anterior['model_version'],
              anterior['model_fallback_reason'], anterior['partial_coverage']),
         ).fetchone()['id']
 
