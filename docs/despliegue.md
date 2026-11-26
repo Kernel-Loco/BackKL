@@ -307,6 +307,17 @@ El servicio `programador` vuelve a escanear cada dominio autorizado según el pl
 4. (VM) `docker compose --dry-run up -d --build` (sin recrear `cirdan-pg16`) y `docker compose up -d --build`. `docker compose ps programador` dice `running` y `docker compose logs programador` dice 'escaneo programado' con cada escaneo que pidió, sin errores.
 5. Para apagarlo: quitar `COMPOSE_PROFILES` del `.env` y `docker compose --profile programador stop programador`. Tiene 60 s para cerrar: los escaneos que dejó corriendo quedan en 'failed' y su turno queda a una hora, no al siguiente intervalo del plan, así que salen en cuanto se vuelva a encender.
 
+## Alertas a Microsoft Teams (RC-114)
+
+Un hallazgo crítico nuevo o un score que pasa el umbral llega como tarjeta al canal de Teams del equipo en menos de 60 s (`deliveries.latency_ms`). No hay servicio aparte: la API y el programador despachan al cerrar cada fuente y el score, y reintentan a los 10 s, 1 min, 5 min y 30 min. La URL se cifra con `SOURCE_KEYS_ENCRYPTION_KEY`, que la VM ya tiene (RC-54).
+
+1. **Comprobar primero que una cuenta @tec.mx puede crear el flujo.** En Teams, en el canal: `...` > Workflows > "Publicar en un canal cuando se recibe una solicitud de webhook" (en inglés, "Post to a channel when a webhook request is received"). Si la cuenta no puede, usar la de otro integrante o un equipo propio de Teams.
+2. Copiar la URL que da el flujo (empieza con `https://` y termina con `sig=...`). Es un secreto: quien la tenga publica en el canal. No va en el repo, en un ticket ni en un chat.
+3. Como Admin de la empresa, `PUT /api/v1/integrations/teams` con `{"url": "<la URL>"}` y luego `POST /api/v1/integrations/teams/test`: la tarjeta de prueba debe llegar al canal.
+4. Si una entrega quedó a medias porque el proceso se reinició, `docker compose exec api python -m cirdan.alertas <id de la empresa>` la reintenta.
+
+**Guion para el ensayo final (#54, S16):** con el canal conectado, escanear olmardo.com. El token falso del repo de GitHub (fila 8 de `docs/hallazgos_esperados.md`) es crítico: si el escaneo lo abre o lo reabre, la tarjeta llega al canal. Mostrar `latency_ms` con `SELECT status, attempt, latency_ms FROM deliveries ORDER BY created_at DESC LIMIT 3` como postgres. Si el hallazgo ya estaba abierto, se reabre marcándolo como resuelto en Hallazgos (RC-133) antes de escanear.
+
 ## Respaldo diario (RC-233, RC-28 y RC-339)
 
 Una vez al día, a las 09:00 UTC (03:00 en Monterrey), `lowtide-respaldo.timer` corre `db/respaldo/respaldar.sh`:

@@ -49,6 +49,19 @@ Comparación y exportaciones (#24, RC-57). Las reglas del CSV de este párrafo t
 
 La simulación recibe `{"action_ids": ["spf_missing", "secret_in_public_repo"]}`. `action_ids` usa los ids de acciones devueltos por el plan, en este momento códigos de regla. La respuesta incluye score y banda antes/después, reducción y notas por categoría. Las acciones desconocidas o sin hallazgos abiertos responden 422. La simulación no escribe hallazgos, scores ni bitácora. En el plan y en la simulación, el score, la banda y las notas 'antes' son las del último score guardado, las mismas de `/score`. Si el dominio no tiene score guardado, salen del motor. El 'después' se recalcula con el motor (#31) y la reducción es lo que baja el motor al resolver esas acciones, así que nunca es negativa. Si el score guardado no cuadra con los hallazgos de ese momento (un escaneo en curso o caído), 'antes' menos la reducción puede no dar 'después'.
 
+## Alertas a Microsoft Teams (#65, RC-114)
+
+Solo el Admin, con la sesión del portal. La URL del flujo lleva su firma (`sig`): se guarda cifrada y ninguna respuesta la devuelve, solo el host.
+
+| Método y ruta | Qué hace |
+|---|---|
+| `GET /api/v1/integrations/teams` | `configured`, `enabled`, `host`, `updated_at` y `last_delivery` (`status`, `attempt`, `latency_ms`, `delivered_at`, `last_error`) |
+| `PUT /api/v1/integrations/teams` | Recibe `url` (la del flujo de Workflows: https, de `*.logic.azure.com` o `*.powerplatform.com`, con `sig`) y `enabled` opcional. Crea la integración o reemplaza la URL de la que ya hay. 422 con una URL de otro host, http, con usuario o puerto, o sin firma. Evento `integration.teams_set` con el host |
+| `DELETE /api/v1/integrations/teams` | La apaga y borra la URL guardada. 204, o 404 si no hay. Evento `integration.teams_removed` |
+| `POST /api/v1/integrations/teams/test` | Manda una tarjeta de prueba al canal y responde `delivered` y `status` |
+
+Qué llega al canal: una tarjeta adaptable por cada hallazgo crítico que un escaneo abre o reabre (`finding.created`) y cuando el score de un dominio llega al umbral de la empresa y el anterior estaba abajo (`score.above_threshold`). La alerta y su entrega se guardan en la misma transacción que el hallazgo o el score (outbox), y cada intento queda en `deliveries` con `latency_ms`. La tarjeta no lleva correos: se cambian por `[correo]`.
+
 ## Llaves de API (#87)
 
 Para que un sistema de la propia empresa lea la API sin la sesión del portal. Es solo para los sistemas de la propia empresa: no se da a un integrador ni a otra empresa hasta que la carta tenga dónde nombrarlo ([`politica_uso_etico.md`](politica_uso_etico.md), sección 6, punto 1). Las crea, lista y revoca el Administrador, con su sesión.
