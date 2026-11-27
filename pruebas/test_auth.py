@@ -119,6 +119,20 @@ class Login(unittest.TestCase):
         replay = Client()
         self.assertEqual(replay.get(AUTH + '/me', headers={'Cookie': 'lt_session=' + stolen})[0], 401)
 
+    def test_5b_volver_a_entrar_cierra_la_sesion_anterior_del_navegador(self):
+        # V7.2.4 de ASVS (#75, RC-136): el navegador manda su cookie vieja al volver a entrar, y esa sesión se cierra en
+        # el servidor, no solo se reemplaza la cookie.
+        client = sesion.login(JORDAN)
+        vieja = client.cookie().value
+        codigo, cuerpo = sesion.post_login(client, JORDAN, PASSWORD)
+        self.assertEqual(codigo, 200, cuerpo)
+        codigo, _ = client.post(AUTH + '/mfa/verify', {'mfa_token': cuerpo['mfa_token'], 'code': sesion.next_code(JORDAN)})
+        self.assertEqual(codigo, 200)
+        nueva = client.cookie().value
+        self.assertNotEqual(nueva, vieja)
+        self.assertEqual(Client().get(AUTH + '/me', headers={'Cookie': 'lt_session=' + vieja})[0], 401)
+        self.assertEqual(client.get(AUTH + '/me')[0], 200)
+
     def test_6_cinco_fallos_bloquean_el_correo(self):
         client = Client()
         email = 'bloqueo-%s@acme-demo.mx' % secrets.token_hex(4)

@@ -262,6 +262,10 @@ class AltaDeDominio(unittest.TestCase):
         parche = mock.patch.object(deps.sessions, 'get', lambda token: datos if token == 'CIRDAN_FAKE_sesion' else None)
         parche.start()
         self.addCleanup(parche.stop)
+        # La cuenta inventada no está en la base: current_session la relee en cada petición (V7.4.2, #75).
+        vigente = mock.patch.object(deps, 'cuenta_vigente', lambda session: True)
+        vigente.start()
+        self.addCleanup(vigente.stop)
         return [('cookie', '%s=CIRDAN_FAKE_sesion' % deps.COOKIE)]
 
     def test_1_una_carta_de_mas_de_64_kb_y_menos_de_5_mb_se_registra(self):

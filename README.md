@@ -110,7 +110,7 @@ El 19 oct 2026 pasaron las 16 (8 de aislamiento y 8 del dominio de prueba) con l
 
 ## Inicio de sesión (#25)
 
-Correo, contraseña y captcha, y después el código de 6 dígitos de una app autenticadora (TOTP). Al verificar el código, la API entrega una cookie `lt_session` (httpOnly, SameSite=Lax, Secure en producción con `COOKIE_SECURE=true`) que solo lleva un token aleatorio. La sesión vive en Valkey, guardada bajo el SHA-256 del token: expira a los 15 min sin actividad y a las 8 h aunque haya actividad, y al cerrar sesión se borra del servidor.
+Correo, contraseña y captcha, y después el código de 6 dígitos de una app autenticadora (TOTP). Al verificar el código, la API entrega una cookie `lt_session` (httpOnly, SameSite=Lax, Secure en producción con `COOKIE_SECURE=true`) que solo lleva un token aleatorio. La sesión vive en Valkey, guardada bajo el SHA-256 del token: expira a los 15 min sin actividad y a las 8 h aunque haya actividad, y al cerrar sesión se borra del servidor. Al volver a entrar, la sesión de la cookie que trae el navegador se borra antes de crear la nueva (V7.2.4 de ASVS). En cada petición con cookie la API relee la cuenta (`cuenta_vigente` en `cirdan/auth/deps.py`): si ya no está activa, se borró o, en su propia empresa, cambió de rol, la sesión se cierra con 401 aunque el cambio se haya hecho directo en la base (V7.4.2 de ASVS, [`docs/asvs_nivel1.md`](docs/asvs_nivel1.md)).
 
 | Endpoint | Qué hace |
 |---|---|

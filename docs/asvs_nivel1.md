@@ -18,6 +18,9 @@ porqué. La versión pública, sin rutas ni detalles de las fallas abiertas, est
   - **ZAP**: el escaneo activo del 22 nov (#51), en [`pruebas_zap.md`](pruebas_zap.md) y `zap/reporte_zap.html`;
   - **Código** o **configuración**: con su ruta;
   - **En vivo**: comprobado contra `lowtidesec.com` el 23 nov, con el comando a la vista.
+- **Actualización del 27 nov 2026:** V7.4.2 pasa a «Cumple» con la baja y el cambio de rol de RC-259 (BackKL PR 309) y la
+  cuenta releída en cada petición, y V7.2.4 con la sesión anterior cerrada al entrar. Las dos llegan con esta tarjeta.
+  V12.1.1 se volvió a probar en vivo ese día y sigue igual. La página pública responde en `https://lowtidesec.com`.
 - **Revisó:** GermanMZtec. Revisa los estados Ernesto en el PR.
 
 ## Resumen
@@ -30,7 +33,7 @@ porqué. La versión pública, sin rutas ni detalles de las fallas abiertas, est
 | V4 API y servicios web | 2 | 1 | 0 | 1 |
 | V5 Manejo de archivos | 4 | 4 | 0 | 0 |
 | V6 Autenticación | 13 | 13 | 0 | 0 |
-| V7 Manejo de sesiones | 6 | 4 | 2 | 0 |
+| V7 Manejo de sesiones | 6 | 6 | 0 | 0 |
 | V8 Autorización | 4 | 4 | 0 | 0 |
 | V9 Tokens autocontenidos | 4 | 0 | 0 | 4 |
 | V10 OAuth y OIDC | 5 | 0 | 0 | 5 |
@@ -41,9 +44,9 @@ porqué. La versión pública, sin rutas ni detalles de las fallas abiertas, est
 | V15 Código y arquitectura seguros | 3 | 3 | 0 | 0 |
 | V16 Bitácora y errores | 0 | 0 | 0 | 0 |
 | V17 WebRTC | 0 | 0 | 0 | 0 |
-| **Total** | **70** | **55** | **4** | **11** |
+| **Total** | **70** | **57** | **2** | **11** |
 
-Ningún «No cumple» deja leer datos de otra empresa ni entrar sin contraseña. Los cuatro, con su arreglo, están en
+Ningún «No cumple» deja leer datos de otra empresa ni entrar sin contraseña. Los dos, con su arreglo, están en
 [Pendientes](#pendientes).
 
 ## Requisitos
@@ -92,9 +95,9 @@ Ningún «No cumple» deja leer datos de otra empresa ni entrar sin contraseña.
 | V7.2.1 | La sesión se verifica en un servicio confiable del servidor | Cumple | Código: cada petición busca la sesión en Valkey (`current_session` en `cirdan/auth/deps.py`); el portal no decide nada por su cuenta | — | Cada sesión se revisa en el servidor en cada petición. |
 | V7.2.2 | Tokens de sesión dinámicos, no secretos fijos | Cumple | Código: un token nuevo por inicio de sesión (`sessions.create` en `cirdan/auth/sessions.py`). Las llaves de API son aparte, para sistemas, y se pueden revocar (`cirdan/auth/api_keys.py`) | — | Cada inicio de sesión crea un token nuevo. |
 | V7.2.3 | Tokens de referencia únicos, de un CSPRNG y con 128 bits o más | Cumple | Código: `secrets.token_urlsafe(32)`, 256 bits; Valkey guarda solo su SHA-256 (`cirdan/auth/sessions.py`) | — | El token de sesión tiene 256 bits al azar y no se guarda en claro. |
-| V7.2.4 | Token nuevo al autenticarse, y se termina el anterior | No cumple | Código: cada login, enlace o passkey crea un token nuevo (`_start_session` en `cirdan/auth/routes.py`), así que no hay fijación de sesión. Pero si el navegador ya traía una sesión válida, esa no se borra de Valkey: solo se pierde la cookie, y vence a los 15 min sin uso | Riesgo bajo: quien ya tuviera ese token viejo podría usarlo hasta 15 min sin actividad (8 h como máximo). El portal manda a quien tiene sesión fuera de `/login`, así que solo pasa llamando a la API directamente. Arreglo: en `_start_session`, borrar la sesión de la cookie que llega. Toca el login, así que va en su propia tarjeta | En corrección: cada inicio de sesión ya crea un token nuevo; falta cerrar del todo la sesión anterior del mismo navegador. |
+| V7.2.4 | Token nuevo al autenticarse, y se termina el anterior | Cumple | Código: cada login, código MFA, enlace o passkey crea un token nuevo y, antes, borra de Valkey la sesión de la cookie que trae la petición (`_start_session` en `cirdan/auth/routes.py`, desde el 27 nov, #75). Así no hay fijación de sesión y el token anterior del mismo navegador deja de servir. CI: `pruebas/test_auth.py` (prueba 5b: al volver a entrar, el token viejo da 401) | — | Cada inicio de sesión crea un token nuevo y cierra en el servidor la sesión anterior del mismo navegador. |
 | V7.4.1 | Al cerrar sesión o vencer, la sesión ya no sirve | Cumple | Código: el logout borra la sesión en Valkey y la cookie, aunque falle la bitácora; vence a los 15 min sin uso y a las 8 h (`cirdan/auth/routes.py`, `cirdan/auth/sessions.py`). CI: `pruebas/test_auth.py` (prueba 5), `pruebas/test_login_sin_red.py` | — | Al cerrar sesión, o a los 15 minutos sin uso, la sesión deja de servir en el servidor. |
-| V7.4.2 | Al desactivar o borrar una cuenta, se cierran todas sus sesiones | No cumple | Código: no hay ruta de la API para desactivar cuentas; se hace en la base. `current_session` (`cirdan/auth/deps.py`) solo vuelve a leer la cuenta cuando se trabaja en otra empresa, y `GET /auth/me` cierra la sesión si la cuenta ya no está activa. Una petición directa a la API con la cookie sigue entrando hasta 8 h | Riesgo medio: una persona dada de baja con la sesión abierta sigue leyendo datos de su empresa hasta 8 h, si llama a la API sin el portal. Arreglo (propuesta de Ernesto del 5 nov): al desactivar, borrar o cambiar el rol, borrar todas las sesiones del índice `sess-user:` que ya existe, o revisar `users.is_active` y el rol en `current_session`. Toca la sesión, así que va en su propia tarjeta, antes de la cuenta del socio (RC-141) | En corrección: al dar de baja una cuenta, el portal la saca de inmediato; falta que la API también la corte en todas sus sesiones abiertas. |
+| V7.4.2 | Al desactivar o borrar una cuenta, se cierran todas sus sesiones | Cumple | Código: la baja y el cambio de rol del Admin (`PATCH /api/v1/users/{id}`, RC-259) y la cancelación al terminar el servicio (`cirdan/fin_servicio.py`, RC-258) cierran todas las sesiones del índice `sess-user:` (`cerrar_sesiones` en `cirdan/auth/cuentas.py`). Además, `current_session` relee la cuenta en cada petición (`cuenta_vigente` en `cirdan/auth/deps.py`, desde el 27 nov, #75): si ya no está activa, se borró o cambió de rol fuera de la API, la sesión se cierra en esa petición. CI: `pruebas/test_usuarios_admin.py` (pruebas 2, 3 y 6) y `pruebas/test_fin_servicio.py` | — | Al dar de baja una cuenta o cambiarle el rol, todas sus sesiones abiertas se cierran de inmediato. |
 | V8.1.1 | Documentar las reglas de acceso por función y por dato | Cumple | Configuración: `docs/contrato_api_v1.md` dice qué rol usa cada ruta y que cada empresa solo ve lo suyo (RLS); los permisos del portal están en `FrontKL/src/config/permissions.ts` | — | Está documentado qué puede hacer cada rol y qué datos ve cada empresa. |
 | V8.2.1 | Acceso a funciones solo con permiso explícito | Cumple | Código: `require_roles` y `api_key_or_roles` (`cirdan/auth/deps.py`); el gerente recibe 403 en hallazgos y comparaciones (RC-280). CI: `pruebas/test_api_v1.py`, `pruebas/test_superadmin.py`, `pruebas/test_llaves_api.py` | — | Cada función revisa el rol antes de responder. |
 | V8.2.2 | Acceso a datos solo con permiso sobre cada dato (IDOR, BOLA) | Cumple | Código: seguridad por fila (RLS) forzada en la base; la API entra con un rol sin `BYPASSRLS` y la empresa sale de la sesión, nunca de un encabezado (`db/migraciones/001_esquema_inicial.sql`, `cirdan/db.py`). CI: `pruebas/test_aislamiento.py` revisa toda tabla con `organization_id` | — | La base de datos aísla a cada empresa: nadie ve datos de otra. |
@@ -111,7 +114,7 @@ Ningún «No cumple» deja leer datos de otra empresa ni entrar sin contraseña.
 | V11.3.1 | Sin modos de bloque inseguros (ECB) ni rellenos débiles | Cumple | Código: todo cifrado es AES-256-GCM (`cirdan/auth/passwords.py`, `cirdan/cartas.py`, `cirdan/auth/totp.py`) | — | Los datos se cifran con AES-256-GCM. |
 | V11.3.2 | Solo cifrados aprobados, como AES-GCM | Cumple | Código: AES-256-GCM con `cryptography` y nonce de 96 bits al azar en cada cifrado | — | Solo se usan cifrados aprobados. |
 | V11.4.1 | Solo funciones hash aprobadas; nunca MD5 con fines criptográficos | Cumple | Código: argon2id para contraseñas, SHA-256 para tokens y la cadena de la bitácora, HMAC-SHA256 en el captcha. SHA-1 solo aparece donde el protocolo de otro lo fija: el rango de Pwned Passwords y el `shasum` de npm junto a su SHA-512 (`cirdan/auth/passwords.py`, `cirdan/recolectores/huellas.py`). MD5 solo en las migraciones, para ver si un texto cambió, sin fin criptográfico | — | Contraseñas con argon2id y tokens con SHA-256; ningún hash débil protege datos. |
-| V12.1.1 | Solo TLS 1.2 y 1.3, con 1.3 de preferencia | No cumple | En vivo, 23 nov: `openssl s_client -connect lowtidesec.com:443 -tls1_1 -cipher 'DEFAULT:@SECLEVEL=0'` conecta con TLS 1.1, y con `-tls1` con TLS 1.0. Sin forzar la versión, negocia TLS 1.3. El TLS lo termina Cloudflare | Riesgo bajo: un navegador moderno nunca baja a 1.0 o 1.1, pero un cliente viejo sí podría y esas versiones tienen fallas conocidas. Arreglo: en Cloudflare, SSL/TLS > Edge Certificates > Minimum TLS Version = TLS 1.2. Lo hace Ernesto; el paso ya está en `docs/despliegue.md` con la comprobación | En corrección: el sitio prefiere TLS 1.3; falta apagar en el borde las versiones viejas 1.0 y 1.1. |
+| V12.1.1 | Solo TLS 1.2 y 1.3, con 1.3 de preferencia | No cumple | En vivo, 23 nov y de nuevo el 27 nov: `openssl s_client -connect lowtidesec.com:443 -tls1_1 -cipher 'DEFAULT:@SECLEVEL=0'` conecta con TLS 1.1, y con `-tls1` con TLS 1.0. Sin forzar la versión, negocia TLS 1.3. El TLS lo termina Cloudflare | Riesgo bajo: un navegador moderno nunca baja a 1.0 o 1.1, pero un cliente viejo sí podría y esas versiones tienen fallas conocidas. Arreglo: en Cloudflare, SSL/TLS > Edge Certificates > Minimum TLS Version = TLS 1.2. Lo hace Ernesto; el paso ya está en `docs/despliegue.md` con la comprobación | En corrección: el sitio prefiere TLS 1.3; falta apagar en el borde las versiones viejas 1.0 y 1.1. |
 | V12.2.1 | TLS en toda conexión con servicios externos, sin bajar a HTTP | Cumple | Configuración: «Always Use HTTPS» y HSTS en Cloudflare (`docs/despliegue.md`). En vivo: `curl -sI http://lowtidesec.com/login` responde 301 a `https://`. Los servicios HTTP de terceros que llama la API van solo por `https://`; las consultas DNS y WHOIS de los recolectores no son servicios HTTP y van sin cifrar por su protocolo (control 8.24 de `docs/politica_seguridad_privacidad.md`) | — | Todo el tráfico va por HTTPS. |
 | V12.2.2 | Certificados de confianza pública | Cumple | En vivo, 23 nov: el certificado de `lowtidesec.com` es de Let's Encrypt y vence el 6 feb 2027 | — | El sitio usa un certificado de una autoridad pública. |
 | V13.4.1 | Desplegar sin metadatos de control de versiones (`.git`) | Cumple | Configuración: `.dockerignore` deja fuera `.git` en BackKL y FrontKL. En vivo, 23 nov: `/.git/HEAD` y `/.git/config` responden 404 | — | El despliegue no lleva archivos del repositorio. |
@@ -137,10 +140,8 @@ Además, desde esta revisión toda respuesta de la API lleva `Cache-Control: no-
 
 | Requisito | Riesgo | Arreglo | Quién | Tarjeta |
 |---|---|---|---|---|
-| V7.4.2 la baja corta las sesiones | Medio | Borrar las sesiones de `sess-user:` al desactivar, borrar o cambiar el rol, o revisar `is_active` y el rol en `current_session` | Por asignar | Propuesta, antes de RC-141 |
 | V12.1.1 solo TLS 1.2 y 1.3 | Bajo | Cloudflare: Minimum TLS Version = TLS 1.2, y comprobar con `openssl` | Ernesto | Sin tarjeta: es un ajuste |
 | V3.3.1 prefijo de la cookie | Bajo | `__Host-lt_session` en la API y el portal | Por asignar | Propuesta |
-| V7.2.4 cerrar la sesión anterior al entrar | Bajo | Borrar la sesión de la cookie que llega en `_start_session` | Por asignar | Propuesta, junto con V3.3.1 |
 
 Cuando se arregle uno, su fila pasa a «Cumple» con la evidencia nueva, aquí y en `FrontKL/src/config/asvs.ts`, y
 sale de esta tabla.

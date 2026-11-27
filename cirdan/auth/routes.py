@@ -92,8 +92,13 @@ def platform_view(session, user):
     return out
 
 
-def _start_session(response, conn, user, ip, via):
-    """Crea la sesión, pone la cookie y lo deja en la bitácora. Siempre empieza en la empresa de la cuenta."""
+def _start_session(response, conn, user, ip, via, anterior=None):
+    """Crea la sesión, pone la cookie y lo deja en la bitácora. Siempre empieza en la empresa de la cuenta.
+
+    `anterior` es la cookie que traía la petición: esa sesión se cierra en Valkey antes de crear la nueva (V7.2.4 de
+    ASVS, #75), sea de esta cuenta o de otra que usó el mismo navegador. Sin esto, quien ya tuviera ese token podría
+    seguir usándolo hasta que venciera."""
+    sessions.delete(anterior)
     conn.execute('UPDATE users SET last_login_at = now() WHERE id = %s', (user['id'],))
     audit(conn, user['organization_id'], 'auth.login_succeeded', user['id'], ip, 'user', user['id'], {'via': via})
     platform = bool(conn.execute('SELECT public.is_platform_admin(%s) AS ok', (user['id'],)).fetchone()['ok'])
@@ -336,7 +341,8 @@ def login(body: LoginIn, request: Request, response: Response):
             audit(conn, org, 'auth.%s_mfa_required' % mfa_setup_required, user_id, ip, 'user', user_id)
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
-                                                    'email': email}, ip, 'password')
+                                                    'email': email}, ip, 'password',
+                                  anterior=request.cookies.get(COOKIE))
     if mfa_setup_required == 'operator':
         # El operador de la consola multiempresa no se da de alta al entrar: con la contraseña sola abriría una sesión
         # de superadmin con su propia app (H1 de la revisión de RC-5). Su TOTP se activa por fuera, como en la 027.
@@ -398,7 +404,8 @@ def verify_mfa(body: MfaIn, request: Request, response: Response):
             sessions.delete_mfa(body.mfa_token)
             # Después de un enlace al correo (#28, RC-63) la bitácora dice link_totp; si no, totp.
             via = 'link_totp' if pending.get('via') == 'link_totp' else 'totp'
-            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, via)
+            user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'], 'email': row['email']}, ip, via,
+                                  anterior=request.cookies.get(COOKIE))
     if fail:
         sessions.register_mfa_fail(ip)
         raise HTTPException(401, fail)
@@ -556,7 +563,8 @@ def verify_link(body: LinkVerifyIn, request: Request, response: Response):
             rejected = kind + '_mfa_required'
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
-                                                    'email': row['email']}, ip, 'link')
+                                                    'email': row['email']}, ip, 'link',
+                                  anterior=request.cookies.get(COOKIE))
         if rejected:
             audit(conn, org, 'auth.link_rejected', user_id, ip, 'user', user_id, {'reason': rejected})
     # Fuera del with: con raise adentro, la transacción se desharía y la bitácora no quedaría.
@@ -949,7 +957,8 @@ def mfa_enroll_enable(body: MfaEnrollEnableIn, request: Request, response: Respo
             _delete_passkeys_of(conn, user_id, org, ip, 'mfa_enabled')
             sessions.delete_others(user_id, None)
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
-                                                    'email': row['email']}, ip, 'totp_enroll')
+                                                    'email': row['email']}, ip, 'totp_enroll',
+                                  anterior=request.cookies.get(COOKIE))
     if not row:
         sessions.delete_mfa_enroll(body.mfa_setup_token)
         raise HTTPException(401, MFA_EXPIRED)
@@ -1352,7 +1361,8 @@ def passkey_login_verify(body: PasskeyLoginVerifyIn, request: Request, response:
             reason = 'sign_count_race'
         else:
             user = _start_session(response, conn, {'id': user_id, 'organization_id': org, 'role': row['role'],
-                                                   'email': row['email']}, ip, 'passkey')
+                                                   'email': row['email']}, ip, 'passkey',
+                                  anterior=request.cookies.get(COOKIE))
     if reason == 'operator_mfa_required':
         raise HTTPException(403, OPERATOR_MFA_REQUIRED)
     if reason == 'admin_mfa_required':

@@ -79,6 +79,9 @@ def current_session(request: Request) -> Session:
     session = Session(token=token, user_id=data['user_id'], org_id=data['org_id'], role=data['role'], email=data['email'],
                       created_at=data.get('created_at'), home_org_id=data.get('home_org_id'),
                       platform_admin=bool(data.get('platform_admin')))
+    if not cuenta_vigente(session):
+        sessions.delete(token)
+        raise HTTPException(401, SESION_TERMINADA)
     if session.acting_elsewhere and not can_work_in(session.user_id, session.org_id):
         # Se le quitó el permiso o el TOTP, se desactivó la cuenta, se suspendió su empresa o se suspendió o canceló
         # la empresa ajena con la sesión abierta en ella: la sesión se cierra en la siguiente petición y no espera a
@@ -102,6 +105,19 @@ def _ruta_de_operador(request: Request) -> bool:
     (sin root_path ni valores de la URL) y, si no la hay, el path."""
     ruta = getattr(request.scope.get('route'), 'path', None) or request.url.path
     return ruta == '/api/v1/operator' or ruta.startswith(RUTAS_DE_OPERADOR)
+
+
+def cuenta_vigente(session: Session) -> bool:
+    """Si la cuenta de la sesión sigue activa y, en su propia empresa, con el rol de la sesión (V7.4.2 de ASVS, #75).
+
+    La baja y el cambio de rol por la API (RC-259) y la cancelación (RC-258) ya cierran todas las sesiones de la
+    cuenta. Esto cubre lo que se cambia fuera de ellas, como directo en la base: la sesión se cierra en la siguiente
+    petición y no espera a las 8 h. Una cuenta borrada tampoco aparece. En una empresa ajena (superadmin) el rol lo
+    pone el cambio de empresa, así que ahí solo se revisa que la cuenta siga activa; can_work_in() revisa lo demás.
+    La fila del usuario solo se ve con la RLS de su propia empresa."""
+    with transaction(session.own_org_id) as conn:
+        fila = conn.execute('SELECT role FROM users WHERE id = %s AND is_active', (session.user_id,)).fetchone()
+    return bool(fila) and (session.acting_elsewhere or fila['role'] == session.role)
 
 
 def is_platform_admin(user_id) -> bool:

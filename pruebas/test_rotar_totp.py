@@ -208,7 +208,7 @@ class Rutas(Base):
                        mock.patch.object(sessions, 'delete_mfa', lambda _: None),
                        mock.patch.object(sessions, 'password_tag', lambda h: 'marca'),
                        mock.patch.object(routes, '_start_session',
-                                         lambda response, conn, user, ip, via: {'email': user['email'], 'via': via})):
+                                         lambda response, conn, user, ip, via, anterior=None: {'email': user['email'], 'via': via})):
             parche.start()
             self.addCleanup(parche.stop)
 
@@ -226,7 +226,8 @@ class Rutas(Base):
         self.conexion = Conexion(self.fila(blob), guarda)
         pendiente = {'user_id': USUARIO, 'org_id': ORG, 'email': 'mfa@ejemplo.test', 'tag': 'marca'}
         with mock.patch.object(sessions, 'take_mfa', lambda _: dict(pendiente)):
-            return routes.verify_mfa(routes.MfaIn(mfa_token='t' * 20, code=codigo or self.codigo()), None, Response())
+            return routes.verify_mfa(routes.MfaIn(mfa_token='t' * 20, code=codigo or self.codigo()),
+                                     SimpleNamespace(cookies={}), Response())
 
     def guardado(self):
         """El secreto que dejó el UPDATE, o None si el UPDATE no lo tocó."""
