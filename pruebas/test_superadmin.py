@@ -48,12 +48,19 @@ SOLO_SUPERADMIN = 'Solo el superadmin de la plataforma puede hacer esto.'
 SIN_SESION = 'Tu sesión terminó. Vuelve a iniciar sesión.'
 NOMBRE_LLAVE = 'CIRDAN_FAKE_superadmin'
 
-# La cadena de la bitácora de una empresa, recalculada con la fórmula del trigger audit_log_chain() de la 001.
-CADENA = ("SELECT coalesce(bool_and(ok), true) FROM (SELECT row_hash = sha256(prev_hash || convert_to(concat_ws(chr(31),"
+# La cadena de la bitácora de una empresa, recalculada con la fórmula del trigger audit_log_chain(): la de la 001 en
+# las filas con chain_version 1 y la de la 036 (RC-294), con la versión y la IP, en las de la 2.
+CADENA = ("SELECT coalesce(bool_and(ok), true) FROM (SELECT row_hash = sha256(prev_hash || convert_to("
+          "CASE chain_version WHEN 1 THEN concat_ws(chr(31),"
           " coalesce(organization_id::text, ''), chain_seq::text, id::text,"
           " (extract(epoch FROM occurred_at) * 1000000)::bigint::text, actor_type, coalesce(actor_user_id::text, ''),"
           " coalesce(actor_api_key_id::text, ''), action, coalesce(entity_type, ''), coalesce(entity_id::text, ''),"
-          " details::text), 'UTF8'))"
+          " details::text)"
+          " ELSE concat_ws(chr(31), chain_version::text,"
+          " coalesce(organization_id::text, ''), chain_seq::text, id::text,"
+          " (extract(epoch FROM occurred_at) * 1000000)::bigint::text, actor_type, coalesce(actor_user_id::text, ''),"
+          " coalesce(actor_api_key_id::text, ''), action, coalesce(entity_type, ''), coalesce(entity_id::text, ''),"
+          " coalesce(ip_address::text, ''), details::text) END, 'UTF8'))"
           " AND prev_hash = coalesce(lag(row_hash) OVER (ORDER BY chain_seq), decode(repeat('00', 32), 'hex'))"
           " AND chain_seq = row_number() OVER (ORDER BY chain_seq) AS ok"
           " FROM audit_log WHERE organization_id = '%s') t;")
