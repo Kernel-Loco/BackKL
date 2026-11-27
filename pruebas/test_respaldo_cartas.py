@@ -318,6 +318,12 @@ class RespaldoCartas(unittest.TestCase):
              'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -v ON_ERROR_STOP=1'],
             input=texto, capture_output=True, text=True, encoding='utf-8')
 
+    def _limpiar(self, texto):
+        """Si la limpieza falla, quedan filas de la prueba en la base. Se reporta como error en vez de ignorarla."""
+        limpieza = self._sql('cirdan', texto)
+        if limpieza.returncode != 0:
+            raise AssertionError('la limpieza de la prueba falló: %s' % limpieza.stderr)
+
     def _registrar_cartas(self):
         """Guarda cinco archivos en el volumen de la API y los registra en la base como lo hace el portal."""
         solicitud = str(uuid.uuid4())
@@ -343,7 +349,7 @@ class RespaldoCartas(unittest.TestCase):
                  'tok_mano': uuid.uuid4().hex, 'tok_mifiel': uuid.uuid4().hex}
         datos.update({'k_' + k: v for k, v in llaves.items()})
         datos.update({'h_' + k: v for k, v in huellas.items()})
-        self.addCleanup(self._sql, 'cirdan', SQL_LIMPIEZA % datos)
+        self.addCleanup(self._limpiar, SQL_LIMPIEZA % datos)
         registro = self._sql('cirdan', SQL_REGISTRO % datos)
         self.assertEqual(registro.returncode, 0, registro.stderr)
         return llaves, huellas

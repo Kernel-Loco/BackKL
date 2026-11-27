@@ -123,10 +123,19 @@ os.close(fd)
 
 # Todas las llaves de cartas que guarda la base, cada una con el id que lleva su AAD (cirdan/cartas.py): el de la
 # solicitud de firma si la carta salió de la API de Mifiel (migración 031) y el domain_id si se subió a mano.
-cat <<'SQL' \
-  | MSYS_NO_PATHCONV=1 docker exec -i -e BASE="$base" "$contenedor_base" sh -c \
-    'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -F "|" -v ON_ERROR_STOP=1' \
-  > "$trabajo/referencias.tsv" || falla "no se pudieron leer las referencias de cartas de la base $base"
+# Una base de antes de la 031 no tiene signature_requests ni signature_request_id: solo hay cartas subidas a mano y
+# su AAD lleva el domain_id. Así la restauración de un respaldo viejo no aborta (RC-339).
+con_031=$(MSYS_NO_PATHCONV=1 docker exec -e BASE="$base" "$contenedor_base" sh -c \
+  'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -v ON_ERROR_STOP=1 -c "SELECT to_regclass('\''public.signature_requests'\'') IS NOT NULL"') \
+  || falla "no se pudo revisar si la base $base tiene la migración 031"
+if [ "$con_031" != t ]; then
+  echo "restaurar_completo: AVISO: la base $base no tiene la migración 031; se verifican solo las cartas subidas a mano" >&2
+  cat <<'SQL'
+SELECT organization_id, domain_id, signed_document_key, encode(signed_document_sha256, 'hex') FROM domain_authorizations
+ORDER BY 3;
+SQL
+else
+  cat <<'SQL'
 SELECT organization_id, coalesce(signature_request_id, domain_id), signed_document_key,
        encode(signed_document_sha256, 'hex') FROM domain_authorizations
 UNION
@@ -142,6 +151,10 @@ SELECT organization_id, id, evidence_key, encode(evidence_sha256, 'hex') FROM si
  WHERE evidence_key IS NOT NULL
 ORDER BY 3;
 SQL
+fi \
+  | MSYS_NO_PATHCONV=1 docker exec -i -e BASE="$base" "$contenedor_base" sh -c \
+    'exec psql -U "$POSTGRES_USER" -d "$BASE" -X -q -At -F "|" -v ON_ERROR_STOP=1' \
+  > "$trabajo/referencias.tsv" || falla "no se pudieron leer las referencias de cartas de la base $base"
 docker run --rm --network none --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE \
   --security-opt no-new-privileges --entrypoint python \
   -v "$volumen:/cartas:ro" -v "$trabajo/carta.key:/run/carta.key:ro" \
