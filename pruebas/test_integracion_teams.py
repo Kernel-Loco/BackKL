@@ -50,7 +50,7 @@ class IntegracionTeams(unittest.TestCase):
         self.assertNotIn(FIRMA, str(body))
         self.assertNotIn(FIRMA, str(self.alex.get(RUTA)[1]))
         fila = postgres("SELECT endpoint || '|' || encode(secret_enc, 'escape') || '|' || (config->>'formato') "
-                        "FROM integrations WHERE organization_id = '%s';" % ACME)
+                        "FROM integrations WHERE organization_id = '%s' AND config->>'formato' = 'teams';" % ACME)
         self.assertTrue(fila.startswith(HOST + '|'))
         self.assertTrue(fila.endswith('|teams'))
         self.assertNotIn(FIRMA, fila)                     # cifrada: la firma no está en claro
@@ -62,7 +62,7 @@ class IntegracionTeams(unittest.TestCase):
         # Poner otra URL reemplaza la misma integración
         self.assertEqual(self.alex.request('PUT', RUTA, {'url': URL.replace('prod-12', 'prod-13'), 'enabled': False})
                          [1]['enabled'], False)
-        self.assertEqual(postgres("SELECT count(*) FROM integrations WHERE organization_id = '%s';" % ACME), '1')
+        self.assertEqual(postgres("SELECT count(*) FROM integrations WHERE organization_id = '%s' AND config->>'formato' = 'teams';" % ACME), '1')
         # Cada empresa ve la suya
         self.assertFalse(self.dana.get(RUTA)[1]['configured'])
 
@@ -84,7 +84,7 @@ class IntegracionTeams(unittest.TestCase):
         self.assertEqual(self.alex.request('PUT', RUTA, {'url': URL})[0], 200)
         self.assertEqual(self.alex.request('DELETE', RUTA)[0], 204)
         self.assertEqual(postgres("SELECT enabled || ',' || (secret_enc IS NULL) FROM integrations "
-                                  "WHERE organization_id = '%s';" % ACME), 'false,true')
+                                  "WHERE organization_id = '%s' AND config->>'formato' = 'teams';" % ACME), 'false,true')
         self.assertEqual(self.alex.post(RUTA + '/test', {})[0], 404)
 
 
