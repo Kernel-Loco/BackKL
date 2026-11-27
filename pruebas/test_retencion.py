@@ -103,9 +103,11 @@ def correr_retencion():
 def existen(tabla, ids):
     llave = 'finding_id' if tabla == 'breach_exposures' else 'id'
     lista = ','.join("'%s'" % i for i in ids)
-    salida = scalar('SELECT coalesce(string_agg(%s::text, \',\' ORDER BY %s), \'\') FROM %s WHERE %s IN (%s);'
-                    % (llave, llave, tabla, llave, lista), user='postgres')
-    return set(filter(None, salida.split(',')))
+    # Sin filas, psql da una línea vacía y scalar() no la acepta: se lee la salida completa
+    ok, salida, err = psql('SELECT %s::text FROM %s WHERE %s IN (%s);' % (llave, tabla, llave, lista), user='postgres')
+    if not ok:
+        raise AssertionError(err)
+    return set(filter(None, salida.splitlines()))
 
 
 class Retencion(unittest.TestCase):
