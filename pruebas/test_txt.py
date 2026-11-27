@@ -8,6 +8,7 @@ Los mensajes DNS son de dnspython, armados aquí.
 Pide dnspython y cryptography, que están en la imagen y no en el runner del CI: corre dentro del contenedor, como
 test_orquestador.py.
 """
+import hashlib
 import io
 import socket
 import ssl
@@ -321,6 +322,23 @@ class Respaldo(unittest.TestCase):
             txt.ConsultaTxt(None, error='x'), txt.ConsultaTxt((TXT_BUENO,), error='x'))],
             ['match', 'mismatch', 'missing', 'missing', 'dns_error', 'dns_error'])
         self.assertEqual(txt.ConsultaTxt(None).resolver_ip, '1.1.1.1')
+
+    def test_9_solo_se_guarda_el_token_y_la_huella_de_lo_demas(self):
+        """RC-272: guardables() deja tal cual los valores cirdan-verification=<hex> y pasa cualquier otro a
+        sha256:<hex> de su texto en UTF-8, en el mismo orden, como el CHECK de la migración 037."""
+        def huella(v):
+            return 'sha256:' + hashlib.sha256(v.encode('utf-8')).hexdigest()
+        otro = 'cirdan-verification=0123456789abcdef0123456789abcdef'
+        crudos = ('v=spf1 include:_spf.mx.cloudflare.net -all', TXT_BUENO, 'ñandú=1', otro,
+                  'cirdan-verification=C41D7E2A9B06', 'cirdan-verification=c41d7e2a9b06 ', 'a�b')
+        self.assertEqual(txt.guardables(crudos),
+                         [huella(crudos[0]), TXT_BUENO, huella('ñandú=1'), otro, huella(crudos[4]), huella(crudos[5]),
+                          huella('a�b')])
+        self.assertIsNone(txt.guardables(None))
+        self.assertEqual(txt.guardables(()), [])
+        # El resultado se calcula con los valores crudos: no cambia por el filtro.
+        self.assertEqual(txt.resultado(txt.ConsultaTxt(crudos), TOKEN), 'match')
+        self.assertEqual(txt.resultado(txt.ConsultaTxt((crudos[0],)), TOKEN), 'mismatch')
 
 
 class Extremo(socket.socket):

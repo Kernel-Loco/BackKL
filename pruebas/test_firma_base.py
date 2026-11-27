@@ -308,8 +308,14 @@ class FirmaBase(unittest.TestCase):
         ok = pedir(self.app, 'POST', '/api/v1/signature-requests/%s/accept' % enviada['id'], {'confirm_fqdn': body['fqdn']})
         self.assertEqual((ok.status_code, ok.json()['domain']['id']), (200, domain_id), ok.text)
         with transaction(ORG) as conn:
-            self.assertEqual(conn.execute('SELECT count(*) AS n FROM domain_authorizations WHERE domain_id = %s',
-                                          (domain_id,)).fetchone()['n'], 2)
+            cartas_ = conn.execute('SELECT id::text, revoked_at IS NULL AS vigente FROM domain_authorizations '
+                                   'WHERE domain_id = %s ORDER BY created_at', (domain_id,)).fetchall()
+            # RC-272: la renovación revoca la carta anterior y lo deja en la bitácora, con la carta que la reemplaza.
+            self.assertEqual([c['vigente'] for c in cartas_], [False, True])
+            evento = conn.execute("SELECT actor_type, details->>'replaced_by' AS por FROM audit_log "
+                                  "WHERE action = 'authorization.superseded' AND entity_id = %s",
+                                  (cartas_[0]['id'],)).fetchall()
+            self.assertEqual([(e['actor_type'], e['por']) for e in evento], [('system', cartas_[1]['id'])])
         # El alta de RC-59 sigue sin aceptar un dominio que ya existe.
         alta = {k: v for k, v in body.items() if k != 'xml_base64'}
         self.assertEqual(pedir(self.app, 'POST', '/api/v1/domains', alta).status_code, 409)
@@ -504,6 +510,41 @@ class FirmaBase(unittest.TestCase):
             renovacion = self.enviar(self.body(existente))
         self.cancelar(primera['id'])
         self.cancelar(renovacion['id'])
+
+    def test_12_una_carta_futura_con_otra_vigente_da_409_sin_guardar_nada(self):
+        """RC-272: por los dos caminos, una carta que empieza después de hoy no entra mientras el dominio tenga otra
+        vigente. Da 409 antes de guardar el PDF y la carta firmada en Mifiel sigue 'signed' para confirmarla el día
+        que empieza."""
+        self.produccion()
+        body = {**self.body(), 'xml_base64': base64.b64encode(XML).decode()}
+        r = pedir(self.app, 'POST', '/api/v1/signature-uploads', body)
+        self.assertEqual(r.status_code, 201, r.text)
+        domain_id = r.json()['domain']['id']
+        with transaction(ORG) as conn:
+            manana = conn.execute('SELECT (current_date + 1)::text AS d').fetchone()['d']
+        archivos = sorted(Path(self.dir.name).rglob('*'))
+
+        futura = {**self.body(body['fqdn'], valid_from=manana), 'xml_base64': body['xml_base64']}
+        r = pedir(self.app, 'POST', '/api/v1/signature-uploads', futura)
+        self.assertEqual((r.status_code, r.json()['detail']), (409, v1.CARTA_FUTURA))
+        self.assertEqual(sorted(Path(self.dir.name).rglob('*')), archivos)
+
+        enviada = self.enviar(self.body(body['fqdn'], valid_from=manana))
+        # Se puede mandar a firmar, y la solicitud dice desde cuándo se confirma (concurrencia-api-2).
+        self.assertEqual(enviada['accept_from'], manana)
+        self.mifiel.firmar(self.fila(enviada['id'])['provider_document_id'])
+        pedir(self.app, 'POST', '/api/v1/signature-requests/%s/refresh' % enviada['id'])
+        archivos = sorted(Path(self.dir.name).rglob('*'))
+        r = pedir(self.app, 'POST', '/api/v1/signature-requests/%s/accept' % enviada['id'], {'confirm_fqdn': body['fqdn']})
+        self.assertEqual((r.status_code, r.json()['detail']), (409, v1.CARTA_FUTURA))
+        self.assertEqual(self.fila(enviada['id'])['status'], 'signed')
+        self.assertEqual(sorted(Path(self.dir.name).rglob('*')), archivos)
+        lista = pedir(self.app, 'GET', '/api/v1/signature-requests').json()
+        self.assertEqual(next(s['accept_from'] for s in lista['items'] if s['id'] == enviada['id']), manana)
+        with transaction(ORG) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) AS n FROM domain_authorizations WHERE domain_id = %s AND '
+                                          'revoked_at IS NULL', (domain_id,)).fetchone()['n'], 1)
+        self.cancelar(enviada['id'])
 
 
 if __name__ == '__main__':
