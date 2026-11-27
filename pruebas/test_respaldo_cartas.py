@@ -18,16 +18,22 @@ from pruebas.pila import exigir_contenedor
 RAIZ = Path(__file__).resolve().parents[1]
 RESPALDO = RAIZ / 'db' / 'respaldo'
 PDF = b'%PDF-1.4\nCIRDAN_TEST_CARTA\n%%EOF\n'
-# Empresa, usuario y dominios de db/semillas/001_datos_demo.sql. acme-tienda.mx lleva una carta subida a mano (AAD con
-# el domain_id) y acme-portal.mx una que salió de la API de Mifiel (AAD con el id de la solicitud, migración 031).
+# Empresa y usuario de db/semillas/001_datos_demo.sql. Los dos dominios los crea la prueba y no tienen carta de semilla:
+# desde la 037 (RC-272) una carta nueva revoca la anterior del dominio y deja authorization.superseded en audit_log,
+# que no se borra. DOMINIO_MANO lleva una carta subida a mano (AAD con el domain_id) y DOMINIO_MIFIEL una que salió de
+# la API de Mifiel (AAD con el id de la solicitud, migración 031).
 ORG_ID = '20000000-0000-4000-8000-000000000001'
 USER_ID = '30000000-0000-4000-8000-000000000001'
-DOMINIO_MANO = '40000000-0000-4000-8000-000000000002'
-DOMINIO_MIFIEL = '40000000-0000-4000-8000-000000000003'
-FQDN_MIFIEL = 'acme-portal.mx'
+DOMINIO_MANO = '40000000-0000-4000-8000-0000000272a1'
+DOMINIO_MIFIEL = '40000000-0000-4000-8000-0000000272a2'
+FQDN_MANO = 'respaldo-mano.acme-demo.mx'
+FQDN_MIFIEL = 'respaldo-mifiel.acme-demo.mx'
 # Cómo registra el portal cada carta (cirdan/api/firmas.py). %(...)s solo recibe uuid y hex generados por la prueba.
 SQL_REGISTRO = """
 BEGIN;
+INSERT INTO domains (id, organization_id, fqdn, status, txt_token, added_by) VALUES
+  ('%(mano)s', '%(org)s', '%(fqdn_mano)s', 'pending_verification', '%(tok_mano)s', '%(usuario)s'),
+  ('%(dominio)s', '%(org)s', '%(fqdn)s', 'pending_verification', '%(tok_mifiel)s', '%(usuario)s');
 INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email,
   signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, activities,
   signature_provider, evidence_key, evidence_sha256)
@@ -55,12 +61,13 @@ UPDATE signature_requests SET status = 'accepted', decided_by = '%(usuario)s', d
  WHERE id = '%(sol)s';
 COMMIT;
 """
-# Las dos tablas no se borran (sus guardias). Solo para limpiar la prueba se apagan los disparadores en la sesión.
+# Las tablas de cartas no se borran (sus guardias). Solo para limpiar la prueba se apagan los disparadores en la sesión.
 SQL_LIMPIEZA = """
 BEGIN;
 SET LOCAL session_replication_role = replica;
 DELETE FROM domain_authorizations WHERE signed_document_key IN ('%(k_mano_pdf)s', '%(k_firmado)s');
 DELETE FROM signature_requests WHERE id = '%(sol)s';
+DELETE FROM domains WHERE id IN ('%(mano)s', '%(dominio)s');
 COMMIT;
 """
 CONTENEDOR_BASE = (os.environ.get('RESPALDO_CONTENEDOR') or '').strip() or (
@@ -331,7 +338,9 @@ class RespaldoCartas(unittest.TestCase):
                         % sorted(llaves.values()))
         huellas = {k: hashlib.sha256(d).hexdigest() for k, (d, _) in documentos.items()}
         datos = {'org': ORG_ID, 'usuario': USER_ID, 'mano': DOMINIO_MANO, 'dominio': DOMINIO_MIFIEL,
-                 'fqdn': FQDN_MIFIEL, 'sol': solicitud, 'doc': 'CIRDAN_FAKE_doc_' + uuid.uuid4().hex}
+                 'fqdn_mano': FQDN_MANO, 'fqdn': FQDN_MIFIEL, 'sol': solicitud,
+                 'doc': 'CIRDAN_FAKE_doc_' + uuid.uuid4().hex,
+                 'tok_mano': uuid.uuid4().hex, 'tok_mifiel': uuid.uuid4().hex}
         datos.update({'k_' + k: v for k, v in llaves.items()})
         datos.update({'h_' + k: v for k, v in huellas.items()})
         self.addCleanup(self._sql, 'cirdan', SQL_LIMPIEZA % datos)

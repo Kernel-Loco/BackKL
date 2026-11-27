@@ -313,9 +313,9 @@ El servicio `inteligencia` carga el catálogo completo CISA KEV y el archivo dia
 
 El servicio usa `cirdan_intel`, un rol separado que solo puede leer `cves` y actualizar las columnas de inteligencia. No puede leer hallazgos ni modificar CVSS. La API sigue usando `cirdan_app`, que no puede actualizar esas columnas.
 
-1. Aplicar las migraciones pendientes hasta la 035, antes de encender el servicio. Para la 035:
+1. Aplicar las migraciones pendientes hasta la 038, antes de encender el servicio. Para la 038:
    ```bash
-   docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/035_inteligencia_amenazas.sql
+   docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/038_inteligencia_amenazas.sql
    ```
 2. Elegir una contraseña independiente, guardarla en `CIRDAN_INTEL_PASSWORD` del `.env` y establecer la misma para el rol, sin escribirla en el comando:
    ```bash
@@ -333,9 +333,9 @@ Para apagarlo, quitar `inteligencia` de `COMPOSE_PROFILES` y ejecutar `docker co
 
 El servicio `retencion` borra cada día, empresa por empresa, lo que pasa de 12 meses: entregas y alertas, scores con sus aportes, hallazgos resueltos (con su brecha), activos sin verse ni hallazgos, reportes y escaneos que ya nadie referencia. No borra hallazgos abiertos, en riesgo aceptado ni falsos positivos, ni la bitácora, las cartas o las verificaciones del TXT (#140). Usa el rol `cirdan_retention`, sin superusuario ni BYPASSRLS, y cada corrida deja en la bitácora de cada empresa un evento `retention.purged` con cuántas filas borró por tabla.
 
-1. Aplicar la migración 036 (después de la 035):
+1. Aplicar la migración 039 (después de la 038):
    ```bash
-   docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/036_rol_retencion.sql
+   docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/039_rol_retencion.sql
    ```
 2. Elegir una contraseña, guardarla en `CIRDAN_RETENTION_PASSWORD` del `.env` y ponerla al rol sin escribirla en el comando: `docker compose exec db psql -U postgres -d cirdan`, luego `\password cirdan_retention` y `\q`. En una base nueva la pone `db/init/cargar_cirdan.sh`.
 3. Agregar `retencion` a `COMPOSE_PROFILES`, conservando los demás (por ejemplo `COMPOSE_PROFILES=programador,inteligencia,retencion`), y levantar con los archivos de Compose habituales.

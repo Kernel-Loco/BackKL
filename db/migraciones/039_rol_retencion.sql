@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/036_rol_retencion.sql (#139, RC-257)
+-- Cirdan · db/migraciones/039_rol_retencion.sql (#139, RC-257)
 -- Rol cirdan_retention para la retención de 12 meses (sección 5.6 y
 -- control 8.10 de docs/politica_seguridad_privacidad.md). Los triggers de
 -- la 001 ya le dejan borrar domain_scores y score_contributions de más de
@@ -61,7 +61,10 @@ GRANT USAGE ON SCHEMA public TO cirdan_retention;
 GRANT SELECT, DELETE ON public.deliveries, public.alerts, public.score_contributions, public.domain_scores,
   public.breach_exposures, public.findings, public.assets, public.reports, public.scan_source_runs, public.scans
   TO cirdan_retention;
-GRANT SELECT, INSERT ON public.audit_log TO cirdan_retention;
+-- INSERT solo de las columnas que también tiene cirdan_app (036, RC-294): la cadena y la hora las pone la base.
+GRANT SELECT ON public.audit_log TO cirdan_retention;
+GRANT INSERT (organization_id, actor_type, actor_user_id, action, entity_type, entity_id, ip_address, details)
+  ON public.audit_log TO cirdan_retention;
 
 CREATE OR REPLACE FUNCTION public.retention_orgs()
 RETURNS SETOF uuid

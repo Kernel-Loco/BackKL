@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.request
 
+from cirdan import bitacora
 from pruebas import sesion
 from pruebas.test_aislamiento import ACME, BETA, psql, scalar
 from pruebas.test_llaves_api import borrar_llaves, poner_plan
@@ -43,17 +44,14 @@ QUITAR_FALLA = ('DROP TRIGGER IF EXISTS rc312_falla ON public.audit_log; '
 
 # La cadena se recalcula como el trigger audit_log_chain() de la 001: consecutivo sin huecos, prev_hash igual al
 # row_hash anterior (génesis en ceros) y row_hash igual al SHA-256 del contenido canónico. Cuenta las filas que fallan.
+# row_hash con la fórmula de cada fila según su chain_version (cirdan/bitacora.py, HASH_FILA; migraciones 001 y 036).
 CADENA_ROTA = r'''
 SELECT count(*) FROM (
   SELECT l.*, lag(l.row_hash) OVER w AS anterior, lag(l.chain_seq) OVER w AS seq_anterior
     FROM audit_log l WHERE l.organization_id = '%s' WINDOW w AS (ORDER BY l.chain_seq)) x
  WHERE x.chain_seq <> coalesce(x.seq_anterior, 0) + 1
     OR x.prev_hash <> coalesce(x.anterior, decode(repeat('00', 32), 'hex'))
-    OR x.row_hash <> sha256(x.prev_hash || convert_to(concat_ws(chr(31),
-         coalesce(x.organization_id::text, ''), x.chain_seq::text, x.id::text,
-         (extract(epoch FROM x.occurred_at) * 1000000)::bigint::text,
-         x.actor_type, coalesce(x.actor_user_id::text, ''), coalesce(x.actor_api_key_id::text, ''),
-         x.action, coalesce(x.entity_type, ''), coalesce(x.entity_id::text, ''), x.details::text), 'UTF8'));
+    OR x.row_hash <> ''' + bitacora.HASH_FILA.replace('%', '%%') + ''';
 '''
 
 

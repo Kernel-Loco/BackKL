@@ -306,7 +306,7 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
                      'Se borran en un plazo de [30] días, con confirmación',
                      '`cirdan_app` no puede borrar hallazgos, activos, reportes, alertas ni `breach_exposures`, y un '
                      'hallazgo que ya entró en un score no se puede borrar',
-                     'porque solo `cirdan_retention` (migración 036, RC-257) puede borrar scores, y solo los de '
+                     'porque solo `cirdan_retention` (migración 039, RC-257) puede borrar scores, y solo los de '
                      'más de 12 meses',
                      'Al terminar la carta, o antes cuando el equipo la revoca al cerrar el curso o porque la empresa '
                      'pide por escrito borrar todos sus datos (sección 11, punto 7), pasan a bloqueo por [plazo] '
@@ -337,10 +337,9 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
                      'con la fecha de su último acceso, pasan a bloqueo',
                      '[plazo] contado desde que se cierran',
                      'El fin de la carta no reinicia el plazo de las que ya estaban cerradas',
-                     'Se borra el mismo día. Hoy no se puede si llegó en un TXT del dominio raíz, porque queda en '
-                     '`dns_txt_verifications.observed_values` (sección 5.5, punto 5), ni la fila de un hallazgo '
-                     'que ya entró en un score ni la de su activo (sección 9). Su evidencia y el valor del activo '
-                     'sí se sobrescriben el mismo día |'):
+                     'Se borra el mismo día. Hoy no se puede borrar la fila de un hallazgo que ya entró en un score ni '
+                     'la de su activo (sección 9). De un TXT del dominio raíz solo queda su huella (sección 5.5, '
+                     'punto 5). Su evidencia y el valor del activo sí se sobrescriben el mismo día |'):
             with self.subTest(seccion='5.6', cita=cita):
                 self.assertIn(cita, retencion)
         fila = next(f for f in retencion.splitlines() if f.startswith('| Carta, datos de quien firma'))
