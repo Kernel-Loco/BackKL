@@ -20,7 +20,8 @@ porqué. La versión pública, sin rutas ni detalles de las fallas abiertas, est
   - **En vivo**: comprobado contra `lowtidesec.com` el 23 nov, con el comando a la vista.
 - **Actualización del 27 nov 2026:** V7.4.2 pasa a «Cumple» con la baja y el cambio de rol de RC-259 (BackKL PR 309) y la
   cuenta releída en cada petición, y V7.2.4 con la sesión anterior cerrada al entrar. Las dos llegan con esta tarjeta.
-  V12.1.1 se volvió a probar en vivo ese día y sigue igual. La página pública responde en `https://lowtidesec.com`.
+  V12.1.1 pasa a «Cumple» el mismo día: Ernesto puso TLS 1.2 como mínimo en Cloudflare y se comprobó en vivo con
+  `openssl`. La página pública responde en `https://lowtidesec.com`.
 - **Revisó:** GermanMZtec. Revisa los estados Ernesto en el PR.
 
 ## Resumen
@@ -38,15 +39,15 @@ porqué. La versión pública, sin rutas ni detalles de las fallas abiertas, est
 | V9 Tokens autocontenidos | 4 | 0 | 0 | 4 |
 | V10 OAuth y OIDC | 5 | 0 | 0 | 5 |
 | V11 Criptografía | 3 | 3 | 0 | 0 |
-| V12 Comunicación segura | 3 | 2 | 1 | 0 |
+| V12 Comunicación segura | 3 | 3 | 0 | 0 |
 | V13 Configuración | 1 | 1 | 0 | 0 |
 | V14 Protección de datos | 2 | 2 | 0 | 0 |
 | V15 Código y arquitectura seguros | 3 | 3 | 0 | 0 |
 | V16 Bitácora y errores | 0 | 0 | 0 | 0 |
 | V17 WebRTC | 0 | 0 | 0 | 0 |
-| **Total** | **70** | **57** | **2** | **11** |
+| **Total** | **70** | **58** | **1** | **11** |
 
-Ningún «No cumple» deja leer datos de otra empresa ni entrar sin contraseña. Los dos, con su arreglo, están en
+El único «No cumple» no deja leer datos de otra empresa ni entrar sin contraseña. Está, con su arreglo, en
 [Pendientes](#pendientes).
 
 ## Requisitos
@@ -114,7 +115,7 @@ Ningún «No cumple» deja leer datos de otra empresa ni entrar sin contraseña.
 | V11.3.1 | Sin modos de bloque inseguros (ECB) ni rellenos débiles | Cumple | Código: todo cifrado es AES-256-GCM (`cirdan/auth/passwords.py`, `cirdan/cartas.py`, `cirdan/auth/totp.py`) | — | Los datos se cifran con AES-256-GCM. |
 | V11.3.2 | Solo cifrados aprobados, como AES-GCM | Cumple | Código: AES-256-GCM con `cryptography` y nonce de 96 bits al azar en cada cifrado | — | Solo se usan cifrados aprobados. |
 | V11.4.1 | Solo funciones hash aprobadas; nunca MD5 con fines criptográficos | Cumple | Código: argon2id para contraseñas, SHA-256 para tokens y la cadena de la bitácora, HMAC-SHA256 en el captcha. SHA-1 solo aparece donde el protocolo de otro lo fija: el rango de Pwned Passwords y el `shasum` de npm junto a su SHA-512 (`cirdan/auth/passwords.py`, `cirdan/recolectores/huellas.py`). MD5 solo en las migraciones, para ver si un texto cambió, sin fin criptográfico | — | Contraseñas con argon2id y tokens con SHA-256; ningún hash débil protege datos. |
-| V12.1.1 | Solo TLS 1.2 y 1.3, con 1.3 de preferencia | No cumple | En vivo, 23 nov y de nuevo el 27 nov: `openssl s_client -connect lowtidesec.com:443 -tls1_1 -cipher 'DEFAULT:@SECLEVEL=0'` conecta con TLS 1.1, y con `-tls1` con TLS 1.0. Sin forzar la versión, negocia TLS 1.3. El TLS lo termina Cloudflare | Riesgo bajo: un navegador moderno nunca baja a 1.0 o 1.1, pero un cliente viejo sí podría y esas versiones tienen fallas conocidas. Arreglo: en Cloudflare, SSL/TLS > Edge Certificates > Minimum TLS Version = TLS 1.2. Lo hace Ernesto; el paso ya está en `docs/despliegue.md` con la comprobación | En corrección: el sitio prefiere TLS 1.3; falta apagar en el borde las versiones viejas 1.0 y 1.1. |
+| V12.1.1 | Solo TLS 1.2 y 1.3, con 1.3 de preferencia | Cumple | Configuración: en Cloudflare, SSL/TLS > Edge Certificates > Minimum TLS Version = TLS 1.2 (`docs/despliegue.md`), lo puso Ernesto el 27 nov. En vivo, 27 nov: `openssl s_client -connect lowtidesec.com:443 -servername lowtidesec.com -tls1_1 -cipher 'DEFAULT:@SECLEVEL=0'` y `-tls1` reciben `alert protocol version`; `-tls1_2` y `-tls1_3` conectan, y sin forzar la versión negocia TLS 1.3. El 23 nov todavía aceptaba 1.0 y 1.1 | — | El sitio solo acepta TLS 1.2 y 1.3, y prefiere 1.3. |
 | V12.2.1 | TLS en toda conexión con servicios externos, sin bajar a HTTP | Cumple | Configuración: «Always Use HTTPS» y HSTS en Cloudflare (`docs/despliegue.md`). En vivo: `curl -sI http://lowtidesec.com/login` responde 301 a `https://`. Los servicios HTTP de terceros que llama la API van solo por `https://`; las consultas DNS y WHOIS de los recolectores no son servicios HTTP y van sin cifrar por su protocolo (control 8.24 de `docs/politica_seguridad_privacidad.md`) | — | Todo el tráfico va por HTTPS. |
 | V12.2.2 | Certificados de confianza pública | Cumple | En vivo, 23 nov: el certificado de `lowtidesec.com` es de Let's Encrypt y vence el 6 feb 2027 | — | El sitio usa un certificado de una autoridad pública. |
 | V13.4.1 | Desplegar sin metadatos de control de versiones (`.git`) | Cumple | Configuración: `.dockerignore` deja fuera `.git` en BackKL y FrontKL. En vivo, 23 nov: `/.git/HEAD` y `/.git/config` responden 404 | — | El despliegue no lleva archivos del repositorio. |
@@ -140,7 +141,6 @@ Además, desde esta revisión toda respuesta de la API lleva `Cache-Control: no-
 
 | Requisito | Riesgo | Arreglo | Quién | Tarjeta |
 |---|---|---|---|---|
-| V12.1.1 solo TLS 1.2 y 1.3 | Bajo | Cloudflare: Minimum TLS Version = TLS 1.2, y comprobar con `openssl` | Ernesto | Sin tarjeta: es un ajuste |
 | V3.3.1 prefijo de la cookie | Bajo | `__Host-lt_session` en la API y el portal | Por asignar | Propuesta |
 
 Cuando se arregle uno, su fila pasa a «Cumple» con la evidencia nueva, aquí y en `FrontKL/src/config/asvs.ts`, y
