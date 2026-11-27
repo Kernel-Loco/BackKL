@@ -212,7 +212,7 @@ class Rutas(unittest.TestCase):
     """cirdan/auth/routes.py sin base ni Resend: la respuesta, el envío después del 202 y el canje."""
 
     def request(self):
-        return SimpleNamespace(client=SimpleNamespace(host='198.51.100.7'), headers={})
+        return SimpleNamespace(client=SimpleNamespace(host='198.51.100.7'), headers={}, cookies={})
 
     def test_10_misma_respuesta_y_el_envio_va_despues(self):
         with mock.patch.object(routes.captcha, 'verify', return_value=True):

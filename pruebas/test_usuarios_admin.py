@@ -133,6 +133,24 @@ class UsuariosAdmin(unittest.TestCase):
         self.assertEqual(self.dana.get(USUARIOS + '/access-reviews')[1]['total'], 0)   # cada empresa ve las suyas
         self.assertEqual(self.alex.post(USUARIOS + '/access-review', {'notes': 5})[0], 422)
 
+    def test_6_la_baja_o_el_cambio_de_rol_fuera_de_la_api_tambien_cortan_la_sesion(self):
+        # V7.4.2 de ASVS (#75, RC-136): la API relee la cuenta en cada petición, así que un cambio hecho directo en la
+        # base (el comando del operador, psql) corta la sesión abierta en la siguiente petición, sin esperar 8 h.
+        casos = ((MAYA, MAYA_ID, 'is_active = false', 'is_active = true'),
+                 (JORDAN, JORDAN_ID, "role = 'manager'", "role = 'analyst'"))
+        for correo, usuario, cambio, regreso in casos:
+            with self.subTest(cambio=cambio):
+                cliente = sesion.login(correo)
+                self.assertEqual(cliente.get('/api/v1/domains')[0], 200)
+                postgres("UPDATE users SET %s WHERE id = '%s';" % (cambio, usuario))
+                self.assertEqual(cliente.get('/api/v1/domains')[0], 401)
+                # La sesión quedó cerrada, no solo rechazada: aunque la cuenta vuelva como estaba, esa cookie no sirve.
+                postgres("UPDATE users SET %s WHERE id = '%s';" % (regreso, usuario))
+                self.assertEqual(cliente.get('/api/v1/domains')[0], 401)
+                self.assertEqual(sesion.login(correo).get('/api/v1/domains')[0], 200)
+        # Las demás sesiones siguen como estaban.
+        self.assertEqual(self.alex.get(USUARIOS)[0], 200)
+
 
 if __name__ == '__main__':
     unittest.main()

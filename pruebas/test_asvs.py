@@ -174,7 +174,7 @@ class ReporteAsvs(unittest.TestCase):
         self.assertEqual(hashlib.sha256(publico.encode('utf-8')).hexdigest(), HUELLA_PUBLICA)
 
 
-HUELLA_PUBLICA = 'd54126d8ce1cdd735302ebdb1c281312f54d0607eafd062b8f8fbc9daf7be77a'
+HUELLA_PUBLICA = 'a433b1acf2973733e20e79f6174648b1d885ccc0921a434d6d82d5ac323f3c72'
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
