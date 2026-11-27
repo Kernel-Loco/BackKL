@@ -108,6 +108,9 @@ services:
   programador:
     <<: [*registro, *sin-raw]
 
+  inteligencia:
+    <<: [*registro, *sin-raw]
+
   portal:
     <<: *registro
     build:

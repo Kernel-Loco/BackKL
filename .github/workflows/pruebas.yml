@@ -103,6 +103,21 @@ jobs:
         run: |
           docker compose logs db | grep -q 'cirdan: base lista'
 
+      - name: Inteligencia en base aislada
+        run: |
+          docker compose exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE inteligencia_prueba"
+          docker compose exec -T db psql -U postgres -d inteligencia_prueba -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE public.cves (
+            cve_id text PRIMARY KEY, cvss_base_score numeric(3,1), epss_score numeric(6,5),
+            epss_percentile numeric(6,5), in_kev boolean NOT NULL DEFAULT false, kev_date_added date,
+            intel_updated_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now()
+          );
+          ALTER ROLE cirdan_intel PASSWORD 'solo-prueba-ci';
+          SQL
+          docker compose exec -T db psql -U postgres -d inteligencia_prueba -v ON_ERROR_STOP=1 < db/migraciones/038_inteligencia_amenazas.sql
+          docker compose run --rm -e "INTEL_TEST_DSN=host=db dbname=inteligencia_prueba user=cirdan_intel password=solo-prueba-ci" \
+            -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest -v pruebas/test_inteligencia.py
+
       # age cifra el respaldo de la base (db/respaldo, RC-233). test_respaldo.py falla si falta, no se salta.
       - name: Instalar age para la prueba del respaldo
         run: sudo apt-get update -q && sudo apt-get install -y -q age

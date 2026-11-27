@@ -98,11 +98,15 @@ class ApiV1(unittest.TestCase):
         for nueva, base, dias in cartas:
             sql += ('INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, '
                     'signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, '
-                    'template_version, activities) '
+                    'template_version, activities, created_at) '
                     "SELECT '%s', organization_id, domain_id, signer_name, signer_title, signer_email, "
                     "signed_document_key || '.rc313', signed_document_sha256, %s + 1, %s + %d, accepted_by, "
-                    "template_version, activities "
-                    "FROM domain_authorizations WHERE id = '%s';" % (nueva, hoy, hoy, dias, base))
+                    "template_version, activities, "
+                    # La más nueva del dominio aunque el reloj de la base vaya atrás (test_1c, libfaketime): desde la
+                    # 037 la API toma la vigente y, si no hay, la de created_at más reciente.
+                    "(SELECT max(y.created_at) FROM domain_authorizations y WHERE y.domain_id = x.domain_id) "
+                    "+ interval '1 second' "
+                    "FROM domain_authorizations x WHERE x.id = '%s';" % (nueva, hoy, hoy, dias, base))
         ok, salida, err = psql(sql + 'COMMIT;', user='postgres')
         self.assertTrue(ok, err)
         self.addCleanup(self.psql_o_falla, 'BEGIN; SET LOCAL session_replication_role = replica; '
@@ -306,7 +310,11 @@ class ApiV1(unittest.TestCase):
             COMMIT;""", user='postgres')
         self.assertTrue(ok, err)
         try:
-            lista = {i['id']: i for i in self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')['items']}
+            orden = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')['items']
+            ids = [i['id'] for i in orden]
+            self.assertLess(ids.index(completo), ids.index(fuera))
+            self.assertLess(ids.index(fuera), ids.index(stub))
+            lista = {i['id']: i for i in orden}
             campos = ('cve_id', 'cvss', 'epss', 'in_kev')
             self.assertEqual(tuple(lista[completo][c] for c in campos), (cve_completo, 9.8, 0.00043, True))
             self.assertEqual(tuple(lista[stub][c] for c in campos), (cve_stub, 7.5, None, None))

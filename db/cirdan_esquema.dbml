@@ -271,7 +271,7 @@ Table breach_exposures [note: 'Hecho de que un activo aparece en una brecha púb
   data_classes "text[]" [not null, note: 'Solo categorías expuestas (\'Passwords\', \'Email addresses\'), nunca los valores']
 }
 
-Table cves [note: 'Inteligencia de vulnerabilidades local: CVSS de NVD, EPSS de FIRST y CISA KEV en una fila por CVE, cargada una vez al día. Hoy en dev el orquestador inserta un stub por cada CVE que nombra un hallazgo (Shodan) o, si la visita web la trae de la NVD, la fila con descripción, CVSS, vector y fecha (migración 014, #18, RC-46). Nunca actualiza: la primera fila que entra se queda, y el cargador diario será el único que actualice (plan, #69, RC-127). Mientras una CVE siga como stub, la API toma el CVSS de la evidencia del hallazgo.'] {
+Table cves [note: 'Inteligencia de vulnerabilidades local: CVSS de NVD, EPSS de FIRST y CISA KEV en una fila por CVE. El orquestador inserta los datos de NVD o un stub, sin actualizar (014). El cargador diario usa cirdan_intel para actualizar EPSS y KEV (038, RC-127). Mientras una CVE siga sin CVSS, la API lo toma de la evidencia del hallazgo.'] {
   cve_id text [pk, note: 'Llave natural, ej. CVE-2024-3400. CHECK (cve_id ~ \'^CVE-[0-9]{4}-[0-9]{4,}$\'). El worker tendrá GRANT INSERT (cve_id, description, cvss_base_score, cvss_vector, published_at) y usará ON CONFLICT DO NOTHING. Hoy en dev ese GRANT lo tiene cirdan_app (migraciones 001 y 014)']
   description text
   cvss_base_score numeric(3,1) [note: 'NVD, CHECK 0 a 10']
@@ -281,7 +281,7 @@ Table cves [note: 'Inteligencia de vulnerabilidades local: CVSS de NVD, EPSS de 
   in_kev boolean [not null, note: 'DEFAULT false. true si CISA KEV la lista como explotada. Índice parcial WHERE in_kev']
   kev_date_added date
   published_at timestamptz
-  intel_updated_at timestamptz [note: 'Última carga diaria que tocó la fila. NULL = stub sin inteligencia todavía. Al completarlo se recalculará con reason \'intel_update\' (plan, #69, RC-127). Nunca se borra un CVE, aunque NVD lo marque REJECTED']
+  intel_updated_at timestamptz [note: 'Última carga diaria de EPSS y KEV que tocó la fila. NULL = KEV desconocido. La carga no cambia la severidad ni recalcula el score.']
 }
 
 Table scoring_rule_sets [note: 'Versión completa del juego de reglas y pesos de las 4 categorías del score. organization_id NULL identifica la plantilla global v1; los cambios crean juegos activos por organización, versionados e inmutables (migración 013, #32). Un juego nuevo copia todas las reglas de su plantilla anterior y recalcula scores con reason rules_change.'] {
