@@ -135,7 +135,7 @@ services:
 
   cloudflared:
     <<: *registro
-    image: cloudflare/cloudflared:2026.11.0
+    image: cloudflare/cloudflared:2026.11.1
     # Túnel administrado desde Cloudflare: los nombres (lowtidesec.com y www) y su destino, http://portal:3000,
     # se configuran en el panel de Zero Trust. Aquí solo va el token del túnel.
     command: ["tunnel", "--no-autoupdate", "run"]

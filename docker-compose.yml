@@ -27,7 +27,7 @@ services:
     restart: unless-stopped
 
   valkey:
-    image: valkey/valkey:8.1.11
+    image: valkey/valkey:8.1.12
     container_name: cirdan-valkey
     # Usuarios de Valkey (RC-292). default apagado: sin usuario y contraseña no entra nadie. cirdan_api, el de la API,
     # solo con los comandos y los prefijos de llave que usa cirdan/auth/sessions.py (también los de sus EVAL, que
