@@ -2,13 +2,16 @@
 
 Necesitan la base, así que corren dentro del contenedor de la API, como test_orquestador.py:
 
-    docker compose run --rm -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest -v pruebas/test_planes.py
+    docker compose run --rm -e POSTGRES_PASSWORD -v "$PWD/pruebas:/app/pruebas:ro" api python -m unittest -v pruebas/test_planes.py
 
 Casi todas corren en una transacción que se deshace al final. La de peticiones en paralelo (Paralelo) necesita que cada
 petición confirme su transacción, como en la API: al terminar pasa sus escaneos a hace 2 días, fuera del día y del
-enfriamiento, para que las demás pruebas de acme-demo.mx no choquen con el tope. Acme Demo está en Starter
-(on_demand_scans = false) y Beta Corp en Business (semilla 001).
+enfriamiento, para que las demás pruebas de acme-demo.mx no choquen con el tope. Desde la migración 035 (RC-285)
+`scans.queued_at` es inmutable incluso para `postgres`, así que Paralelo y las pruebas de enfriamiento y medianoche de
+Tope mueven `queued_at` como `postgres` con `SET LOCAL session_replication_role = replica` (se saltan sin
+POSTGRES_PASSWORD). Acme Demo está en Starter (on_demand_scans = false) y Beta Corp en Business (semilla 001).
 """
+import contextlib
 import threading
 import time
 import unittest
@@ -24,7 +27,7 @@ from cirdan.api import escaneos
 from cirdan.db import DSN, transaction
 from cirdan.orquestador import Solicitud
 from cirdan.recolectores import REGISTRO, cargar
-from pruebas.test_orquestador import ACME, BETA, FALLA, TXT_ACME, renovar_carta, responde
+from pruebas.test_orquestador import ACME, BETA, FALLA, TXT_ACME, conexion_postgres, renovar_carta, responde
 
 TXT_BETA = 'cirdan-verification=b7e1d0c4a9f2'   # token de beta-corp.mx en la semilla
 TXT_TIENDA = 'cirdan-verification=5e9a1f3c7d28'  # token de acme-tienda.mx en la semilla
@@ -123,11 +126,40 @@ class Tope(unittest.TestCase):
     def pedir(self, dns=None, org=ACME, fqdn='acme-demo.mx', trigger='on_demand'):
         return orquestador.solicitar(org, fqdn, trigger=trigger, consultar=dns or responde(TXT_ACME), conn=self.conn)
 
-    def cerrar(self, s, hace=None):
-        """Termina el escaneo (deja pedir otro sin scan_in_progress) y, si se da, lo pasa a hace `hace`."""
+    def cerrar(self, s):
+        """Termina el escaneo (deja pedir otro sin scan_in_progress)."""
         self.assertTrue(s.aceptada, s.detalle)
-        self.conn.execute("UPDATE scans SET status = 'completed', finished_at = now(), "
-                          'queued_at = now() - %s WHERE id = %s', (hace or timedelta(0), s.scan_id))
+        self.conn.execute("UPDATE scans SET status = 'completed', finished_at = now() WHERE id = %s", (s.scan_id,))
+
+    @contextlib.contextmanager
+    def como_postgres(self):
+        """Abre una transacción que se deshace como postgres y la corre con SET LOCAL ROLE cirdan_app, para que
+        mover_queued_at() pueda cambiar una columna inmutable desde la 035 (RC-285) dentro de la misma transacción."""
+        # Deshace la carta de setUp: desde la 037 (RC-272) dos cartas sin confirmar del mismo dominio en dos conexiones
+        # se esperan una a otra (candado del dominio y revocación de la anterior) y la prueba quedaría colgada.
+        self.tx.__exit__(None, None, None)
+        self.tx = self.conn.transaction(force_rollback=True)
+        self.tx.__enter__()
+        pg = conexion_postgres()
+        anterior = self.conn
+        try:
+            with pg.transaction(force_rollback=True):
+                pg.execute('SET LOCAL ROLE cirdan_app')
+                self.conn = pg
+                self.empresa(ACME)
+                renovar_carta(pg)
+                yield
+        finally:
+            self.conn = anterior
+            pg.close()
+
+    def mover_queued_at(self, scan_id, cuando):
+        """Mueve scans.queued_at dentro de como_postgres() sin disparar scans_guard_bu (035, RC-285)."""
+        self.conn.execute('RESET ROLE')
+        self.conn.execute('SET LOCAL session_replication_role = replica')
+        self.conn.execute('UPDATE scans SET queued_at = %s WHERE id = %%s' % cuando, (scan_id,))
+        self.conn.execute('SET LOCAL session_replication_role = origin')
+        self.conn.execute('SET LOCAL ROLE cirdan_app')
 
     def verificaciones(self):
         return self.uno('SELECT count(*) AS n FROM dns_txt_verifications')['n']
@@ -157,15 +189,14 @@ class Tope(unittest.TestCase):
         self.assertEqual(s.retry_after, self.segundos_a_medianoche_utc())
 
     def test_2_el_enfriamiento_frena_el_mismo_dominio(self):
-        with mock.patch.object(planes, 'TOPE_DOMINIO_SIN_PLAN', 99):
+        with self.como_postgres(), mock.patch.object(planes, 'TOPE_DOMINIO_SIN_PLAN', 99):
             primero = self.pedir()
             self.cerrar(primero)
             s = self.rechazo_sin_dns(['on_demand_cooldown'])
             self.assertEqual(s.retry_after, 6 * 3600)
-            self.conn.execute("UPDATE scans SET queued_at = now() - interval '5 hours' WHERE id = %s", (primero.scan_id,))
+            self.mover_queued_at(primero.scan_id, "now() - interval '5 hours'")
             self.assertEqual(self.rechazo_sin_dns(['on_demand_cooldown']).retry_after, 3600)
-            self.conn.execute("UPDATE scans SET queued_at = now() - interval '6 hours 1 second' WHERE id = %s",
-                              (primero.scan_id,))
+            self.mover_queued_at(primero.scan_id, "now() - interval '6 hours 1 second'")
             self.assertTrue(self.pedir().aceptada)
 
     def test_3_tope_por_empresa_y_otra_empresa_todavia_puede(self):
@@ -194,11 +225,10 @@ class Tope(unittest.TestCase):
             self.rechazo_sin_dns(['on_demand_daily_limit'])
 
     def test_5_los_de_ayer_no_cuentan(self):
-        with mock.patch.object(planes, 'ENFRIAMIENTO', timedelta(0)):
+        with self.como_postgres(), mock.patch.object(planes, 'ENFRIAMIENTO', timedelta(0)):
             primero = self.pedir()
-            self.cerrar(primero, hace=timedelta(0))
-            self.conn.execute("UPDATE scans SET queued_at = date_trunc('day', now(), 'UTC') - interval '1 second' "
-                              'WHERE id = %s', (primero.scan_id,))
+            self.cerrar(primero)
+            self.mover_queued_at(primero.scan_id, "date_trunc('day', now(), 'UTC') - interval '1 second'")
             self.assertTrue(self.pedir().aceptada)
 
     def test_6_los_programados_no_pasan_por_el_tope_ni_cuentan(self):
@@ -273,6 +303,10 @@ class Paralelo(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # envejecer() mueve queued_at como postgres (035, RC-285): sin POSTGRES_PASSWORD se salta antes de confirmar
+        # nada en la base, así no deja escaneos de hoy que traben a Tope ni a test_programador.
+        with conexion_postgres():
+            pass
         # Una carta vigente de acme-demo.mx confirmada, solo si ya no hay una (como test_escaneos_api.py test_5)
         with transaction(ACME) as c:
             c.execute(
@@ -291,11 +325,13 @@ class Paralelo(unittest.TestCase):
         self.addCleanup(self.envejecer)
 
     def envejecer(self):
-        """Los escaneos confirmados de la prueba pasan a hace 2 días: ya no cuentan para el tope ni el enfriamiento."""
+        """Los escaneos confirmados de la prueba pasan a hace 2 días: ya no cuentan para el tope ni el enfriamiento.
+        Desde la 035 (RC-285) queued_at es inmutable incluso para postgres, así que se mueven sin triggers."""
         if self.ids:
-            with transaction(ACME) as c:
-                c.execute("UPDATE scans SET queued_at = now() - interval '2 days', finished_at = now() - interval '2 days' "
-                          'WHERE id = ANY(%s::uuid[])', (self.ids,))
+            with conexion_postgres() as pg, pg.transaction():
+                pg.execute('SET LOCAL session_replication_role = replica')
+                pg.execute("UPDATE scans SET queued_at = now() - interval '2 days', finished_at = now() - interval '2 days' "
+                           'WHERE id = ANY(%s::uuid[])', (self.ids,))
 
     def a_la_vez(self):
         real = planes.check_plan_limits
@@ -328,9 +364,9 @@ class Paralelo(unittest.TestCase):
                 h.start()
             for h in hilos:
                 h.join(60)
+        self.ids += [s.scan_id for s in salida if s.aceptada]
         self.assertEqual(errores, [])
         self.assertEqual(len(salida), self.N)
-        self.ids += [s.scan_id for s in salida if s.aceptada]
         return salida
 
     def test_1_n_a_la_vez_no_pasan_del_tope(self):

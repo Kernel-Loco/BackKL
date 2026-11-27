@@ -313,9 +313,9 @@ El servicio `inteligencia` carga el catálogo completo CISA KEV y el archivo dia
 
 El servicio usa `cirdan_intel`, un rol separado que solo puede leer `cves` y actualizar las columnas de inteligencia. No puede leer hallazgos ni modificar CVSS. La API sigue usando `cirdan_app`, que no puede actualizar esas columnas.
 
-1. Aplicar las migraciones pendientes hasta la 035, antes de encender el servicio. Para la 035:
+1. Aplicar las migraciones pendientes hasta la 038, antes de encender el servicio. Para la 038:
    ```bash
-   docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/035_inteligencia_amenazas.sql
+   docker exec -i cirdan-pg16 psql -U postgres -d cirdan -v ON_ERROR_STOP=1 < db/migraciones/038_inteligencia_amenazas.sql
    ```
 2. Elegir una contraseña independiente, guardarla en `CIRDAN_INTEL_PASSWORD` del `.env` y establecer la misma para el rol, sin escribirla en el comando:
    ```bash
