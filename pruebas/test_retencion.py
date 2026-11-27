@@ -171,8 +171,10 @@ class Retencion(unittest.TestCase):
                                 "WHERE rolname = 'cirdan_retention';", user='postgres'), 'false,false')
         ok, _, _ = psql("DELETE FROM audit_log WHERE organization_id = '%s';" % ACME, user='cirdan_retention', org=ACME)
         self.assertFalse(ok)
-        ok, _, _ = psql("SELECT count(*) FROM domain_authorizations;", user='cirdan_retention', org=ACME)
-        self.assertFalse(ok)   # no tiene permiso: las cartas y el TXT van en #140
+        # Lee las cartas para mandar la confirmación del fin de servicio (RC-258), pero no las borra
+        ok, _, _ = psql("DELETE FROM domain_authorizations WHERE organization_id = '%s';" % ACME,
+                        user='cirdan_retention', org=ACME)
+        self.assertFalse(ok)
 
 
 if __name__ == '__main__':

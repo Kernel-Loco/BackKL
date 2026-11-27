@@ -306,8 +306,8 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
                      'Se borran en un plazo de [30] días, con confirmación',
                      '`cirdan_app` no puede borrar hallazgos, activos, reportes, alertas ni `breach_exposures`, y un '
                      'hallazgo que ya entró en un score no se puede borrar',
-                     'porque solo `cirdan_retention` (migración 039, RC-257) puede borrar scores, y solo los de '
-                     'más de 12 meses',
+                     'porque solo `cirdan_retention` (migraciones 039 y 040) puede borrar scores: los de más de 12 '
+                     'meses y los de una empresa que terminó el servicio',
                      'Al terminar la carta, o antes cuando el equipo la revoca al cerrar el curso o porque la empresa '
                      'pide por escrito borrar todos sus datos (sección 11, punto 7), pasan a bloqueo por [plazo] '
                      '(sección 6 de la carta), solo como prueba',
@@ -403,8 +403,9 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
                      'aviso',
                      'Falta también que la sección 1.2 de #6 diga que la base frena una revocación solo desde que se '
                      'registra (sección 11, punto 3)',
-                     'hoy no se puede, porque `score_contributions` referencia a `findings` y solo el rol de '
-                     'retención puede borrar scores', 'Hace falta una excepción por organización o anonimizar',
+                     'porque `score_contributions` referencia a `findings` y el rol de retención solo puede borrar '
+                     'scores de más de 12 meses o de una empresa que terminó el servicio',
+                     'Hace falta una excepción por dominio o anonimizar',
                      'Por la misma referencia, tampoco se puede borrar el mismo día la fila de un hallazgo '
                      'guardado por error que ya entró en un score ni la de su activo, como pide la sección 5.6',
                      'una carta que sigue vigente'):
