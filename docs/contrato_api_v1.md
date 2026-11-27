@@ -93,6 +93,19 @@ Una empresa puede apagar fuentes OSINT para sus escaneos. Solo apaga: una fuente
 - **Score:** `disabled_sources` en `score.json` y en cada punto de `historico.json` nombra las fuentes apagadas en el escaneo de ese score, y `coverage_gaps` da sus códigos con `source_disabled_by_org`. Un score con fuentes apagadas no es comparable con uno que las tuvo: el portal lo avisa antes de apagar.
 - **Bitácora:** cada cambio queda en `audit_log` como `source.disabled` o `source.enabled`, con `entity_type` `data_source`, el id de la fuente y `{code, enabled}` en `details`. Repetir el mismo estado no cambia nada ni repite la bitácora.
 
+## Alertas a Microsoft Teams (#65, RC-114)
+
+Solo el Admin, con la sesión del portal. La URL del flujo lleva su firma (`sig`): se guarda cifrada y ninguna respuesta la devuelve, solo el host.
+
+| Método y ruta | Qué hace |
+|---|---|
+| `GET /api/v1/integrations/teams` | `configured`, `enabled`, `host`, `updated_at` y `last_delivery` (`status`, `attempt`, `latency_ms`, `delivered_at`, `last_error`) |
+| `PUT /api/v1/integrations/teams` | Recibe `url` (la del flujo de Workflows: https, de `*.logic.azure.com` o `*.powerplatform.com`, con `sig`) y `enabled` opcional. Crea la integración o reemplaza la URL de la que ya hay. 422 con una URL de otro host, http, con usuario o puerto, o sin firma. Evento `integration.teams_set` con el host |
+| `DELETE /api/v1/integrations/teams` | La apaga y borra la URL guardada. 204, o 404 si no hay. Evento `integration.teams_removed` |
+| `POST /api/v1/integrations/teams/test` | Manda una tarjeta de prueba al canal y responde `delivered` y `status` |
+
+Qué llega al canal: una tarjeta adaptable por cada hallazgo crítico que un escaneo abre o reabre (`finding.created`) y cuando el score de un dominio llega al umbral de la empresa y el anterior estaba abajo (`score.above_threshold`). La alerta y su entrega se guardan en la misma transacción que el hallazgo o el score (outbox), y cada intento queda en `deliveries` con `latency_ms`. La tarjeta no lleva correos: se cambian por `[correo]`.
+
 ## Bitácora (#86, RC-130)
 
 La bitácora de la empresa (`audit_log`) y la verificación de su cadena de hashes. Las lee la pantalla de bitácora del portal (#86b, RC-174). Solo el Administrador, con su sesión: el Gerente y el Analista reciben 403, sin sesión responde 401 y una llave de API no entra (401). Un superadmin que trabaja en otra empresa entra como Admin de esa empresa y ve la de esa empresa. Las dos respuestas van con `Cache-Control: no-store`.

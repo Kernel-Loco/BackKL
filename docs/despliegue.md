@@ -406,6 +406,17 @@ AGE_IDENTIDAD=<ruta del archivo de la llave privada> db/respaldo/restaurar_compl
 
 `pruebas/test_respaldo.py` cubre el cifrado, la restauración de base, la retención y la subida simulada. `pruebas/test_respaldo_cartas.py` cubre el contenido seguro del paquete y, en el CI, la restauración de DB, volumen y llave y la autenticación AES-GCM de la carta. En una PC, las pruebas con Docker solo corren si se indican `RESPALDO_CONTENEDOR` y `RESPALDO_CARTAS_CONTENEDOR` de una pila aislada; nunca usan por omisión los contenedores de desarrollo.
 
+## Alertas a Microsoft Teams (RC-114)
+
+Un hallazgo crítico nuevo o un score que pasa el umbral llega como tarjeta al canal de Teams del equipo en menos de 60 s (`deliveries.latency_ms`). No hay servicio aparte: la API y el programador despachan al cerrar cada fuente y el score, y reintentan a los 10 s, 1 min, 5 min y 30 min. La URL se cifra con `SOURCE_KEYS_ENCRYPTION_KEY`, que la VM ya tiene (RC-54).
+
+1. **Comprobar primero que una cuenta @tec.mx puede crear el flujo.** En Teams, en el canal: `...` > Workflows > "Publicar en un canal cuando se recibe una solicitud de webhook" (en inglés, "Post to a channel when a webhook request is received"). Si la cuenta no puede, usar la de otro integrante o un equipo propio de Teams.
+2. Copiar la URL que da el flujo (empieza con `https://` y termina con `sig=...`). Es un secreto: quien la tenga publica en el canal. No va en el repo, en un ticket ni en un chat.
+3. Como Admin de la empresa, `PUT /api/v1/integrations/teams` con `{"url": "<la URL>"}` y luego `POST /api/v1/integrations/teams/test`: la tarjeta de prueba debe llegar al canal.
+4. Si una entrega quedó a medias porque el proceso se reinició, `docker compose exec api python -m cirdan.alertas <id de la empresa>` la reintenta.
+
+**Guion para el ensayo final (#54, S16):** con el canal conectado, escanear olmardo.com. El token falso del repo de GitHub (fila 8 de `docs/hallazgos_esperados.md`) es crítico: si el escaneo lo abre o lo reabre, la tarjeta llega al canal. Mostrar `latency_ms` con `SELECT status, attempt, latency_ms FROM deliveries ORDER BY created_at DESC LIMIT 3` como postgres. Si el hallazgo ya estaba abierto, se reabre marcándolo como resuelto en Hallazgos (RC-133) antes de escanear.
+
 ## Plan B
 
 En una PC del equipo, la misma pila con un túnel propio (otro `TUNNEL_TOKEN`). Para pasar el tráfico se cambia en Cloudflare el destino de `lowtidesec.com` y `www.lowtidesec.com` al túnel del plan B. Al probarlo se anotan la fecha, los pasos y los minutos hasta que respondió lowtidesec.com (comentario 10383 de RC-91).

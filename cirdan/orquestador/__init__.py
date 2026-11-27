@@ -34,6 +34,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from cirdan import alcance_carta, db
+from cirdan.alertas import outbox as alertas
 from cirdan.config import config
 from cirdan.db import audit, transaction
 from cirdan import planes
@@ -648,6 +649,8 @@ def _guardar_resultado(conn, org, scan_id, domain_id, source_id, resultado, regl
          'sin_revisar': resultado.sin_revisar, 'codigos': [c for c, _, _ in CIERRE_POR_FECHA],
          'campos': [c for _, c, _ in CIERRE_POR_FECHA], 'cortes': cortes},
     ).fetchall()}
+    # Outbox de alertas (RC-114): un crítico que se abre o se reabre deja su alerta y sus entregas en esta transacción.
+    alertas.encolar_hallazgos(conn, org, domain_id, abiertos)
     return abiertos, cerrados
 
 
@@ -729,6 +732,8 @@ def _guardar_score(conn, org, domain_id, scan_id, rule_set_id, reglas, pesos, pa
             (org, score_id, aporte['finding_id'], aporte['rule_id'], aporte['penalty'], aporte['severity'],
              Jsonb(aporte['factors'])),
         )
+    # Outbox de alertas (RC-114): el score que cruza el umbral de la empresa deja su alerta en esta transacción.
+    alertas.encolar_score(conn, org, domain_id, score_id, calculo['score'])
     return calculo
 
 
@@ -1059,6 +1064,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 # Lo que una fuente resuelve y otra reabre en este escaneo (o al revés) no cuenta. Hoy dos fuentes no
                 # dan la misma huella y no pasa, pero el conteo no depende de eso.
                 abiertos, cerrados = cambios
+                if abiertos and conn is None:   # ya con commit: la alerta de un crítico sale sin esperar al score
+                    alertas.despachar_en_segundo_plano(org)
                 resueltos |= cerrados - nuevos
                 nuevos -= cerrados
                 nuevos |= abiertos - resueltos
@@ -1133,6 +1140,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
             audit(c, org, 'scan.finished', None, None, 'scan', scan_id, {'fqdn': fqdn, 'status': estado, **stats})
     if not cerrado:
         return _ya_no_corre(org, scan_id, conn, corridas)
+    if conn is None:   # la alerta del score, ya con commit (RC-114)
+        alertas.despachar_en_segundo_plano(org)
     return {'scan_id': scan_id, 'status': estado, 'stats': stats, 'sources': corridas}
 
 

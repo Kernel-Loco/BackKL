@@ -152,7 +152,7 @@ jobs:
           pruebas/test_alta_dominio.py pruebas/test_verificacion_txt_api.py pruebas/test_alta_dominio_integracion.py
           pruebas/test_firma.py pruebas/test_firma_base.py
           pruebas/test_enlace_sin_red.py pruebas/test_recuperar_sin_red.py pruebas/test_programador.py pruebas/test_llave_fuentes.py
-          pruebas/test_motivos_falla.py
+          pruebas/test_motivos_falla.py pruebas/test_alertas.py
 
       - name: Pruebas sin base ni red
         run: >-
@@ -166,6 +166,12 @@ jobs:
           pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_plan_zap.py pruebas/test_reto_hackeo.py pruebas/test_pruebas_usuarios.py pruebas/test_pentest_reporte.py pruebas/test_asvs.py pruebas/test_siem.py pruebas/test_despliegue.py
           pruebas/test_reporte_tecnico.py pruebas/test_medicion.py
           pruebas/test_ci.py pruebas/test_cadena_suministro.py pruebas/test_terraform.py pruebas/test_alcance_carta.py
+          pruebas/test_alertas_tarjeta.py
+
+      # RC-114: la API de la integración con Teams contra la pila del CI. No sale nada a la red: la URL es de prueba y
+      # la entrega simulada está en test_alertas.py, dentro del contenedor.
+      - name: Integración con Teams
+        run: python -m unittest pruebas/test_integracion_teams.py
 
       # #28 (RC-63): el enlace al correo de punta a punta en otro compose, aislado y sin red, con Resend simulado,
       # y en el mismo compose la recuperación de la contraseña con un enlace (RC-335, test_recuperar.py)

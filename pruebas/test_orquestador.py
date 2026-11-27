@@ -33,6 +33,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from cirdan import orquestador, planes
+from cirdan.alertas import outbox as alertas_outbox
 from cirdan.api import v1 as api_v1
 from cirdan.config import config
 from cirdan.db import DSN
@@ -548,6 +549,26 @@ class Orquestador(unittest.TestCase):
         with mock.patch.object(orquestador, 'ejecutar', return_value=resultado):
             orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['github'], modo='reproducir', conn=self.conn)
         return self.uno('SELECT id::text FROM findings WHERE fingerprint = %s', bytes.fromhex(huella))['id']
+
+    def test_2h0_un_critico_nuevo_deja_su_alerta_a_teams_en_su_transaccion(self):
+        """RC-114: el outbox. El secreto crítico que abre el escaneo deja su alerta finding.created y una entrega
+        pendiente por integración de Teams encendida, en la misma transacción. Reescanear el mismo no repite la alerta.
+        Con la conexión de la prueba no se lanza el hilo que despacha: lo prueba pruebas/test_alertas.py."""
+        teams = str(uuid.uuid4())
+        url = 'https://prod-1.westus.logic.azure.com/workflows/x/triggers/manual/paths/invoke?sig=CIRDAN_FAKE_firma'
+        self.conn.execute("INSERT INTO integrations (id, organization_id, kind, name, endpoint, secret_enc, config) "
+                          "VALUES (%s, %s, 'webhook', 'Microsoft Teams', 'prod-1.westus.logic.azure.com', %s, "
+                          "'{\"formato\": \"teams\"}')", (teams, ACME, alertas_outbox.cifrar_url(teams, url)))
+        with mock.patch.object(alertas_outbox, 'despachar_en_segundo_plano') as hilo:
+            finding_id = self.escanear_secreto_github('2026-09-20T00:00:00+00:00')
+            hilo.assert_not_called()
+        alerta = self.uno("SELECT id::text, severity, payload->>'rule_code' AS regla FROM alerts "
+                          "WHERE finding_id = %s AND event_type = 'finding.created'", finding_id)
+        self.assertEqual((alerta['severity'], alerta['regla']), ('critical', 'secret_in_public_repo'))
+        entrega = self.uno('SELECT integration_id::text, status FROM deliveries WHERE alert_id = %s', alerta['id'])
+        self.assertEqual((entrega['integration_id'], entrega['status']), (teams, 'pending'))
+        self.escanear_secreto_github('2026-09-20T00:00:00+00:00')   # sigue abierto: no es nuevo
+        self.assertEqual(self.uno("SELECT count(*) AS n FROM alerts WHERE finding_id = %s", finding_id)['n'], 1)
 
     def test_2h_un_secreto_rotado_no_se_reabre_sin_un_commit_posterior(self):
         finding_id = self.escanear_secreto_github('2026-09-20T00:00:00+00:00')
