@@ -457,12 +457,15 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
                    '2026'),
                   ('fila 13 de hallazgos_esperados.md', fila13, '| La llave de #19 (Core 1) |'),
                   ('fechas de hallazgos_esperados.md', esperados, '#19 llega después de la revisión legal'),
-                  ('HIBP en servicios_externos.md', hibp[0], 'Se compra después de la revisión legal'),
-                  ('gasto de HIBP en servicios_externos.md', hibp[1], 'Sin compra: espera la revisión legal'),
-                  ('pregunta 10 de servicios_externos.md', hibp[2], 'No se compra antes de la revisión legal')]
+                  ('HIBP en servicios_externos.md', hibp[0],
+                   'Comprada el 23 nov 2026 a las 16:06, después de la revisión legal'),
+                  ('gasto de HIBP en servicios_externos.md', hibp[1],
+                   'Pagado el 23 nov 2026 a las 16:06, después de la revisión legal'),
+                  ('pregunta 10 de servicios_externos.md', hibp[2],
+                   'Se compró el 23 nov 2026, después de la revisión legal')]
         vence = next((f for f in servicios.splitlines() if f.startswith('| Ninguna llave vence antes')), '')
         with self.subTest(documento='vencimientos de servicios_externos.md'):
-            self.assertIn('La de HIBP se compra después de la revisión legal del 23 nov 2026', vence,
+            self.assertIn('La de HIBP se compró el 23 nov 2026, después de la revisión legal', vence,
                           'el vencimiento de HIBP no espera la revisión legal (r17-reg-1)')
             self.assertNotIn('si se compra el 5 nov', vence, 'el vencimiento de HIBP sigue con la compra del 5 nov')
         for donde, linea, cita in lineas:
