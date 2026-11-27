@@ -290,6 +290,23 @@ class Despliegue(unittest.TestCase):
         for llave in ('CIRDAN_APP_PASSWORD', 'TOTP', 'PASSWORD_HASH', 'CARTA', 'SOURCE_KEYS', 'IA_', 'CORREO'):
             self.assertEqual([k for k in s['environment'] if k.startswith(llave)], [], llave)
 
+    def test_16d_retencion_solo_con_su_profile_y_con_su_propio_rol(self):
+        # RC-257: la retención de 12 meses no se enciende con `up -d` (test_1). Con su profile corre su módulo con
+        # cirdan_retention, sin init: true (RC-324), sin puertos ni NET_RAW y sin la contraseña ni las llaves de la API.
+        rc, salida = _config(ENV_FALSO, perfiles=('retencion',))
+        self.assertEqual(rc, 0, salida[-500:])
+        s = json.loads(salida)['services']['retencion']
+        self.assertEqual((s['command'], s['profiles']), (['python', '-m', 'cirdan.retencion'], ['retencion']))
+        self.assertNotIn('init', list(s))
+        self.assertFalse(s.get('ports'))
+        self.assertIn('NET_RAW', s.get('cap_drop') or [])
+        self.assertIn('CIRDAN_RETENTION_PASSWORD', s['environment'])
+        # Sin CIRDAN_APP_PASSWORD el módulo no puede importar cirdan.db, que la pide al cargarse.
+        fuente = (RAIZ / 'cirdan' / 'retencion.py').read_text(encoding='utf-8')
+        self.assertNotRegex(fuente, r'(?m)^\s*(from cirdan\.db import|import cirdan\.db|from cirdan import .*db)')
+        for llave in ('CIRDAN_APP_PASSWORD', 'TOTP', 'PASSWORD_HASH', 'CARTA', 'SOURCE_KEYS', 'IA_', 'CORREO'):
+            self.assertEqual([k for k in s['environment'] if k.startswith(llave)], [], llave)
+
     def test_16_programador_solo_con_su_profile_y_sin_imds(self):
         # RC-52: el programador no se enciende con `up -d` (test_1). Con su profile sale por default, sin puertos, sin
         # la IP fija de la API ni NET_RAW, con el registro rotado y sin las llaves de Key Vault.

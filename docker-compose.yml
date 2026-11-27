@@ -10,6 +10,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD en .env}
       CIRDAN_APP_PASSWORD: ${CIRDAN_APP_PASSWORD:?Falta CIRDAN_APP_PASSWORD en .env}
+      CIRDAN_RETENTION_PASSWORD: ${CIRDAN_RETENTION_PASSWORD:-}
       TZ: America/Mexico_City
       PGTZ: America/Mexico_City
     ports:
@@ -266,6 +267,24 @@ services:
       db:
         condition: service_healthy
     # Sin init: true, como la API y el programador: cirdan.init es el PID 1 y no deja el entorno legible (RC-324).
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+
+  # Retención de 12 meses (RC-257): corre al arrancar y cada 24 h con el rol cirdan_retention (migración 039).
+  retencion:
+    build: .
+    command: ["python", "-m", "cirdan.retencion"]
+    profiles: ["retencion"]
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: cirdan
+      CIRDAN_RETENTION_PASSWORD: ${CIRDAN_RETENTION_PASSWORD:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    # Sin init: true: cirdan.init es el PID 1 y no deja el entorno legible (RC-324).
     restart: unless-stopped
     healthcheck:
       disable: true

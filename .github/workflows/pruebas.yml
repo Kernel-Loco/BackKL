@@ -48,7 +48,7 @@ jobs:
         run: |
           cp .env.example .env
           al_azar() { python -c "import secrets; print(secrets.token_urlsafe(24))"; }
-          for var in POSTGRES_PASSWORD CIRDAN_APP_PASSWORD VALKEY_PASSWORD VALKEY_ADMIN_PASSWORD; do
+          for var in POSTGRES_PASSWORD CIRDAN_APP_PASSWORD CIRDAN_RETENTION_PASSWORD VALKEY_PASSWORD VALKEY_ADMIN_PASSWORD; do
             sed -i "s|^$var=.*|$var=$(al_azar)|" .env
           done
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
@@ -127,7 +127,7 @@ jobs:
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
           pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_bitacora.py pruebas/test_bitacora_descargas.py pruebas/test_inventario_activos.py pruebas/test_llaves_api.py pruebas/test_usuarios_admin.py
           pruebas/test_superadmin.py pruebas/test_operador.py pruebas/test_candados_base.py pruebas/test_valkey_acl.py pruebas/test_fuentes_por_cliente.py
-          pruebas/test_respaldo.py pruebas/test_respaldo_cartas.py
+          pruebas/test_respaldo.py pruebas/test_respaldo_cartas.py pruebas/test_retencion.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
       # porque no trae gitleaks. Aquí INTEGRACION_GITHUB=1 hace que falle si a la imagen le faltan.

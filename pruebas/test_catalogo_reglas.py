@@ -128,7 +128,7 @@ MARCAS_DB = re.compile(r'''
 # Los archivos del aviso que ya pasaron la prueba 15 en una base recién cargada, con su SHA-256 (los \r\n se cuentan
 # como \n, como los guarda git, así la huella es la misma en Windows y en el CI). Cómo se agrega uno: db/README.md.
 HUELLAS_DB = {
-    'db/init/cargar_cirdan.sh': 'f2ced66729f048f0d9d7c75e4aea764341c9b253ad98dcd05c6e65dd3c698684',
+    'db/init/cargar_cirdan.sh': 'a2bcc1b7f15f176c8918d69ca6ca6fdb0248e1429fbb9cc6d57d82b35d37111c',
     'db/migraciones/001_esquema_inicial.sql': '94a5eecc28b57eb1d2d275f9f40bf7e562ddbe7a65bf724c3b4d94f21cead8d4',
     'db/migraciones/002_login.sql': 'a2e4900b8a00aa496e8d95acb97a1e1232ed75aa265e5af449032bba4a1518ee',
     'db/migraciones/003_textos_reglas.sql': '1301a671fe7bf650033d378a36eacf8a9b792a78c1ac4173f76e6c8a84875b9e',
@@ -160,6 +160,7 @@ HUELLAS_DB = {
     'db/migraciones/034_fuentes_por_organizacion.sql': '86113c35b97f33ee030eac6b2f0f9d1f74a257dde6d2d95c3d4bcb2ebca60291',
     'db/migraciones/035_escaneo_inmutable.sql': 'f00d02e4b6957d538a51e62aa69ddedc7a90c5890dc8af604953bf7689b59761',
     'db/migraciones/037_cartas_y_txt.sql': '2154ee0e2242322414f301388509681f928365bc9c0683a1718d885ec4dd2401',
+    'db/migraciones/039_rol_retencion.sql': 'd8d94c85213f734d41b7708753c885832a8cf38bf4c6ddfcaea2f7315bdf7372',
     'db/semillas/001_datos_demo.sql': 'fe4bd48276a8366a15578bdc14c3d65d869bc4586afec745d5a3dc97b1e71efb',
     'db/semillas/004_reglas_recolectores.sql': '7d7ce5d07352db3a706a892681c2fd70a9182e3ff0a72e7b83aebd1c2eec47c0',
     'db/semillas/020_regla_contenedores.sql': '6df33599a52a8169f49967164fa7d14d764cf593fd9cbe4603b5226452e9a2c7',

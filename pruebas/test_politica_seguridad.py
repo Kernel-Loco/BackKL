@@ -287,7 +287,7 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
         self.assertLess(i_cuenta, i_prueba, "'ese fin' es el de la primera frase y el bloqueo va al final")
         self.assertEqual(frases[3], 'Los de un dominio, igual al vencer o revocarse su última carta.')
         # Lo que la base no deja hacer: hoy no se borra ningún hallazgo que ya entró en un score, porque el rol de
-        # retención no existe y cirdan_app no borra hallazgos (r9-7, r9-9, r10-6).
+        # retención solo borra lo de más de 12 meses (RC-257) y cirdan_app no borra hallazgos (r9-7, r9-9, r10-6).
         self.assertEqual(frases[4], 'Hoy la base no deja borrar ni anonimizar lo bloqueado ni los hallazgos que ya '
                          'entraron en un score, y el fin de la carta no desactiva ni reactiva las cuentas '
                          '(sección 9).', 'el punto 7 cierra con lo que hoy la base no permite')
@@ -306,8 +306,8 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
                      'Se borran en un plazo de [30] días, con confirmación',
                      '`cirdan_app` no puede borrar hallazgos, activos, reportes, alertas ni `breach_exposures`, y un '
                      'hallazgo que ya entró en un score no se puede borrar',
-                     'porque solo `cirdan_retention`, que todavía no existe, podrá borrar scores, y solo los de más '
-                     'de 12 meses',
+                     'porque solo `cirdan_retention` (migración 039, RC-257) puede borrar scores, y solo los de '
+                     'más de 12 meses',
                      'Al terminar la carta, o antes cuando el equipo la revoca al cerrar el curso o porque la empresa '
                      'pide por escrito borrar todos sus datos (sección 11, punto 7), pasan a bloqueo por [plazo] '
                      '(sección 6 de la carta), solo como prueba',

@@ -111,6 +111,9 @@ services:
   inteligencia:
     <<: [*registro, *sin-raw]
 
+  retencion:
+    <<: [*registro, *sin-raw]
+
   portal:
     <<: *registro
     build:
