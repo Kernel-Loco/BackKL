@@ -44,7 +44,7 @@ QUITAR_FALLA = ('DROP TRIGGER IF EXISTS rc312_falla ON public.audit_log; '
 
 # La cadena se recalcula como el trigger audit_log_chain() de la 001: consecutivo sin huecos, prev_hash igual al
 # row_hash anterior (génesis en ceros) y row_hash igual al SHA-256 del contenido canónico. Cuenta las filas que fallan.
-# row_hash con la fórmula de cada fila según su chain_version (cirdan/bitacora.py, HASH_FILA; migraciones 001 y 035).
+# row_hash con la fórmula de cada fila según su chain_version (cirdan/bitacora.py, HASH_FILA; migraciones 001 y 036).
 CADENA_ROTA = r'''
 SELECT count(*) FROM (
   SELECT l.*, lag(l.row_hash) OVER w AS anterior, lag(l.chain_seq) OVER w AS seq_anterior

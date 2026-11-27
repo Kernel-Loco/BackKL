@@ -15,7 +15,7 @@ from cirdan.orquestador.txt import ConsultaTxt
 
 FECHA = datetime(2026, 11, 19, tzinfo=timezone.utc)
 DOMINIO = {'id': 'domain-id', 'fqdn': 'example.com', 'status': 'pending_verification', 'txt_token': 'ab12cd34ef56'}
-# Un token en hex, como los de secrets.token_hex: desde la 036 (RC-272) solo ese se guarda tal cual en observed_values
+# Un token en hex, como los de secrets.token_hex: desde la 037 (RC-272) solo ese se guarda tal cual en observed_values
 ESPERADO = 'cirdan-verification=ab12cd34ef56'
 
 

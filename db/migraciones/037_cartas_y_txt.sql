@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/036_cartas_y_txt.sql (#154, RC-272)
+-- Cirdan · db/migraciones/037_cartas_y_txt.sql (#154, RC-272)
 -- Una carta nueva revoca la anterior, una revocación no se deshace y el TXT
 -- se guarda sin datos de más.
 -- Lo que llega aquí:

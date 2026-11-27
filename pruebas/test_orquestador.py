@@ -32,7 +32,7 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from cirdan import orquestador
+from cirdan import orquestador, planes
 from cirdan.api import v1 as api_v1
 from cirdan.config import config
 from cirdan.db import DSN
@@ -155,13 +155,18 @@ class Orquestador(unittest.TestCase):
         self.tx.__enter__()
         self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
         renovar_carta(self.conn)
+        # Sin el tope de escaneos a mano (RC-297): aquí se piden varios del mismo dominio en una prueba. El tope y
+        # su lugar en solicitar() los prueba pruebas/test_planes.py.
+        sin_tope = mock.patch.object(planes, 'check_plan_limits', return_value=None)
+        sin_tope.start()
+        self.addCleanup(sin_tope.stop)
 
     def tearDown(self):
         self.tx.__exit__(None, None, None)
         self.conn.close()
 
-    def solicitar(self, fqdn, dns, conn=None):
-        return orquestador.solicitar(ACME, fqdn, consultar=dns, conn=conn or self.conn)
+    def solicitar(self, fqdn, dns, conn=None, trigger='on_demand'):
+        return orquestador.solicitar(ACME, fqdn, consultar=dns, conn=conn or self.conn, trigger=trigger)
 
     def uno(self, sql, *params):
         return self.conn.execute(sql, params).fetchone()
@@ -242,7 +247,7 @@ class Orquestador(unittest.TestCase):
         run = self.uno('SELECT r.status, r.attempt, r.next_retry_at, r.error FROM scan_source_runs r '
                        "JOIN data_sources d ON d.id = r.source_id WHERE r.scan_id = %s AND d.code = 'ct_logs'", s.scan_id)
         self.assertEqual((run['status'], run['attempt'], run['next_retry_at']), ('failed', 0, None))
-        self.assertIn('no autorizada por la carta (actividad 1', run['error'])
+        self.assertEqual(run['error'], 'no autorizada por la carta')  # un motivo fijo (RC-300); el detalle va en avisos
 
     def test_2c_carta_sin_alcance_no_corre_ninguna_fuente(self):
         self.carta_con_alcance(None)   # carta de antes de la 029 que nadie llenó: falla cerrado
@@ -256,7 +261,7 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['stats']['sources_unauthorized'], ['ct_logs', 'dns'])
 
     def test_2d_el_escaneo_usa_la_carta_nueva(self):
-        # RC-272: la carta nueva vence antes que la de renovar_carta() y que la 41...01 de la semilla. Antes de la 036
+        # RC-272: la carta nueva vence antes que la de renovar_carta() y que la 41...01 de la semilla. Antes de la 037
         # el escaneo tomaba la vigente de valid_until más lejano. Ahora la carga revoca las otras y el escaneo usa la
         # nueva.
         nueva = self.uno(
@@ -272,6 +277,56 @@ class Orquestador(unittest.TestCase):
         otras = self.uno('SELECT count(*) AS n FROM domain_authorizations a JOIN domains d ON d.id = a.domain_id '
                          "WHERE d.fqdn = 'acme-demo.mx' AND a.revoked_at IS NULL AND a.id <> %s", nueva)
         self.assertEqual(otras['n'], 0)
+
+    def apagar_para_acme(self, codigo):
+        """Acme apaga la fuente (org_source_settings, #117, RC-235), en la transacción de la prueba."""
+        self.conn.execute(
+            'INSERT INTO org_source_settings (organization_id, source_id, enabled, changed_by) '
+            "SELECT %s, d.id, false, u.id FROM data_sources d, users u WHERE d.code = %s "
+            "AND u.email = 'alex.morgan@acme-demo.mx'", (ACME, codigo))
+
+    def test_235a_la_fuente_que_la_organizacion_apago_no_corre_y_el_score_es_parcial(self):
+        self.apagar_para_acme('ct_logs')
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), ['ct_logs'])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        self.assertTrue(s.aceptada, s.detalle)
+        with mock.patch.object(orquestador, 'ejecutar', wraps=orquestador.ejecutar) as ejecutar:
+            # Sin `fuentes`: las de fuentes_activas() menos las apagadas.
+            with mock.patch.object(orquestador, 'fuentes_activas', return_value=['ct_logs', 'ejemplo']):
+                resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', modo='reproducir', conn=self.conn)
+        self.assertEqual([c.args[0].FUENTE for c in ejecutar.call_args_list], ['ejemplo'])
+        self.assertEqual(resumen['status'], 'partial')
+        self.assertEqual(resumen['stats']['sources_disabled_by_org'], ['ct_logs'])
+        self.assertEqual([r['source'] for r in resumen['sources']], ['ejemplo'])
+        self.assertIsNone(self.corrida_de(s.scan_id, 'ct_logs'))
+        scan = self.uno('SELECT status, stats FROM scans WHERE id = %s', s.scan_id)
+        self.assertEqual((scan['status'], scan['stats']['sources_disabled_by_org']), ('partial', ['ct_logs']))
+        score = self.uno('SELECT partial_coverage FROM domain_scores WHERE scan_id = %s', s.scan_id)
+        self.assertIs(score['partial_coverage'], True)
+
+    def test_235b_la_apagada_tampoco_corre_si_viene_en_fuentes_y_otra_empresa_no_la_ve(self):
+        self.apagar_para_acme('ejemplo')
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        with mock.patch.object(orquestador, 'ejecutar') as ejecutar:
+            resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                         conn=self.conn)
+        ejecutar.assert_not_called()
+        self.assertEqual(resumen['status'], 'failed')   # no corrió ninguna: nada que comparar
+        self.assertEqual(resumen['stats']['sources_disabled_by_org'], ['ejemplo'])
+        # Con RLS, Beta no ve lo que apagó Acme.
+        self.conn.execute("SELECT set_config('app.current_org', %s, true)", (BETA,))
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), [])
+        self.conn.execute("SELECT set_config('app.current_org', %s, true)", (ACME,))
+
+    def test_235c_una_fila_encendida_es_lo_mismo_que_no_tenerla(self):
+        self.apagar_para_acme('ejemplo')
+        self.conn.execute("UPDATE org_source_settings SET enabled = true")
+        self.assertEqual(orquestador.fuentes_apagadas(self.conn), [])
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        resumen = orquestador.correr(ACME, s.scan_id, 'acme-demo.mx', fuentes=['ejemplo'], modo='reproducir',
+                                     conn=self.conn)
+        self.assertEqual(resumen['status'], 'completed')
+        self.assertNotIn('sources_disabled_by_org', resumen['stats'])
 
     def test_2_corre_el_recolector_grabado_y_cierra_el_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
@@ -637,7 +692,7 @@ class Orquestador(unittest.TestCase):
             self.assertTrue(s.aceptada, s.detalle)
             return s.scan_id
         # Un escaneo caído (sin score) pedido antes del más viejo de los dos scores y que terminó después: cuenta por
-        # finished_at. queued_at (hoy, antes de los scores de 2098 y 2099) no cuenta, y desde la 034 (RC-285) no cambia.
+        # finished_at. queued_at (hoy, antes de los scores de 2098 y 2099) no cuenta, y desde la 035 (RC-285) no cambia.
         caido = solicitar()
         self.conn.execute("UPDATE scans SET status = 'failed', finished_at = '2099-01-01T13:00:00+00:00' WHERE id = %s",
                           (caido,))
@@ -1323,7 +1378,8 @@ class Orquestador(unittest.TestCase):
             antes.append(len(red.de('api.certspotter.com')))
             red.certspotter_caido = False
         self.exige_cupo('ct_logs', 2 * crtsh.MAX_CONSULTAS)
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         with tempfile.TemporaryDirectory() as d, mock.patch.object(crtsh, 'CARPETA_GRABADAS', Path(d)), \
                 mock.patch.object(transporte, 'descargar', descargar), \
                 mock.patch.object(crtsh.time, 'sleep', lambda s: None), \
@@ -1485,14 +1541,14 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(resumen['status'], 'failed')
         run = self.corrida(s.scan_id)
         # sigue como la dejó el abandono, que conserva el error del primer intento: no 'succeeded' sin error
-        self.assertEqual((run['status'], run['attempt'], run['error']), ('failed', 1, FALLA.error))
+        self.assertEqual((run['status'], run['attempt'], run['error']), ('failed', 1, 'no respondió'))  # motivo (RC-300)
 
     def test_3i_la_fila_suma_las_consultas_de_sus_intentos_y_guarda_los_errores_anteriores(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         resumen = self.en_vivo(s, [FALLA, FALLA, BIEN], lambda segundos: None)
         fuente = resumen['sources'][0]
         self.assertEqual((fuente['status'], fuente['consultas']), ('succeeded', 3))
-        self.assertEqual(fuente['avisos'], ['Intento 1: crt.sh no respondió', 'Intento 2: crt.sh no respondió'])
+        self.assertEqual(fuente['avisos'], ['Intento 1: no respondió', 'Intento 2: no respondió'])  # motivos (RC-300)
         guardado = self.uno('SELECT raw_payload FROM scan_source_runs WHERE scan_id = %s', s.scan_id)['raw_payload']
         self.assertEqual((guardado['consultas'], guardado['avisos']), (3, fuente['avisos']))  # `ejemplo` guarda raw_payload
 
@@ -1639,15 +1695,16 @@ class Orquestador(unittest.TestCase):
         # puede quedar cupo, pero no el máximo de una corrida completa
         self.assertEqual(texto, 'Sin cupo diario: ct_logs no tiene cupo para una corrida completa hoy (día UTC).')
         run = self.corrida_de(s.scan_id, 'ct_logs')
-        self.assertEqual((run['status'], run['attempt'], run['next_retry_at'], run['error']), ('failed', 0, None, texto))
+        self.assertEqual((run['status'], run['attempt'], run['next_retry_at'], run['error']), ('failed', 0, None, 'sin cupo'))
         self.assertEqual((run['raw_payload']['consultas'], run['raw_payload']['avisos']), (0, [texto]))  # ct_logs guarda raw_payload
         fuente = resumen['sources'][1]
-        self.assertEqual((fuente['source'], fuente['status'], fuente['error']), ('ct_logs', 'failed', texto))
+        self.assertEqual((fuente['source'], fuente['status'], fuente['error']), ('ct_logs', 'failed', 'sin cupo'))
         self.assertEqual((resumen['status'], resumen['stats']['sources_failed']), ('partial', 1))  # `ejemplo` sí respondió
         self.assertEqual(self.cupo('ct_logs')[1], usadas)  # la reserva que no cupo no dejó nada
 
     def test_3n2_si_el_cupo_se_acaba_entre_reintentos_la_fuente_queda_fallida(self):
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         limite, usadas, _ = self.cupo('ct_logs')
         self.assertIsNotNone(limite)
         if limite - usadas < 0:  # el ajuste registra lo gastado de más: lo usado hoy puede pasar del límite
@@ -1664,12 +1721,13 @@ class Orquestador(unittest.TestCase):
         self.assertEqual(sum(esperas), 60)  # solo la espera del primer reintento
         run = self.corrida_de(s.scan_id, 'ct_logs')
         self.assertEqual((run['status'], run['attempt'], run['next_retry_at']), ('failed', 1, None))
-        self.assertEqual(run['raw_payload']['avisos'], ['Intento 1: crt.sh no respondió', orquestador.SIN_CUPO % 'ct_logs'])
+        self.assertEqual(run['raw_payload']['avisos'], ['Intento 1: no respondió', orquestador.SIN_CUPO % 'ct_logs'])
         self.assertEqual(resumen['status'], 'failed')  # su única fuente falló
         self.assertEqual(self.cupo('ct_logs')[1], usadas + FALLA.consultas)  # lo gastado de más se registra igual
 
     def test_3o_la_reserva_y_el_ajuste_dejan_en_daily_used_lo_que_se_gasto(self):
-        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        # Programado: uno a mano no reintenta ct_logs si ya gastó consultas (RC-297, cirdan/planes.py)
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME), trigger='scheduled')
         reservadas = crtsh.MAX_CONSULTAS
         _, usadas = self.exige_cupo('ct_logs', 2 + reservadas)  # 2 intentos de 1 consulta y la reserva del tercero
         durante = []
@@ -1717,7 +1775,7 @@ class Orquestador(unittest.TestCase):
 
     def test_3r_el_cupo_de_un_dia_viejo_se_reinicia(self):
         """Como postgres deja ct_logs lleno ayer. Después corre como cirdan_app en la misma transacción, que se deshace."""
-        # Deshace la carta de setUp: desde la 036 (RC-272) dos cartas sin confirmar del mismo dominio en dos conexiones
+        # Deshace la carta de setUp: desde la 037 (RC-272) dos cartas sin confirmar del mismo dominio en dos conexiones
         # se esperan una a otra (candado del dominio y la revocación de la anterior), y esta prueba quedaría colgada.
         self.tx.__exit__(None, None, None)
         self.tx = self.conn.transaction(force_rollback=True)
@@ -1877,14 +1935,30 @@ class Orquestador(unittest.TestCase):
         with mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(self.conn)):
             orquestador.marcar_fallido(ACME, s.scan_id, KeyboardInterrupt())  # Ctrl+C no trae texto
         run = self.corrida(s.scan_id)
-        self.assertEqual((run['status'], run['next_retry_at'], run['error']), ('failed', None, 'KeyboardInterrupt'))
+        self.assertEqual((run['status'], run['next_retry_at'], run['error']), ('failed', None, 'error interno'))  # RC-300
 
     def test_9e_marcar_fallido_con_ctrl_c_deja_el_motivo_en_el_escaneo(self):
         s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
         with mock.patch.object(orquestador, 'transaction', lambda org: contextlib.nullcontext(self.conn)):
             orquestador.marcar_fallido(ACME, s.scan_id, KeyboardInterrupt())
         scan = self.uno('SELECT status, stats FROM scans WHERE id = %s', s.scan_id)
-        self.assertEqual((scan['status'], scan['stats']['error']), ('failed', 'KeyboardInterrupt'))
+        self.assertEqual((scan['status'], scan['stats']['error']), ('failed', 'error interno'))  # RC-300: el texto, al log
+
+    def test_9f_un_error_de_la_base_no_se_guarda_y_va_al_log_con_el_id(self):
+        """RC-300: el texto de una excepción de psycopg (tabla, restricción y valores) no queda en scan_source_runs.error,
+        ni en los avisos de los intentos ni en el resumen. Queda 'error interno' y el texto va al log con el escaneo."""
+        s = self.solicitar('acme-demo.mx', responde(TXT_ACME))
+        texto = ('UniqueViolation: duplicate key value violates unique constraint "assets_organization_id_kind_value_key"'
+                 '\nDETAIL:  Key (organization_id, kind, value)=(%s, subdomain, secreto.acme-demo.mx) already exists.' % ACME)
+        roto = SimpleNamespace(**dict(vars(FALLA), error=texto))
+        with self.assertLogs('cirdan.orquestador', 'WARNING') as logs:
+            resumen = self.en_vivo(s, [roto] * (contrato.MAX_INTENTO + 1), lambda segundos: None)
+        run = self.corrida_de(s.scan_id, 'ejemplo')
+        self.assertEqual((run['status'], run['error']), ('failed', 'error interno'))
+        self.assertEqual(resumen['sources'][0]['error'], 'error interno')
+        self.assertNotIn('secreto', repr((run, resumen)))
+        self.assertTrue(all(aviso.endswith('error interno') for aviso in run['raw_payload']['avisos']))
+        self.assertTrue(any(s.scan_id in linea and 'secreto.acme-demo.mx' in linea for linea in logs.output))
 
     def test_10_un_dominio_de_otra_empresa_no_existe_para_mi(self):
         s = self.solicitar('olmardo.com', responde('cirdan-verification=ab439d2b39a7'))

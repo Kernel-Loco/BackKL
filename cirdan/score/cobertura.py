@@ -6,6 +6,8 @@ código va con la fuente que no lo revisó y el motivo:
 - 'source_failed': la fuente corrió y no terminó 'succeeded'. Ninguno de sus códigos se revisó.
 - 'source_not_run': la fuente tiene recolector pero no corrió en ese escaneo, porque está apagada en `data_sources`
   o porque aún no existía. Ninguno de sus códigos se revisó.
+- 'source_disabled_by_org': la organización apagó la fuente (`sources_disabled_by_org` de `scans.stats`, #117,
+  RC-235). No corrió y ninguno de sus códigos se revisó.
 - 'no_api_key': la fuente no revisó ese código porque le faltó la llave. Pasa con los códigos de shodan.SIN_LLAVE
   cuando no hubo API de host y con los de HIBP sin la llave de la plataforma (RC-54).
 - 'source_partial': la fuente respondió pero no pudo revisar ese código (su `sin_cobertura`).
@@ -26,7 +28,8 @@ vez por cada fuente que no lo revisó. Que una no lo revisara no dice nada de la
 from cirdan.recolectores import REGISTRO, cargar, shodan
 
 FUENTE_PRUEBAS = 'ejemplo'
-MOTIVOS = ('source_failed', 'source_not_run', 'no_api_key', 'source_partial', 'partially_checked')
+MOTIVOS = ('source_failed', 'source_not_run', 'source_disabled_by_org', 'no_api_key', 'source_partial',
+           'partially_checked')
 # Cómo empiezan shodan.LIMITES y shodan.LIMITES_CON_LLAVE. Una corrida guarda el aviso con el texto de su versión, y el
 # resto del texto cambió varias veces (la del CDN el 12 nov, la de las etiquetas el 17 nov en 839af0f). Todas las
 # versiones de LIMITES, desde la primera (42e545c), empiezan con AVISO_SIN_LLAVE, y antes de 839af0f no había API de
@@ -61,14 +64,15 @@ def _sin_llave(corrida):
     return None
 
 
-def huecos(corridas, sin_cobertura=(), parciales=(), codigos=codigos_de, sin_llave=()):
+def huecos(corridas, sin_cobertura=(), parciales=(), codigos=codigos_de, sin_llave=(), apagadas=()):
     """[{code, source, reason}] ordenada por código y fuente.
 
     `corridas`: las de `scan_source_runs` del escaneo, cada una con source, status y, de su raw_payload, sin_cobertura,
     sin_llave y avisos (None si no los guardó). `sin_cobertura`: `rules_without_coverage` de `scans.stats`.
     `parciales`: `sources_partial` de `scans.stats`. `sin_llave`: `rules_without_key` de `scans.stats`.
+    `apagadas`: `sources_disabled_by_org` de `scans.stats`.
     """
-    if not corridas:
+    if not corridas and not apagadas:  # con todo apagado por la organización sí se sabe qué faltó
         return []
     motivos = {}
     for r in corridas:
@@ -76,10 +80,11 @@ def huecos(corridas, sin_cobertura=(), parciales=(), codigos=codigos_de, sin_lla
             for c in codigos(r['source']):
                 motivos.setdefault((c, r['source']), 'source_failed')
     corrieron = {r['source'] for r in corridas}
+    apagadas = set(apagadas) - corrieron
     for fuente in REGISTRO:
         if fuente != FUENTE_PRUEBAS and fuente not in corrieron:
             for c in codigos(fuente):
-                motivos.setdefault((c, fuente), 'source_not_run')
+                motivos.setdefault((c, fuente), 'source_disabled_by_org' if fuente in apagadas else 'source_not_run')
     sin_lista = []
     for r in corridas:
         if r['status'] != 'succeeded':

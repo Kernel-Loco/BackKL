@@ -34,7 +34,7 @@ DOH_IP = '1.0.0.1'        # fija: getaddrinfo no consulta DNS por una IP literal
 DOH_URL = 'https://%s/dns-query' % DOH_IP
 DOH_TIPO = 'application/dns-message'
 DOH_TOPE = 65535          # el mensaje DNS más largo que existe: su largo es de 16 bits
-# Un valor de verificación que se guarda tal cual (guardables). El mismo patrón que txt_observados_validos() de la 036.
+# Un valor de verificación que se guarda tal cual (guardables). El mismo patrón que txt_observados_validos() de la 037.
 _TOKEN = re.compile(r'cirdan-verification=[0-9a-f]{8,64}')
 
 # Lo que puede salir de una petición DoH que no respondió bien: la red, el TLS y un HTTP 4xx o 5xx (OSError, con
@@ -126,7 +126,7 @@ def guardables(valores):
     """Los TXT de una consulta como van a dns_txt_verifications.observed_values (RC-272): un valor
     cirdan-verification=<token en hex> va tal cual y cualquier otro como sha256:<hex> de su texto en UTF-8, en el
     mismo orden. Así no se guarda el SPF, la llave de otro servicio ni nada más del dominio, y el resultado, que se
-    calcula con los valores sin filtrar, no cambia. Es el mismo filtro que la migración 036 y su CHECK."""
+    calcula con los valores sin filtrar, no cambia. Es el mismo filtro que la migración 037 y su CHECK."""
     if valores is None:
         return None
     return [v if _TOKEN.fullmatch(v) else 'sha256:' + hashlib.sha256(v.encode('utf-8')).hexdigest() for v in valores]

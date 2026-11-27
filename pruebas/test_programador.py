@@ -12,6 +12,7 @@ Hecho cuando de RC-52: cada dominio autorizado se vuelve a escanear según plans
 Business y Enterprise cada día) sin duplicar escaneos, y no corre sin autorización vigente ni TXT verificado.
 La de una empresa suspendida entra como postgres y se salta sin POSTGRES_PASSWORD (como en test_orquestador.py).
 """
+import json
 import os
 import threading
 import unittest
@@ -145,8 +146,8 @@ class Base(unittest.TestCase):
         self.conn.execute("UPDATE scans SET status = 'completed', finished_at = now() "
                           "WHERE domain_id = %s AND status IN ('queued', 'running')", (dominio,))
 
-    def fallido(self, org, scan_id, error):
-        """marcar_fallido() en la conexión de la prueba."""
+    def fallido(self, org, scan_id, error, motivo=None):
+        """marcar_fallido() en la conexión de la prueba. detener() pasa el motivo (RC-300)."""
         self.uno(org, "UPDATE scans SET status = 'failed', finished_at = now() WHERE id = %s AND status = 'running' "
                       'RETURNING id', scan_id)
 
@@ -438,6 +439,28 @@ class TrasLanzar(Base):
             programador._correr(ACME, self.scan_id, 'acme-demo.mx')
         self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1))
 
+    def test_28_failed_por_fuentes_apagadas_no_adelanta_el_turno(self):
+        # La organización apagó todas sus fuentes (#117, RC-235): no corrió ninguna y el escaneo queda en 'failed'.
+        # Reintentar en una hora fallaría igual, así que el turno se queda en el intervalo del plan.
+        def termina(stats):
+            def correr(org, scan_id, fqdn):
+                self.uno(org, "UPDATE scans SET status = 'failed', finished_at = now(), stats = %s::jsonb "
+                         "WHERE id = %s RETURNING id", json.dumps(stats), scan_id)
+                return {'scan_id': scan_id, 'status': 'failed'}
+            return correr
+
+        todas = {'sources_ok': 0, 'sources_failed': 0, 'sources_disabled_by_org': ['ct_logs', 'dns']}
+        with mock.patch.object(orquestador, 'correr', side_effect=termina(todas)):
+            programador._correr(ACME, self.scan_id, 'acme-demo.mx')
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(days=7))
+        # Con alguna apagada pero otra que sí corrió y falló, se reintenta en una hora como siempre.
+        self.empresa(ACME)
+        self.conn.execute("UPDATE scans SET status = 'running', finished_at = NULL WHERE id = %s", (self.scan_id,))
+        otra = {'sources_ok': 0, 'sources_failed': 1, 'sources_disabled_by_org': ['ct_logs']}
+        with mock.patch.object(orquestador, 'correr', side_effect=termina(otra)):
+            programador._correr(ACME, self.scan_id, 'acme-demo.mx')
+        self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1))
+
     def test_26_detener_cierra_el_escaneo_y_adelanta_el_turno(self):
         hilo = mock.Mock(is_alive=mock.Mock(return_value=True))
         with programador._hilos_candado:
@@ -446,6 +469,7 @@ class TrasLanzar(Base):
         with mock.patch.object(orquestador, 'marcar_fallido', side_effect=self.fallido) as marcar:
             programador.detener()
         self.assertEqual(marcar.call_args.args[:2], (ACME, self.scan_id))
+        self.assertEqual(marcar.call_args.args[3], 'escaneo interrumpido')  # RC-300
         self.assertEqual(self.estado(), 'failed')
         self.assertEqual(self.turno(ACME_DEMO), self.t0 + timedelta(hours=1))
         # Un escaneo que ya no corre no se toca.

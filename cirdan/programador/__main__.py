@@ -20,6 +20,7 @@ import psycopg
 
 from cirdan import programador
 from cirdan.db import DSN
+from cirdan.proceso import no_volcable
 
 log = logging.getLogger('cirdan.programador')
 
@@ -52,6 +53,8 @@ def main(argv=None):
     p.add_argument('--una-vez', action='store_true', help='una sola vuelta y sale')
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+    # Antes de la primera vuelta: git y gitleaks corren con el mismo uid y sin esto leerían este entorno (RC-324).
+    no_volcable()
     espera = programador.intervalo()
     programador.max_escaneos()  # un valor mal escrito tumba el arranque, no la primera vuelta
 

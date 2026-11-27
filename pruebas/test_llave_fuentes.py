@@ -26,7 +26,7 @@ from unittest import mock
 import psycopg
 from psycopg.rows import dict_row
 
-from cirdan import orquestador
+from cirdan import orquestador, planes
 from cirdan.db import DSN
 from cirdan.recolectores import hibp, identidad, llaves
 from cirdan.recolectores.contrato import Activo, Resultado
@@ -206,6 +206,14 @@ class Funcion(Base):
 
 class Orquestador(Base):
     """HIBP por el orquestador con su transporte falso: llave, correos, brechas y cobertura."""
+
+    def setUp(self):
+        super().setUp()
+        # Sin el tope de escaneos a mano (RC-297): aquí se piden varios del mismo dominio en una prueba. El tope y
+        # su lugar en solicitar() los prueba pruebas/test_planes.py.
+        sin_tope = mock.patch.object(planes, 'check_plan_limits', return_value=None)
+        sin_tope.start()
+        self.addCleanup(sin_tope.stop)
 
     def correr(self, transporte, llave=LLAVE_PRUEBA, leer=None):
         s = orquestador.solicitar(ACME, 'acme-demo.mx', consultar=responde(TXT_ACME), conn=self.conn)

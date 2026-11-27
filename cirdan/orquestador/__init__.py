@@ -36,6 +36,8 @@ from psycopg.types.json import Jsonb
 from cirdan import alcance_carta, db
 from cirdan.config import config
 from cirdan.db import audit, transaction
+from cirdan import planes
+from cirdan.orquestador import motivos
 from cirdan.orquestador import txt as dns_txt
 from cirdan.recolectores import REGISTRO, cargar, certspotter, turno
 from cirdan.recolectores.contrato import COLUMNAS_CVES, CVE_VALIDA, Resultado, ejecutar, siguiente_estado
@@ -56,6 +58,7 @@ MOTIVOS = {
     'txt_not_verified': 'Falta verificar el registro TXT',
     'scan_in_progress': 'Ya hay un escaneo en curso para este dominio',
     'live_scan_not_allowed': 'Este dominio es de la demo y no se consulta en vivo',
+    **planes.MOTIVOS,  # tope de escaneos a mano (RC-297): la API responde 429 con Retry-After
 }
 TXT_DETALLE = {
     'missing': 'no tiene registro TXT',
@@ -75,10 +78,9 @@ FUENTE_PRUEBAS = 'ejemplo'  # recolector sin red; solo cuando una prueba lo pide
 LATIDO = 60                           # segundos entre marcas
 TOPE_CORRIDA = timedelta(minutes=20)  # una corrida no marca vida más allá de esto
 ABANDONO = timedelta(minutes=30)      # sin marca en ese tiempo, el escaneo se da por caído
-ERROR_ABANDONO = 'El escaneo se cortó: pasaron más de 30 minutos sin marca de vida'
+ERROR_ABANDONO = motivos.INTERRUMPIDO  # pasaron más de 30 minutos sin marca de vida (RC-300: un motivo fijo)
 ACCION_HALLAZGO_RESUELTO = 'finding.resolved'
 MOTIVO_SECRETO_ROTADO = 'secret_rotated'
-ERROR_YA_NO_CORRE = 'El escaneo dejó de estar en curso antes de terminar esta fuente'
 
 # Límite diario por fuente (#13b, RC-184): vive en data_sources (daily_limit, daily_used, daily_used_on) y solo
 # lo mueven reserve_source_quota() y adjust_source_quota() de la migración 008, con el día en UTC. Se reserva
@@ -150,6 +152,8 @@ CORREOS_SQL = (
     "AND x.asset_type = 'email' AND lower(x.value) = c.correo) NULLS FIRST, correo LIMIT %(tope)s")
 MAX_CORREOS = 200   # el recolector consulta menos (hibp.MAX_CORREOS) y avisa de los que sobran
 SIN_CUPO = 'Sin cupo diario: %s no tiene cupo para una corrida completa hoy (día UTC).'
+# RC-297: en un escaneo a mano, una fuente del tope (planes.FUENTES_DEL_TOPE) que ya gastó consultas no se reintenta.
+SIN_REINTENTO = 'Sin reintento: un escaneo a mano no vuelve a gastar el cupo diario de %s.'
 
 # Costo medido del escaneo (#52, RC-87): se guarda en scans.stats para el costo interno, pero GET /api/v1/scans y
 # GET /api/v1/scans/{id} no lo entregan al portal ni a las llaves de API. Las demás llaves de stats salen igual.
@@ -157,10 +161,23 @@ STATS_INTERNAS = frozenset({'queries', 'queries_by_source', 'seconds_by_source',
 
 
 def stats_publicas(stats):
-    """scans.stats sin las llaves de STATS_INTERNAS. Un stats en NULL se queda en None."""
+    """scans.stats sin las llaves de STATS_INTERNAS y con `error` solo si es un motivo fijo (RC-300): el de una fila de
+    antes sale como 'error interno'. Un stats en NULL se queda en None."""
     if stats is None:
         return None
-    return {k: v for k, v in stats.items() if k not in STATS_INTERNAS}
+    publicas = {k: v for k, v in stats.items() if k not in STATS_INTERNAS}
+    if 'error' in publicas:
+        publicas['error'] = motivos.publico(publicas['error'])
+    return publicas
+
+
+def fuentes_publicas(fuentes):
+    """Las corridas que devuelven las rutas de escaneos, con `error` solo si es un motivo fijo (RC-300)."""
+    for fuente in fuentes or ():
+        if isinstance(fuente, dict) and 'error' in fuente:
+            fuente['error'] = motivos.publico(fuente['error'])
+    return fuentes
+
 
 # Los hallazgos de una empresa se guardan de una fuente a la vez (RC-55). Dos dominios de la misma empresa pueden dar
 # la misma huella (un repo de GitHub declarado en los dos, el certificado de un subdominio) y escanearse a la vez:
@@ -189,6 +206,7 @@ class Solicitud:
     scan_id: str | None = None
     domain_id: str | None = None
     txt: str | None = None  # resultado de la consulta TXT, si se hizo
+    retry_after: int | None = None  # segundos, si lo frenó el tope de escaneos a mano (RC-297)
 
 
 @contextmanager
@@ -285,6 +303,13 @@ def abandonar_vencidos(conn, org, domain_id=None, scan_id=None):
     return ids
 
 
+def _en_curso(conn, org, domain_id):
+    """¿Hay un escaneo del dominio en curso? Antes da por caídos los que no tienen marca de vida (abandonar_vencidos)."""
+    abandonar_vencidos(conn, org, domain_id=domain_id)
+    return conn.execute("SELECT 1 FROM scans WHERE domain_id = %s AND status IN ('queued', 'running') LIMIT 1",
+                        (domain_id,)).fetchone() is not None
+
+
 def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=None, conn=None, platform=None):
     """Revisa autorización y TXT y, si todo cumple, crea el escaneo. Nunca escanea sin los dos.
 
@@ -305,6 +330,22 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
             motivos.append('txt_not_verified')  # el alta (#26) todavía no verifica el TXT
         if not motivos and consultar is None and not en_vivo_permitido(fqdn):
             motivos.append('live_scan_not_allowed')
+        # Tope de escaneos a mano por empresa, por dominio y enfriamiento (RC-297), antes del DNS: si se pasa, ni
+        # consulta TXT ni fila en dns_txt_verifications. Toma el candado de la empresa hasta el final de esta
+        # transacción, que es la que inserta el escaneo. Los programados (RC-52) no pasan por aquí.
+        # El candado va antes de _en_curso: abandonar_vencidos() puede escribir scan.abandoned, y el trigger de
+        # audit_log toma el candado de la cadena de la empresa. Al revés, una petición con la cadena tomada esperaría el
+        # tope y otra con el tope esperaría la cadena para su audit: interbloqueo (RC-297-B2.1). Así, además, dos
+        # peticiones a la vez del mismo dominio dan 409 y no 429.
+        limite = None
+        if not motivos and trigger != 'scheduled':
+            planes.tomar_candado(c, org)
+            if _en_curso(c, org, domain['id']):
+                motivos.append('scan_in_progress')  # 409 como antes, no el 429 del enfriamiento, y sin consulta DNS
+        if not motivos and trigger != 'scheduled':
+            limite = planes.check_plan_limits(org, 'on_demand_scan', c, domain_id=domain['id'])
+            if limite:
+                motivos.extend(limite.motivos)
 
         txt_resultado = None
         verification_id = None
@@ -340,9 +381,12 @@ def solicitar(org, fqdn, user_id=None, ip=None, trigger='on_demand', consultar=N
 
         if motivos:
             detalle = _texto(motivos, txt_resultado)
-            audit(c, org, 'scan.rejected', user_id, ip, 'domain', domain['id'],
-                  {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado}, platform=platform)
-            return Solicitud(fqdn, False, motivos, detalle, domain_id=domain['id'], txt=txt_resultado)
+            detalles = {'fqdn': fqdn, 'reasons': motivos, 'txt': txt_resultado}
+            if limite:
+                detalles['retry_after'] = limite.retry_after
+            audit(c, org, 'scan.rejected', user_id, ip, 'domain', domain['id'], detalles, platform=platform)
+            return Solicitud(fqdn, False, motivos, detalle, domain_id=domain['id'], txt=txt_resultado,
+                             retry_after=limite.retry_after if limite else None)
 
         audit(c, org, 'scan.requested', user_id, ip, 'scan', scan_id, {'fqdn': fqdn, 'trigger': trigger},
               platform=platform)
@@ -360,6 +404,17 @@ def fuentes_activas(conn):
     filas = conn.execute('SELECT code FROM data_sources WHERE enabled AND kind = %s ORDER BY code', ('osint',)).fetchall()
     codigos = [f['code'] for f in filas if f['code'] in REGISTRO and f['code'] != FUENTE_PRUEBAS]
     return sorted(codigos, key=_pide_correos)
+
+
+APAGADAS_SQL = ('SELECT d.code FROM org_source_settings o JOIN data_sources d ON d.id = o.source_id '
+                'WHERE NOT o.enabled ORDER BY d.code')
+
+
+def fuentes_apagadas(conn):
+    """Códigos de las fuentes que la organización de la transacción apagó (org_source_settings, #117, RC-235).
+
+    Lee con RLS: solo ve las filas de su organización. Una fuente sin fila sigue data_sources.enabled."""
+    return [f['code'] for f in conn.execute(APAGADAS_SQL).fetchall()]
 
 
 def _pide_correos(codigo):
@@ -777,7 +832,7 @@ def _ajustar(org, codigo, dia, delta, conn):
 def _ya_no_corre(org, scan_id, conn, corridas):
     """El escaneo dejó de estar en 'running' a mitad: no se toca su estado, solo se cierran sus fuentes."""
     with _tx(org, conn) as c:
-        _cerrar_corridas(c, [scan_id], ERROR_YA_NO_CORRE)
+        _cerrar_corridas(c, [scan_id], motivos.INTERRUMPIDO)  # dejó de estar en curso (RC-300)
         scan = c.execute('SELECT status, stats FROM scans WHERE id = %s', (scan_id,)).fetchone()
     return {'scan_id': scan_id, 'status': scan['status'], 'stats': scan['stats'] or {}, 'sources': corridas}
 
@@ -859,13 +914,18 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     que sigue vivo y, si alguien lo dio por caído, deja de correr. Al reproducir no se reintenta, porque la
     respuesta grabada sería la misma, ni al grabar, porque cada intento volvería a vaciar la grabación: la
     fuente queda en 'failed'. Las consultas de la fila suman las de todos sus intentos y los errores de los
-    intentos anteriores quedan en sus avisos.
+    intentos anteriores quedan en sus avisos. En un escaneo a mano (trigger 'on_demand' o 'api', RC-297), ct_logs,
+    whois y shodan solo se reintentan si el intento fallido no gastó consultas: así cada escaneo a mano gasta a lo
+    más un MAX_CONSULTAS de cada una y vale la cuenta del tope de cirdan/planes.py. Si no, quedan en 'failed' con el
+    aviso SIN_REINTENTO. Los programados se reintentan como siempre.
     En vivo y al grabar, antes de cada corrida (también de cada reintento) reserva en data_sources el máximo de
     consultas del recolector (MAX_CONSULTAS) y al terminar ajusta a las que gastó. Si la fuente ya no tiene cupo
     hoy (día UTC), queda en 'failed' sin llamar al recolector y sin reintento, porque esperar 1, 5 o 25 minutos no
     devuelve un cupo diario. Si algo lanza entre la reserva y el ajuste, lo reservado se queda: es lo conservador.
     Al reproducir no reserva ni ajusta: las demos no gastan cupo ni se bloquean.
     Una fuente que no se recupera deja el escaneo 'partial' si otra respondió, o 'failed' si ninguna respondió.
+    Una fuente que la organización apagó (org_source_settings, #117, RC-235) no corre: va en
+    stats.sources_disabled_by_org y deja el escaneo 'partial', o 'failed' si no respondió ninguna otra.
     También termina 'partial' si una fuente respondió
     pero dejó códigos en sin_cobertura (por ejemplo, crt.sh con el respaldo de Cert Spotter), así no
     se muestran como 0 hallazgos, o si revisó solo una parte de lo suyo (revisados, en stats.sources_partial).
@@ -891,7 +951,12 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     inicio = time.monotonic()
     fqdn = fqdn.strip().lower().rstrip('.')
     with _tx(org, conn) as c:
-        fuentes = fuentes if fuentes is not None else fuentes_activas(c)
+        pedidas = fuentes if fuentes is not None else fuentes_activas(c)
+        # Las que la organización apagó no corren, tampoco si vienen en `fuentes` (#117, RC-235). Quedan en
+        # stats.sources_disabled_by_org y el score sale con cobertura parcial.
+        apagadas = set(fuentes_apagadas(c))
+        fuentes = [f for f in pedidas if f not in apagadas]
+        saltadas = sorted(f for f in set(pedidas) if f in apagadas)
         catalogo = {f['code']: f for f in c.execute(
             'SELECT id::text, code, keep_raw_payload FROM data_sources WHERE code = ANY(%s)', (fuentes,)).fetchall()}
         # Solo los dominios vigentes de la organización cuentan como propios (#109, RC-226). Uno dado de baja
@@ -911,6 +976,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         alcance = c.execute('SELECT a.activities FROM scans s JOIN domain_authorizations a ON a.id = s.authorization_id '
                             'WHERE s.id = %s', (scan_id,)).fetchone()
         actividades = alcance['activities'] if alcance else None
+        disparo = c.execute('SELECT trigger_type FROM scans WHERE id = %s', (scan_id,)).fetchone()
+        a_mano = bool(disparo) and disparo['trigger_type'] in planes.A_MANO   # RC-297: sin reintento tras gastar
 
     if modo == 'vivo' and not en_vivo_permitido(fqdn):
         modo = 'reproducir'  # nunca consultar en vivo un dominio fuera de DOMINIOS_EN_VIVO
@@ -927,7 +994,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         while True:
             if not _latido(org, scan_id, conn):
                 return _ya_no_corre(org, scan_id, conn, corridas)
-            reservadas, dia = 0, None
+            reservadas, dia, sin_reintento = 0, None, []
             if con_cupo and permitida:
                 reservadas = getattr(modulo, 'MAX_CONSULTAS')
                 dia = _reservar(org, codigo, reservadas, conn)
@@ -951,8 +1018,18 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 momento = datetime.now(timezone.utc)
                 status, attempt, next_retry_at = (siguiente_estado(res.estado, intento, momento) if reintenta
                                                   else (res.estado, 0, None))
+                if (status == 'retrying' and a_mano and codigo in planes.FUENTES_DEL_TOPE
+                        and gastadas + res.consultas > 0):
+                    # Otro intento reservaría otra vez MAX_CONSULTAS del cupo de toda la plataforma (RC-297-B1.1).
+                    status, attempt, next_retry_at = 'failed', intento, None
+                    sin_reintento = [SIN_REINTENTO % codigo]
+            # RC-300: en la base, en los avisos de los intentos y en el resumen solo va un motivo fijo
+            # (motivos.MOTIVOS). El texto completo de la falla va al log con el id del escaneo, en una línea (%r).
+            error = motivos.motivo(res.error)
+            if res.error and res.error != error:
+                log.warning('Escaneo %s, fuente %s, intento %d: %r', scan_id, codigo, intento + 1, res.error)
             gastadas += res.consultas
-            avisos = previos + res.avisos
+            avisos = previos + sin_reintento + res.avisos  # antes de los de la fuente, que avisos[:10] puede cortar
             resumen = {'activos': len(res.activos), 'hallazgos': len(res.hallazgos), 'consultas': gastadas,
                        'avisos': avisos[:10], 'sin_cobertura': res.sin_cobertura, 'sin_llave': res.sin_llave,
                        'cobertura_parcial': res.estado == 'succeeded' and res.revisados is not None}
@@ -971,7 +1048,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                         'finished_at = EXCLUDED.finished_at, coverage = EXCLUDED.coverage, mode = EXCLUDED.mode, '
                         'updated_at = now()',
                         (org, scan_id, catalogo[codigo]['id'], status, attempt, next_retry_at,
-                         Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, res.error or None,
+                         Jsonb(resumen) if catalogo[codigo]['keep_raw_payload'] else None, error,
                          cobertura(res, modulo), modo))
                     if res.estado == 'succeeded':
                         cambios = _guardar_resultado(c, org, scan_id, domain['id'], catalogo[codigo]['id'], res, reglas,
@@ -988,12 +1065,12 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                 resueltos -= abiertos
             if status != 'retrying':
                 break
-            previos.append('Intento %d: %s' % (attempt, (res.error or '')[:300]))
+            previos.append('Intento %d: %s' % (attempt, error or ''))
             if not _esperar(org, scan_id, (next_retry_at - momento).total_seconds(), conn, dormir):
                 return _ya_no_corre(org, scan_id, conn, corridas)
             certspotter.nuevo_intento()  # el reintento vuelve a pedir lo que falló en Cert Spotter, salvo un 429
             intento = attempt
-        corridas.append({'source': codigo, 'status': status, 'error': res.error or None, 'no_autorizada': not permitida,
+        corridas.append({'source': codigo, 'status': status, 'error': error, 'no_autorizada': not permitida,
                          'avisos_omitidos': max(0, len(avisos) - len(resumen['avisos'])), **resumen})
         tiempos[codigo] = segundos
         if res.estado == 'succeeded':
@@ -1005,7 +1082,7 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
                             for c in r['sin_cobertura']})
     no_autorizadas = [r['source'] for r in corridas if r['no_autorizada']]
     a_medias = [r['source'] for r in corridas if r['status'] == 'succeeded' and r['cobertura_parcial']]
-    completo = ok == len(corridas) and not sin_cobertura and not a_medias
+    completo = ok == len(corridas) and not sin_cobertura and not a_medias and not saltadas
     estado = 'completed' if completo else 'failed' if ok == 0 else 'partial'
     stats = {'assets': len(activos), 'findings': hallazgos, 'new_findings': len(nuevos),
              'resolved_findings': len(resueltos), 'sources_ok': ok, 'sources_failed': len(corridas) - ok}
@@ -1020,6 +1097,8 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
         stats['sources_partial'] = a_medias
     if no_autorizadas:
         stats['sources_unauthorized'] = no_autorizadas
+    if saltadas:  # apagadas por la organización (#117, RC-235): coverage_gaps de la API les da 'source_disabled_by_org'
+        stats['sources_disabled_by_org'] = saltadas
     # Costo medido del escaneo (#52, RC-87): consultas de cada fuente con todos sus intentos, también las de una
     # fuente que falló, y segundos. seconds_by_source suma lo que tardó el recolector en cada intento, sin las
     # esperas entre reintentos. duration_seconds va del inicio de correr() hasta antes del score y sí las incluye.
@@ -1057,9 +1136,18 @@ def correr(org, scan_id, fqdn, fuentes=None, modo='vivo', ahora=None, conn=None,
     return {'scan_id': scan_id, 'status': estado, 'stats': stats, 'sources': corridas}
 
 
-def marcar_fallido(org, scan_id, error):
-    """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando."""
-    texto = (str(error) or type(error).__name__)[:300]  # Ctrl+C (KeyboardInterrupt) no trae texto
+def marcar_fallido(org, scan_id, error, motivo=motivos.INTERNO):
+    """Si algo inesperado tumba el escaneo, no lo deja 'running' para siempre ni a sus fuentes esperando.
+
+    En la base solo queda `motivo`, de motivos.MOTIVOS (RC-300): 'error interno' por omisión, porque el texto de la
+    excepción puede traer tabla, restricción y valores de una fila, y 'escaneo interrumpido' al apagar el servicio
+    (programador.detener). El texto completo va al log con el id del escaneo."""
+    try:
+        detalle = '%s: %s' % (type(error).__name__, error)
+    except Exception:  # una excepción cuyo texto también falla
+        detalle = type(error).__name__
+    log.error('El escaneo %s falló: %r', scan_id, detalle)
+    texto = motivo if motivo in motivos.MOTIVOS else motivos.INTERNO
     with transaction(org) as c:
         c.execute("UPDATE scans SET status = 'failed', finished_at = now(), stats = %s, updated_at = now() "
                   "WHERE id = %s AND status = 'running'", (Jsonb({'error': texto}), scan_id))

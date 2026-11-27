@@ -48,7 +48,7 @@ jobs:
         run: |
           cp .env.example .env
           al_azar() { python -c "import secrets; print(secrets.token_urlsafe(24))"; }
-          for var in POSTGRES_PASSWORD CIRDAN_APP_PASSWORD VALKEY_PASSWORD; do
+          for var in POSTGRES_PASSWORD CIRDAN_APP_PASSWORD VALKEY_PASSWORD VALKEY_ADMIN_PASSWORD; do
             sed -i "s|^$var=.*|$var=$(al_azar)|" .env
           done
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
@@ -66,8 +66,9 @@ jobs:
           llave=$(python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")
           sed -i "s|^SOURCE_KEYS_ENCRYPTION_KEY=.*|SOURCE_KEYS_ENCRYPTION_KEY=$llave|" .env
           grep -q '^SOURCE_KEYS_ENCRYPTION_KEY=.\{44\}$' .env
-          # Sin llave anterior de las huellas (RC-333) y sin consultas en vivo a Pwned Passwords (RC-334).
+          # Sin llave anterior de las huellas (RC-333) ni del MFA (RC-295) y sin consultas en vivo a Pwned Passwords (RC-334).
           grep -qx 'PASSWORD_HASH_PREVIOUS_ENCRYPTION_KEY=' .env
+          grep -qx 'TOTP_PREVIOUS_ENCRYPTION_KEY=' .env
           grep -qx 'PWNED_PASSWORDS_ENABLED=' .env
           # .env.example la trae en false (#169, RC-287) y las pruebas entran con las cuentas de demo.
           sed -i "s|^DEMO_ACCOUNTS=.*|DEMO_ACCOUNTS=true|" .env
@@ -110,7 +111,7 @@ jobs:
         run: >-
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
           pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_bitacora.py pruebas/test_bitacora_descargas.py pruebas/test_inventario_activos.py pruebas/test_llaves_api.py
-          pruebas/test_superadmin.py pruebas/test_operador.py pruebas/test_candados_base.py
+          pruebas/test_superadmin.py pruebas/test_operador.py pruebas/test_candados_base.py pruebas/test_valkey_acl.py pruebas/test_fuentes_por_cliente.py
           pruebas/test_respaldo.py pruebas/test_respaldo_cartas.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
@@ -119,21 +120,24 @@ jobs:
       # prueba el transporte, TLS incluido, con el OpenSSL de la imagen. TRANSPORTE_TLS=1 hace que falle si a la
       # imagen le falta (RC-166). SaludoReal de test_visita.py hace lo mismo con el saludo TLS de la visita web: certificados
       # malos y un servidor que solo habla TLS 1.0 o 1.1 (RC-239).
-      - name: Pruebas dentro del contenedor (asistente, orquestador, explorador, modelo ML, TXT, cuentas de demo, bloqueo por IP, IP del cliente, cookie Secure, código MFA y logout sin red, tope del cuerpo, llaves del MFA y de las huellas, captcha, documentación de la API, gitleaks, TLS, pesos, ruta del reporte, subfinder sin red y cartas)
+      - name: Pruebas dentro del contenedor (asistente, orquestador, tope de escaneos a mano, explorador, modelo ML, TXT, cuentas de demo, bloqueo por IP, IP del cliente, cookie Secure, código MFA y logout sin red, tope del cuerpo, llaves del MFA y de las huellas, captcha, documentación de la API, gitleaks, TLS, pesos, ruta del reporte, subfinder sin red, cartas y entorno de los hijos)
         run: >-
-          docker compose run --rm -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -e RUTA_REPORTE=1 -e INTEGRACION_SUBFINDER=1 -e ESTADO_CARTA=1 -e CIRDAN_TEST_DB_ISOLATED=true
+          POSTGRES_PASSWORD=$(sed -n 's/^POSTGRES_PASSWORD=//p' .env)
+          VALKEY_ADMIN_PASSWORD=$(sed -n 's/^VALKEY_ADMIN_PASSWORD=//p' .env)
+          docker compose run --rm -e POSTGRES_PASSWORD -e VALKEY_ADMIN_PASSWORD -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -e RUTA_REPORTE=1 -e INTEGRACION_SUBFINDER=1 -e ESTADO_CARTA=1 -e CIRDAN_TEST_DB_ISOLATED=true
           -v "$PWD/pruebas:/app/pruebas:ro"
           -v "$PWD/datos/ml:/app/datos/ml:ro" -v "$PWD/db:/app/db:ro" -v "$PWD/docs:/app/docs:ro" -v "$PWD/Dockerfile:/app/Dockerfile:ro"
-          api python -m unittest pruebas/test_asistente.py pruebas/test_orquestador.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_anomalias_ml.py pruebas/test_auditoria_humana_ml.py pruebas/test_txt.py
+          api python -m unittest pruebas/test_asistente.py pruebas/test_orquestador.py pruebas/test_planes.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_anomalias_ml.py pruebas/test_auditoria_humana_ml.py pruebas/test_txt.py
           pruebas/test_demo_cuentas.py pruebas/test_bloqueo_ip.py pruebas/test_ip_cliente.py pruebas/test_cookie_segura.py pruebas/test_login_sin_red.py pruebas/test_tope_cuerpo.py pruebas/test_llave_totp.py pruebas/test_llave_huellas.py
           pruebas/test_captcha.py pruebas/test_documentacion_api.py
-          pruebas/test_rotar_huellas.py pruebas/test_contrasenas_filtradas.py
+          pruebas/test_rotar_huellas.py pruebas/test_rotar_totp.py pruebas/test_contrasenas_filtradas.py pruebas/test_proceso.py
           pruebas.test_github.Integracion
           pruebas.test_rdap.Transporte pruebas.test_crtsh.TopeDeBytes pruebas.test_visita.SaludoReal pruebas/test_pesos_configurables.py pruebas.test_reporte.Ruta
           pruebas.test_subfinder.Integracion pruebas/test_estado_carta.py
           pruebas/test_alta_dominio.py pruebas/test_verificacion_txt_api.py pruebas/test_alta_dominio_integracion.py
           pruebas/test_firma.py pruebas/test_firma_base.py
           pruebas/test_enlace_sin_red.py pruebas/test_recuperar_sin_red.py pruebas/test_programador.py pruebas/test_llave_fuentes.py
+          pruebas/test_motivos_falla.py
 
       - name: Pruebas sin base ni red
         run: >-
@@ -144,7 +148,7 @@ jobs:
           pruebas/test_github.py pruebas/test_shodan.py pruebas/test_rdap.py pruebas/test_geoip.py pruebas/test_borde.py
           pruebas/test_huellas.py pruebas/test_visita.py pruebas/test_api_docs.py pruebas/test_dataset_ml.py
           pruebas/test_contrasenas_comunes.py pruebas/test_identidad.py pruebas/test_hibp.py
-          pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_plan_zap.py pruebas/test_reto_hackeo.py pruebas/test_pruebas_usuarios.py pruebas/test_asvs.py pruebas/test_siem.py pruebas/test_despliegue.py
+          pruebas/test_exportar.py pruebas/test_reporte.py pruebas/test_politica_seguridad.py pruebas/test_plan_zap.py pruebas/test_reto_hackeo.py pruebas/test_pruebas_usuarios.py pruebas/test_pentest_reporte.py pruebas/test_asvs.py pruebas/test_siem.py pruebas/test_despliegue.py
           pruebas/test_reporte_tecnico.py
           pruebas/test_ci.py pruebas/test_cadena_suministro.py pruebas/test_terraform.py pruebas/test_alcance_carta.py
 
@@ -157,7 +161,7 @@ jobs:
           C='docker compose -p backkl-enlace -f docker-compose.yml -f pruebas/enlace/docker-compose.yml'
           trap "$C down -v" EXIT
           $C up -d --build --wait db valkey api correo-falso
-          $C run --rm pruebas python -m unittest -v pruebas/test_enlace.py pruebas/test_recuperar.py > enlace.log 2> enlace.err || { cat enlace.err; exit 1; }
+          $C run --rm pruebas python -m unittest -v pruebas/test_pentest.py pruebas/test_enlace.py pruebas/test_recuperar.py > enlace.log 2> enlace.err || { cat enlace.err; exit 1; }
           cat enlace.err
           # Sin 'skipped': fuera del compose aislado la prueba se salta y no debe contar como verde. Se lee la última
           # línea de resultado de unittest, no la última del archivo: un aviso de Python puede salir después del OK.

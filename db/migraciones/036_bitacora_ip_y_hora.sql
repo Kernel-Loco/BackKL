@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/035_bitacora_ip_y_hora.sql (#176, RC-294)
+-- Cirdan · db/migraciones/036_bitacora_ip_y_hora.sql (#176, RC-294)
 -- La IP de cada evento de audit_log entra en la cadena de hashes, y la app
 -- ya no fija la hora ni los campos de la cadena.
 -- Lo que llega aquí:
@@ -43,7 +43,7 @@ ALTER TABLE public.audit_log DROP CONSTRAINT IF EXISTS audit_log_chain_version_c
 ALTER TABLE public.audit_log ADD CONSTRAINT audit_log_chain_version_check CHECK (chain_version IN (1, 2));
 
 COMMENT ON COLUMN public.audit_log.chain_version IS
-  'RC-294: versión de la fórmula del row_hash. 1 = la de la 001, sin ip_address (las filas de antes de la 035). 2 = la versión, los campos de la 001 e ip_address. La fija audit_log_chain().';
+  'RC-294: versión de la fórmula del row_hash. 1 = la de la 001, sin ip_address (las filas de antes de la 036). 2 = la versión, los campos de la 001 e ip_address. La fija audit_log_chain().';
 
 CREATE OR REPLACE FUNCTION public.audit_log_chain() RETURNS trigger
 LANGUAGE plpgsql SET TimeZone = 'UTC' AS $$
@@ -71,7 +71,7 @@ BEGIN
 END $$;
 
 COMMENT ON FUNCTION public.audit_log_chain() IS
-  'Cadena de hashes por organización (NULL = plataforma). Desde la 035 (RC-294) calcula la versión 2 del row_hash, con chain_version e ip_address. La misma fórmula está en cirdan/bitacora.py (HASH_FILA) y en pruebas/test_superadmin.py (CADENA): si cambia aquí, cambia allá.';
+  'Cadena de hashes por organización (NULL = plataforma). Desde la 036 (RC-294) calcula la versión 2 del row_hash, con chain_version e ip_address. La misma fórmula está en cirdan/bitacora.py (HASH_FILA) y en pruebas/test_superadmin.py (CADENA): si cambia aquí, cambia allá.';
 
 REVOKE INSERT ON public.audit_log FROM cirdan_app;
 GRANT INSERT (organization_id, actor_type, actor_user_id, action, entity_type, entity_id, ip_address, details)

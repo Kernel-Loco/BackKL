@@ -1,4 +1,4 @@
-"""Candados de la base para el escaneo, la bitácora, las cartas y el TXT (migraciones 034, 035 y 036; RC-285, RC-294
+"""Candados de la base para el escaneo, la bitácora, las cartas y el TXT (migraciones 035, 036 y 037; RC-285, RC-294
 y RC-272).
 
 Corren contra la base `cirdan` del compose desechable (pruebas/pila.py), nunca contra `cirdan-pg16`, entrando como
@@ -136,7 +136,7 @@ class Bitacora(unittest.TestCase):
             with self.subTest(cambio=cambio):
                 self.assertEqual(self.verificar(self.evento(uno) + '\n' + cambios % cambio), ('row_hash', uno))
 
-    def test_8_una_fila_de_antes_de_la_035_sigue_verificando(self):
+    def test_8_una_fila_de_antes_de_la_036_sigue_verificando(self):
         """Una fila de la versión 1, con su row_hash de la fórmula de la 001, cuadra. Su IP no entraba en el hash."""
         uno = 'c0000000-0000-4000-8000-0000000294f2'
         v1 = bitacora.HASH_FILA.replace('CASE chain_version', 'CASE 1')
@@ -287,10 +287,10 @@ class Txt(unittest.TestCase):
                                 " '42000000-0000-4000-8000-000000000008';", user='postgres'),
                          '{%s,cirdan-verification=be92b38a1634}' % huella(SPF_LOWTIDE))
 
-    def test_18_la_036_reescribe_las_filas_viejas_en_su_orden(self):
-        """La sección 5 de la 036, tal cual, sobre una fila cruda: el token queda, lo demás pasa a su huella con el
+    def test_18_la_037_reescribe_las_filas_viejas_en_su_orden(self):
+        """La sección 5 de la 037, tal cual, sobre una fila cruda: el token queda, lo demás pasa a su huella con el
         mismo cálculo que guardables() del orquestador, sin los NULL y en el mismo orden. Su trigger queda encendido."""
-        texto = (RAIZ / 'db' / 'migraciones' / '036_cartas_y_txt.sql').read_text(encoding='utf-8')
+        texto = (RAIZ / 'db' / 'migraciones' / '037_cartas_y_txt.sql').read_text(encoding='utf-8')
         seccion = re.search(r'-- 5\. Las filas que ya existen, con el mismo filtro -+\n(.*?)\nCOMMENT ON COLUMN', texto,
                             re.S).group(1)
         fila = '42000000-0000-4000-8000-0000000272ff'

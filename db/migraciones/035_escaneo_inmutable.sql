@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/034_escaneo_inmutable.sql (#167, RC-285)
+-- Cirdan · db/migraciones/035_escaneo_inmutable.sql (#167, RC-285)
 -- Un escaneo ya creado no cambia de carta, TXT, dominio ni fecha.
 -- Lo que llega aquí:
 -- 1. cirdan_app pierde el UPDATE de toda la tabla scans (001:618) y queda
