@@ -168,7 +168,7 @@ SELECT d.id::text, d.fqdn::text, d.status, d.last_scan_at, d.next_scan_at,
   FROM domains d
   LEFT JOIN LATERAL (SELECT * FROM domain_authorizations x WHERE x.domain_id = d.id
                       ORDER BY (x.revoked_at IS NULL AND current_date BETWEEN x.valid_from AND x.valid_until) DESC,
-                               x.valid_until DESC LIMIT 1) a ON true
+                               x.created_at DESC, x.valid_until DESC LIMIT 1) a ON true
   LEFT JOIN LATERAL (SELECT v.result, v.checked_at FROM dns_txt_verifications v
                       WHERE v.domain_id = d.id ORDER BY v.checked_at DESC LIMIT 1) t ON true
   LEFT JOIN LATERAL (SELECT ds.score, rs.band_medium_from, rs.band_high_from, rs.band_critical_from FROM domain_scores ds
@@ -293,15 +293,29 @@ def _revisar_empresa_y_carta(conn, session, end):
     return organization['limit']
 
 
-def _dominio_para_carta(conn, session, request, fqdn, end, token, renovar=False):
+# Una carta que empieza después de hoy no entra mientras el dominio tenga otra vigente (RC-272): al cargarse revocaría
+# la vigente y el dominio quedaría sin carta hasta su inicio. Es la misma regla que el trigger
+# domain_authorizations_una_vigente() de la migración 037, que queda de segundo candado.
+CARTA_FUTURA = ('El dominio ya tiene una carta vigente. Una carta que empieza después de hoy se carga el día que '
+                'empieza.')
+CARTA_FUTURA_SQL = (
+    'SELECT %s::date > current_date AND EXISTS (SELECT 1 FROM domain_authorizations WHERE domain_id = %s '
+    'AND revoked_at IS NULL AND current_date BETWEEN valid_from AND valid_until) AS futura')
+
+
+def _dominio_para_carta(conn, session, request, fqdn, end, token, renovar=False, start=None):
     """(domain_id, nuevo) del dominio al que va una carta, dentro de la transacción de `conn`.
 
     Con `renovar` (RC-211), un fqdn que ya existe en la empresa y no está removed recibe otra carta en
-    domain_authorizations. Si no, nace el dominio como en el alta (RC-59): tope de dominios y domain.added."""
+    domain_authorizations. Si no, nace el dominio como en el alta (RC-59): tope de dominios y domain.added.
+    Con `start`, una carta que empieza después de hoy para un dominio con otra vigente da 409 (RC-272), antes de
+    guardar el PDF."""
     limit = _revisar_empresa_y_carta(conn, session, end)
     if renovar:
         row = conn.execute("SELECT id::text FROM domains WHERE fqdn = %s AND status <> 'removed'", (fqdn,)).fetchone()
         if row:
+            if start is not None and conn.execute(CARTA_FUTURA_SQL, (start, row['id'])).fetchone()['futura']:
+                raise HTTPException(409, CARTA_FUTURA)
             return row['id'], False
     count = conn.execute("SELECT count(*) AS total FROM domains WHERE status <> 'removed'").fetchone()['total']
     if count >= limit:
@@ -399,7 +413,7 @@ def verify_domain_txt(fqdn: str, request: Request, session: Session = Depends(re
             'observed_values, resolver_ip, result, checked_at) VALUES (%s, %s, %s, %s, %s, %s, %s, clock_timestamp()) '
             'RETURNING checked_at',
             (session.org_id, domain['id'], 'onboarding', esperado,
-             [esperado] if resultado == 'match' else None, consulta.resolver_ip, resultado),
+             dns_txt.guardables([esperado]) if resultado == 'match' else None, consulta.resolver_ip, resultado),
         ).fetchone()['checked_at']
         choque = False
         if resultado == 'match' and domain['status'] == 'pending_verification':

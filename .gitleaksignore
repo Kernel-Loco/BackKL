@@ -86,4 +86,5 @@ ba8494de2a008ea28d3d7644291b72a6683cfdef:pruebas/test_rotar_totp.py:lowtide-toke
 ba8494de2a008ea28d3d7644291b72a6683cfdef:pruebas/test_rotar_totp.py:lowtide-token-falso-fuera-de-fixtures:30
 ba8494de2a008ea28d3d7644291b72a6683cfdef:pruebas/test_rotar_totp.py:lowtide-token-falso-fuera-de-fixtures:293
 10eefeb1c044acc3247697f443d5318e4c44f596:pruebas/test_despliegue.py:lowtide-token-falso-fuera-de-fixtures:31
+ecef40c45d4b2d9bb5761da525a6701393f3e665:pruebas/test_verificacion_txt_api.py:generic-api-key:17
 c4d4a44e318b4ae9d2d6275b0591b86b09e8f87b:pruebas/test_integracion_teams.py:lowtide-token-falso-fuera-de-fixtures:15

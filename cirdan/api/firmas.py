@@ -48,12 +48,18 @@ CREANDO_VENCIDA = 5            # minutos en creating antes de darla por fallida
 # Nombre, cargo y correo de quien firma solo salen mientras la solicitud sigue abierta y su carta no venció. Después
 # están en bloqueo, como el correo de DOMAINS_SQL (RC-274, sección 5.6 de docs/politica_seguridad_privacidad.md).
 _VISIBLE = "status IN ('creating', 'sent', 'signed') AND current_date <= valid_until"
+# Una solicitud abierta cuya carta empieza después de hoy para un dominio con otra carta vigente (RC-272): se puede
+# firmar ya, pero POST /accept da 409 CARTA_FUTURA hasta su fecha de inicio. accept_from le dice al portal desde cuándo.
+_ESPERA_INICIO = ("(status IN ('creating', 'sent', 'signed') AND valid_from > current_date AND EXISTS ("
+                  "SELECT 1 FROM domains d JOIN domain_authorizations a ON a.domain_id = d.id "
+                  "WHERE d.fqdn = signature_requests.fqdn AND d.status <> 'removed' AND a.revoked_at IS NULL "
+                  "AND current_date BETWEEN a.valid_from AND a.valid_until)) AS espera_inicio")
 COLUMNAS = ('id::text, fqdn::text, environment, status, '
             'CASE WHEN %(v)s THEN signer_name END AS signer_name, '
             'CASE WHEN %(v)s THEN signer_title END AS signer_title, '
             'CASE WHEN %(v)s THEN signer_email::text END AS signer_email, valid_from, '
             'valid_until, template_version, activities, provider_document_id, provider_signed_at, last_checked_at, '
-            'last_error, created_at, updated_at, decided_at') % {'v': _VISIBLE}
+            'last_error, created_at, updated_at, decided_at, ' + _ESPERA_INICIO) % {'v': _VISIBLE}
 NO_HABILITADA = 'El alta de dominios no está habilitada: falta configurar el almacenamiento y su respaldo.'
 INCIERTO = ('Mifiel no confirmó si recibió la carta. Si al firmante le llegó la invitación, bórrala en la web de '
             'Mifiel. Luego cancela esta solicitud para mandar otra.')
@@ -66,7 +72,7 @@ def _solicitud(r):
             'template_version': r['template_version'], 'activities': r['activities'],
             'signed_at': r['provider_signed_at'], 'last_checked_at': r['last_checked_at'],
             'last_error': r['last_error'], 'created_at': r['created_at'], 'updated_at': r['updated_at'],
-            'decided_at': r['decided_at']}
+            'decided_at': r['decided_at'], 'accept_from': r['valid_from'] if r.get('espera_inicio') else None}
 
 
 def _propia(session):
@@ -337,7 +343,7 @@ def _aceptar(request_id, body, request, session):
             if body['confirm_fqdn'].strip().lower().removesuffix('.') != r['fqdn']:
                 raise HTTPException(422, 'El dominio que escribiste no es el de la carta.')
             domain_id, _ = _dominio_para_carta(conn, session, request, r['fqdn'], r['valid_until'],
-                                               secrets.token_hex(16), renovar=True)
+                                               secrets.token_hex(16), renovar=True, start=r['valid_from'])
             authorization_id = conn.execute(
                 'INSERT INTO domain_authorizations (organization_id, domain_id, signer_name, signer_title, signer_email, '
                 'signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, template_version, '
@@ -391,7 +397,8 @@ def _subir(body, request, session):
         raise HTTPException(422, 'El XML de Mifiel no es válido.')
     try:
         with transaction(session.org_id) as conn:
-            domain_id, _ = _dominio_para_carta(conn, session, request, fqdn, end, secrets.token_hex(16), renovar=True)
+            domain_id, _ = _dominio_para_carta(conn, session, request, fqdn, end, secrets.token_hex(16), renovar=True,
+                                               start=start)
             pdf_key, pdf_sha = cartas.guardar(pdf, session.org_id, domain_id)
             xml_key, xml_sha = cartas.guardar(evidencia, session.org_id, domain_id)
             authorization_id = conn.execute(
