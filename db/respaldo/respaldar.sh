@@ -92,7 +92,8 @@ docker inspect --type container "$CONTENEDOR_BASE" >/dev/null 2>&1 || falla "no 
 docker inspect --type container "$CONTENEDOR_CARTAS" >/dev/null 2>&1 || falla "no existe el contenedor $CONTENEDOR_CARTAS"
 # La base que se respalda es la que usa la API (PGDATABASE de su contenedor, docker-compose.yml). Tras una
 # restauración completa apunta a la base nueva: respaldar la vieja junto al volumen actual dejaría un paquete
-# incoherente. Sale de la configuración del contenedor, así que sirve aunque la API esté detenida.
+# incoherente. Sale de la configuración del contenedor (docker inspect). La revisión de la llave de abajo sí usa
+# docker exec, así que el respaldo pide la API corriendo: con la API detenida falla y no deja un paquete a medias.
 base_datos=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTENEDOR_CARTAS" \
   | sed -n 's/^PGDATABASE=//p' | tail -n 1)
 base_datos=${base_datos:-cirdan}
@@ -109,13 +110,16 @@ done
 
 # Un despliegue que todavía no configura la llave de cartas (alta apagada) y no tiene cartas sigue con el respaldo
 # de solo la base, en el formato antiguo .dump.age: así el respaldo diario no se pierde, pero ese archivo no sirve
-# para habilitar un alta restaurada. Con cartas en el volumen y sin llave, el respaldo falla.
+# para habilitar un alta restaurada. Con cartas en el volumen o con el alta prendida y sin llave, el respaldo
+# falla: así un respaldo de solo la base nunca sale con código 0 cuando ya hay cartas que proteger (RC-339).
 estado_llave=0
 docker exec "$CONTENEDOR_CARTAS" python -c '
 import os, sys
 from cirdan.config import config
 if config("CARTA_KEY_VAULT_SECRET_URL") or config("CARTA_ENCRYPTION_KEY"):
     sys.exit(0)
+if config("CARTA_ALTA_ENABLED", "false").lower() == "true":
+    sys.exit(5)
 root = os.environ.get("CARTA_STORAGE_DIR", "")
 sys.exit(4 if os.path.isdir(root) and os.listdir(root) else 3)
 ' || estado_llave=$?
@@ -124,6 +128,7 @@ case $estado_llave in
   3) nombre="$raiz_nombre.dump.age"
      echo "respaldo: AVISO: $CONTENEDOR_CARTAS no tiene llave de cartas; respaldo solo de la base (.dump.age)" >&2 ;;
   4) falla "hay cartas en el volumen, pero $CONTENEDOR_CARTAS no tiene llave de cartas" ;;
+  5) falla "el alta de dominios está prendida (CARTA_ALTA_ENABLED), pero $CONTENEDOR_CARTAS no tiene llave de cartas" ;;
   *) falla "no se pudo revisar la llave de cartas en $CONTENEDOR_CARTAS" ;;
 esac
 [[ $nombre =~ $PATRON ]] || falla "no se pudo armar el nombre del respaldo"

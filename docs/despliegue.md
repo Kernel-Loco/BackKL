@@ -17,7 +17,8 @@ la base, el volumen con las cartas cifradas y la llave de cartas; la restauraci�
 documento referenciado antes de usar los destinos nuevos. El respaldo usa la retención actual de Azure: inmutabilidad
 de 7 días y borrado entre 30 y 32 días. En la VM, la llave de cartas va como URL versionada de Key Vault
 en `CARTA_KEY_VAULT_SECRET_URL`. Sin ninguna llave de cartas, el alta da error y el respaldo diario guarda solo la base
-en el formato antiguo `.dump.age`. La verificación TXT de dominios ya registrados sigue
+en el formato antiguo `.dump.age`. Si hay cartas en el volumen o `CARTA_ALTA_ENABLED=true` y no hay llave, el respaldo falla
+(RC-339). El respaldo necesita el contenedor de la API corriendo, porque revisa la llave con `docker exec`. La verificación TXT de dominios ya registrados sigue
 funcionando para los que estén en `DOMINIOS_EN_VIVO`.
 
 Para pruebas locales sin datos reales: monta el volumen mediante `docker compose`, pon `CARTA_ALTA_ENABLED=true` y
