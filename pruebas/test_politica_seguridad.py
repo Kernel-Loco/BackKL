@@ -337,10 +337,9 @@ class PoliticaSeguridadPrivacidad(unittest.TestCase):
                      'con la fecha de su último acceso, pasan a bloqueo',
                      '[plazo] contado desde que se cierran',
                      'El fin de la carta no reinicia el plazo de las que ya estaban cerradas',
-                     'Se borra el mismo día. Hoy no se puede si llegó en un TXT del dominio raíz, porque queda en '
-                     '`dns_txt_verifications.observed_values` (sección 5.5, punto 5), ni la fila de un hallazgo '
-                     'que ya entró en un score ni la de su activo (sección 9). Su evidencia y el valor del activo '
-                     'sí se sobrescriben el mismo día |'):
+                     'Se borra el mismo día. Hoy no se puede borrar la fila de un hallazgo que ya entró en un score ni '
+                     'la de su activo (sección 9). De un TXT del dominio raíz solo queda su huella (sección 5.5, '
+                     'punto 5). Su evidencia y el valor del activo sí se sobrescriben el mismo día |'):
             with self.subTest(seccion='5.6', cita=cita):
                 self.assertIn(cita, retencion)
         fila = next(f for f in retencion.splitlines() if f.startswith('| Carta, datos de quien firma'))

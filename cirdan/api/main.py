@@ -356,7 +356,7 @@ SELECT d.fqdn AS domain,
   FROM domains d
   LEFT JOIN LATERAL (SELECT * FROM domain_authorizations x WHERE x.domain_id = d.id
                       ORDER BY (x.revoked_at IS NULL AND current_date BETWEEN x.valid_from AND x.valid_until) DESC,
-                               x.valid_until DESC LIMIT 1) a ON true
+                               x.created_at DESC, x.valid_until DESC LIMIT 1) a ON true
   LEFT JOIN LATERAL (SELECT v.result FROM dns_txt_verifications v
                       WHERE v.domain_id = d.id ORDER BY v.checked_at DESC LIMIT 1) t ON true
   LEFT JOIN LATERAL (SELECT ds.score FROM domain_scores ds

@@ -111,7 +111,7 @@ jobs:
         run: >-
           python -m unittest pruebas/test_aislamiento.py pruebas/test_dominio_prueba.py pruebas/test_organizacion_lowtide.py pruebas/test_api.py
           pruebas/test_auth.py pruebas/test_alta_totp.py pruebas/test_passkeys.py pruebas/test_escaneos_api.py pruebas/test_api_v1.py pruebas/test_bitacora.py pruebas/test_bitacora_descargas.py pruebas/test_inventario_activos.py pruebas/test_llaves_api.py
-          pruebas/test_superadmin.py pruebas/test_operador.py pruebas/test_valkey_acl.py pruebas/test_fuentes_por_cliente.py
+          pruebas/test_superadmin.py pruebas/test_operador.py pruebas/test_candados_base.py pruebas/test_valkey_acl.py pruebas/test_fuentes_por_cliente.py
           pruebas/test_respaldo.py pruebas/test_respaldo_cartas.py
 
       # Integracion de test_github.py corre git y gitleaks reales con gitleaks_cirdan.toml. En el runner se salta,
@@ -122,8 +122,9 @@ jobs:
       # malos y un servidor que solo habla TLS 1.0 o 1.1 (RC-239).
       - name: Pruebas dentro del contenedor (asistente, orquestador, tope de escaneos a mano, explorador, modelo ML, TXT, cuentas de demo, bloqueo por IP, IP del cliente, cookie Secure, código MFA y logout sin red, tope del cuerpo, llaves del MFA y de las huellas, captcha, documentación de la API, gitleaks, TLS, pesos, ruta del reporte, subfinder sin red, cartas y entorno de los hijos)
         run: >-
+          POSTGRES_PASSWORD=$(sed -n 's/^POSTGRES_PASSWORD=//p' .env)
           VALKEY_ADMIN_PASSWORD=$(sed -n 's/^VALKEY_ADMIN_PASSWORD=//p' .env)
-          docker compose run --rm -e VALKEY_ADMIN_PASSWORD -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -e RUTA_REPORTE=1 -e INTEGRACION_SUBFINDER=1 -e ESTADO_CARTA=1 -e CIRDAN_TEST_DB_ISOLATED=true
+          docker compose run --rm -e POSTGRES_PASSWORD -e VALKEY_ADMIN_PASSWORD -e INTEGRACION_GITHUB=1 -e TRANSPORTE_TLS=1 -e RUTA_REPORTE=1 -e INTEGRACION_SUBFINDER=1 -e ESTADO_CARTA=1 -e CIRDAN_TEST_DB_ISOLATED=true
           -v "$PWD/pruebas:/app/pruebas:ro"
           -v "$PWD/datos/ml:/app/datos/ml:ro" -v "$PWD/db:/app/db:ro" -v "$PWD/docs:/app/docs:ro" -v "$PWD/Dockerfile:/app/Dockerfile:ro"
           api python -m unittest pruebas/test_asistente.py pruebas/test_orquestador.py pruebas/test_planes.py pruebas/test_explorador.py pruebas/test_modelo_ml.py pruebas/test_anomalias_ml.py pruebas/test_auditoria_humana_ml.py pruebas/test_txt.py
