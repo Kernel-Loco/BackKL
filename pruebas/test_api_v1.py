@@ -1467,5 +1467,108 @@ class ApiV1(unittest.TestCase):
             self.assertEqual(self.beta.get('/api/v1/domains/%s/export/siem' % fqdn)[0], 404, fqdn)
         self.assertEqual(sesion.Client().get('/api/v1/domains/beta-corp.mx/export/siem')[0], 401)
 
+    # RC-133 (#80): un hallazgo propio de la prueba en acme-demo.mx, para no dejar eventos de triage en los de la semilla.
+    TRIAGE = '80000000-0000-4000-8000-000000000133'
+
+    def test_9t_triage_del_hallazgo_y_metricas_de_remediacion(self):
+        """Falso positivo fuera del score con recálculo, reabrir, riesgo aceptado fuera del plan hasta su fecha y
+        resuelto con quién y cuándo en la bitácora. Solo analista y admin. Las métricas de remediación por dominio."""
+        acme = '20000000-0000-4000-8000-000000000001'
+        ok, seq, err = psql("SELECT coalesce(max(chain_seq), 0) FROM audit_log WHERE organization_id = '%s';" % acme,
+                            user='postgres')
+        self.assertTrue(ok, err)
+        ok, t0, err = psql('SELECT clock_timestamp();', user='postgres')
+        self.assertTrue(ok, err)
+        self.addCleanup(self.psql_o_falla,
+                        "BEGIN; SET LOCAL session_replication_role = replica; "
+                        "DELETE FROM score_contributions WHERE score_id IN (SELECT id FROM domain_scores "
+                        "WHERE organization_id = '{o}' AND reason = 'correction' AND computed_at > '{t}'); "
+                        "DELETE FROM domain_scores WHERE organization_id = '{o}' AND reason = 'correction' "
+                        "AND computed_at > '{t}'; "
+                        "DELETE FROM findings WHERE id = '{f}'; "
+                        "DELETE FROM audit_log WHERE organization_id = '{o}' AND chain_seq > {s}; COMMIT;"
+                        .format(o=acme, t=t0.strip(), f=self.TRIAGE, s=int(seq)),
+                        'quedó el hallazgo de triage de prueba (RC-133)')
+        self.psql_o_falla(self.INSERTAR_CRITICO_NUEVO.replace(self.CRITICO_NUEVO, self.TRIAGE)
+                          .replace("'rc316-critico-nuevo'", "'rc133-triage'").replace("'critical'", "'high'")
+                          .replace('Crítico nuevo de prueba', 'Hallazgo de triage de prueba'),
+                          'no entró el hallazgo de triage de prueba')
+        url = '/api/v1/findings/%s/triage' % self.TRIAGE
+
+        def correcciones():
+            ok, n, err = psql("SELECT count(*) FROM domain_scores WHERE organization_id = '%s' AND reason = 'correction' "
+                              "AND computed_at > '%s';" % (acme, t0.strip()), user='postgres')
+            self.assertTrue(ok, err)
+            return int(n)
+
+        def en_el_ultimo_score():
+            ok, n, err = psql("SELECT count(*) FROM score_contributions WHERE finding_id = '%s' AND score_id = "
+                              "(SELECT id FROM domain_scores WHERE domain_id = (SELECT domain_id FROM findings "
+                              "WHERE id = '%s') ORDER BY computed_at DESC LIMIT 1);" % (self.TRIAGE, self.TRIAGE),
+                              user='postgres')
+            self.assertTrue(ok, err)
+            return int(n) == 1
+
+        # Validación y roles: el gerente no marca, el riesgo aceptado pide fecha y un estado que no existe es 422.
+        maya = sesion.login('maya.reed@acme-demo.mx')
+        self.assertEqual(maya.post(url, {'status': 'false_positive'})[0], 403)
+        self.assertEqual(self.acme.post(url, {'status': 'accepted_risk'})[0], 422)
+        self.assertEqual(self.acme.post(url, {'status': 'borrado'})[0], 422)
+        self.assertEqual(self.acme.post(url, {'status': 'resolved', 'reason': 'secret_rotated'})[0], 422)
+        self.assertEqual(self.beta.post(url, {'status': 'false_positive'})[0], 404)   # otra empresa
+        self.assertEqual(self.acme.post('/api/v1/findings/no-es-uuid/triage', {'status': 'open'})[0], 404)
+        self.assertEqual(self.acme.get('/api/v1/domains/acme-demo.mx/findings?estado=borrado')[0], 422)
+
+        # Falso positivo: sale del score, que se recalcula con 'correction', y sale en ?estado=false_positive.
+        code, body = self.acme.post(url, {'status': 'false_positive', 'note': 'Es un servidor de pruebas'})
+        self.assertEqual(code, 200, body)
+        self.assertEqual((body['status'], body['previous_status'], body['score_recalculated']),
+                         ('false_positive', 'open', True))
+        self.assertEqual(correcciones(), 1)
+        self.assertFalse(en_el_ultimo_score())
+        self.assertEqual(self.acme.post(url, {'status': 'false_positive'})[0], 409)
+        lista = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings?estado=false_positive')['items']
+        marcado = next(i for i in lista if i['id'] == self.TRIAGE)
+        self.assertEqual((marcado['status'], marcado['triage']['action'], marcado['triage']['by'],
+                          marcado['triage']['note']),
+                         ('false_positive', 'finding.false_positive', 'alex.morgan@acme-demo.mx',
+                          'Es un servidor de pruebas'))
+        abiertos = self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings')['items']
+        self.assertNotIn(self.TRIAGE, [i['id'] for i in abiertos])
+
+        # Reabrir: vuelve al score con otro recálculo.
+        code, body = self.acme.post(url, {'status': 'open'})
+        self.assertEqual((code, body['score_recalculated']), (200, True), body)
+        self.assertEqual(correcciones(), 2)
+        self.assertTrue(en_el_ultimo_score())
+
+        # Riesgo aceptado con fecha: sigue en el score (sin recálculo) y sale del plan hasta esa fecha.
+        manana = (date.today() + timedelta(days=2)).isoformat()
+        code, body = self.acme.post(url, {'status': 'accepted_risk', 'review_date': manana})
+        self.assertEqual((code, body['score_recalculated'], body['review_date']), (200, False, manana), body)
+        self.assertEqual(correcciones(), 2)
+        plan = self.get(self.acme, '/api/v1/domains/acme-demo.mx/action-plan')
+        self.assertNotIn(self.TRIAGE, [i for a in plan['actions'] for i in a['finding_ids']])
+        aceptado = next(i for i in self.get(self.acme, '/api/v1/domains/acme-demo.mx/findings?estado=all')['items']
+                        if i['id'] == self.TRIAGE)
+        self.assertEqual(aceptado['triage']['review_date'], manana)
+
+        # Resuelto: con quién, cuándo y el motivo en la bitácora, y cuenta en las métricas del dominio.
+        code, body = self.acme.post(url, {'status': 'resolved'})
+        self.assertEqual((code, body['reason']), (200, 'fixed'), body)
+        ok, fila, err = psql("SELECT action || '|' || (actor_user_id IS NOT NULL)::text || '|' || (details->>'from') "
+                             "|| '|' || (details->>'reason') FROM audit_log WHERE organization_id = '%s' AND "
+                             "entity_id = '%s' ORDER BY chain_seq DESC LIMIT 1;" % (acme, self.TRIAGE), user='postgres')
+        self.assertTrue(ok, err)
+        self.assertEqual(fila.strip(), 'finding.resolved|true|accepted_risk|fixed')
+        metricas = self.get(self.acme, '/api/v1/domains/acme-demo.mx/remediation')
+        self.assertEqual(metricas['domain'], 'acme-demo.mx')
+        self.assertGreaterEqual(metricas['by_status']['resolved'], 1)
+        self.assertGreaterEqual(metricas['closed'], 1)
+        self.assertIsNotNone(metricas['closed_pct'])
+        self.assertIsNotNone(metricas['mean_time_to_remediate_days'])
+        self.assertEqual(maya.get('/api/v1/domains/acme-demo.mx/remediation')[0], 403)
+        self.assertEqual(self.beta.get('/api/v1/domains/acme-demo.mx/remediation')[0], 404)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

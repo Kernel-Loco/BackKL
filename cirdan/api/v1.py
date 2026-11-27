@@ -26,7 +26,7 @@ from psycopg import IsolationLevel
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
-from cirdan import alcance_carta, cartas, orquestador, reporte, reporte_tecnico, siem
+from cirdan import alcance_carta, cartas, orquestador, reporte, reporte_tecnico, siem, triage
 from cirdan.api.llaves import SIN_SESION
 from cirdan.auth import sessions
 from cirdan.auth.deps import (ROL_LLAVE, SIN_PERMISO, Session, api_key_or_roles, client_ip, current_session, in_scope,
@@ -507,11 +507,104 @@ def _finding(f):
     }
 
 
-@router.get('/domains/{fqdn}/findings', summary='Hallazgos abiertos ordenados por KEV, EPSS y severidad')
-def domain_findings(fqdn: str, session: Session = Depends(LEE_HALLAZGOS)):
+# Con ?estado=, la misma consulta para los hallazgos en triage (RC-133): el portal lista los marcados para reabrirlos.
+FINDINGS_POR_ESTADO_SQL = FINDINGS_SQL.replace("AND f.status = 'open'", 'AND f.status = ANY(%s)')
+assert FINDINGS_POR_ESTADO_SQL != FINDINGS_SQL
+Estado = Literal['open', 'accepted_risk', 'false_positive', 'resolved', 'all']
+
+# El último evento de triage de cada hallazgo (RC-133), en una sola consulta: audit_log no tiene índice por entidad.
+TRIAGE_SQL = """
+SELECT DISTINCT ON (al.entity_id) al.entity_id::text AS id, al.action, al.occurred_at, al.details,
+       u.email::text AS by_email
+  FROM audit_log al
+  LEFT JOIN users u ON u.organization_id = al.organization_id AND u.id = al.actor_user_id
+ WHERE al.entity_type = 'finding' AND al.entity_id = ANY(%s::uuid[]) AND al.action = ANY(%s)
+ ORDER BY al.entity_id, al.occurred_at DESC, al.chain_seq DESC
+"""
+
+
+def _ultimo_triage(conn, finding_ids):
+    if not finding_ids:
+        return {}
+    return {f['id']: f for f in conn.execute(TRIAGE_SQL, (list(finding_ids), list(triage.ACCIONES.values())))}
+
+
+def _triage_de(evento):
+    """Lo que la API muestra del último triage: cuándo, quién (correo; None si fue el sistema o la plataforma), el
+    motivo, la fecha de revisión y la nota."""
+    if not evento:
+        return None
+    detalles = evento['details'] or {}
+    return {'action': evento['action'], 'at': evento['occurred_at'], 'by': evento['by_email'],
+            'reason': detalles.get('reason'), 'review_date': detalles.get('review_date'), 'note': detalles.get('note')}
+
+
+@router.get('/domains/{fqdn}/findings', summary='Hallazgos del dominio por KEV, EPSS y severidad (abiertos por omisión)')
+def domain_findings(fqdn: str, estado: Estado = Query(default='open', description="'open' (por omisión), "
+                                                      "'accepted_risk', 'false_positive', 'resolved' o 'all' (RC-133)"),
+                    session: Session = Depends(LEE_HALLAZGOS)):
     _domain_id(session, fqdn)
-    items = [_finding(f) for f in _query(session, FINDINGS_SQL, (fqdn,))]
+    estados = list(triage.ESTADOS) if estado == 'all' else [estado]
+    with transaction(session.org_id) as conn:
+        filas = conn.execute(FINDINGS_POR_ESTADO_SQL, (fqdn, estados)).fetchall()
+        eventos = _ultimo_triage(conn, [f['id'] for f in filas])
+    items = [{**_finding(f), 'triage': _triage_de(eventos.get(f['id']))} for f in filas]
     return {'domain': fqdn, 'items': items, 'total': len(items)}
+
+
+@router.post('/findings/{finding_id}/triage',
+             summary='Marca un hallazgo como falso positivo, riesgo aceptado o resuelto, o lo reabre (RC-133)')
+def triage_finding(request: Request, finding_id: str, payload: dict[str, object] = Body(...),
+                   session: Session = Depends(require_roles('analyst', 'admin'))):
+    try:
+        uuid.UUID(finding_id)
+    except ValueError:
+        raise HTTPException(404, 'Hallazgo no encontrado') from None
+    with transaction(session.org_id) as conn:
+        # El hallazgo y después el candado de pesos: el mismo orden que el orquestador (hallazgos, luego score).
+        hallazgo = conn.execute(
+            'SELECT f.id::text, f.status, f.domain_id::text, r.code AS rule_code FROM findings f '
+            'JOIN scoring_rules r ON r.id = f.rule_id WHERE f.id = %s FOR NO KEY UPDATE OF f', (finding_id,),
+        ).fetchone()
+        if not hallazgo or not in_scope(session, hallazgo['domain_id']):
+            raise HTTPException(404, 'Hallazgo no encontrado')
+        try:
+            cambio = triage.validar(payload, hallazgo['rule_code'])
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        anterior = hallazgo['status']
+        if cambio['status'] == anterior and anterior != 'accepted_risk':   # un riesgo aceptado puede cambiar de fecha
+            raise HTTPException(409, 'El hallazgo ya está en ese estado')
+        conn.execute(
+            "UPDATE findings SET status = %s, resolved_at = CASE WHEN %s = 'resolved' THEN now() END, "
+            'updated_at = now() WHERE id = %s', (cambio['status'], cambio['status'], finding_id))
+        audit(conn, session.org_id, triage.ACCIONES[cambio['status']], user_id=session.audit_user_id,
+              ip=client_ip(request), entity_type='finding', entity_id=finding_id, platform=session.audit_platform,
+              details=triage.detalles(anterior, cambio))
+        # Un falso positivo sale del score y uno que se reabre vuelve: se recalcula el del dominio con 'correction'.
+        recalculado = (anterior in motor.ESTADOS_PUNTUABLES) != (cambio['status'] in motor.ESTADOS_PUNTUABLES)
+        if recalculado:
+            configuracion.bloquear_pesos(conn, session.org_id)
+            juego = configuracion.juego_activo(conn, session.org_id)
+            if juego:
+                pesos = {k: float(v) for k, v in juego['category_weights'].items()}
+                try:
+                    recalculado = bool(configuracion.recalcular_scores(
+                        conn, session.org_id, juego['id'], pesos, dominio=hallazgo['domain_id'], motivo='correction'))
+                except ValueError as error:   # p. ej. un score ML sin severidades congeladas: no se guarda nada
+                    raise HTTPException(409, str(error)) from error
+            else:
+                recalculado = False
+    return {'id': finding_id, 'status': cambio['status'], 'previous_status': anterior, 'reason': cambio['reason'],
+            'review_date': cambio['review_date'], 'score_recalculated': recalculado}
+
+
+@router.get('/domains/{fqdn}/remediation',
+            summary='Tiempo medio de remediación y porcentaje de hallazgos cerrados del dominio (RC-133)')
+def domain_remediation(fqdn: str, session: Session = Depends(LEE_HALLAZGOS)):
+    domain_id = _domain_id(session, fqdn)
+    filas = _query(session, 'SELECT status, detected_at, resolved_at FROM findings WHERE domain_id = %s', (domain_id,))
+    return {'domain': fqdn, **triage.metricas(filas)}
 
 
 # ---------------------------------------------------------------- score e histórico
@@ -732,7 +825,10 @@ def export_findings(request: Request, fqdn: str, formato: str = Query(default='j
     domain_id = _dominio_autorizado(session, fqdn)
     with transaction(session.org_id) as conn:
         _carta_vigente(conn, domain_id)
-        items = [_finding(f) for f in conn.execute(FINDINGS_SQL, (fqdn,)).fetchall()]
+        filas = conn.execute(FINDINGS_SQL, (fqdn,)).fetchall()
+        # El JSON es igual a GET /findings, con el último triage de cada hallazgo (RC-133).
+        eventos = _ultimo_triage(conn, [f['id'] for f in filas])
+        items = [{**_finding(f), 'triage': _triage_de(eventos.get(f['id']))} for f in filas]
         if formato == 'json':
             respuesta = _descarga(_json({'domain': fqdn, 'items': items, 'total': len(items)}),
                                   'application/json; charset=utf-8', '%s-hallazgos.json' % fqdn)
@@ -963,6 +1059,15 @@ def _leer_contexto_plan(conn, session, domain_id):
         'WHERE f.domain_id = %s AND f.status = ANY(%s) ORDER BY f.id',
         (domain_id, list(motor.ESTADOS_PUNTUABLES)),
     ).fetchall()
+    # Un riesgo aceptado sale del plan hasta su fecha de revisión; ese día vuelve como abierto (RC-133). El score no
+    # cambia: los dos estados cuentan igual en el motor.
+    aceptados = [h['id'] for h in hallazgos if h['status'] == 'accepted_risk']
+    if aceptados:
+        eventos = _ultimo_triage(conn, aceptados)
+        for h in hallazgos:
+            if h['status'] == 'accepted_risk' and triage.revision_vencida(
+                    'accepted_risk', ((eventos.get(h['id']) or {}).get('details') or {}).get('review_date')):
+                h['status'] = 'open'
     severidades = None
     if method == 'ml' and score:
         severidades = {r['finding_id']: r['severity'] for r in conn.execute(
