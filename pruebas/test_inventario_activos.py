@@ -76,9 +76,11 @@ def borrar_insertados(prefijo=PREFIJO_ID):
 
 
 def poner_cartas():
-    """Una carta vigente por 30 días en cada dominio de CON_CARTA_PROPIA, copiada de la primera carta del dominio."""
+    """Una carta vigente por 30 días en cada dominio de CON_CARTA_PROPIA, copiada de la primera carta del dominio.
+    Sin triggers: desde la 037 (RC-272) una carta nueva revoca las anteriores del dominio y las de la semilla quedarían
+    revocadas cuando borrar_cartas() quita estas."""
     hoy = "(now() AT TIME ZONE 'America/Mexico_City')::date"
-    sql = 'BEGIN;'
+    sql = 'BEGIN; SET LOCAL session_replication_role = replica;'
     for n, fqdn in enumerate(CON_CARTA_PROPIA):
         sql += ("INSERT INTO domain_authorizations (id, organization_id, domain_id, signer_name, signer_title, "
                 "signer_email, signed_document_key, signed_document_sha256, valid_from, valid_until, accepted_by, "

@@ -8,7 +8,7 @@ Corren dentro del contenedor de la API, con un motivo que queda en la bitácora 
 **terminar** (sección 5.6 de la política: al vencer o revocarse la última carta, al cerrar el curso o cuando la empresa
 lo pide por escrito; el plazo es de [30] días desde ese hecho): con el rol `cirdan_retention` y RLS de la empresa,
 - marca la empresa `cancelled` con `service_ended_at`, pausa sus dominios, desactiva sus cuentas y revoca sus llaves;
-- borra sus entregas, alertas, aportes y scores (la migración 037 se lo permite a una empresa con `service_ended_at`),
+- borra sus entregas, alertas, aportes y scores (la migración 040 se lo permite a una empresa con `service_ended_at`),
   hallazgos con su brecha, activos, reportes, corridas y escaneos;
 - deja `service.ended` en su bitácora con el motivo y cuántas filas borró por tabla, sin datos de las filas;
 - cierra las sesiones abiertas de sus cuentas y manda la confirmación a quien firmó sus cartas.

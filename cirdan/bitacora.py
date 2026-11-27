@@ -1,7 +1,7 @@
 """Bitácora de la empresa y verificación de su cadena de hashes (#86, RC-130).
 
 `audit_log` es de solo inserción y cada fila encadena su `row_hash` con el de la anterior de la misma empresa, con la
-fórmula del trigger `audit_log_chain()` (migración 001). Aquí está el SQL que comparten la API
+fórmula del trigger `audit_log_chain()` (migraciones 001 y 036). Aquí está el SQL que comparten la API
 (cirdan/api/bitacora.py) y las pruebas (pruebas/test_bitacora.py). Va sin dependencias para que las pruebas del host
 lo importen sin fastapi ni psycopg.
 
@@ -12,14 +12,26 @@ Lo que la cadena sola no detecta: que alguien borre las últimas filas, porque l
 cadena de la plataforma (`organization_id` NULL) no la ve ninguna empresa.
 """
 
-# El row_hash que le toca a una fila de audit_log según su contenido: la fórmula del trigger audit_log_chain() de la
-# 001 (también CADENA en pruebas/test_superadmin.py). Si el trigger cambia, esto cambia con él.
-HASH_FILA = '''sha256(prev_hash || convert_to(concat_ws(chr(31),
+# El row_hash que le toca a una fila de audit_log según su contenido y su chain_version: la fórmula del trigger
+# audit_log_chain() (también CADENA en pruebas/test_superadmin.py). Si el trigger cambia, esto cambia con él.
+#   1  la de la 001, sin ip_address: las filas de antes de la migración 036.
+#   2  la de la 036 (RC-294): la versión al principio e ip_address, como texto de inet, antes de details.
+# Una fila de la 2 que alguien pasa a la 1 no cuadra: su row_hash se calculó con la fórmula 2.
+HASH_FILA = '''sha256(prev_hash || convert_to(CASE chain_version
+         WHEN 1 THEN concat_ws(chr(31),
            coalesce(organization_id::text, ''), chain_seq::text, id::text,
            (extract(epoch FROM occurred_at) * 1000000)::bigint::text,
            actor_type, coalesce(actor_user_id::text, ''), coalesce(actor_api_key_id::text, ''),
            action, coalesce(entity_type, ''), coalesce(entity_id::text, ''),
-           details::text), 'UTF8'))'''
+           details::text)
+         ELSE concat_ws(chr(31),
+           chain_version::text,
+           coalesce(organization_id::text, ''), chain_seq::text, id::text,
+           (extract(epoch FROM occurred_at) * 1000000)::bigint::text,
+           actor_type, coalesce(actor_user_id::text, ''), coalesce(actor_api_key_id::text, ''),
+           action, coalesce(entity_type, ''), coalesce(entity_id::text, ''),
+           coalesce(ip_address::text, ''),
+           details::text) END, 'UTF8'))'''
 
 # Una fila con lo revisado y el primer eslabón roto, si hay. Cada fila se revisa en este orden:
 #   chain_seq  la posición no es la que toca: falta una fila antes o se repite su número.
@@ -27,7 +39,7 @@ HASH_FILA = '''sha256(prev_hash || convert_to(concat_ws(chr(31),
 #   row_hash   no cuadra con su propio contenido: se cambió la fila.
 VERIFICAR_SQL = '''
 WITH cadena AS (
-  SELECT id, chain_seq, prev_hash, row_hash,
+  SELECT id, chain_seq, chain_version, prev_hash, row_hash,
          row_number() OVER w AS esperado_seq,
          coalesce(lag(row_hash) OVER w, decode(repeat('00', 32), 'hex')) AS esperado_prev,
          ''' + HASH_FILA + ''' AS esperado_hash
@@ -42,6 +54,7 @@ WITH cadena AS (
     FROM cadena
 )
 SELECT (SELECT count(*) FROM cadena) AS checked,
+       (SELECT count(*) FROM cadena WHERE chain_version = 1) AS checked_v1,
        (SELECT max(chain_seq) FROM cadena) AS last_chain_seq,
        r.id::text AS broken_id, r.chain_seq AS broken_seq, r.motivo AS broken_reason,
        clock_timestamp() AS verified_at
@@ -51,7 +64,7 @@ SELECT (SELECT count(*) FROM cadena) AS checked,
 
 # Las FK de la 001 son compuestas (empresa, id), así que los JOIN también: nunca se cruza con otra empresa.
 LISTA_SQL = '''
-SELECT a.id::text, a.chain_seq, a.occurred_at, a.actor_type, u.email::text AS user_email, k.name AS key_name,
+SELECT a.id::text, a.chain_seq, a.chain_version, a.occurred_at, a.actor_type, u.email::text AS user_email, k.name AS key_name,
        a.action, a.entity_type, a.entity_id::text, host(a.ip_address) AS ip_address, a.details
   FROM audit_log a
   LEFT JOIN users u ON u.organization_id = a.organization_id AND u.id = a.actor_user_id
@@ -88,16 +101,20 @@ def actor(r):
 
 def fila(r):
     """Una fila de LISTA_SQL con la forma de AuditEntry del portal (FrontKL, src/types/api.ts), más chain_seq,
-    entity_id e ip_address."""
+    entity_id, ip_address y chain_version (RC-294): con la 1 (filas de antes de la migración 036) la ip_address no
+    entra en la cadena y /verify no detecta que alguien la cambie."""
     return {'id': r['id'], 'occurred_at': r['occurred_at'], 'actor_type': r['actor_type'], 'actor': actor(r),
             'action': r['action'], 'entity_type': r['entity_type'], 'details': r['details'],
-            'chain_seq': r['chain_seq'], 'entity_id': r['entity_id'], 'ip_address': r['ip_address']}
+            'chain_seq': r['chain_seq'], 'entity_id': r['entity_id'], 'ip_address': r['ip_address'],
+            'chain_version': r['chain_version']}
 
 
 def resultado(r):
-    """La fila de VERIFICAR_SQL como respuesta de GET /api/v1/audit-log/verify."""
+    """La fila de VERIFICAR_SQL como respuesta de GET /api/v1/audit-log/verify. checked_v1 dice cuántas de las
+    filas revisadas son de la fórmula 1 (antes de la migración 036, RC-294): en esas la ip_address no está protegida
+    por la cadena."""
     roto = None
     if r['broken_id']:
         roto = {'id': r['broken_id'], 'chain_seq': r['broken_seq'], 'reason': r['broken_reason']}
-    return {'status': 'broken' if roto else 'intact', 'checked': r['checked'],
+    return {'status': 'broken' if roto else 'intact', 'checked': r['checked'], 'checked_v1': r['checked_v1'],
             'last_chain_seq': r['last_chain_seq'], 'first_broken': roto, 'verified_at': r['verified_at']}

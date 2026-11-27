@@ -2,7 +2,7 @@
 
 Otros equipos del grupo atacan LowTide para encontrar lo que se nos pasó. Cada reporte queda registrado aquí con su
 arreglo, y los de severidad Alta se corrigen antes del congelamiento del 25 nov. Se muestra en S16 junto con ZAP
-([`pruebas_zap.md`](pruebas_zap.md), #51) y el pentest (#58b).
+([`pruebas_zap.md`](pruebas_zap.md), #51) y el pentest ([`pentest.md`](pentest.md), #58b).
 
 El marco lo fija la sección 3 de [`politica_uso_etico.md`](politica_uso_etico.md): las pruebas activas solo van contra
 el despliegue de LowTide en su VM, con cuentas de prueba y sin datos reales de ninguna empresa, sin denegación de

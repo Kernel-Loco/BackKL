@@ -1,6 +1,6 @@
 """Retención de 12 meses (#139, RC-257): borra por lotes lo que pasa del plazo, empresa por empresa.
 
-Corre con el rol `cirdan_retention` (migración 036), sin superusuario ni BYPASSRLS. Para cada empresa fija
+Corre con el rol `cirdan_retention` (migración 039), sin superusuario ni BYPASSRLS. Para cada empresa fija
 `app.current_org`, así que la política `tenant_isolation` de cada tabla solo le deja ver y borrar esa empresa. Los
 triggers de la 001 solo le dejan borrar `domain_scores` y `score_contributions` de más de 12 meses.
 

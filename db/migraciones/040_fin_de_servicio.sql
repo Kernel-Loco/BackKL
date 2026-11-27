@@ -1,5 +1,5 @@
 -- =====================================================================
--- Cirdan · db/migraciones/037_fin_de_servicio.sql (#140, RC-258)
+-- Cirdan · db/migraciones/040_fin_de_servicio.sql (#140, RC-258)
 -- Borrado al terminar el servicio y cancelación de usuarios del portal
 -- (sección 5.6 y control 8.10 de docs/politica_seguridad_privacidad.md).
 --
@@ -39,7 +39,7 @@ CREATE OR REPLACE FUNCTION block_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   -- Excepciones de retención: solo DELETE y solo cirdan_retention. IF anidados: PL/pgSQL no corta un AND, y cada
-  -- tabla solo tiene sus columnas (036).
+  -- tabla solo tiene sus columnas (039).
   IF TG_OP = 'DELETE' AND current_user = 'cirdan_retention' THEN
     IF TG_TABLE_NAME IN ('domain_scores', 'score_contributions') THEN
       -- Fin del servicio de la empresa (RC-258)
